@@ -508,7 +508,7 @@ compliance, identification, the asset lifecycle, data retention and BOM scoping.
 Every asset has exactly one **class**, and the class decides which attributes it
 can carry, which CycloneDX component type it exports as, and which CMDB
 configuration-item type it maps to. **Policies → Classes** is the browser for
-that taxonomy — 49 classes under 7 fixed top-level branches, each with its own
+that taxonomy — 50 classes under 7 fixed top-level branches, each with its own
 attributes and its inherited ones.
 
 It is **read-only in this release**; adding your own subclasses is planned.

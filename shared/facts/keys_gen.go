@@ -121,9 +121,9 @@ var All = []Key{
 		Type:        "string",
 		Enum:        nil,
 		ItemSchema:  "",
-		Producers:   []string{"device-agent", "device-interrogation", "sensor", "platform-sensor", "connector", "import"},
+		Producers:   []string{"device-agent", "device-interrogation", "sensor", "platform-sensor", "connector", "import", "enricher"},
 		Redact:      false,
-		Description: "Hardware manufacturer (\"Dell Inc.\", \"Cisco Systems\", \"Siemens\"). Seeded by DMI on hosts, by sysObjectID or LLDP on network gear, and by OUI lookup when nothing better is available.",
+		Description: "Hardware manufacturer (\"Dell Inc.\", \"Cisco Systems\", \"Siemens\"). Seeded by DMI on hosts, by sysObjectID or LLDP on network gear, and — when nothing better is available — by OUI lookup of the MAC, which the platform performs at ingestion against the full IEEE registry (enricher). The sensors no longer resolve it; an older sensor binary may still send its own table's answer, which the platform's supersedes.",
 	},
 	{
 		Key:         "hw.model",

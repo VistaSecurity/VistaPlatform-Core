@@ -261,8 +261,19 @@ export function defaultSurvivor(candidates: MergeCandidate[]): string | undefine
   return best.asset_id;
 }
 
-export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
+/**
+ * Three answers, in the order a reviewer who trusts the evidence wants them:
+ *
+ * - **Merge as is** applies the platform's recommended merge (the highest-
+ *   scoring record survives, the rest fold into it) without a modal. The
+ *   proposal already says these are probably one thing; this is the one-click
+ *   agreement. If a field needs a human choice, it opens the review instead.
+ * - **Review merge** opens the same recommendation for adjustment.
+ * - **Keep separate** says they are different things.
+ */
+export function MergeProposalRow({ proposal, onMergeAsIs, onAccept, onKeepSeparate, busy }: {
   proposal: MergeProposal;
+  onMergeAsIs: () => void;
   onAccept: () => void;
   onKeepSeparate: () => void;
   busy?: boolean;
@@ -303,11 +314,20 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
           <button
             className="ui-btn sm accent"
             disabled={busy || !canMerge}
-            title={canMerge ? 'Select records and review the merge before applying it.' : 'At least two available asset records are needed.'}
+            title={canMerge ? 'Apply the recommended merge: the highest-scoring record survives and the others fold into it. Opens the review instead if a field needs your choice.' : 'At least two available asset records are needed.'}
+            onClick={onMergeAsIs}
+            style={{ opacity: canMerge ? 1 : 0.5 }}
+          >
+            <Icon name="git-merge" size={12} />Merge as is
+          </button>
+          <button
+            className="ui-btn sm"
+            disabled={busy || !canMerge}
+            title={canMerge ? 'See the recommended merge and adjust which record survives, what folds in and how conflicting fields resolve.' : 'At least two available asset records are needed.'}
             onClick={onAccept}
             style={{ opacity: canMerge ? 1 : 0.5 }}
           >
-            <Icon name="git-merge" size={12} />Review merge
+            <Icon name="eye" size={12} />Review merge
           </button>
           <button
             className="ui-btn sm"
@@ -322,7 +342,7 @@ export function MergeProposalRow({ proposal, onAccept, onKeepSeparate, busy }: {
 
       {!hasObservation && (
         <div style={{ fontSize: 11.5, color: 'var(--app-t2)', marginBottom: 9 }}>
-          This question involves existing assets. Review merge to select the records that represent the same device, or Keep separate if they are different.
+          This question involves existing assets. Merge as is takes the recommended merge, Review merge lets you adjust it, and Keep separate says they are different things.
         </div>
       )}
 

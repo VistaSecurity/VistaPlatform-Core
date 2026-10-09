@@ -247,8 +247,8 @@ func TestIntegration_SeededContent_DeletingAdminCreatedRowsLeavesNoTombstone(t *
 		t.Errorf("deleting four admin-created rows wrote %d tombstones, want 0", got)
 	}
 
-	f.exec(t, `DELETE FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '000001'`)
-	if got := f.count(t, `SELECT count(*) FROM seeded_content_tombstones WHERE entity = 'classification_rule' AND natural_key = '["oui", "000001"]'`); got != 1 {
+	f.exec(t, `DELETE FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Xen'`)
+	if got := f.count(t, `SELECT count(*) FROM seeded_content_tombstones WHERE entity = 'classification_rule' AND natural_key = '["oui_vendor", "Xen"]'`); got != 1 {
 		t.Errorf("deleting a shipped classification rule wrote %d tombstones, want 1", got)
 	}
 }

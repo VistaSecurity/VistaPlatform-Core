@@ -16,6 +16,7 @@ package services
 // test-integration-db).
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -319,5 +320,124 @@ func TestIntegration_SelfObservation_NeverDemotesAnExistingHostname(t *testing.T
 	}
 	if hostname != "already-named-host" {
 		t.Errorf("hostname = %q after a worse self-report, want the pre-existing name UNCHANGED", hostname)
+	}
+}
+
+// TestIntegration_SelfObservation_SecondNICOpensAProposalAndStaysMatched is
+// the first two-sensor deployment's shape: a laptop running a sensor has an
+// Ethernet NIC (its primary) and a Wi-Fi NIC on another network. Passive
+// capture met the Wi-Fi NIC first and recorded it as its own asset. The
+// sensor's self-report names both MACs.
+//
+// Before: the report carried one MAC, so the two records never met — or, with
+// both MACs, the walk's conflict path attached the report to NEITHER asset.
+// Now the report stays matched to the sensor's asset and ONE merge proposal
+// names both records; nothing moves, neither asset's status changes, and the
+// next hourly report re-asks nothing.
+func TestIntegration_SelfObservation_SecondNICOpensAProposalAndStaysMatched(t *testing.T) {
+	svc, db, tenant := newHostObsFixture(t)
+	const ethernetMAC, wifiMAC = "00:1a:2b:3c:4d:01", "00:1a:2b:3c:4d:02"
+
+	sensorID := uuid.New()
+	if _, err := db.Exec(`
+		INSERT INTO sensors (id, tenant_id, name, platform, version, profile, status)
+		VALUES ($1, $2, 'laptop-sensor', 'windows', '4.5.0', 'datacenter_host', 'active')`,
+		sensorID, tenant); err != nil {
+		t.Fatalf("insert sensor fixture: %v", err)
+	}
+	ingest := func(f IngestFinding) {
+		t.Helper()
+		if _, err := svc.IngestFindings(tenant, []IngestFinding{f}); err != nil {
+			t.Fatalf("IngestFindings: %v", err)
+		}
+	}
+	assetHolding := func(kind, value string) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := db.QueryRow(`SELECT asset_id FROM asset_identifiers WHERE tenant_id=$1 AND kind=$2 AND value=$3`,
+			tenant, kind, value).Scan(&id); err != nil {
+			t.Fatalf("who holds %s=%s: %v", kind, value, err)
+		}
+		return id
+	}
+	status := func(id uuid.UUID) string {
+		t.Helper()
+		var s string
+		if err := db.QueryRow(`SELECT asset_status FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, id).Scan(&s); err != nil {
+			t.Fatalf("status of %s: %v", id, err)
+		}
+		return s
+	}
+	proposals := func() []string {
+		t.Helper()
+		rows, err := db.Query(`
+			SELECT changes_json->'candidates' FROM asset_history
+			 WHERE tenant_id=$1 AND action='merge_proposed' AND changes_json->>'kind'='merge_proposal'`, tenant)
+		if err != nil {
+			t.Fatalf("read proposals: %v", err)
+		}
+		defer func() { _ = rows.Close() }()
+		var out []string
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, c)
+		}
+		return out
+	}
+
+	// The Wi-Fi NIC, seen passively on its own network.
+	ingest(observationFinding(t, &hostobs.HostObservation{
+		Source:    hostobs.SourceARP,
+		MAC:       wifiMAC,
+		Addresses: addrsFor(t, "198.51.100.172"),
+	}))
+	// The sensor's first self-report: the Ethernet NIC only.
+	ingest(selfObservationFinding(t, sensorID, &hostobs.HostObservation{
+		Platform: "windows", Profile: "datacenter_host", Hostnames: []string{"laptop-7"},
+		MAC: ethernetMAC, Addresses: addrsFor(t, "192.0.2.173"),
+	}))
+	wifiAsset, hostAsset := assetHolding("mac_address", wifiMAC), assetHolding("sensor_id", sensorID.String())
+	if wifiAsset == hostAsset {
+		t.Fatal("setup: the Ethernet self-report landed on the Wi-Fi record")
+	}
+	wifiStatus, hostStatus := status(wifiAsset), status(hostAsset)
+
+	report := func() IngestFinding {
+		return selfObservationFinding(t, sensorID, &hostobs.HostObservation{
+			Platform: "windows", Profile: "datacenter_host", Hostnames: []string{"laptop-7"},
+			MAC: ethernetMAC, OtherMACs: []string{wifiMAC}, Addresses: addrsFor(t, "192.0.2.173"),
+		})
+	}
+	ingest(report())
+
+	got := proposals()
+	if len(got) != 1 {
+		t.Fatalf("%d merge proposals, want one naming both records: %v", len(got), got)
+	}
+	for _, want := range []uuid.UUID{hostAsset, wifiAsset} {
+		if !strings.Contains(got[0], want.String()) {
+			t.Fatalf("proposal candidates %s do not name %s", got[0], want)
+		}
+	}
+	// Still the sensor's asset, refreshed by its own report.
+	var linked uuid.UUID
+	if err := db.QueryRow(`SELECT asset_id FROM sensors WHERE id=$1`, sensorID).Scan(&linked); err != nil || linked != hostAsset {
+		t.Fatalf("sensors.asset_id = %s (%v), want the sensor's own asset %s", linked, err, hostAsset)
+	}
+	// ADR-0002 D5: nothing moved, nothing left service.
+	if holder := assetHolding("mac_address", wifiMAC); holder != wifiAsset {
+		t.Fatalf("the Wi-Fi MAC moved to %s without a person deciding", holder)
+	}
+	if status(wifiAsset) != wifiStatus || status(hostAsset) != hostStatus {
+		t.Fatalf("statuses changed: wifi %s→%s, host %s→%s", wifiStatus, status(wifiAsset), hostStatus, status(hostAsset))
+	}
+
+	// The next hourly report asks nothing new.
+	ingest(report())
+	if n := len(proposals()); n != 1 {
+		t.Fatalf("%d merge proposals after the repeat report, want the one pending question", n)
 	}
 }

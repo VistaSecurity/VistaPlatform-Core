@@ -9,11 +9,11 @@ import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime } from './kit';
 import { usePendingAssets } from './queries';
 import {
   MERGE_PROPOSALS_PAGE_SIZE, mergeProposalRangeLabel, useAutoAcceptedMerges,
-  useMergeProposals, useResolveMergeProposal,
+  useMergeAsIs, useMergeProposals, useResolveMergeProposal,
 } from '../inventory/asset-queries';
 import { assetIdentity, classLabel, primaryAddressPort } from '../inventory/asset-shape';
 import { IdentityStatus } from '../inventory/identity-status';
-import { AssetMergeModal } from './asset-merge-modal';
+import { AssetMergeModal, recommendedMerge } from './asset-merge-modal';
 import type { MergeProposal } from '../inventory/asset-queries';
 import { MergeProposalRow } from './merge-proposal-row';
 import { AutoMergedSection } from './auto-merged-section';
@@ -83,7 +83,17 @@ export function ApprovalsPage() {
   const [proposalOffset, setProposalOffset] = useState(0);
   const proposalsQ = useMergeProposals(true, proposalOffset);
   const resolve = useResolveMergeProposal();
-  const [mergeReview, setMergeReview] = useState<MergeProposal>();
+  const mergeAsIs = useMergeAsIs();
+  // The review modal, with the note "Merge as is" hands over when it could not
+  // merge unattended (a field with two declared values needs a person).
+  const [mergeReview, setMergeReview] = useState<{ proposal: MergeProposal; note?: string }>();
+  function mergeProposalAsIs(p: MergeProposal) {
+    const selection = recommendedMerge(p);
+    if (!selection) return;
+    mergeAsIs.mutate({ proposalID: p.id, selection }, {
+      onSuccess: (r) => { if (r.outcome === 'needs-review') setMergeReview({ proposal: p, note: r.note }); },
+    });
+  }
   // The third row kind (ADR-0006 D6). Its own read, its own error state: a
   // failed relationship read is an unknown number of proposals a person still
   // has to decide, exactly as a failed merge read is.
@@ -344,16 +354,16 @@ export function ApprovalsPage() {
             <MergeProposalRow
               key={p.id}
               proposal={p}
-              busy={resolve.isPending}
-              // Explicit source and survivor selection happens in the preview.
-              onAccept={() => setMergeReview(p)}
+              busy={resolve.isPending || mergeAsIs.isPending}
+              onMergeAsIs={() => mergeProposalAsIs(p)}
+              onAccept={() => setMergeReview({ proposal: p })}
               onKeepSeparate={() => resolve.mutate({ action: 'keep-separate', id: p.id })}
             />
           ))}
         </div>
       )}
 
-      {mergeReview && <AssetMergeModal proposal={mergeReview} onClose={() => setMergeReview(undefined)} />}
+      {mergeReview && <AssetMergeModal proposal={mergeReview.proposal} note={mergeReview.note} onClose={() => setMergeReview(undefined)} />}
 
       {relProposals.length > 0 && (
         <div data-testid="relationship-proposals-section" style={{ marginBottom: 16 }}>

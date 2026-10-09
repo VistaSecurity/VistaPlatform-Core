@@ -39,8 +39,8 @@ export function binaryUrl(tag: string, name: 'crypto-sensor' | 'device-agent', o
   return `${CORE_RELEASES_URL}/download/${tag}/${name}-${os}-${arch}-${tag}${ext}`;
 }
 
-/** A sensor installer script at the release's tag in the public source. */
-export function installerUrl(tag: string, file: 'install-sensor.sh' | 'install-sensor.ps1'): string {
+/** An agent installer script at the release's tag in the public source. */
+export function installerUrl(tag: string, file: 'install-sensor.sh' | 'install-sensor.ps1' | 'install-device-agent.sh'): string {
   return `${CORE_RAW_URL}/${tag}/scripts/${file}`;
 }
 

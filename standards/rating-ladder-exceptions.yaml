@@ -94,7 +94,7 @@ frontend-v2/src/sections/dashboard/dashboard-page.tsx#DashboardPage:
   concept: dashboard_counts
   reason: Displays per-grade counts and trends; unrelated count/length comparisons
     are not a ladder.
-  fingerprint: 6d67ec8bb2969f71d399887f46a67fac9051e3e9b9dff462aa440f06588fe873
+  fingerprint: 8c4ca3dd1453405d0409c83b78239d4ad7dfe908d419368a9d83158002202e58
 frontend-v2/src/sections/findings/findings-page.tsx#FindingsPage:
   concept: findings_loaded_view_counts
   reason: UI comparisons and conditional labels describe row counts, filters and

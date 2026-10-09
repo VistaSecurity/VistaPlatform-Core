@@ -1546,6 +1546,13 @@ func logIdentityDecisions(label string, res identity.Resolution) {
 		log.Printf("[AssetService] IngestFindings: %s is a floating address: asset %s announces %v for asset %s (gratuitous_arp=%v); resolved to the address's asset, the announcer's MAC %v was not attached, and no merge proposal was opened",
 			label, fa.AnnouncerAssetID, fa.Announcement.Addresses, res.Asset.ID, fa.Announcement.Gratuitous, fa.Announcement.MACs)
 	}
+	if res.Outcome == identity.OutcomeMatched && res.Proposal.ID != "" {
+		// A host's own report, decided by its installation identity, that
+		// also names identifiers another asset holds (shared/identity
+		// installation_claims.go): matched AND proposed.
+		log.Printf("[AssetService] IngestFindings: %s matched asset %s by %s and names identifiers %d other asset(s) hold; opened merge proposal %s",
+			label, res.Asset.ID, res.DecidedBy, len(res.Candidates)-1, res.Proposal.ID)
+	}
 	if s := res.Suppressed; s != nil {
 		when := "at an unrecorded time"
 		if !s.DecidedAt.IsZero() {
@@ -3334,6 +3341,12 @@ func (s *AssetService) createAssetResolved(tenantID uuid.UUID, input models.Asse
 		if cerr := s.applyAssetContext(tx, tenantID, assetID, input, source, res.Outcome); cerr != nil {
 			return cerr
 		}
+		// Record only, never Promote, on this path. A declaration or an import
+		// is a person's assertion about the asset, not evidence the platform
+		// measured; on a match it re-states an asset that exists, and a rule
+		// moving that asset's class as a side effect of somebody re-importing
+		// a spreadsheet row is not what they asked for. The floor sweep
+		// (class_floor_sweep.go) still re-asks the question for the asset.
 		if cerr := s.recordClassOutcome(ctxBG, tx, tenantID, assetID, res.Outcome, classProp); cerr != nil {
 			return cerr
 		}
@@ -3478,7 +3491,13 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 		if cerr := s.applyAssetContext(tx, tenantID, assetID, ctxInput, obs.Source, res.Outcome); cerr != nil {
 			return cerr
 		}
-		if cerr := s.recordClassOutcome(ctxBG, tx, tenantID, assetID, res.Outcome, classProp); cerr != nil {
+		// On a MATCH, over the asset's accumulated evidence, promoting a
+		// floor asset to a rule's class before recording any proposal — see
+		// classOutcomeForResolution. Read here, after Resolve attached this
+		// finding's identifiers and applyAssetContext wrote its context, on
+		// the engine's transaction.
+		if _, cerr := s.classOutcomeForResolution(ctxBG, tx, tenantID, assetID, res.Outcome, classProp,
+			findingClassEvidence(f), true); cerr != nil {
 			return cerr
 		}
 		if res.Outcome != identity.OutcomeConflict && assetStatus != "" && assetStatus != identity.StatusPendingApproval {

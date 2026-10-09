@@ -36,7 +36,7 @@ import (
 	"net/netip"
 	"strings"
 
-	"github.com/vistasecurity/vistaplatform/shared/hostobs"
+	"github.com/vistasecurity/vistaplatform/shared/ouiregistry"
 )
 
 const (
@@ -132,20 +132,24 @@ func MACFromSerial(serial string, registered func(oui string) bool) (mac string,
 	return mac, true
 }
 
-// MACFromSerialRegistered is [MACFromSerial] checked against the manufacturer
-// table the platform already uses for hw.vendor: shared/hostobs, generated from
-// standards/oui-vendors.csv.
+// MACFromSerialRegistered is [MACFromSerial] checked against the registry the
+// platform resolves hw.vendor from: the full IEEE MA-L/MA-M/MA-S registry in
+// shared/ouiregistry.
 //
-// That table is a curated subset of the IEEE registry, not all of it, so an
-// absent prefix means "not determined" and this function will decline to derive
-// from a genuine MAC whose manufacturer is not listed. That is the safe
-// direction: a missed derivation leaves the ordinary matching rules in charge,
-// where a false one could join two unrelated devices. Extending coverage is a
-// CSV edit and `make generate`, not a change here.
+// The whole derived MAC is checked, not just its first three octets, because
+// the registry resolves the LONGEST covering block: a 28- or 36-bit MA-M/MA-S
+// assignment sits inside a 24-bit block the IEEE lists only as its own
+// "Registration Authority", and asking about "aa:bb:cc:00:00:00" would answer
+// for a different assignee. A prefix the registry does not determine (not
+// assigned, "Private", or an ambiguous registrant) declines the derivation.
+// That is the safe direction: a missed derivation leaves the ordinary matching
+// rules in charge, where a false one could join two unrelated devices.
 func MACFromSerialRegistered(serial string) (mac string, ok bool) {
-	return MACFromSerial(serial, func(oui string) bool {
-		return hostobs.VendorForMAC(oui+":00:00:00") != ""
-	})
+	mac, ok = MACFromSerial(serial, func(string) bool { return true })
+	if !ok || !ouiregistry.Registered(mac) {
+		return "", false
+	}
+	return mac, true
 }
 
 // format renders m as aa:bb:cc:dd:ee:ff, refusing an all-zero, multicast or

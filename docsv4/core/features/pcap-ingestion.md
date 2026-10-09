@@ -18,6 +18,22 @@ PCAP analysis is **narrower than a live sensor**. A sensor sees a connection as 
 4. What it found reaches your inventory the same way a sensor's findings do —
    see [Where the discoveries go](#where-the-discoveries-go).
 
+### Capture full-length packets
+
+A capture keeps at most its **snapshot length** of each packet. A short one keeps
+the packet headers and drops the payload, and the payload is where the TLS
+handshake and the certificates are. A 128-byte snapshot still shows that QUIC or
+ARP traffic was there, but it leaves no handshake that can be read.
+
+- With `tcpdump`, pass `-s 0` (full packets). Recent `tcpdump` versions already
+  default to full packets; older ones and many appliances do not.
+- A router's or firewall's built-in packet capture often defaults to a short
+  snapshot length. Set its packet-size option to the maximum before capturing.
+
+When a capture was cut short, its row under **Recent uploads** says how many
+packets were truncated and to what length, so a near-empty result is not
+mistaken for a quiet network.
+
 Uploading needs the **Upload PCAP files** permission (`pcap.upload`); without it
 the dropzone says so instead of accepting a file.
 
@@ -34,7 +50,7 @@ The PCAP processor reassembles TLS handshakes per connection and analyzes them f
 |----------|---------------|
 | **TLS 1.0–1.3** | Negotiated protocol version, selected cipher suite, client-offered cipher suites, SNI hostname, and the server's certificate chain (see the TLS 1.3 note below) |
 | **SSH** | Banner protocol version |
-| **QUIC** | QUIC version and Initial-packet detection |
+| **QUIC** | QUIC version (v1, v2 or a draft), read from the client's Initial packet. One discovery per conversation, from the client to the server |
 
 Cipher suites are reported by their **IANA name** (for example `TLS_AES_128_GCM_SHA256`), so they resolve against the platform's algorithm catalogue and carry a real risk score.
 
@@ -48,7 +64,7 @@ These are properties of packet captures, not gaps we plan to close:
 
 - **TLS 1.3 hides certificates.** In TLS 1.3 the server's certificate message is encrypted, so a passive capture cannot see it. Certificate chains are extracted from TLS 1.2 and earlier handshakes only. For certificate coverage on TLS 1.3 endpoints, use a sensor or a device/cloud integration.
 - **A capture must contain the handshake.** A capture that starts mid-connection carries only encrypted application data and yields nothing.
-- **Lossy or heavily reordered captures are skipped, not guessed at.** A connection whose record framing does not line up is dropped rather than parsed into inaccurate inventory.
+- **Retransmitted and reordered packets are handled; missing bytes are not invented.** Each direction of a connection is put back in TCP sequence order, so duplicates and out-of-order segments do no harm. Bytes the capture never recorded (a lost packet, or a payload cut off by the snapshot length) leave a gap, and the connection yields only what came before it. A connection whose record framing still does not line up is dropped rather than parsed into inaccurate inventory.
 
 Not extracted from PCAP today: ALPN, JA3/JA4 fingerprints, SSH key exchange / encryption / MAC algorithm lists, STARTTLS upgrades, and IKE/IPsec. Live sensors cover several of these.
 
@@ -130,8 +146,9 @@ pending → processing → completed
 
 - Each uploaded file is stored under a generated name and deleted as soon as it
   has been processed
-- TLS handshake bytes are reassembled per connection and per direction, so
-  certificate messages that span several packets are parsed correctly
+- TLS handshake bytes are reassembled per connection and per direction, in TCP
+  sequence order, so certificate messages that span several packets are parsed
+  correctly
 - Discoveries are recorded with a discovery method of `pcap_upload`, so you can
   always tell a replay from a live capture or an active probe
 - Everything then flows through the normal discovery pipeline

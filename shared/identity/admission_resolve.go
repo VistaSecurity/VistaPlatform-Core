@@ -47,6 +47,13 @@ func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, erro
 		return Resolution{}, err
 	}
 	obs.pinned = pinned
+	// And which their owner was device-confirmed at within the lease window
+	// (leasefresh.go), read under the same locks for the same reason.
+	fresh, err := e.leaseFreshAddresses(ctx, obs)
+	if err != nil {
+		return Resolution{}, err
+	}
+	obs.leaseFresh = fresh
 	recorder, ok := e.repo.(ObservationRepository)
 	if !ok {
 		return e.resolve(ctx, obs)

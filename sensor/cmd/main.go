@@ -402,6 +402,22 @@ func main() {
 		*configFile = findDefaultConfigFile()
 	}
 
+	flags := sensorFlags{
+		configFile:    configFile,
+		verbose:       verbose,
+		register:      register,
+		interactive:   interactive,
+		testMode:      testMode,
+		caFingerprint: caFingerprint,
+	}
+
+	// Started by the Windows Service Control Manager: run the same lifecycle
+	// under its control instead of as a console process (service_windows.go).
+	// Always false on other platforms.
+	if runAsWindowsService(flags) {
+		return
+	}
+
 	// Run interactive configuration mode. This is the default on a fresh host —
 	// running the binary with no arguments IS the install flow — and it starts
 	// the sensor when it finishes, so setup and first run are one step.
@@ -410,9 +426,73 @@ func main() {
 		return
 	}
 
+	runSensor(flags, sensorHost{logToStderr: true})
+}
+
+// sensorFlags are main's command-line flags, handed to runSensor whether the
+// sensor runs as a console process or as a Windows service.
+type sensorFlags struct {
+	configFile    *string
+	verbose       *bool
+	register      *bool
+	interactive   *bool
+	testMode      *bool
+	caFingerprint *string
+}
+
+// sensorOutcome is why runSensor's loop ended.
+type sensorOutcome int
+
+const (
+	// sensorStopped: a signal or a service stop request; cleanup has run.
+	sensorStopped sensorOutcome = iota
+	// sensorRestartRequested: the control plane asked for a restart; cleanup
+	// has run and the supervisor is expected to start the sensor again.
+	sensorRestartRequested
+)
+
+// sensorHost is what runSensor needs from whatever supervises the process: a
+// console (or systemd, which also signals and captures stderr), or the Windows
+// Service Control Manager. The zero value of every field is the console's
+// behaviour except logToStderr.
+type sensorHost struct {
+	// logToStderr tees the log to stderr. Under a Windows service stderr is not
+	// a usable handle, and a failed write would stop io.MultiWriter before the
+	// ring buffer saw the line.
+	logToStderr bool
+	// logToFile tees the log into <dataPath>/logs/sensor.log (size-rotated)
+	// once the configuration names the data path.
+	logToFile bool
+	// event reports a lifecycle message to the host's own log (the Windows
+	// Event Log). Optional.
+	event func(isError bool, msg string)
+	// started is called once the sensor is capturing and its loop is about to
+	// run. Optional.
+	started func()
+	// stop delivers graceful-shutdown requests besides SIGINT/SIGTERM; each
+	// value says who asked. nil blocks forever.
+	stop <-chan string
+}
+
+// runSensor loads the configuration, registers if needed, starts capture and
+// runs the sensor loop until it is asked to stop or restart. Fatal startup
+// errors exit the process.
+func runSensor(flags sensorFlags, host sensorHost) sensorOutcome {
+	configFile := flags.configFile
+	verbose := flags.verbose
+	register := flags.register
+	interactive := flags.interactive
+	testMode := flags.testMode
+	caFingerprint := flags.caFingerprint
+
 	// Initialize logging. Tee log output into an in-memory ring buffer so the
 	// export_logs command can return recent lines to the platform console.
-	log.SetOutput(io.MultiWriter(os.Stderr, logRing))
+	// A Windows service has no stderr (see sensorHost.logToStderr).
+	if host.logToStderr {
+		log.SetOutput(io.MultiWriter(os.Stderr, logRing))
+	} else {
+		log.SetOutput(logRing)
+	}
 	if *verbose {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 		log.Println("Verbose logging enabled")
@@ -448,6 +528,24 @@ func main() {
 	// The build-stamped binary version is the truth about what code is running;
 	// a version copied into a config file or env var goes stale on upgrade.
 	cfg.Version = Version
+
+	// Now that the data path is known, give a service a log that outlives the
+	// process. The ring buffer already holds every line so far, so the file
+	// starts with them.
+	if host.logToFile {
+		path, err := teeLogToFile(cfg.Storage.DataPath, host.logToStderr)
+		if err != nil {
+			log.Printf("⚠️  Could not open a log file: %v — logs are kept in memory only (export_logs)", err)
+			if host.event != nil {
+				host.event(true, fmt.Sprintf("Could not open a log file under %s: %v. Logs are kept in memory only.", cfg.Storage.DataPath, err))
+			}
+		} else {
+			log.Printf("📝 Logging to %s", path)
+			if host.event != nil {
+				host.event(false, "Logging to "+path)
+			}
+		}
+	}
 
 	// Verbose logging is on by default; a `verbose:` key in the config file (or
 	// the VERBOSE env var) is how an operator turns it back down for a
@@ -582,7 +680,9 @@ func main() {
 	log.Println(sensor.startupStateLine("Sensor"))
 	log.Println("📡 Monitoring network traffic for cryptographic configurations...")
 	log.Printf("🔄 Reporting interval: %v", cfg.ReportingInterval)
-	log.Println("💡 Press Ctrl+C to stop the sensor")
+	if host.logToStderr {
+		log.Println("💡 Press Ctrl+C to stop the sensor")
+	}
 
 	// Check certificate expiration on startup
 	if sensor.sensorManager != nil && cfg.Security.UseTLS {
@@ -592,6 +692,10 @@ func main() {
 	// Start TLS enricher worker pool (active probes for TLS 1.3 cert extraction)
 	if sensor.tlsEnricher != nil {
 		sensor.tlsEnricher.Start(3)
+	}
+
+	if host.started != nil {
+		host.started()
 	}
 
 	for {
@@ -632,10 +736,15 @@ func main() {
 			log.Printf("🛑 Received signal %v, shutting down gracefully...", sig)
 			sensor.cleanup()
 			log.Println("👋 Sensor shutdown complete")
-			return
+			return sensorStopped
+		case reason := <-host.stop:
+			log.Printf("🛑 %s, shutting down gracefully...", reason)
+			sensor.cleanup()
+			log.Println("👋 Sensor shutdown complete")
+			return sensorStopped
 		case <-sensor.restartChan:
 			sensor.shutdownForRestart()
-			return
+			return sensorRestartRequested
 		}
 	}
 }
@@ -716,7 +825,11 @@ func (s *Sensor) register() error {
 
 	config, err := s.sensorManager.Register()
 	if err != nil {
-		return fmt.Errorf("registration failed: %v", err)
+		// %w, not %v: both callers errors.As this for *api.RegistrationRejectedError
+		// to tell a spent or invalid key (stop, tell the operator) from a control
+		// plane that is merely down (retry). %v flattened it to a string, so a
+		// consumed key was retried forever with "next attempt in …".
+		return fmt.Errorf("registration failed: %w", err)
 	}
 
 	// Registration (via sensorManager) stored the client cert/key + server CA on

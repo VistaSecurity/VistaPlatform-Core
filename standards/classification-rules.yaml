@@ -70,8 +70,10 @@
 #              (a CDP `switch` bit: true of a switch, and of a router with a
 #              switch module).
 #
-# A vendor-only rule carries the confidence of its VENDOR claim (0.85 for an
-# IEEE assignment), because that is all it asserts.
+# A vendor-only rule carries the confidence of its VENDOR claim, because that is
+# all it asserts. The IEEE registry's own vendor statement — which the engine
+# makes for every MAC it resolves, rule or none — carries 0.85
+# (classify.RegistryVendorConfidence).
 #
 # ---------------------------------------------------------------------------
 # Rule kinds
@@ -79,7 +81,19 @@
 #
 #   oui           pattern is the 24-bit IEEE assignment as 6 uppercase hex
 #                 digits, no separators ("00000C"). Matches the first three
-#                 octets of any MAC in the input, in any spelling.
+#                 octets of any MAC in the input, in any spelling. A PREFIX
+#                 rule: for an admin's override, or the rare assignment a
+#                 vendor-level statement cannot express. For one MAC it
+#                 OUTRANKS every oui_vendor rule — it is the more specific
+#                 statement — so the two never argue.
+#
+#   oui_vendor    pattern is a CANONICAL manufacturer name, exactly as
+#                 standards/oui/vendors.yaml spells it ("Brother Industries").
+#                 The engine resolves each input MAC through the IEEE registry
+#                 (shared/ouiregistry: 24-, 28- and 36-bit blocks, longest
+#                 prefix wins) and matches the rule when the MAC's canonical
+#                 vendor equals the pattern. Exact, case-sensitive. GENERATED
+#                 from `oui_classes` below — never written in the rules list.
 #
 #   sysobjectid   pattern is an OID prefix under 1.3.6.1.4.1 — the IANA
 #                 private-enterprise arc. Matched on ARC boundaries, so
@@ -142,13 +156,21 @@
 #                 inventory writes, or the OS a vendor management API reported.
 #                 The pattern carries its own anchoring, as a banner's does.
 #                 This is the only kind whose evidence comes from INSIDE the
-#                 host rather than off the wire, and the only one a
-#                 general-purpose computer can match at all.
+#                 host rather than off the wire.
+#
+#   dhcp_vendor_class  pattern is an RE2 regexp over the DHCP option 60 vendor
+#                 class identifier the client sent (RFC 2132 section 9.13),
+#                 exactly as sent — "MSFT 5.0", "android-dhcp-14". Anchored by
+#                 the pattern itself; every matching rule is returned, as for
+#                 os_name. It names the DHCP CLIENT SOFTWARE, never the
+#                 hardware vendor, and is the one passive signal a
+#                 general-purpose computer reliably emits.
 
 version: 1
 
 kinds:
   - oui
+  - oui_vendor
   - sysobjectid
   - enip
   - cloud_type
@@ -160,6 +182,7 @@ kinds:
   - lldp_capability
   - mdns_service
   - os_name
+  - dhcp_vendor_class
 
 # Citations reused across whole blocks, so the rules below stay readable.
 # (YAML anchors; the generator resolves them before it sees a rule.)
@@ -169,34 +192,33 @@ sources:
   odva: &odva https://www.odva.org/subscriptions-services/vendor-id-list/
 
 # ---------------------------------------------------------------------------
-# oui — one table, one owner
+# MACs — the registry names the vendor, this file names the class
 # ---------------------------------------------------------------------------
 #
-# OUI → VENDOR lives in standards/oui-vendors.csv and nowhere else. That table
-# is workstream 2.5's (shared/hostobs compiles it into the sensor so a passive
-# capture can name a manufacturer with no network call), it is curated, and it
-# already covers 462 prefixes across 118 manufacturers.
+# MAC → VENDOR is not this file's business. The engine resolves every input MAC
+# through the whole IEEE registry (shared/ouiregistry, generated from the
+# vendored snapshot and standards/oui/vendors.yaml) and reports the canonical
+# manufacturer on the proposal whether or not any rule mentions it. No rule row
+# is needed for a vendor, and none is generated.
 #
-# This file does NOT restate any of it. A second copy of the same mapping is a
-# second copy that drifts — and it already had: a first cut of this file
-# carried 123 hand-written OUI rules, and when the CSV landed 27 of them
-# disagreed with it about the vendor's own name (Netgear/NETGEAR,
-# Brother/Brother Industries, Rockwell Automation/Allen-Bradley for the same
-# prefix). Nothing would have failed; the two tables would simply have told a
-# customer two different things.
+# History, because it explains the shape: this file once carried 123
+# hand-written OUI rules, which disagreed with the sensor's OUI table about
+# vendors' own names (Netgear/NETGEAR, Brother/Brother Industries); then it
+# derived one `oui` rule per row of that table, which covered about 6% of the
+# prefixes of the manufacturers it named. Both were ways of carrying a vendor
+# per prefix, and the registry made them unnecessary.
 #
-# So `oui_classes` maps a VENDOR — spelled exactly as the CSV spells it — onto
-# the class its products are, and the generator emits one `oui` rule per CSV
-# prefix:
+# What remains is the CLASS. `oui_classes` maps a canonical VENDOR onto the
+# class its networked products are, and the generator emits one `oui_vendor`
+# rule per entry: pattern = the vendor, class and confidence from here, cited to
+# the IEEE registry — or, for a vendor whose prefixes the IEEE does not
+# truthfully attribute (QEMU, OpenStack, Docker, VirtualBox), to the `source:`
+# vendors.yaml records for it. A vendor NOT in this map gets no rule and still
+# gets its vendor reported, which is the majority and the default.
 #
-#   * a vendor in this map     → a rule with that vendor AND that class
-#   * a vendor not in this map → a rule with that vendor and NO class
-#
-# The second case is the majority and the default, which is the rule of thumb
-# working as intended: of 462 prefixes only about a third carry a class.
-#
-# The generator FAILS on a vendor here that the CSV does not contain, because a
-# typo would otherwise be a class that silently never applies to anything.
+# The generator FAILS on a key here that is not a canonical vendor in
+# standards/oui/vendors.yaml, because an `oui_vendor` rule matches only the
+# canonical spelling and a typo would be a class that silently never applies.
 #
 # What belongs in this map: a vendor whose networked products are all one
 # thing. What does not, with the reason, because these are the judgement calls
@@ -231,59 +253,28 @@ sources:
 #   * American Power Conversion — UPSs and rack PDUs, for which the taxonomy has
 #     no class and `iot_device` would be a category error.
 #
-# Confidence follows the same ladder as everything else in this file, and a
-# vendor-only rule gets `oui_vendor_only_confidence` below.
-
-# What a rule asserts when it names only the manufacturer: an IEEE assignment
-# is a strong claim about who made the thing and no claim at all about what it
-# is.
-oui_vendor_only_confidence: 0.85
+# Confidence follows the same ladder as everything else in this file.
 
 # ---------------------------------------------------------------------------
 # Vendor names: one manufacturer, one spelling
 # ---------------------------------------------------------------------------
 #
-# Every `vendor:` a rule below names must be spelled EXACTLY as
-# standards/oui-vendors.csv spells it, and the generator fails on any that is
-# not. This is not tidiness. The engine refuses to choose between two rules
-# naming DIFFERENT vendors at similar confidence, so two spellings of one
-# manufacturer do not disagree loudly — they CANCEL. `Dell` on the OUI rule
-# against `Dell Inc.` on the sysObjectID rule meant a Dell server seen by both
-# MAC and SNMP came back with no vendor AND no class; `Ubiquiti` against
-# `Ubiquiti Networks` did the same to every UniFi device. Both also break the
-# hw.vendor join the end-of-life catalogue exists for.
+# Every `vendor:` a rule below names, and every `oui_classes` key, must be
+# spelled EXACTLY as standards/oui/vendors.yaml spells a canonical vendor, and
+# the generator fails on any that is not. This is not tidiness. The engine
+# refuses to choose between two statements naming DIFFERENT vendors at similar
+# confidence, so two spellings of one manufacturer do not disagree loudly — they
+# CANCEL. `Dell` from the MAC against `Dell Inc.` on the sysObjectID rule meant a
+# Dell server seen by both MAC and SNMP came back with no vendor AND no class;
+# `Ubiquiti` against `Ubiquiti Networks` did the same to every UniFi device. Both
+# also break the hw.vendor join the end-of-life catalogue exists for.
 #
-# A manufacturer with no prefix in the CSV is legitimate — these three are
-# reached over SNMP and have never appeared in the MAC table — but it has to be
-# DECLARED here, so that adding their OUI later cannot quietly introduce a
-# second spelling.
-vendors_outside_oui_table:
-  - Zyxel
-  - Brocade
-  - Citrix
-  - H3C
-
-# ---------------------------------------------------------------------------
-# Citations for prefixes IEEE did not assign
-# ---------------------------------------------------------------------------
-#
-# An OUI rule cites the IEEE registry, because that is where OUI → vendor comes
-# from. For a LOCALLY-ADMINISTERED prefix that citation is false: the U/L bit
-# means nobody registered it, and `FA:16:3E → OpenStack` is a convention of that
-# platform's own. A citation that does not say what the rule says is worse than
-# no citation, because it is aimed at a reader who will not go and check.
-#
-# The generator REQUIRES an entry here for every locally-administered prefix in
-# the CSV, and accepts one for a universally-administered prefix whose registrant
-# is not the name the table uses.
-oui_sources:
-  # Locally administered — required.
-  '52:54:00': https://libvirt.org/formatdomain.html
-  'FA:16:3E': https://docs.openstack.org/neutron/latest/configuration/neutron.html
-  '02:42:AC': https://docs.docker.com/engine/network/drivers/bridge/
-  # Registered to Cadmus Computer Systems; every frame carrying it in practice
-  # is a VirtualBox guest, which is what the table names it.
-  '08:00:27': https://www.virtualbox.org/manual/ch06.html
+# A manufacturer the IEEE registry genuinely lacks is legitimate — reached over
+# SNMP only, say — but it has to be DECLARED here, so that adding it to
+# vendors.yaml later cannot quietly introduce a second spelling. The generator
+# fails on a name listed here that vendors.yaml DOES carry. Empty today: Zyxel,
+# Brocade, Citrix and H3C used to be listed, and the registry has all four.
+vendors_outside_oui_table: []
 
 oui_classes:
 
@@ -353,6 +344,59 @@ oui_classes:
   Dahua Technology:    { class: iot_device, confidence: 0.80 }
   Axis Communications: { class: iot_device, confidence: 0.80 }
   Espressif:           { class: iot_device, confidence: 0.75 }
+
+  # --- smart devices (consumer and office connected devices) ----------------
+  # `smart_device` is the consumer sibling of `iot_device`: TVs and streaming
+  # players, speakers, doorbells, bulbs, thermostats, game consoles. Each vendor
+  # here sells only that kind of thing on its registered assignments:
+  #
+  #   * Roku, Vizio — streaming players and TVs. Sonos, Bose — speakers and
+  #     soundbars. Ring — doorbells and cameras for the home. Nest Labs —
+  #     thermostats, doorbells and smart displays. Philips Lighting, GE
+  #     Lighting — bulbs and bridges.
+  #     Nintendo, Sony Interactive Entertainment — consoles, and SIE is the
+  #     PlayStation registrant only, not Sony Corporation.
+  #   * Amazon Technologies at 0.75 — Echo speakers, Fire TV and Kindle. A
+  #     Kindle is the near miss, and the 0.70–0.79 band says so.
+  #     It is safe from the router case because eero routers register under
+  #     their OWN name, which is why eero is classed `network_device` below.
+  #   * Top Victory Electronics at 0.70 — TPV, which builds televisions and
+  #     monitors for several brands. A monitor has no network interface of its
+  #     own, so a networked TPV assignment is almost always a TV, and the low
+  #     band says "almost".
+  #
+  # Deliberately vendor-only (no class), each because it spans phones,
+  # computers or network gear under the same registrant:
+  #
+  #   * Google — Pixel phones, Chromebooks, Nest Wifi routers and Chromecasts.
+  #   * Samsung, LG — phones, laptops and monitors as well as TVs and appliances.
+  #   * Sony (Corporation) — Xperia phones, VAIO-era laptops and cameras;
+  #     consoles are the SIE registrant above.
+  #   * Microsoft — Surface hardware and Xbox share assignments (the Hyper-V
+  #     pool is its own canonical vendor above).
+  #   * Apple — Macs, iPhones and iPads alongside Apple TV and HomePod.
+  #   * Intel — the Wi-Fi and Ethernet silicon in most laptops and desktops;
+  #     the MAC says whose radio, not whose device.
+  #   * TP-Link — routers, switches and access points next to Kasa/Tapo plugs
+  #     and cameras.
+  #
+  # Espressif stays `iot_device`: its radios are in sensors and controllers as
+  # much as in consumer plugs, and the broad embedded class is the safe answer.
+  Roku:                           { class: smart_device, confidence: 0.85 }
+  Vizio:                          { class: smart_device, confidence: 0.85 }
+  Ring:                           { class: smart_device, confidence: 0.85 }
+  Sonos:                          { class: smart_device, confidence: 0.85 }
+  Bose:                           { class: smart_device, confidence: 0.85 }
+  Nintendo:                       { class: smart_device, confidence: 0.85 }
+  Sony Interactive Entertainment: { class: smart_device, confidence: 0.85 }
+  Philips Lighting:               { class: smart_device, confidence: 0.85 }
+  Nest Labs:                      { class: smart_device, confidence: 0.85 }
+  GE Lighting:                    { class: smart_device, confidence: 0.80 }
+  Amazon Technologies:            { class: smart_device, confidence: 0.75 }
+  Top Victory Electronics:        { class: smart_device, confidence: 0.70 }
+  # eero sells mesh Wi-Fi routers and nothing else; its own registrant keeps
+  # them apart from the Amazon Technologies assignments above.
+  eero:                           { class: network_device, confidence: 0.80 }
 
   # --- industrial control ----------------------------------------------------
   # `ot_device` and not `plc`: these vendors ship PLCs, but also drives, I/O
@@ -1178,21 +1222,42 @@ rules:
   # exactly what an SSH banner is not — every class in the taxonomy runs sshd,
   # and none of them advertise `_ipp._tcp` unless they accept print jobs.
   #
-  # Printers, plus Matter IoT. That is not an oversight. The DNS-SD registry is
-  # large and almost every other entry describes software rather than a kind of
-  # device: `_smb._tcp` is a NAS, a server, a workstation and a printer with
-  # scan-to-share; `_workstation._tcp` is whatever Avahi is installed on;
-  # `_ssh._tcp` is the banner problem with a different transport.
+  # Printers, plus a handful of consumer smart-home and media protocols. That
+  # is not an oversight. The DNS-SD registry is large and almost every other
+  # entry describes software rather than a kind of device: `_smb._tcp` is a
+  # NAS, a server, a workstation and a printer with scan-to-share;
+  # `_workstation._tcp` is whatever Avahi is installed on; `_ssh._tcp` is the
+  # banner problem with a different transport.
   #
-  # Two the taxonomy simply cannot express yet, left out rather than
-  # approximated:
+  # The smart-device rules (`smart_device`, the consumer sibling of
+  # `iot_device`) are the protocols only a consumer device RECEIVES on:
   #
-  #   * `_airplay._tcp` / `_googlecast._tcp` → a media-device class. There is
-  #     none, and `iot_device` for a television is a category error of the same
-  #     shape as calling a desk phone one. Deferred.
-  #   * `_hap._tcp` (HomeKit) → `iot_device` is arguably right, but a HomeKit
-  #     BRIDGE advertises it on behalf of accessories that are not themselves
-  #     on the network, so the advertiser is not reliably the thing. Deferred.
+  #   * `_googlecast._tcp` — a Google Cast receiver: a Chromecast, a TV or
+  #     speaker with Cast built in, a Nest smart display. Chrome browses for
+  #     it; it does not advertise it.
+  #   * `_matter._tcp` — a Matter operational node. Matter is the consumer
+  #     smart-home standard (plugs, bulbs, locks, thermostats).
+  #
+  # Deliberately NOT given a rule, because each is advertised by
+  # general-purpose computers too, and a wrong class is worse than no class:
+  #
+  #   * `_airplay._tcp`, `_raop._tcp` — every Mac advertises an AirPlay
+  #     receiver, not only Apple TVs and AirPlay speakers.
+  #   * `_spotify-connect._tcp` — the Spotify desktop app advertises it.
+  #   * `_ssh._tcp`, `_sftp-ssh._tcp` — Macs, Linux hosts and NAS units alike.
+  #   * `_companion-link._tcp` — every Apple device: Mac, iPhone, iPad, Apple TV.
+  #   * `_dns-sd._udp` — the DNS-SD meta-query itself; it says nothing about the
+  #     host.
+  #   * `_hap._tcp` — a HomeKit accessory, usually. But Homebridge and Home
+  #     Assistant's HomeKit bridge advertise it from an ordinary Linux host,
+  #     which has no os_name rule to conflict with, so the box would be
+  #     proposed as a smart device. Until a corroborating signal (a vendor)
+  #     can be required alongside it, it stays out.
+  #
+  # Two the brief proposed and this file does not carry yet, for want of a
+  # citation: `_amzn-wplay._tcp` (Fire TV) and `_xboxda._tcp` (Xbox). Neither
+  # is in the IANA service-name registry, and no vendor document found names
+  # them. Every rule here cites its source; add them with one.
   - kind: mdns_service
     pattern: _ipp._tcp
     class: printer
@@ -1215,9 +1280,14 @@ rules:
     source_url: https://datatracker.ietf.org/doc/html/rfc1179
   - kind: mdns_service
     pattern: _matter._tcp
-    class: iot_device
+    class: smart_device
     confidence: 0.75
     source_url: https://csa-iot.org/all-solutions/matter/
+  - kind: mdns_service
+    pattern: _googlecast._tcp
+    class: smart_device
+    confidence: 0.75
+    source_url: https://developers.google.com/cast/docs/discovery
 
   # ===========================================================================
   # os_name — what the host says it runs
@@ -1281,3 +1351,99 @@ rules:
     class: computer
     confidence: 0.75
     source_url: https://support.apple.com/en-us/109033
+
+  # ===========================================================================
+  # dhcp_vendor_class — what the DHCP client calls itself
+  # ===========================================================================
+  #
+  # DHCP option 60, the vendor class identifier (RFC 2132 section 9.13), is a
+  # string the client's DHCP implementation puts in every DISCOVER and REQUEST
+  # without anyone configuring it. The sensor's DHCP decoder (shared/hostobs)
+  # records it as the `dhcp_vendor_class` attribute, and it is passive evidence
+  # about hosts the wire otherwise says little about: a Windows laptop's MAC
+  # names Intel or Dell, which is vendor-only by design, while its DHCP
+  # exchange names a Windows client.
+  #
+  # What it names is the DHCP CLIENT SOFTWARE — not the hardware manufacturer,
+  # and so never a vendor on its own (the decoder says so too: option 60 is a
+  # classification signal, never hw.vendor). The rules below stop at what the
+  # client software establishes:
+  #
+  #   * `MSFT 5.0` → `computer`, no vendor. Microsoft's DHCP extensions
+  #     ([MS-DHCPE], "DHCPv4 Option Code 60 - Vendor Class Identifier Option")
+  #     define it as the Windows DHCP client's identifier, and the Windows DHCP
+  #     server predefines it as the class of "Windows 2000 and later" clients
+  #     ([MS-DHCPM]). The OS vendor is not the hardware vendor, so the rule
+  #     states a class only. A Windows SERVER sends
+  #     it too, and that is fine: `server` refines `computer`, so a host the
+  #     os_name rules call a server resolves to `server`, not to a conflict.
+  #     Exact-anchored, so `MSFT 5.0 XBOX` (which [MS-DHCPE] defines for a
+  #     console that "claims to be" an Xbox) and `MSFT 98` (a Windows 9x client
+  #     that understands none of the vendor options) match nothing. 0.75, not
+  #     higher: the same specification notes that not every Xbox uses the XBOX
+  #     form, so a console may yet send the plain string.
+  #   * `android-dhcp-<release>` → `mobile`, 0.70. The Android network stack
+  #     builds it from the platform release (NetworkStack DhcpPacket.getVendorId).
+  #     The bottom of the 0.70–0.79 band rather than 0.75 because Android TVs and
+  #     some set-top boxes run the same stack and send the same string; such a
+  #     device usually advertises `_googlecast._tcp` as well, whose
+  #     `smart_device` rule (0.75) sits within the conflict epsilon of this one
+  #     and is unrelated in the taxonomy, so the engine proposes nothing for it
+  #     — the honest outcome — rather than calling a television a phone.
+  #   * `Cisco AP <model>` → `access_point`, vendor Cisco Systems, 0.80. Cisco
+  #     documents these strings, one per Aironet / Catalyst access-point
+  #     family, as what its lightweight APs send so a DHCP server can hand them
+  #     a controller address in option 43. One product line, one meaning.
+  #   * `Hewlett-Packard JetDirect` → `printer`, vendor Hewlett Packard, 0.80.
+  #     The JetDirect network interface on HP printers identifies itself this
+  #     way. No HP-published document stating the string could be found; the
+  #     citation is the SANS Internet Storm Center diary that documents it.
+  #     Other HP spellings (`HP LaserJet …`, `HP OfficeJet …`) are NOT ruled:
+  #     they are plausible, and nothing citable says a printer sends them.
+  #
+  # Deliberately NOT given a rule — each was considered:
+  #
+  #   * `udhcp <ver>` — BusyBox's DHCP client. It is inside home routers, IP
+  #     cameras, televisions, smart plugs and NAS units alike; it names a
+  #     toolkit, not a device.
+  #   * `dhcpcd-<ver>` — the dhcpcd client, on any Linux or BSD host: a server,
+  #     a desktop, a Raspberry Pi, an appliance. The os_name reasoning about
+  #     distributions applies unchanged.
+  #   * `PXEClient…` — a network boot ROM. It is a server or a workstation
+  #     mid-boot, and the string says nothing about which.
+  #   * `AAPL…` (`AAPLBSDPC/…`, Apple's NetBoot client) — the OUI already names
+  #     Apple, and the class it would carry is wrong: a Mac, an iPhone and an
+  #     Apple TV are three different classes.
+  #   * `Linux …`, `SUNW.…` / `Sun Microsystems` — too broad, and historic.
+  #   * `ubnt` (Ubiquiti) — would be vendor-only, and the OUI registry already
+  #     states that vendor for every Ubiquiti MAC.
+  #   * `Polycom-…`, `Yealink …` desk phones — recognisable, but the taxonomy has
+  #     no phone class (see the CDP/LLDP telephone note above), and `iot_device`
+  #     for a desk telephone is a category error.
+  #
+  # Option 55 (the parameter request list, stored as `dhcp_param_request_list`)
+  # is a FINGERPRINT of the client implementation rather than a statement, and
+  # matching it needs a curated corpus (Fingerbank-style). It is not this kind;
+  # it would be a later kind of its own.
+  - kind: dhcp_vendor_class
+    pattern: '^Cisco AP '
+    class: access_point
+    vendor: Cisco Systems
+    confidence: 0.80
+    source_url: https://www.cisco.com/c/en/us/support/docs/wireless-mobility/wireless-lan-wlan/97066-dhcp-option-43-00.html
+  - kind: dhcp_vendor_class
+    pattern: ^Hewlett-Packard JetDirect
+    class: printer
+    vendor: Hewlett Packard
+    confidence: 0.80
+    source_url: https://isc.sans.edu/diary/1652
+  - kind: dhcp_vendor_class
+    pattern: ^MSFT 5\.0$
+    class: computer
+    confidence: 0.75
+    source_url: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-dhcpe/819e0181-af14-42c6-b454-9f37b133031b
+  - kind: dhcp_vendor_class
+    pattern: ^android-dhcp-
+    class: mobile
+    confidence: 0.70
+    source_url: https://android.googlesource.com/platform/packages/modules/NetworkStack/+/refs/heads/main/src/android/net/dhcp/DhcpPacket.java

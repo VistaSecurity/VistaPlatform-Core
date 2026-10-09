@@ -147,6 +147,8 @@ type stubPcapService struct {
 	job       *models.PcapUploadJob
 	getErr    error
 	deleteErr error
+	// updates records what the results callback asked the store to write.
+	updates map[string]interface{}
 }
 
 func (s *stubPcapService) GetMaxUploadSize() (int, error) { return s.maxMB, s.maxErr }
@@ -160,7 +162,8 @@ func (s *stubPcapService) GetJob(_, _ uuid.UUID) (*models.PcapUploadJob, error) 
 	return s.job, s.getErr
 }
 func (s *stubPcapService) DeleteJob(_, _ uuid.UUID) error { return s.deleteErr }
-func (s *stubPcapService) UpdateJobStatus(_ uuid.UUID, _ string, _ map[string]interface{}) error {
+func (s *stubPcapService) UpdateJobStatus(_ uuid.UUID, _ string, updates map[string]interface{}) error {
+	s.updates = updates
 	return nil
 }
 
@@ -176,8 +179,11 @@ func samplePcapJob() *models.PcapUploadJob {
 		PacketCount:      0,
 		ProtocolsFound:   map[string]int{"tls": 3},
 		CaptureTimeRange: map[string]interface{}{"start": "2026-01-01T00:00:00Z"},
-		CreatedAt:        time.Now().UTC(),
-		UpdatedAt:        time.Now().UTC(),
+		// A truncated capture, so the contract covers both truncation fields.
+		TruncatedPacketCount: 17972,
+		SnapshotLength:       func() *int { n := 128; return &n }(),
+		CreatedAt:            time.Now().UTC(),
+		UpdatedAt:            time.Now().UTC(),
 	}
 }
 

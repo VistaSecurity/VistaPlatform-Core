@@ -23,6 +23,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/classify"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
+	"github.com/vistasecurity/vistaplatform/shared/ouiregistry"
 )
 
 const (
@@ -863,10 +864,11 @@ func TestCapabilityVocabularyMatchesHostobs(t *testing.T) {
 	compare("CDP", cdpCapabilities, hostobs.CDPCapabilityNames())
 }
 
-// The OUI extraction has to agree with the engine's, because the two are read
-// as one fact: the engine matches an OUI rule and this package hashes the
-// vendor that rule names. A spelling one accepts and the other rejects would
-// make the model's vendor feature disagree with the rule that fired.
+// The MAC reading has to agree with the engine's, because the two are read as
+// one fact: the engine resolves the MAC through the IEEE registry to match an
+// oui_vendor rule, and this package hashes the same registry vendor. A
+// spelling one accepts and the other rejects would make the model's vendor
+// feature disagree with the rule that fired.
 func TestOUIExtractionAgreesWithTheEngine(t *testing.T) {
 	// VMware's 00:0C:29, which the shipped table classes as virtual_machine.
 	for _, spelling := range []string{
@@ -901,6 +903,52 @@ func TestOUIExtractionAgreesWithTheEngine(t *testing.T) {
 	}
 	if got := ouiOf("00:00:00:00:00:00"); got != "" {
 		t.Errorf("the all-zero MAC produced OUI %q; it is a placeholder, not an identity", got)
+	}
+}
+
+// The OUI feature is the registry's answer, in exactly one of three shapes:
+// a canonical vendor's bucket, the shared uncatalogued feature for a registrant
+// vendors.yaml does not name, or oui_unknown. The 28-bit case proves the full
+// MAC reaches the registry, and the uncatalogued case proves a raw registrant
+// string reaches neither a feature name nor a label.
+func TestOUIFeatureIsTheRegistrysCanonicalVendor(t *testing.T) {
+	features := func(mac string) Vector {
+		return Features(Input{Facts: classify.ClassifyInput{MACs: []string{mac}}})
+	}
+
+	// 4C:74:A7:E is a 28-bit Kyocera block.
+	v := features("4c:74:a7:e1:23:45")
+	if v.At(bucket(NamespaceOUI, "Kyocera", OUIBuckets)) != 1 {
+		t.Errorf("a 28-bit Kyocera block did not set Kyocera's bucket: %v", v.Names())
+	}
+
+	// 00:55:DA:0 is registered to a registrant vendors.yaml does not name.
+	entry, ok := ouiregistry.Lookup("00:55:da:01:23:45")
+	if !ok || entry.Canonical {
+		t.Fatalf("fixture drift: %+v %v", entry, ok)
+	}
+	v = features("00:55:da:01:23:45")
+	if v.At(FeatureOUIUncatalogued) != 1 {
+		t.Errorf("a non-canonical registrant did not set %s: %v", FeatureOUIUncatalogued, v.Names())
+	}
+	for _, n := range v.Names() {
+		if strings.HasPrefix(n, NamespaceOUI+"/") || n == FeatureOUIUnknown {
+			t.Errorf("a non-canonical registrant also set %s", n)
+		}
+		if strings.Contains(strings.ToLower(n), "shinko") {
+			t.Errorf("feature name %q carries the raw registrant", n)
+		}
+	}
+	for n, label := range v.Evidence {
+		if strings.Contains(strings.ToLower(label), strings.ToLower(entry.Vendor)) {
+			t.Errorf("label for %s quotes the raw registrant: %q", n, label)
+		}
+	}
+
+	// A randomised, locally-administered MAC is not attributed at all.
+	v = features("da:a1:19:12:34:56")
+	if v.At(FeatureOUIUnknown) != 1 || v.At(FeatureOUIUncatalogued) != 0 {
+		t.Errorf("an unattributed MAC: %v", v.Names())
 	}
 }
 

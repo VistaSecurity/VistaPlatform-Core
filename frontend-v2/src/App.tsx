@@ -22,7 +22,6 @@ import { QueuePage } from './sections/remediation/queue-page';
 import { AlertsPage } from './sections/remediation/alerts-page';
 import { JobsPage } from './sections/discovery/jobs-page';
 import { CommandCenterPage } from './sections/discovery/command-center';
-import { LogsPage } from './sections/discovery/logs-page';
 import { DevicesPage } from './sections/discovery/devices-page';
 import { ScansPage } from './sections/discovery/scans-page';
 import { NEVER_SCANNED_HREF } from './sections/inventory/builtin-views';
@@ -127,7 +126,8 @@ export default function App() {
           <Route path="/discovery/active-scan" element={<Navigate to={NEVER_SCANNED_HREF} replace />} />
           <Route path="/discovery/approvals" element={<ApprovalsPage />} />
           <Route path="/discovery/observations" element={<ObservationsPage />} />
-          <Route path="/discovery/logs" element={<LogsPage />} />
+          {/* Job Logs was folded into Discovery Jobs; keep old links working. */}
+          <Route path="/discovery/logs" element={<Navigate to="/discovery/jobs" replace />} />
           <Route path="/discovery/cloud" element={<CloudPage />} />
           <Route path="/discovery/pcap" element={<PcapPage />} />
           <Route path="/discovery/sbom" element={<SbomPage />} />

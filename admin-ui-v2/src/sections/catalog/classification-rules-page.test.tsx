@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ClassificationRulesPage } from './classification-rules-page';
-import type { ClassificationRule, ClassificationRulePage } from './catalog-queries';
+import { RULE_KIND_HINT, RULE_KIND_LABEL, dhcpVendorClassCaution, ouiVendorProblem } from './catalog-queries';
+import type { ClassificationRule, ClassificationRuleInput, ClassificationRulePage } from './catalog-queries';
 
 // Every screen state of Catalog ▸ Classification rules, rendered.
 //
@@ -41,7 +42,8 @@ vi.mock('./catalog-queries', async (importOriginal) => {
 });
 
 const ALL_KINDS = [
-  'oui', 'sysobjectid', 'enip', 'cloud_type', 'banner', 'port_profile', 'model', 'platform',
+  'oui', 'oui_vendor', 'sysobjectid', 'enip', 'cloud_type', 'banner', 'port_profile', 'model', 'platform',
+  'dhcp_vendor_class',
 ] as ClassificationRulePage['kinds'];
 
 const rule = (over: Partial<ClassificationRule> = {}): ClassificationRule => ({
@@ -251,5 +253,51 @@ describe('Catalog ▸ Classification rules', () => {
     queryState.rules.data = page([rule()]);
     const html = renderToStaticMarkup(createElement(ClassificationRulesPage));
     expect(html).toContain('Your edits to them survive upgrades');
+  });
+
+  // The shipped MAC rules are per MANUFACTURER now: the engine resolves a MAC
+  // through the platform's IEEE registry and an oui_vendor rule names the
+  // canonical vendor. The page has to say what to type, and say it is a name
+  // from the registry rather than a prefix.
+  it('renders a manufacturer rule and explains its pattern', () => {
+    queryState.rules.data = page([rule({
+      rule_kind: 'oui_vendor', pattern: 'Brother Industries', class_key: 'printer',
+      vendor: 'Brother Industries', confidence: 0.85,
+    })]);
+    const html = renderToStaticMarkup(createElement(ClassificationRulesPage));
+    expect(html).toContain('MAC manufacturer');
+    expect(html).toContain('Brother Industries');
+    expect(RULE_KIND_HINT.oui_vendor).toContain("canonical manufacturer name from the platform's IEEE registry");
+  });
+
+  it('refuses a manufacturer rule whose vendor is not its pattern, before the server does', () => {
+    const base: ClassificationRuleInput = {
+      rule_kind: 'oui_vendor', pattern: 'Canon', class_key: 'printer', vendor: null,
+      model: null, confidence: 0.8, source_url: null,
+    };
+    expect(ouiVendorProblem(base)).toBeNull();
+    expect(ouiVendorProblem({ ...base, vendor: 'Canon' })).toBeNull();
+    expect(ouiVendorProblem({ ...base, vendor: 'Ricoh' })).toMatch(/vendor is its pattern/);
+    expect(ouiVendorProblem({ ...base, pattern: ' Canon' })).toMatch(/spaces/);
+    expect(ouiVendorProblem({ ...base, pattern: 'x'.repeat(65) })).toMatch(/at most 64/);
+  });
+
+  // DHCP option 60 rules: the kind is labelled, the hint says what to type,
+  // and an unanchored pattern draws a caution (advisory; the server compiles).
+  it('renders a DHCP vendor class rule and explains its pattern', () => {
+    queryState.rules.data = page([rule({
+      rule_kind: 'dhcp_vendor_class', pattern: '^MSFT 5\\.0$', class_key: 'computer', vendor: null, confidence: 0.75,
+    })]);
+    const html = renderToStaticMarkup(createElement(ClassificationRulesPage));
+    expect(html).toContain('DHCP vendor class');
+    expect(RULE_KIND_LABEL.dhcp_vendor_class).toBe('DHCP vendor class');
+    expect(RULE_KIND_HINT.dhcp_vendor_class).toMatch(/RE2 regexp over the DHCP option 60 vendor class identifier, anchored/);
+  });
+
+  it('cautions about an unanchored DHCP vendor class pattern, and not about an anchored one', () => {
+    expect(dhcpVendorClassCaution('^MSFT 5\\.0$')).toBeNull();
+    expect(dhcpVendorClassCaution('(?i)^android-dhcp-')).toBeNull();
+    expect(dhcpVendorClassCaution('')).toBeNull();
+    expect(dhcpVendorClassCaution('MSFT 5\\.0')).toMatch(/Not anchored/);
   });
 });

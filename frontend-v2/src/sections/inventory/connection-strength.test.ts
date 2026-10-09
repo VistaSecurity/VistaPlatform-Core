@@ -28,6 +28,6 @@ describe('external connection strength', () => {
     expect(source).toContain("weakReasons.join('; ')");
     expect(source).toContain('title={reasonsTitle}');
     const dashboard = readFileSync(new URL('../dashboard/dashboard-page.tsx', import.meta.url), 'utf8');
-    expect(dashboard.includes("['Reassessment required', cx?.reassessment_required ?? 0]")).toBe(true);
+    expect(dashboard).toContain("['Reassessment required', cx?.reassessment_required ?? 0, 'var(--warn)']");
   });
 });

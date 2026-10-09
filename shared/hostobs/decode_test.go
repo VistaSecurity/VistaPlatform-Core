@@ -43,7 +43,6 @@ func addrs(t *testing.T, ss ...string) []netip.Addr {
 type want struct {
 	mac       string
 	local     bool
-	vendor    string
 	addresses []netip.Addr
 	hostnames []string
 	fqdns     []string
@@ -61,8 +60,14 @@ func check(t *testing.T, got *HostObservation, w want) {
 	if got.MACLocallyAdministered != w.local {
 		t.Errorf("MACLocallyAdministered = %v, want %v", got.MACLocallyAdministered, w.local)
 	}
-	if got.Vendor != w.vendor {
-		t.Errorf("Vendor = %q, want %q", got.Vendor, w.vendor)
+	// No decoder measures a manufacturer, and Finalize no longer derives one
+	// from the MAC: the platform resolves hw.vendor at ingestion from the full
+	// IEEE registry. Every decoded observation therefore carries none.
+	if got.Vendor != "" {
+		t.Errorf("Vendor = %q; the sensor does not resolve vendors", got.Vendor)
+	}
+	if _, ok := got.Facts[facts.KeyHWVendor]; ok {
+		t.Errorf("hw.vendor = %v; the sensor does not resolve vendors", got.Facts[facts.KeyHWVendor])
 	}
 	if w.addresses != nil && !slices.Equal(got.Addresses, w.addresses) {
 		t.Errorf("Addresses = %v, want %v", got.Addresses, w.addresses)
@@ -129,7 +134,6 @@ func TestDecodeARP(t *testing.T) {
 			hex:  arpGratuitousHex,
 			want: want{
 				mac:       "28:cf:da:11:22:33",
-				vendor:    "Apple",
 				addresses: addrs(t, "192.168.10.50"),
 				attrs:     map[string]any{"arp_gratuitous": true, "arp_operation": "reply"},
 			},
@@ -139,7 +143,6 @@ func TestDecodeARP(t *testing.T) {
 			hex:  arpRequestHex,
 			want: want{
 				mac:       "00:14:22:aa:bb:cc",
-				vendor:    "Dell",
 				addresses: addrs(t, "192.168.10.20"),
 				attrs:     map[string]any{"arp_operation": "request"},
 				noAttrs:   []string{"arp_gratuitous"},
@@ -150,7 +153,6 @@ func TestDecodeARP(t *testing.T) {
 			hex:  arpProbeHex,
 			want: want{
 				mac:       "b8:27:eb:01:02:03",
-				vendor:    "Raspberry Pi",
 				addresses: []netip.Addr{},
 				attrs:     map[string]any{"arp_probe": true},
 			},
@@ -206,7 +208,6 @@ func TestDecodeDHCP(t *testing.T) {
 		}
 		check(t, got, want{
 			mac:       "00:1e:4f:aa:bb:cc",
-			vendor:    "Dell",
 			hostnames: []string{"acct-ws-14"},
 			// Option 50 only: a DHCPREQUEST's ciaddr and yiaddr are both zero,
 			// so the requested address is all the message states.
@@ -261,7 +262,6 @@ func TestDecodeDHCP(t *testing.T) {
 		}
 		check(t, got, want{
 			mac:       "28:cf:da:01:02:03",
-			vendor:    "Apple",
 			hostnames: []string{"studio-mac"},
 			addresses: addrs(t, "10.20.30.41"),
 			attrs:     map[string]any{"dhcp_message_type": "ack"},
@@ -276,9 +276,14 @@ func TestDecodeDHCP(t *testing.T) {
 			t.Fatal(err)
 		}
 		// "MSFT 5.0" identifies the DHCP client software. Letting it become
-		// hw.vendor would file a Dell workstation under Microsoft.
-		if got.Facts[facts.KeyHWVendor] != "Dell" {
-			t.Errorf("hw.vendor = %v, want the OUI-derived Dell", got.Facts[facts.KeyHWVendor])
+		// hw.vendor would file a Dell workstation under Microsoft. hw.vendor
+		// is resolved from the MAC by the platform, so the observation
+		// carries none; the class stays an attribute.
+		if v, ok := got.Facts[facts.KeyHWVendor]; ok {
+			t.Errorf("hw.vendor = %v; the vendor class must not become hw.vendor", v)
+		}
+		if got.Attributes["dhcp_vendor_class"] != "MSFT 5.0" {
+			t.Errorf("dhcp_vendor_class = %v, want MSFT 5.0", got.Attributes["dhcp_vendor_class"])
 		}
 	})
 
@@ -314,7 +319,6 @@ func TestDecodeMDNS(t *testing.T) {
 	}
 	check(t, got, want{
 		mac:       "00:1e:8f:aa:bb:cc",
-		vendor:    "Canon",
 		addresses: addrs(t, "192.168.10.77"),
 		fqdns:     []string{"hp-printer.local"},
 		hostnames: []string{"hp-printer"},
@@ -370,8 +374,7 @@ func TestDecodeMDNS(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		check(t, got, want{
-			mac:       "", // NOT the reflector's
-			vendor:    "",
+			mac:       "",                        // NOT the reflector's
 			addresses: addrs(t, "192.168.10.77"), // the record's, not the frame's
 			fqdns:     []string{"hp-printer.local"},
 			hostnames: []string{"hp-printer"},
@@ -439,7 +442,6 @@ func TestDecodeMDNS(t *testing.T) {
 		}
 		check(t, got, want{
 			mac:       "00:1e:8f:aa:bb:cc",
-			vendor:    "Canon",
 			addresses: addrs(t, "10.1.2.3", "10.1.2.4"),
 			fqdns:     []string{"a.corp.example", "b.corp.example"},
 		})
@@ -525,7 +527,6 @@ func TestDecodeNBNS(t *testing.T) {
 		check(t, got, want{
 			// The in-protocol adapter unit ID wins over the Ethernet source.
 			mac:       "00:15:5d:0a:0b:0c",
-			vendor:    "Microsoft Hyper-V",
 			addresses: addrs(t, "192.168.10.80"),
 			hostnames: []string{"filesrv01"},
 		})
@@ -547,7 +548,6 @@ func TestDecodeNBNS(t *testing.T) {
 		}
 		check(t, got, want{
 			mac:       "00:07:4d:11:22:33",
-			vendor:    "Zebra Technologies",
 			addresses: addrs(t, "192.168.10.90"),
 			hostnames: []string{"printsrv"},
 		})
@@ -567,7 +567,6 @@ func TestDecodeLLDP(t *testing.T) {
 		}
 		check(t, got, want{
 			mac:       "00:1a:2f:11:22:33",
-			vendor:    "Cisco Systems",
 			addresses: addrs(t, "192.168.10.2"),
 			fqdns:     []string{"access-sw-3.corp.example"},
 			hostnames: []string{"access-sw-3"},
@@ -635,9 +634,6 @@ func TestDecodeLLDP(t *testing.T) {
 		if got.MAC != "00:1a:2f:11:22:33" {
 			t.Errorf("MAC = %q; the chassis ID is in the surviving prefix", got.MAC)
 		}
-		if got.Vendor != "Cisco Systems" {
-			t.Errorf("Vendor = %q", got.Vendor)
-		}
 		if got.Attributes["lldp_port_id"] != "GigabitEthernet1/0/24" {
 			t.Errorf("port ID lost: %#v", got.Attributes)
 		}
@@ -658,15 +654,16 @@ func TestDecodeLLDP(t *testing.T) {
 		if got.Facts[facts.KeyHWModel] != "SIP-T46G" {
 			t.Errorf("hw.model = %v, want SIP-T46G", got.Facts[facts.KeyHWModel])
 		}
-		// The MED manufacturer is evidence only. hw.vendor stays OUI-derived,
-		// so one fact keeps one source: this MAC is Cisco's prefix even though
-		// the firmware says Yealink, and a device filed under two vendors is
-		// the failure the single-source rule exists to prevent.
+		// The MED manufacturer is evidence only. hw.vendor stays OUI-derived
+		// (resolved from the MAC by the platform at ingestion), so one fact
+		// keeps one source: this MAC is Cisco's prefix even though the
+		// firmware says Yealink, and a device filed under two vendors is the
+		// failure the single-source rule exists to prevent.
 		if got.Attributes["lldp_med_manufacturer"] != "Yealink" {
 			t.Errorf("lldp_med_manufacturer = %v", got.Attributes["lldp_med_manufacturer"])
 		}
-		if got.Facts[facts.KeyHWVendor] != "Cisco Systems" {
-			t.Errorf("hw.vendor = %v, want the OUI-derived value", got.Facts[facts.KeyHWVendor])
+		if v, ok := got.Facts[facts.KeyHWVendor]; ok {
+			t.Errorf("hw.vendor = %v; the MED manufacturer must not become hw.vendor", v)
 		}
 		// Both 802.1 organisationally specific TLVs are stepped over
 		// structurally, like an unlisted DHCP option — including the one whose
@@ -705,7 +702,6 @@ func TestDecodeCDP(t *testing.T) {
 		}
 		check(t, got, want{
 			mac:       "00:0f:23:aa:bb:cc",
-			vendor:    "Cisco Systems",
 			addresses: addrs(t, "192.168.10.3"),
 			fqdns:     []string{"core-sw-1.corp.example"},
 			hostnames: []string{"core-sw-1"},

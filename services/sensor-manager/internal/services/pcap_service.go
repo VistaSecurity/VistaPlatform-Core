@@ -81,7 +81,8 @@ func (s *PcapService) GetJob(tenantID, jobID uuid.UUID) (*models.PcapUploadJob, 
 	query := `
 		SELECT id, tenant_id, uploaded_by, original_filename, file_size_bytes,
 		       file_path, status, discovery_count, packet_count, protocols_found,
-		       capture_time_range, error_message, processing_started_at,
+		       capture_time_range, error_message, truncated_packet_count, snapshot_length,
+		       processing_started_at,
 		       created_at, updated_at, completed_at
 		FROM pcap_upload_jobs
 		WHERE id = $1 AND tenant_id = $2
@@ -98,7 +99,8 @@ func (s *PcapService) GetJob(tenantID, jobID uuid.UUID) (*models.PcapUploadJob, 
 		scanErr := tx.QueryRowContext(ctx, query, jobID, tenantID).Scan(
 			&job.ID, &job.TenantID, &job.UploadedBy, &job.OriginalFilename, &job.FileSizeBytes,
 			&job.FilePath, &job.Status, &job.DiscoveryCount, &job.PacketCount, &protocolsJSON,
-			&captureRangeJSON, &job.ErrorMessage, &job.ProcessingStartedAt,
+			&captureRangeJSON, &job.ErrorMessage, &job.TruncatedPacketCount, &job.SnapshotLength,
+			&job.ProcessingStartedAt,
 			&job.CreatedAt, &job.UpdatedAt, &job.CompletedAt,
 		)
 		if scanErr == sql.ErrNoRows {
@@ -160,7 +162,8 @@ func (s *PcapService) ListJobs(tenantID uuid.UUID, page, limit int, status strin
 	dataQuery := `
 		SELECT id, tenant_id, uploaded_by, original_filename, file_size_bytes,
 		       file_path, status, discovery_count, packet_count, protocols_found,
-		       capture_time_range, error_message, processing_started_at,
+		       capture_time_range, error_message, truncated_packet_count, snapshot_length,
+		       processing_started_at,
 		       created_at, updated_at, completed_at
 		FROM pcap_upload_jobs
 		WHERE tenant_id = $1
@@ -202,7 +205,8 @@ func (s *PcapService) ListJobs(tenantID uuid.UUID, page, limit int, status strin
 			if e := rows.Scan(
 				&job.ID, &job.TenantID, &job.UploadedBy, &job.OriginalFilename, &job.FileSizeBytes,
 				&job.FilePath, &job.Status, &job.DiscoveryCount, &job.PacketCount, &protocolsJSON,
-				&captureRangeJSON, &job.ErrorMessage, &job.ProcessingStartedAt,
+				&captureRangeJSON, &job.ErrorMessage, &job.TruncatedPacketCount, &job.SnapshotLength,
+				&job.ProcessingStartedAt,
 				&job.CreatedAt, &job.UpdatedAt, &job.CompletedAt,
 			); e != nil {
 				return fmt.Errorf("failed to scan pcap upload job: %w", e)
@@ -279,6 +283,16 @@ func (s *PcapService) UpdateJobStatus(jobID uuid.UUID, status string, updates ma
 	}
 	if v, ok := updates["error_message"]; ok {
 		query += fmt.Sprintf(", error_message = $%d", argIdx)
+		args = append(args, v)
+		argIdx++
+	}
+	if v, ok := updates["truncated_packet_count"]; ok {
+		query += fmt.Sprintf(", truncated_packet_count = $%d", argIdx)
+		args = append(args, v)
+		argIdx++
+	}
+	if v, ok := updates["snapshot_length"]; ok {
+		query += fmt.Sprintf(", snapshot_length = $%d", argIdx)
 		args = append(args, v)
 		argIdx++
 	}

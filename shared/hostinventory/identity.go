@@ -3,6 +3,8 @@ package hostinventory
 import (
 	"net/url"
 	"strings"
+
+	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 )
 
 // normaliseMAC renders a MAC as lower-case colon-separated hex, or "" when the
@@ -40,36 +42,13 @@ func normaliseMAC(v string) string {
 	return out.String()
 }
 
-// virtualInterfacePrefixes name interfaces whose MAC is generated rather than
-// burned in.
-//
-// A container's veth, a bridge, a tunnel and a loopback all have MACs, and all
-// of those MACs are ephemeral or synthesised. Minting an asset identity from
-// one produces a new asset on every container restart — the same failure mode
-// as a locally-administered MAC, which the passive host-observation contract
-// already refuses for the same reason.
-var virtualInterfacePrefixes = []string{
-	"lo", "docker", "br-", "veth", "virbr", "vmnet", "vboxnet", "tun", "tap",
-	"cni", "flannel", "cali", "cilium", "kube-", "wg", "utun", "bridge",
-	"awdl", "llw", "gif", "stf", "ap1", "anpi",
-}
-
 // isVirtualInterface reports whether an interface's MAC is unsuitable as an
-// asset key.
+// asset key: a container's veth, a bridge, a tunnel or a loopback, whose MAC is
+// generated rather than burned in. The name rule is shared with the sensor's
+// self-observation (hostobs.IsVirtualInterfaceName), so the two collectors
+// that describe their own host agree on what is virtual.
 func isVirtualInterface(name string, loopback bool) bool {
-	if loopback {
-		return true
-	}
-	n := strings.ToLower(strings.TrimSpace(name))
-	if n == "" {
-		return true
-	}
-	for _, p := range virtualInterfacePrefixes {
-		if strings.HasPrefix(n, p) {
-			return true
-		}
-	}
-	return false
+	return loopback || hostobs.IsVirtualInterfaceName(name)
 }
 
 // locallyAdministered reports whether a MAC has the locally-administered bit

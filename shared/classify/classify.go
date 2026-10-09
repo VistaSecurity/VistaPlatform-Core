@@ -31,6 +31,12 @@
 // matching. A service that wants the CURATED table loads it through
 // [Repository]; a runtime with no database gets [Default], which is the same
 // rules compiled in.
+//
+// It imports shared/ouiregistry (the whole IEEE OUI registry, compiled in) to
+// resolve MACs to vendors, which means the SENSOR must not import this package:
+// vendor resolution happens on the platform, and
+// `make sensor-no-ouiregistry-test` fails if the sensor's dependency closure
+// ever reaches the registry, through here or anywhere else.
 package classify
 
 import (
@@ -40,6 +46,7 @@ import (
 	"sync"
 
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+	"github.com/vistasecurity/vistaplatform/shared/ouiregistry"
 )
 
 // ConflictEpsilon is how close two competing classes have to be before the
@@ -59,7 +66,10 @@ const ConflictEpsilon = 0.10
 // than an error it has to distinguish from a real one.
 type ClassifyInput struct {
 	// MACs are layer-2 addresses in any spelling (colon, hyphen, Cisco dotted,
-	// bare). Only the first three octets are read.
+	// bare). An `oui` prefix rule reads the first three octets; the IEEE
+	// registry lookup behind `oui_vendor` rules and the reported vendor reads
+	// the WHOLE address, because 28- and 36-bit blocks are assigned below a
+	// 24-bit prefix. Pass the full MAC, never a truncated prefix.
 	MACs []string
 
 	// SysObjectID is the SNMP sysObjectID as walked, with or without a leading
@@ -155,6 +165,18 @@ type ClassifyInput struct {
 	OS string
 	// OSVersion is the separately reported release; kernel/build numbers do not establish an edition.
 	OSVersion string
+
+	// DHCPVendorClass is the DHCP option 60 vendor class identifier exactly as
+	// the client sent it (RFC 2132 §9.13) — "MSFT 5.0", "android-dhcp-14" — as
+	// shared/hostobs' DHCP decoder records it in the `dhcp_vendor_class`
+	// attribute. Not normalised or case-folded beyond trimming surrounding
+	// whitespace: a dhcp_vendor_class rule's regexp carries its own anchoring
+	// and case handling, and an identifier rewritten on the way in would be a
+	// string no client ever sent.
+	//
+	// It names the DHCP CLIENT SOFTWARE, never the hardware manufacturer, so it
+	// is never a source for Vendor.
+	DHCPVendorClass string
 }
 
 // ClassProposal is what the engine concluded, and why.
@@ -409,9 +431,15 @@ func (e *Engine) ProposesClass(key string) bool {
 // # How the vendor is decided
 //
 // An input Vendor wins outright — the device named itself, and no rule
-// out-argues that. Otherwise the highest-confidence matching rule that names a
-// vendor supplies it, with the same epsilon rule: two rules naming DIFFERENT
-// vendors at similar confidence yield no vendor. Model works the same way.
+// out-argues that. Otherwise the highest-confidence statement that names a
+// vendor supplies it, with the same epsilon rule: two statements naming
+// DIFFERENT vendors at similar confidence yield no vendor. Model works the same
+// way.
+//
+// The statements include the IEEE registry's own, one per vendor the input MACs
+// resolve to, at [RegistryVendorConfidence] — so a MAC's manufacturer is
+// reported with no rule row at all, and two MACs from two manufacturers yield
+// no vendor while MatchedRules names both. See [Engine.matchMACs].
 //
 // Classify never returns an error. It takes a context so callers do not have to
 // change shape when a future engine consults something remote, and so it drops
@@ -466,7 +494,7 @@ func (e *Engine) Classify(_ context.Context, facts ClassifyInput) ClassProposal 
 func (e *Engine) match(facts ClassifyInput) []Rule {
 	var out []Rule
 
-	out = append(out, e.matchOUI(facts.MACs)...)
+	out = append(out, e.matchMACs(facts.MACs)...)
 	out = append(out, e.matchSysObjectID(facts.SysObjectID)...)
 	out = append(out, e.matchENIP(facts.ENIPVendorID)...)
 	out = append(out, e.matchCloudType(facts.CloudResourceType)...)
@@ -478,7 +506,34 @@ func (e *Engine) match(facts ClassifyInput) []Rule {
 	out = append(out, e.matchCapabilities(KindLLDPCapability, facts.LLDPCapabilities)...)
 	out = append(out, e.matchMDNSServices(facts.MDNSServices)...)
 	out = append(out, e.matchOSName(osRuleEvidence(facts.OS, facts.OSVersion))...)
+	out = append(out, e.matchDHCPVendorClass(facts.DHCPVendorClass)...)
 
+	return out
+}
+
+// matchDHCPVendorClass returns every dhcp_vendor_class rule whose regexp fits
+// the option 60 identifier the client sent.
+//
+// Every match, for matchOSName's reason: two regexps have no refinement
+// relationship the engine can see, so two that fit one identifier and name
+// different classes are a disagreement for the arbitration, not a tie to break
+// here.
+func (e *Engine) matchDHCPVendorClass(vendorClass string) []Rule {
+	vc := strings.TrimSpace(vendorClass)
+	if vc == "" {
+		return nil
+	}
+	var out []Rule
+	for _, r := range e.byKind[KindDHCPVendorClass] {
+		if r.compiled == nil {
+			// Unreachable through New, which compiles every regexp rule or
+			// skips it; stated rather than dereferenced, as in matchOSName.
+			continue
+		}
+		if r.compiled.MatchString(vc) {
+			out = append(out, r)
+		}
+	}
 	return out
 }
 
@@ -592,25 +647,108 @@ func (e *Engine) matchMDNSServices(services []string) []Rule {
 	return out
 }
 
-func (e *Engine) matchOUI(macs []string) []Rule {
+// RegistryVendorConfidence is what the IEEE registry's own vendor statement
+// carries when no rule is involved: an assignment is a strong claim about who
+// made the thing and no claim at all about what it is. It is the confidence the
+// shipped vendor-only OUI rules carried before the registry replaced them, so
+// the vendor arbitration against sysObjectID and model rules is unchanged.
+const RegistryVendorConfidence = 0.85
+
+// RegistrySourceURL is the citation on the registry's own vendor statement.
+const RegistrySourceURL = "https://standards-oui.ieee.org/"
+
+// matchMACs resolves every input MAC and returns what speaks for it.
+//
+// # Per MAC, in order
+//
+//  1. Every `oui` PREFIX rule whose pattern is the MAC's 24-bit assignment. A
+//     prefix rule is the more specific statement about this address — an
+//     admin's override, or the rare prefix a vendor-level statement cannot
+//     express — so when one matches, no `oui_vendor` rule is consulted for
+//     this MAC. The two never argue: only the prefix rule's answer counts,
+//     the same way a longer sysObjectID prefix replaces a shorter one.
+//  2. Otherwise, every `oui_vendor` rule naming the CANONICAL vendor the IEEE
+//     registry (shared/ouiregistry) resolves the MAC to, by longest prefix over
+//     the 36-, 28- and 24-bit blocks. The full MAC goes to the registry, not
+//     its first three octets, or the 28/36-bit blocks would resolve to the
+//     block's parent registrant.
+//  3. The registry's OWN vendor statement, whether or not any rule exists for
+//     that vendor: a synthetic vendor-only ref (kind `oui_vendor`, no id, no
+//     class, [RegistryVendorConfidence], [RegistrySourceURL]). Vendor-only
+//     knowledge needs no rule row. It is omitted only when a prefix rule for the
+//     MAC names a vendor itself, which is then the answer for that address.
+//
+// # A registrant the vendor map does not name
+//
+// is REPORTED but never matched. It is what the IEEE says, so it becomes the
+// proposal's vendor exactly like a canonical name; but a rule is never written
+// against an uncanonicalised registrant string ("FOO TECHNOLOGY CO.,LTD" today,
+// "Foo Technology Co., Ltd." after the next refresh), so no `oui_vendor` rule
+// can match one.
+//
+// Two MACs resolving to two different vendors produce two registry statements
+// at the same confidence, and the vendor arbitration in [Engine.Classify]
+// therefore proposes no vendor — the class conflict rule, applied to vendors —
+// while MatchedRules records both.
+func (e *Engine) matchMACs(macs []string) []Rule {
 	if len(macs) == 0 {
 		return nil
 	}
-	seen := map[string]bool{}
+	seenPrefix := map[string]bool{}
+	seenVendorRule := map[string]bool{}
+	seenRegistry := map[string]bool{}
 	var out []Rule
 	for _, mac := range macs {
 		oui := ouiOf(mac)
-		if oui == "" || seen[oui] {
+		if oui == "" {
 			continue
 		}
-		seen[oui] = true
+		entry, found := ouiregistry.Lookup(mac)
+
+		var prefixRules []Rule
 		for _, r := range e.byKind[KindOUI] {
 			if r.Pattern == oui {
-				out = append(out, r)
+				prefixRules = append(prefixRules, r)
 			}
+		}
+		if len(prefixRules) > 0 {
+			if !seenPrefix[oui] {
+				seenPrefix[oui] = true
+				out = append(out, prefixRules...)
+			}
+			if anyNamesVendor(prefixRules) {
+				continue
+			}
+		} else if found && entry.Canonical {
+			for _, r := range e.byKind[KindOUIVendor] {
+				if r.Pattern == entry.Vendor && !seenVendorRule[r.Pattern] {
+					seenVendorRule[r.Pattern] = true
+					out = append(out, r)
+				}
+			}
+		}
+
+		if found && !seenRegistry[entry.Vendor] {
+			seenRegistry[entry.Vendor] = true
+			out = append(out, Rule{
+				Kind:       KindOUIVendor,
+				Pattern:    entry.Vendor,
+				Vendor:     entry.Vendor,
+				Confidence: RegistryVendorConfidence,
+				SourceURL:  RegistrySourceURL,
+			})
 		}
 	}
 	return out
+}
+
+func anyNamesVendor(rules []Rule) bool {
+	for _, r := range rules {
+		if strings.TrimSpace(r.Vendor) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ouiOf extracts the 24-bit assignment from a MAC in any spelling, as 6
@@ -875,9 +1013,10 @@ func decideClass(refs []RuleRef) (class string, confidence float64, conflicting 
 // SNMP walk and a vendor API that have never been introduced to each other.
 //
 // The generator holds the LINE — every vendor a shipped rule names is spelled as
-// standards/oui-vendors.csv spells it, and `make audit` fails otherwise. This is
-// the belt underneath, for the vendor strings that arrive from a collector or a
-// stored fact rather than from the table.
+// standards/oui/vendors.yaml spells a canonical vendor (the spelling the
+// registry reports), and `make audit` fails otherwise. This is the belt
+// underneath, for the vendor strings that arrive from a collector or a stored
+// fact rather than from the table.
 //
 // The prefix rule stops well short of fuzzy matching: it does not merge
 // "Cisco Systems" with "Cisco Meraki" (neither is a prefix of the other), and it

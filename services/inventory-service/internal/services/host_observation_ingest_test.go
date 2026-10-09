@@ -568,8 +568,12 @@ func TestHostObservationBuilder_UnspecifiedAddressIsNotAnAddress(t *testing.T) {
 // second opinion about somebody else's measurement.
 func TestHostObservationFacts_AreTheProducersMapUnchanged(t *testing.T) {
 	ho := &hostobs.HostObservation{
-		Source:   hostobs.SourceCDP,
-		MAC:      "00:1a:2f:11:22:55",
+		Source: hostobs.SourceCDP,
+		MAC:    "00:1a:2f:11:22:55",
+		// The vendor an OLDER sensor still sends from its own OUI table; a
+		// current one sends none (the platform resolves it at ingestion,
+		// oui_vendor.go). This function writes whatever the map holds.
+		Vendor:   "Cisco Systems",
 		Model:    "cisco WS-C2960-24TT-L",
 		Services: []string{"_ipp._tcp", "_printer._tcp"},
 	}
@@ -593,7 +597,7 @@ func TestHostObservationFacts_AreTheProducersMapUnchanged(t *testing.T) {
 		}
 	}
 	if byKey["hw.vendor"] != "Cisco Systems" {
-		t.Errorf("hw.vendor = %v, want the OUI table's answer", byKey["hw.vendor"])
+		t.Errorf("hw.vendor = %v, want the carried vendor as given", byKey["hw.vendor"])
 	}
 	if byKey["hw.model"] != "cisco WS-C2960-24TT-L" {
 		t.Errorf("hw.model = %v, want the platform TLV verbatim", byKey["hw.model"])

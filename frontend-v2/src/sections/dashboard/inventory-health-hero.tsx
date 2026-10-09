@@ -107,7 +107,6 @@ export function InventoryHealthHero() {
             >
               {facets.isLoading ? '…' : classFailed ? '—' : total.toLocaleString()}
             </Link>
-            <span style={{ fontSize: 12.5, color: 'var(--app-t3)' }}>configuration items</span>
           </div>
           <p style={{ margin: '14px 0 0', fontSize: 13, lineHeight: 1.55, color: 'var(--app-t2)', maxWidth: 300 }}>
             {classFailed
@@ -141,14 +140,7 @@ export function InventoryHealthHero() {
 
         {/* ---- assets by class ---- */}
         <div style={{ flex: 1, minWidth: 320, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-            <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14.5, color: 'var(--app-t1)' }}>
-              By class
-            </h3>
-            <Link to="/inventory?lens=map&view=topology" style={{ fontSize: 10.5, color: 'var(--accent)', textDecoration: 'none' }}>
-              Topology <Icon name="arrow-up-right" size={11} />
-            </Link>
-          </div>
+          <div className="eyebrow-app" style={{ marginBottom: 9 }}>By class</div>
           {classFailed ? (
             <div style={{ flex: 1, minHeight: 120, borderRadius: 12, border: '1px dashed var(--app-border2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: 'var(--app-t3)' }}>
               Couldn't load the class breakdown.
@@ -166,7 +158,7 @@ export function InventoryHealthHero() {
               <Link to="/discovery" className="ui-btn sm" style={{ marginTop: 4, textDecoration: 'none' }}>Go to Discovery</Link>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }} data-testid="hero-class-breakdown">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 5, maxWidth: 360 }} data-testid="hero-class-breakdown">
               {classes.map((c) => <ClassRow key={c.path || 'other'} slice={c} max={max} />)}
             </div>
           )}
@@ -213,11 +205,11 @@ function ClassRow({ slice, max }: { slice: ClassSlice; max: number }) {
       <span style={{ width: 20, flex: 'none', display: 'flex', alignItems: 'center', color: style.color }}>
         <Icon name={style.icon} size={13} />
       </span>
-      <span style={{ fontSize: 12, color: 'var(--app-t2)', width: 106, flex: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <span style={{ fontSize: 11.5, color: 'var(--app-t2)', width: 100, flex: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {slice.label}
       </span>
-      <span style={{ flex: 1, height: 13, borderRadius: 5, background: 'var(--app-track)', overflow: 'hidden' }}>
-        <span style={{ display: 'block', width: pct + '%', height: '100%', background: style.color, borderRadius: 5, minWidth: slice.count ? 3 : 0 }} />
+      <span style={{ flex: 1, height: 8, borderRadius: 4, background: 'var(--app-track)', overflow: 'hidden' }}>
+        <span style={{ display: 'block', width: pct + '%', height: '100%', background: style.color, borderRadius: 4, minWidth: slice.count ? 3 : 0 }} />
       </span>
       <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)', width: 44, textAlign: 'right' }}>
         {slice.count.toLocaleString()}
@@ -229,13 +221,13 @@ function ClassRow({ slice, max }: { slice: ClassSlice; max: number }) {
   // the rows the number came from.
   if (slice.other) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }} title="Every remaining class, together.">{row}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }} title="Every remaining class, together.">{row}</div>
     );
   }
   return (
     <Link
       to={inventoryQueryHref(`class:${slice.path}`)}
-      style={{ display: 'flex', alignItems: 'center', gap: 9, textDecoration: 'none' }}
+      style={{ display: 'flex', alignItems: 'center', gap: 8, textDecoration: 'none' }}
       title={`${slice.label} — and everything beneath it in the taxonomy`}
     >
       {row}

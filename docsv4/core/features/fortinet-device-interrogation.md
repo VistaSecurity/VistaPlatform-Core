@@ -102,8 +102,8 @@ asset.
 
 ### 3. Review the run
 
-**Where:** **Discovery → Discovery Jobs**, or **Discovery → Job Logs** for the
-per-stage detail. The run reports what it discovered and what reached inventory
+**Where:** **Discovery → Discovery Jobs**; click the run for the per-stage
+detail. The run reports what it discovered and what reached inventory
 as two separate counts, so a job that answered but materialized nothing says so.
 
 Findings include the SSL VPN configuration with its crypto parameters, each

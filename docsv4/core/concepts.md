@@ -34,7 +34,7 @@ risk; the asset rolls them up.
 
 Every asset has a class — the kind of thing it is, drawn from a fixed tree.
 The top-level classes are **hardware** (computers, network devices, storage,
-printers, OT and IoT devices), **virtual** (virtual machines, containers,
+printers, OT and IoT devices, and consumer smart devices), **virtual** (virtual machines, containers,
 hypervisors), **cloud resource** (compute instances, managed databases,
 object storage, and similar), **application**, and **service** (a declared
 business or technical capability, like "Checkout"). Two more classes exist

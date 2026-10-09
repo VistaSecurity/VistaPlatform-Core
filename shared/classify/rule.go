@@ -19,7 +19,26 @@ import (
 const (
 	// KindOUI matches the 24-bit IEEE assignment at the front of a MAC
 	// address. Pattern: 6 uppercase hex digits, no separators.
+	//
+	// It is no longer how the SHIPPED catalogue speaks about MACs — that is
+	// [KindOUIVendor] — and stays for an admin's override in Catalog >
+	// Classification rules and for the rare prefix a vendor-level statement
+	// cannot express. For one MAC, a matching prefix rule OUTRANKS every
+	// vendor rule: it is the more specific statement about that address, the
+	// way a longer sysObjectID prefix outranks a shorter one.
 	KindOUI = "oui"
+
+	// KindOUIVendor matches the CANONICAL manufacturer the IEEE registry
+	// (shared/ouiregistry) resolves a MAC to. Pattern: the canonical vendor
+	// name exactly as standards/oui/vendors.yaml spells it ("Brother
+	// Industries"); exact and case-sensitive, and only against a registry
+	// entry whose vendor IS canonical — a raw registrant string the vendor map
+	// does not name is not a stable thing to write a rule against.
+	//
+	// The engine resolves each input MAC itself, by longest prefix over the
+	// 24-, 28- and 36-bit blocks, so a rule stated once for a vendor covers
+	// every assignment that vendor holds. The rule's vendor IS its pattern.
+	KindOUIVendor = "oui_vendor"
 
 	// KindSysObjectID matches an OID prefix under the IANA private-enterprise
 	// arc 1.3.6.1.4.1, on ARC BOUNDARIES. Longest prefix wins.
@@ -93,14 +112,44 @@ const (
 	// that computer is a desktop, a laptop or a virtual machine, and a rule
 	// that picked one would be the wrong class that is worse than no class.
 	KindOSName = "os_name"
+
+	// KindDHCPVendorClass matches an RE2 regexp against the DHCP option 60
+	// vendor class identifier (RFC 2132 §9.13) the client sent — "MSFT 5.0",
+	// "android-dhcp-14", "Cisco AP c3700".
+	//
+	// Option 60 is a SELF-DECLARATION, and a standardised one: the client's DHCP
+	// implementation fills it in, on every DISCOVER and REQUEST, without anyone
+	// configuring it. That makes it passive evidence about a host the wire
+	// otherwise says little about — a Windows laptop's DHCP exchange names its
+	// client software where its MAC names only Intel or Dell.
+	//
+	// What it names is the DHCP CLIENT, not the hardware and not the OS vendor's
+	// product line, which bounds what a rule may claim. `MSFT 5.0` is every
+	// Windows client since 2000, so it says "a Windows computer" and nothing
+	// about the hardware manufacturer; `udhcp 1.36` is BusyBox, which is inside a
+	// router, a camera, a television and a smart plug alike, so it says nothing
+	// at all. A regexp rather than an exact string because most identifiers
+	// carry a version (`android-dhcp-14`, `dhcpcd-10.0.6`) and a rule must name
+	// the family; the pattern carries its own anchoring, like [KindOSName].
+	//
+	// Matching is the os_name kind's: every rule whose regexp fits is returned,
+	// and two of them disagreeing on class is a real conflict for the
+	// arbitration rather than one refining the other.
+	//
+	// Option 55 (the parameter request list) is a different kind of evidence — a
+	// fingerprint of the client's implementation rather than a statement — and
+	// is deliberately NOT read by this kind; matching it Fingerbank-style would
+	// be a separate kind with its own corpus.
+	KindDHCPVendorClass = "dhcp_vendor_class"
 )
 
 // Kinds is every rule kind, in the order standards/classification-rules.yaml
 // declares them.
 var Kinds = []string{
-	KindOUI, KindSysObjectID, KindENIP, KindCloudType,
+	KindOUI, KindOUIVendor, KindSysObjectID, KindENIP, KindCloudType,
 	KindBanner, KindPortProfile, KindModel, KindPlatform,
 	KindCDPCapabilities, KindLLDPCapability, KindMDNSService, KindOSName,
+	KindDHCPVendorClass,
 }
 
 // Confidence bounds. The floor is 0.50 because a rule that is less than even
@@ -115,10 +164,12 @@ const (
 // Rule is one row of classification_rules.
 //
 // Class, Vendor and Model are each optional and a rule needs at least one of
-// them. A rule with a Vendor and no Class is the NORMAL shape for an OUI, not a
-// degenerate one: most manufacturers sell across several classes under a single
-// assignment, and "a wrong class is worse than none" means the rule stops at
-// the vendor rather than picking the most common product.
+// them. A vendor with no class is a NORMAL answer, not a degenerate one: most
+// manufacturers sell across several classes under a single assignment, and "a
+// wrong class is worse than none" means the answer stops at the vendor rather
+// than picking the most common product. For a MAC that answer needs no rule at
+// all — the engine reports the IEEE registry's vendor itself — and a SNMP or
+// model rule may still name only a vendor.
 type Rule struct {
 	Kind    string `json:"rule_kind"`
 	Pattern string `json:"pattern"`
@@ -158,8 +209,8 @@ type Rule struct {
 	// It is what the admin console edits and what MatchedRules points at.
 	ID string `json:"id,omitempty"`
 
-	// compiled is the banner or os_name regexp, built once at Engine
-	// construction. Nil for every other kind.
+	// compiled is the banner, os_name or dhcp_vendor_class regexp, built once
+	// at Engine construction. Nil for every other kind.
 	compiled *regexp.Regexp
 
 	// ports is the parsed port list for a KindPortProfile rule.
@@ -205,6 +256,26 @@ func (r *Rule) Validate() error {
 		if len(r.Pattern) != 6 || !isHex(r.Pattern) || r.Pattern != strings.ToUpper(r.Pattern) {
 			return fmt.Errorf("classify: oui rule pattern %q must be 6 uppercase hex digits with no separators", r.Pattern)
 		}
+	case KindOUIVendor:
+		// Shape only. Whether the name is CANONICAL is the generator's gate
+		// for a shipped rule (it reads standards/oui/vendors.yaml); an admin's
+		// rule naming a vendor the registry does not know is well-formed and
+		// simply never matches, which the console's hint warns about.
+		if strings.TrimSpace(r.Pattern) != r.Pattern {
+			return fmt.Errorf("classify: oui_vendor rule pattern %q has leading or trailing whitespace", r.Pattern)
+		}
+		if n := len([]rune(r.Pattern)); n > MaxOUIVendorPatternLen {
+			return fmt.Errorf("classify: oui_vendor rule pattern %q is %d characters; a canonical vendor name is at most %d",
+				r.Pattern, n, MaxOUIVendorPatternLen)
+		}
+		// The vendor a vendor rule asserts is its pattern. A different one
+		// would be a rule that matched one manufacturer and claimed another.
+		if r.Vendor == "" {
+			r.Vendor = r.Pattern
+		} else if r.Vendor != r.Pattern {
+			return fmt.Errorf("classify: oui_vendor rule %q names vendor %q; a vendor rule's vendor is its pattern",
+				r.Pattern, r.Vendor)
+		}
 	case KindSysObjectID:
 		if !strings.HasPrefix(r.Pattern, enterprisePrefix) {
 			return fmt.Errorf("classify: sysobjectid rule pattern %q must sit under the private-enterprise arc %s", r.Pattern, enterprisePrefix)
@@ -218,7 +289,7 @@ func (r *Rule) Validate() error {
 		if !isDigits(r.Pattern) {
 			return fmt.Errorf("classify: enip rule pattern %q must be a decimal ODVA vendor id", r.Pattern)
 		}
-	case KindBanner, KindOSName:
+	case KindBanner, KindOSName, KindDHCPVendorClass:
 		re, err := regexp.Compile(r.Pattern)
 		if err != nil {
 			return fmt.Errorf("classify: %s rule pattern %q does not compile: %w", r.Kind, r.Pattern, err)
@@ -248,6 +319,11 @@ func (r *Rule) Validate() error {
 	}
 	return nil
 }
+
+// MaxOUIVendorPatternLen bounds an oui_vendor pattern. It is the limit
+// standards/oui/vendors.yaml places on a canonical vendor name, so every name
+// the registry can produce fits.
+const MaxOUIVendorPatternLen = 64
 
 // mdnsServiceType is the DNS-SD `<Service>.<Proto>` form of RFC 6763 §7: an
 // underscore-prefixed service name, then `._tcp` or `._udp`.
@@ -382,6 +458,15 @@ type RuleRef struct {
 	Model      string  `json:"model,omitempty"`
 	Confidence float64 `json:"confidence"`
 	SourceURL  string  `json:"source_url,omitempty"`
+}
+
+// IsRegistryStatement reports whether this ref is the IEEE registry's own
+// vendor statement for a MAC (see [Engine.Classify]) rather than a rule row:
+// kind oui_vendor, no id, no class, the registry citation. A shipped oui_vendor
+// rule always carries a class and an admin's always carries an id, so the two
+// cannot be mistaken for it.
+func (r RuleRef) IsRegistryStatement() bool {
+	return r.Kind == KindOUIVendor && r.ID == "" && r.Class == "" && r.SourceURL == RegistrySourceURL
 }
 
 func (r Rule) ref() RuleRef {

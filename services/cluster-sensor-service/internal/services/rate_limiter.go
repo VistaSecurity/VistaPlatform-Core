@@ -17,6 +17,19 @@ type RateLimiter struct {
 	db *sqlx.DB
 }
 
+// RateLimitExceededError is a refusal: the tenant is at one of its limits.
+// Any other error from a check is a failure to check (the database), which a
+// caller must not report as a refusal.
+type RateLimitExceededError struct {
+	Limit string // "concurrent jobs" or "scans this hour"
+	Count int
+	Max   int
+}
+
+func (e *RateLimitExceededError) Error() string {
+	return fmt.Sprintf("rate limit exceeded: too many %s (%d/%d)", e.Limit, e.Count, e.Max)
+}
+
 func NewRateLimiter(db *sqlx.DB) *RateLimiter {
 	return &RateLimiter{db: db}
 }
@@ -165,7 +178,18 @@ func (r *RateLimiter) UpdateRateLimit(tenantID string, req models.RateLimitConfi
 }
 
 func (r *RateLimiter) CheckRateLimit(tenantID string) error {
-	return r.checkRateLimit(tenantID, true)
+	return r.checkRateLimit(tenantID, true, "")
+}
+
+// CheckRateLimitForJob is CheckRateLimit at the moment a queued job is picked
+// up to run. The job's own row is already in the queue — it passed this check
+// when it was created, against the jobs ahead of it — so it is left out of
+// both counts. Counted, a job was its own fifth concurrent job: at exactly
+// concurrent_jobs queued the oldest was refused with "5/5" and failed, with
+// nothing running at all; and the hundredth scan of an hour, admitted at
+// creation as the hundredth, was refused at processing as one too many.
+func (r *RateLimiter) CheckRateLimitForJob(tenantID, jobID string) error {
+	return r.checkRateLimit(tenantID, true, jobID)
 }
 
 // CheckRateLimitReadOnly is CheckRateLimit for a request that creates nothing
@@ -173,10 +197,13 @@ func (r *RateLimiter) CheckRateLimit(tenantID string) error {
 // refusal, but a tenant with no stored limits is judged against the defaults
 // without the defaults being stored.
 func (r *RateLimiter) CheckRateLimitReadOnly(tenantID string) error {
-	return r.checkRateLimit(tenantID, false)
+	return r.checkRateLimit(tenantID, false, "")
 }
 
-func (r *RateLimiter) checkRateLimit(tenantID string, persistDefault bool) error {
+// checkRateLimit counts the tenant's jobs against its limits. excludeJobID,
+// when set, is a job already in the queue whose own row must not count
+// against itself (CheckRateLimitForJob).
+func (r *RateLimiter) checkRateLimit(tenantID string, persistDefault bool, excludeJobID string) error {
 	rateLimit, err := r.getRateLimit(tenantID, persistDefault)
 	if err != nil {
 		return err
@@ -190,15 +217,20 @@ func (r *RateLimiter) checkRateLimit(tenantID string, persistDefault bool) error
 	// RLS-scoped reads over discovery_jobs. Both counts run on one
 	// tenant-scoped transaction; the explicit WHERE tenant_id = $1 stays as the
 	// primary control.
+	// $2 is the excluded job, or '' for none: id <> '' is true for every row
+	// without the query having to take two shapes. NULLIF keeps the empty
+	// string from being cast to uuid.
 	var concurrentJobs, scansThisHour int
 	err = r.withTenantTxx(context.Background(), tenantUUID, func(tx *sqlx.Tx) error {
-		query := `SELECT COUNT(*) FROM discovery_jobs WHERE tenant_id = $1 AND status IN ('queued', 'running')`
-		if e := tx.Get(&concurrentJobs, query, tenantID); e != nil {
+		query := `SELECT COUNT(*) FROM discovery_jobs WHERE tenant_id = $1 AND status IN ('queued', 'running')
+		          AND id IS DISTINCT FROM NULLIF($2, '')::uuid`
+		if e := tx.Get(&concurrentJobs, query, tenantID, excludeJobID); e != nil {
 			return fmt.Errorf("failed to check concurrent jobs: %w", e)
 		}
 
-		query = `SELECT COUNT(*) FROM discovery_jobs WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '1 hour'`
-		if e := tx.Get(&scansThisHour, query, tenantID); e != nil {
+		query = `SELECT COUNT(*) FROM discovery_jobs WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '1 hour'
+		         AND id IS DISTINCT FROM NULLIF($2, '')::uuid`
+		if e := tx.Get(&scansThisHour, query, tenantID, excludeJobID); e != nil {
 			return fmt.Errorf("failed to check scans per hour: %w", e)
 		}
 		return nil
@@ -208,11 +240,11 @@ func (r *RateLimiter) checkRateLimit(tenantID string, persistDefault bool) error
 	}
 
 	if concurrentJobs >= rateLimit.ConcurrentJobs {
-		return fmt.Errorf("rate limit exceeded: too many concurrent jobs (%d/%d)", concurrentJobs, rateLimit.ConcurrentJobs)
+		return &RateLimitExceededError{Limit: "concurrent jobs", Count: concurrentJobs, Max: rateLimit.ConcurrentJobs}
 	}
 
 	if scansThisHour >= rateLimit.ScansPerHour {
-		return fmt.Errorf("rate limit exceeded: too many scans this hour (%d/%d)", scansThisHour, rateLimit.ScansPerHour)
+		return &RateLimitExceededError{Limit: "scans this hour", Count: scansThisHour, Max: rateLimit.ScansPerHour}
 	}
 
 	return nil

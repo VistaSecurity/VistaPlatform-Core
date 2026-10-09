@@ -19,7 +19,7 @@ import {
   Tag, FolderTree, Box, Type, ScanBarcode, List, Tags,
   Blocks, Boxes, Briefcase, Cctv, CloudCog, CloudLightning, Cog, Computer, Container,
   Factory, Globe, HardDrive, Laptop, Monitor, Printer, Radio, RadioTower, Router,
-  ServerCog, Share2, SquareStack, Webhook,
+  ServerCog, Share2, SquareStack, TvMinimal, Webhook,
 } from 'lucide-react';
 import { Route, Binary, Ruler, Key, Scale, OctagonAlert, ListChecks, CalendarClock, Gauge, CircleDot, User, Ticket, FolderPlus, ShieldOff, TrendingUp, TrendingDown, Info, SearchX, CheckCheck, Gem, ExternalLink, CircleHelp, CircleDashed, Shapes } from 'lucide-react';
 
@@ -131,7 +131,7 @@ const MAP: Record<string, LucideIcon> = {
   'cloud-lightning': CloudLightning, cog: Cog, computer: Computer, container: Container,
   factory: Factory, globe: Globe, 'hard-drive': HardDrive, laptop: Laptop, monitor: Monitor,
   printer: Printer, radio: Radio, 'radio-tower': RadioTower, router: Router, 'server-cog': ServerCog,
-  'share-2': Share2, 'square-stack': SquareStack, webhook: Webhook, 'circle-question-mark': CircleHelp,
+  'share-2': Share2, 'square-stack': SquareStack, 'tv-minimal': TvMinimal, webhook: Webhook, 'circle-question-mark': CircleHelp,
 };
 
 /** Every name `Icon` can actually draw.

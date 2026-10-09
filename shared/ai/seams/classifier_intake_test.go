@@ -136,6 +136,7 @@ func TestExplain_UnknownAndErrorBothMeanNoProposal(t *testing.T) {
 func TestClassFacts_RoundTripsEveryKindOfEvidence(t *testing.T) {
 	e, err := classify.NewStrict([]classify.Rule{
 		{Kind: classify.KindOUI, Pattern: "005056", Vendor: "VMware", Confidence: 0.85, SourceURL: "u"},
+		{Kind: classify.KindOUIVendor, Pattern: "Brother Industries", Model: "brother", Confidence: 0.85, SourceURL: "u"},
 		{Kind: classify.KindSysObjectID, Pattern: "1.3.6.1.4.1.9", Vendor: "Cisco Systems", Confidence: 0.85, SourceURL: "u"},
 		{Kind: classify.KindENIP, Pattern: "1", Vendor: "Rockwell", Confidence: 0.80, SourceURL: "u"},
 		{Kind: classify.KindCloudType, Pattern: "aws_s3_bucket", Model: "bucket", Confidence: 0.95, SourceURL: "u"},
@@ -147,13 +148,14 @@ func TestClassFacts_RoundTripsEveryKindOfEvidence(t *testing.T) {
 		{Kind: classify.KindLLDPCapability, Pattern: "wlan_access_point", Model: "lldp-ap", Confidence: 0.75, SourceURL: "u"},
 		{Kind: classify.KindMDNSService, Pattern: "_ipp._tcp", Model: "ipp-printer", Confidence: 0.75, SourceURL: "u"},
 		{Kind: classify.KindOSName, Pattern: `(?i)\bwindows[ ]+server\b`, Model: "windows-server", Confidence: 0.80, SourceURL: "u"},
+		{Kind: classify.KindDHCPVendorClass, Pattern: `^MSFT 5\.0$`, Model: "msft-dhcp", Confidence: 0.75, SourceURL: "u"},
 	})
 	if err != nil {
 		t.Fatalf("build engine: %v", err)
 	}
 
 	in := classify.ClassifyInput{
-		MACs:              []string{"00:50:56:aa:bb:cc"},
+		MACs:              []string{"00:50:56:aa:bb:cc", "00:1b:a9:11:22:33"},
 		SysObjectID:       "1.3.6.1.4.1.9.1.1745",
 		ENIPVendorID:      1,
 		CloudResourceType: "aws_s3_bucket",
@@ -165,12 +167,15 @@ func TestClassFacts_RoundTripsEveryKindOfEvidence(t *testing.T) {
 		LLDPCapabilities:  []string{"wlan_access_point"},
 		CDPCapabilities:   []string{"switch"},
 		OS:                "Microsoft Windows Server 2022 Datacenter",
+		DHCPVendorClass:   "MSFT 5.0",
 	}
 	got := Explain(context.Background(), RuleClassifier{Engine: e}, ClassFacts(in))
 
 	byKind := map[string]bool{}
 	for _, r := range got.MatchedRules {
-		byKind[r.Kind] = true
+		if !r.IsRegistryStatement() {
+			byKind[r.Kind] = true
+		}
 	}
 	for _, kind := range classify.Kinds {
 		if !byKind[kind] {

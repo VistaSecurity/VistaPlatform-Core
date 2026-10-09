@@ -186,8 +186,10 @@ describe('the data-quality score', () => {
 });
 
 describe('the hero links out', () => {
-  it('offers the topology at its deep-linkable URL', () => {
-    expect(render(healthy, scored)).toContain('/inventory?lens=map&amp;view=topology');
+  it('keeps the heading plain: no Topology link, no "configuration items" gloss', () => {
+    const html = render(healthy, scored);
+    expect(html).not.toContain('view=topology');
+    expect(html).not.toContain('configuration items');
   });
 
   it('sends a class bar to the list of exactly what it counted', () => {

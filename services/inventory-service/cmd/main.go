@@ -1014,6 +1014,21 @@ func main() {
 	// TestRuleMergeExecutor_MainRegistersIt.
 	services.StartRuleMergeExecutor(ctx, db, bypassDB, mergeProposalService)
 
+	// hw.vendor from the MAC prefix is resolved on the platform at ingestion
+	// (services/oui_vendor.go); this brings assets ingested before that, or
+	// under an older IEEE registry snapshot, up to the registry's answer. Off
+	// the startup path, one replica at a time, recorded per tenant in
+	// oui_vendor_backfill_state.
+	go jobs.StartOUIVendorBackfillWorker(ctx, bypassDB, services.OUIVendorBackfillDueTenants, assetService)
+
+	// Assets still on the unassigned floor (`unknown_host` / `external`) that
+	// nothing observes any more: re-classify their stored evidence and promote
+	// a RULE's class onto them (services/class_floor_sweep.go). Five minutes
+	// after startup — after the OUI backfill's first pass has put vendors in
+	// place — then every six hours; promotes only, never raises a proposal.
+	// Recorded per tenant in class_floor_sweep_state.
+	go jobs.StartClassFloorSweepWorker(ctx, bypassDB, services.ClassFloorSweepTenants, assetService)
+
 	go jobs.StartIdentityEnrichmentWorker(ctx, bypassDB, &identityenrichment.Coordinator{
 		Store: &identityenrichment.Store{DB: db}, Backend: services.NewIdentityEnrichmentBackend(assetService, discoveryService),
 		Enabled: identity.AvailableCapabilities().Enrichment, Excluded: autoscan.PlatformExcludedPrefixes(),

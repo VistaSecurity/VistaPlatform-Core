@@ -33,8 +33,33 @@ function Icon({ name, size = 17 }: { name: string; size?: number }) {
   return L ? <L size={size} /> : null;
 }
 
-function LensGroupLabel({ children, indent = 39 }: { children: React.ReactNode; indent?: number }) {
-  return <div style={{ padding: `7px 10px 3px ${indent}px`, fontSize: 9.5, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--rail-t3)' }}>{children}</div>;
+// Rail nesting, left edge of each level. A group header sits at the same x as
+// an unlabelled item; the items it owns step in one level and hang off a thin
+// guide line, so a header reads as the owner of the rows under it rather than
+// as one more (fainter) link.
+const RAIL_ITEM_X = 41;
+const RAIL_CHILD_X = 54;
+const RAIL_GUIDE_X = 46;
+const RAIL_CONTEXT_X = 54; // contextual sub-links hung under an active item
+const RAIL_CONTEXT_CHILD_X = 67;
+const RAIL_CONTEXT_GUIDE_X = 59;
+
+function LensGroupLabel({ children, indent = RAIL_ITEM_X }: { children: React.ReactNode; indent?: number }) {
+  return <div style={{ padding: `10px 10px 4px ${indent}px`, fontSize: 10, fontWeight: 700, letterSpacing: '.09em', textTransform: 'uppercase', color: 'var(--rail-t1)' }}>{children}</div>;
+}
+
+function MaybeGroupBody({ labelled, children }: { labelled: boolean; children: React.ReactNode }) {
+  return labelled ? <GroupBody guide={RAIL_GUIDE_X}>{children}</GroupBody> : <>{children}</>;
+}
+
+/** The rows a group header owns, with a vertical guide line at `guide`. */
+function GroupBody({ guide, children }: { guide: number; children: React.ReactNode }) {
+  return (
+    <div style={{ position: 'relative' }}>
+      <span aria-hidden style={{ position: 'absolute', left: guide, top: 2, bottom: 2, width: 1, background: 'color-mix(in srgb, var(--rail-t3) 55%, transparent)' }} />
+      {children}
+    </div>
+  );
 }
 
 // A contextual sub-link shown nested *under* an active sub-nav item — the
@@ -44,7 +69,7 @@ function LensGroupLabel({ children, indent = 39 }: { children: React.ReactNode; 
 function ContextSubLink({ to, icon, label, active }: { to: string; icon: string; label: string; active: boolean }) {
   return (
     <Link to={to} className="nav-sub"
-      style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '6px 10px 6px 52px', borderRadius: 8, textDecoration: 'none', background: active ? 'var(--rail-active)' : 'transparent', color: active ? 'var(--rail-accent)' : 'var(--rail-t2)', fontFamily: 'var(--font-body)', fontSize: 12.5, fontWeight: active ? 600 : 500 }}>
+      style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: `6px 10px 6px ${RAIL_CONTEXT_CHILD_X}px`, borderRadius: 8, textDecoration: 'none', background: active ? 'var(--rail-active)' : 'transparent', color: active ? 'var(--rail-accent)' : 'var(--rail-t2)', fontFamily: 'var(--font-body)', fontSize: 12.5, fontWeight: active ? 600 : 500 }}>
       <LensIcon name={icon} size={14} /><span>{label}</span>
     </Link>
   );
@@ -69,7 +94,7 @@ function InventoryNavLink({ item, active }: { item: NavSubItem; active: boolean 
       title={lens?.placeholder ? `Arrives in ${lens.placeholder.phase}` : pending ? 'Review in Discovery → Approvals' : ''}
       style={{
         display: 'flex', alignItems: 'center', gap: 9, width: '100%',
-        padding: '6px 10px 6px 39px', borderRadius: 8, textDecoration: 'none',
+        padding: `6px 10px 6px ${RAIL_CHILD_X}px`, borderRadius: 8, textDecoration: 'none',
         background: active ? 'var(--rail-active)' : 'transparent',
         color: active ? 'var(--rail-accent)' : 'var(--rail-t2)',
         fontFamily: 'var(--font-body)', fontSize: 12.5, fontWeight: active ? 600 : 500,
@@ -200,11 +225,8 @@ function Sidebar() {
                 <div className="fade-up" style={{ margin: '3px 0 7px', display: 'flex', flexDirection: 'column', gap: 1 }}>
                   {s.groups.map((g, gi) => (
                     <div key={gi}>
-                      {g.label && (
-                        <div style={{ padding: '7px 10px 3px 41px', fontSize: 9.5, fontWeight: 700, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--rail-t3)' }}>
-                          {g.label}
-                        </div>
-                      )}
+                      {g.label && <LensGroupLabel>{g.label}</LensGroupLabel>}
+                      <MaybeGroupBody labelled={!!g.label}>
                       {g.items.map((it) => {
                         // Contextual sub-links hang *under the active item itself*
                         // (not after the whole group), so e.g. the Findings lenses
@@ -221,7 +243,7 @@ function Sidebar() {
                               className="nav-sub"
                               style={({ isActive }) => ({
                                 display: 'flex', alignItems: 'center', gap: 9, width: '100%',
-                                padding: '6px 10px 6px 41px', borderRadius: 8, textDecoration: 'none',
+                                padding: `6px 10px 6px ${g.label ? RAIL_CHILD_X : RAIL_ITEM_X}px`, borderRadius: 8, textDecoration: 'none',
                                 background: isActive ? 'var(--rail-subactive)' : 'transparent',
                                 color: isActive ? 'var(--rail-t1)' : 'var(--rail-t2)',
                                 fontFamily: 'var(--font-body)', fontSize: 12.5, fontWeight: isActive ? 600 : 500,
@@ -239,10 +261,12 @@ function Sidebar() {
                                     where the user makes the switch. */}
                                 {SCOPE_ORDER.map((scope) => (
                                   <div key={scope}>
-                                    <LensGroupLabel indent={54}>{SCOPE_LABEL[scope]}</LensGroupLabel>
+                                    <LensGroupLabel indent={RAIL_CONTEXT_X}>{SCOPE_LABEL[scope]}</LensGroupLabel>
+                                    <GroupBody guide={RAIL_CONTEXT_GUIDE_X}>
                                     {FINDINGS_LENSES.filter((l) => l.scope === scope).map((l) => (
                                       <ContextSubLink key={l.key} to={`/risk-compliance/findings?lens=${l.key}`} icon={l.icon} label={l.label} active={curLens === l.key} />
                                     ))}
+                                    </GroupBody>
                                   </div>
                                 ))}
                               </div>
@@ -250,15 +274,18 @@ function Sidebar() {
 
                             {onPosture && (
                               <div className="fade-up" style={{ margin: '2px 0 5px', display: 'flex', flexDirection: 'column', gap: 1 }}>
-                                <LensGroupLabel indent={54}>Views</LensGroupLabel>
+                                <LensGroupLabel indent={RAIL_CONTEXT_X}>Views</LensGroupLabel>
+                                <GroupBody guide={RAIL_CONTEXT_GUIDE_X}>
                                 {POSTURE_TABS.map((t) => (
                                   <ContextSubLink key={t.key} to={`/risk-compliance/posture?tab=${t.key}`} icon={t.icon} label={t.label} active={curTab === t.key} />
                                 ))}
+                                </GroupBody>
                               </div>
                             )}
                           </div>
                         );
                       })}
+                      </MaybeGroupBody>
                     </div>
                   ))}
                 </div>
@@ -269,6 +296,7 @@ function Sidebar() {
                   {s.groups.map((g, gi) => (
                     <div key={g.label ?? gi}>
                       {g.label && <LensGroupLabel>{g.label}</LensGroupLabel>}
+                      <GroupBody guide={RAIL_GUIDE_X}>
                       {g.items.map((item) => (
                         <InventoryNavLink
                           key={item.path}
@@ -285,6 +313,7 @@ function Sidebar() {
                           }
                         />
                       ))}
+                      </GroupBody>
                     </div>
                   ))}
                 </div>

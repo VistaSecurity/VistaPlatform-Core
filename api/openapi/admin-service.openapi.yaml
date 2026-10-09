@@ -10460,7 +10460,16 @@ components:
         compares the two and fails either way round.
 
         * `oui` — the 24-bit IEEE assignment at the front of a MAC, as 6
-          uppercase hex digits with no separators.
+          uppercase hex digits with no separators. A PREFIX rule, for an
+          override or an assignment a vendor-level rule cannot express; for one
+          MAC it outranks every `oui_vendor` rule.
+        * `oui_vendor` — a canonical manufacturer name from the platform's IEEE
+          registry, exactly as `standards/oui/vendors.yaml` spells it (`Brother
+          Industries`), at most 64 characters. The engine resolves each MAC
+          through the whole registry (24-, 28- and 36-bit blocks) and matches
+          when the MAC's canonical vendor equals the pattern; exact,
+          case-sensitive. The rule's vendor is its pattern. A name the registry
+          does not canonicalise is accepted but never matches.
         * `sysobjectid` — an OID prefix under the IANA private-enterprise arc
           `1.3.6.1.4.1`, matched on arc boundaries; longest prefix wins.
         * `enip` — an ODVA vendor id in decimal, from an EtherNet/IP List
@@ -10493,10 +10502,15 @@ components:
         * `os_name` — an RE2 regexp matched against the operating system the
           host named when asked (the `os.name` fact). The pattern carries its
           own anchoring, as a banner's does. The only kind whose evidence comes
-          from inside the host, and the only one a general-purpose computer can
-          match at all.
+          from inside the host.
+        * `dhcp_vendor_class` — an RE2 regexp matched against the DHCP option 60
+          vendor class identifier the client sent (RFC 2132 §9.13), exactly as
+          sent (`MSFT 5.0`, `android-dhcp-14`). The pattern carries its own
+          anchoring; every matching rule is returned. It names the DHCP client
+          software, never the hardware vendor.
       enum:
       - oui
+      - oui_vendor
       - sysobjectid
       - enip
       - cloud_type
@@ -10508,6 +10522,7 @@ components:
       - lldp_capability
       - mdns_service
       - os_name
+      - dhcp_vendor_class
     ClassificationRule:
       type: object
       additionalProperties: false

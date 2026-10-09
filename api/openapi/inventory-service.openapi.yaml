@@ -4908,7 +4908,7 @@ paths:
                   preview:
                     $ref: '#/components/schemas/AssetMergePreview'
         '400':
-          description: Invalid explicit selection or missing reason.
+          description: Invalid explicit selection.
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
         '403':
@@ -4955,7 +4955,7 @@ paths:
                   merge:
                     $ref: '#/components/schemas/AssetMergeResult'
         '400':
-          description: Invalid explicit selection or missing reason.
+          description: Invalid explicit selection.
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
         '403':
@@ -5000,7 +5000,7 @@ paths:
                   preview:
                     $ref: '#/components/schemas/AssetMergePreview'
         '400':
-          description: Invalid explicit selection or missing reason.
+          description: Invalid explicit selection.
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
         '403':
@@ -5045,7 +5045,7 @@ paths:
                   merge:
                     $ref: '#/components/schemas/AssetMergeResult'
         '400':
-          description: Invalid explicit selection or missing reason.
+          description: Invalid explicit selection.
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
         '403':
@@ -6669,6 +6669,7 @@ components:
       - hmi
       - ied
       - iot_device
+      - smart_device
       - bmc
       - virtual
       - virtual_machine
@@ -10385,10 +10386,13 @@ components:
       allOf:
         - $ref: '#/components/schemas/AssetMergeSelection'
         - type: object
-          required: [revision, reason]
+          required: [revision]
           properties:
             revision: { type: string, minLength: 64, maxLength: 64 }
-            reason: { type: string, minLength: 3, maxLength: 2000 }
+            reason:
+              type: string
+              maxLength: 2000
+              description: Optional note recorded with the merge. Who merged, from which preview revision and with which field choices is recorded regardless.
     AssetMergePreview:
       allOf:
         - $ref: '#/components/schemas/AssetMergeSelection'
@@ -10773,11 +10777,16 @@ components:
         than referenced: somebody asking "why does this say switch" six months
         later needs the pattern and the citation that were in force at the time,
         not whatever the rule says now.
+
+        A ref of kind `oui_vendor` with no `id`, no `class` and the IEEE
+        registry as `source_url` is not a rule row: it is the registry's own
+        statement of the manufacturer a MAC resolves to, recorded whether or not
+        any rule exists for that vendor.
       properties:
         id: { type: string }
         kind:
           type: string
-          enum: [oui, sysobjectid, enip, cloud_type, banner, port_profile, model, platform, cdp_capabilities, lldp_capability, mdns_service, os_name]
+          enum: [oui, oui_vendor, sysobjectid, enip, cloud_type, banner, port_profile, model, platform, cdp_capabilities, lldp_capability, mdns_service, os_name, dhcp_vendor_class]
         pattern: { type: string }
         class: { type: string }
         vendor: { type: string }

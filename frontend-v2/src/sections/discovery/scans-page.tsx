@@ -7,6 +7,7 @@ import { Icon } from '../../components/ui';
 import { PageWrap, queryNote, relTime } from './kit';
 import { useSchedules } from './queries';
 import { ScheduleFormModal, ScheduleDeleteModal } from './schedule-modals';
+import { describeCron } from './schedule-cadence';
 
 type Schedule = deviceInterrogationComponents['schemas']['InterrogationSchedule'];
 
@@ -84,8 +85,8 @@ export function ScansPage() {
               </span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</div>
-                <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  <span className="mono">{s.cron_expression}</span>
+                <div title={s.cron_expression} style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {describeCron(s.cron_expression) ?? <span className="mono">{s.cron_expression}</span>}
                   {s.is_enabled && s.next_run_at ? ` · next ${nextRun(s.next_run_at)}` : ''}
                   {` · ${s.target_type === 'cloud_integration' ? 'cloud integration' : 'device'}`}
                 </div>

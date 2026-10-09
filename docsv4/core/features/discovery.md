@@ -314,8 +314,9 @@ Monitor discovery job status and progress.
 Scan, the Discover wizard, the automatic-scan sweep) alongside device
 interrogations — with its kind, executor, status and duration; filter by Kind,
 Status or Executor. Click a discovery/automatic-scan row for its dispatch
-timeline, targets, and findings split; click an interrogation row for the same
-detail **Discovery → Job Logs** also carries.
+timeline, targets, and findings split; click an interrogation row for its run detail. An
+interrogation's row also says what the run produced, and a failed run shows its
+error message, under the status.
 
 A scan described by depth shows, while it runs, a progress bar on its row and a
 live line ("112 of 254 hosts · 31 responded · 9 open ports"), with its executor
@@ -423,7 +424,7 @@ each chip:
 | Needs | What was seen | Suggested |
 |---|---|---|
 | **Ready to confirm** | A device answered at an address on a network that uses DHCP, and no existing asset owns it | **Confirm** |
-| **Matches an asset** | Exactly one existing asset already owns an identifier of the observation | **Link to** that asset |
+| **Matches an asset** | Exactly one existing asset already owns an identifier of the observation, and nothing has confirmed that device at the address recently — a probe of an address a sensor confirmed by MAC within the last day attaches to the asset itself and never reaches this table | **Link to** that asset |
 | **Several match** | More than one existing asset owns identifiers of it, or the one that does cannot take a link | none: compare the assets, link it yourself, or dismiss |
 | **Needs a network** | The address is not inside any network segment you have set up | **Add network** (Settings → Network Segments) |
 | **Needs a sensor** | Another device advertised the name, or no sensor reaches that network | **See options**: add a sensor there, link, or dismiss |

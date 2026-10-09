@@ -205,7 +205,9 @@ func TestHostObsPipelineEmitsDiscovery(t *testing.T) {
 		if !ok {
 			t.Fatalf("raw_metadata.host_observation = %T, want *hostobs.HostObservation", d.RawMetadata["host_observation"])
 		}
-		if obs.MAC != "28:cf:da:11:22:33" || obs.Vendor != "Apple" {
+		// The sensor no longer resolves the OUI vendor: the platform does,
+		// at ingestion, from the full IEEE registry.
+		if obs.MAC != "28:cf:da:11:22:33" || obs.Vendor != "" {
 			t.Errorf("observation = %+v", obs)
 		}
 	default:

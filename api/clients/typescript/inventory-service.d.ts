@@ -3468,7 +3468,7 @@ export interface components {
          * @description Asset class key from the fixed platform taxonomy (ADR-0002 D2, standards/asset-classes.yaml). Tenant leaf subclasses are runtime rows and are NOT members of this enum.
          * @enum {string}
          */
-        AssetClassKey: "hardware" | "computer" | "server" | "workstation" | "laptop" | "mobile" | "network_device" | "switch" | "router" | "firewall" | "load_balancer" | "wireless_controller" | "access_point" | "vpn_gateway" | "storage_device" | "printer" | "ot_device" | "plc" | "rtu" | "hmi" | "ied" | "iot_device" | "bmc" | "virtual" | "virtual_machine" | "container" | "cluster" | "hypervisor" | "cloud_resource" | "compute_instance" | "managed_database" | "object_storage" | "key_store" | "cloud_load_balancer" | "api_gateway" | "cdn_distribution" | "serverless_function" | "virtual_network" | "subnet" | "application" | "web_application" | "database_instance" | "service_daemon" | "middleware" | "service" | "business_service" | "technical_service" | "external" | "unknown_host";
+        AssetClassKey: "hardware" | "computer" | "server" | "workstation" | "laptop" | "mobile" | "network_device" | "switch" | "router" | "firewall" | "load_balancer" | "wireless_controller" | "access_point" | "vpn_gateway" | "storage_device" | "printer" | "ot_device" | "plc" | "rtu" | "hmi" | "ied" | "iot_device" | "smart_device" | "bmc" | "virtual" | "virtual_machine" | "container" | "cluster" | "hypervisor" | "cloud_resource" | "compute_instance" | "managed_database" | "object_storage" | "key_store" | "cloud_load_balancer" | "api_gateway" | "cdn_distribution" | "serverless_function" | "virtual_network" | "subnet" | "application" | "web_application" | "database_instance" | "service_daemon" | "middleware" | "service" | "business_service" | "technical_service" | "external" | "unknown_host";
         /** @description Per-location finding rollup (models.LocationFindingSummaryRow). */
         LocationFindingSummaryRow: {
             /** Format: uuid */
@@ -5242,7 +5242,8 @@ export interface components {
         };
         AssetMergeExecutionRequest: components["schemas"]["AssetMergeSelection"] & {
             revision: string;
-            reason: string;
+            /** @description Optional note recorded with the merge. Who merged, from which preview revision and with which field choices is recorded regardless. */
+            reason?: string;
         };
         AssetMergePreview: components["schemas"]["AssetMergeSelection"] & {
             revision: string;
@@ -5454,11 +5455,14 @@ export interface components {
             /** @description Value × weight, in log-odds. Signed: a negative contribution is evidence AGAINST the proposed class that the rest outweighed. */
             contribution: number;
         };
-        /** @description One classification rule that matched, copied into the proposal rather than referenced: somebody asking "why does this say switch" six months later needs the pattern and the citation that were in force at the time, not whatever the rule says now. */
+        /**
+         * @description One classification rule that matched, copied into the proposal rather than referenced: somebody asking "why does this say switch" six months later needs the pattern and the citation that were in force at the time, not whatever the rule says now.
+         *     A ref of kind `oui_vendor` with no `id`, no `class` and the IEEE registry as `source_url` is not a rule row: it is the registry's own statement of the manufacturer a MAC resolves to, recorded whether or not any rule exists for that vendor.
+         */
         ClassificationRuleRef: {
             id?: string;
             /** @enum {string} */
-            kind: "oui" | "sysobjectid" | "enip" | "cloud_type" | "banner" | "port_profile" | "model" | "platform" | "cdp_capabilities" | "lldp_capability" | "mdns_service" | "os_name";
+            kind: "oui" | "oui_vendor" | "sysobjectid" | "enip" | "cloud_type" | "banner" | "port_profile" | "model" | "platform" | "cdp_capabilities" | "lldp_capability" | "mdns_service" | "os_name" | "dhcp_vendor_class";
             pattern: string;
             class?: string;
             vendor?: string;
@@ -12063,7 +12067,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description Invalid explicit selection or missing reason. */
+            /** @description Invalid explicit selection. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -12128,7 +12132,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description Invalid explicit selection or missing reason. */
+            /** @description Invalid explicit selection. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -12191,7 +12195,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description Invalid explicit selection or missing reason. */
+            /** @description Invalid explicit selection. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -12254,7 +12258,7 @@ export interface operations {
                     };
                 };
             };
-            /** @description Invalid explicit selection or missing reason. */
+            /** @description Invalid explicit selection. */
             400: {
                 headers: {
                     [name: string]: unknown;

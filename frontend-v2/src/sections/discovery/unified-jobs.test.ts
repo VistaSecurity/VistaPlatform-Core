@@ -210,3 +210,27 @@ describe('discoveryRow — scan-plan jobs', () => {
     expect(discoveryRow(discovery({ status: 'running', progress: 50 })).progress).toBeUndefined();
   });
 });
+
+// Job Logs was folded into this table. What only its line said (the run's
+// outcome and a failure's own error) must survive on the interrogation row.
+describe('interrogationRow carries what Job Logs used to show', () => {
+  it('puts a cloud run\'s enumeration under the status', () => {
+    const row = interrogationRow(interrogation({ enumeration: { instances: 12, networks: 0, subnets: 3, security_groups: 0 } }));
+    expect(row.statusDetail).toBe('12 instances, 3 subnets');
+  });
+
+  it('says a host inventory failed rather than listing its counts', () => {
+    const row = interrogationRow(interrogation({ host_inventory: { failed: 'identity conflict' } as InterrogationJob['host_inventory'] }));
+    expect(row.statusDetail).toBe('host inventory NOT materialised — identity conflict');
+  });
+
+  it('shows a failed run\'s error, and only for a failed run', () => {
+    expect(interrogationRow(interrogation({ status: 'failed', error_message: 'connection refused' })).errorDetail).toBe('connection refused');
+    expect(interrogationRow(interrogation({ status: 'error', error_message: 'timeout' })).errorDetail).toBe('timeout');
+    expect(interrogationRow(interrogation({ status: 'completed', error_message: 'stale' })).errorDetail).toBeUndefined();
+  });
+
+  it('adds no detail line for a run that reports nothing extra', () => {
+    expect(interrogationRow(interrogation()).statusDetail).toBeUndefined();
+  });
+});

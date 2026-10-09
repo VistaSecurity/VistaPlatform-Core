@@ -256,6 +256,15 @@ type Observation struct {
 	// rule then read the same answer.
 	pinned map[string]bool
 
+	// leaseFresh are the keys of this observation's `ip_address` identifiers
+	// inside a dynamic scope whose single owner was device-confirmed at that
+	// address within the lease window (leasefresh.go). Unexported for the
+	// reason pinned is: [Engine.Resolve] reads it from the store once per
+	// observation, and admission and the voting rules then share the answer.
+	// Unlike pinned it is NOT read by the lease rule: a lease-fresh address is
+	// still a lease, and still follows the MAC.
+	leaseFresh map[string]bool
+
 	// claims is what the engine decided, once per resolution, about each of
 	// this observation's claimed addresses (claimed.go). Unexported for the
 	// reason pinned is: it is read from the store, not said by the caller.

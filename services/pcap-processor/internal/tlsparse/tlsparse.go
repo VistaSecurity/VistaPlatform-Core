@@ -485,9 +485,27 @@ func (s *Session) HasContent() bool {
 }
 
 // flowBuffers holds the per-direction reassembly state.
+//
+// nextSeq is the TCP sequence number of the first byte this direction has not
+// yet consumed. A segment is consumed only when it starts there; one that
+// starts later waits in pending until the gap before it is filled, and bytes
+// that start earlier have been consumed already and are discarded. That is
+// what makes a retransmitted or duplicated segment harmless: before sequence
+// numbers were read, every segment was appended in arrival order, so one
+// retransmission of a ClientHello's first segment spliced the same bytes in
+// twice and desynchronised the flow.
 type flowBuffers struct {
 	recordBuf []byte
 	hsBuf     []byte
+
+	nextSeq uint32
+	// anchored is set once nextSeq is known: from the first segment of this
+	// direction that starts a TLS record.
+	anchored bool
+	pending  map[uint32][]byte
+	// pendingBytes is what pending holds. It counts toward MaxFlowBytes so a
+	// flow cannot pin unbounded memory in segments waiting behind a gap.
+	pendingBytes int
 }
 
 type sessionState struct {
@@ -498,10 +516,13 @@ type sessionState struct {
 
 // Tracker reassembles TLS handshakes from per-packet TCP payloads.
 //
-// It is not a full TCP reassembler: segments are appended in arrival order per
-// direction, which is what a capture of a healthy handshake looks like. A flow
-// whose record framing desynchronises (loss, reordering, retransmission
-// overlap) is abandoned rather than mis-parsed.
+// Each direction is ordered by TCP sequence number: retransmitted and
+// duplicated bytes are dropped, overlapping segments are trimmed, and a
+// segment that arrives early waits until the bytes before it arrive. Bytes
+// that never arrive (packet loss, or a capture whose snapshot length cut the
+// payload short) leave a gap the flow cannot read past; whatever the handshake
+// yielded before the gap is still emitted. A flow whose record framing stops
+// making sense despite that is abandoned rather than mis-parsed.
 type Tracker struct {
 	sessions map[sessionKey]*sessionState
 
@@ -518,6 +539,14 @@ type Tracker struct {
 	// Desynced counts flows abandoned because their record framing stopped
 	// making sense.
 	Desynced int
+	// Gapped counts flows that ended with bytes still waiting behind a gap in
+	// the sequence space: data the capture never carried. Lost packets do it
+	// occasionally; a capture with a short snapshot length does it to nearly
+	// every flow.
+	Gapped int
+	// Retransmitted counts segments dropped because every byte in them had
+	// already been consumed.
+	Retransmitted int
 }
 
 // NewTracker creates a Tracker. onComplete is invoked once per session, when
@@ -531,8 +560,15 @@ func NewTracker(onComplete func(*Session)) *Tracker {
 	}
 }
 
-// Feed supplies one TCP payload for one direction of a flow.
-func (t *Tracker) Feed(key FlowKey, payload []byte, ts time.Time) {
+// Feed supplies one TCP segment's payload for one direction of a flow. seq is
+// the segment's TCP sequence number, which orders the bytes within the
+// direction.
+//
+// payload may be shorter than the segment that was on the wire — a capture
+// with a short snapshot length keeps only a prefix. That needs no special
+// handling: the bytes that are present are real and sit at seq, and the
+// missing remainder is simply a gap the next segment waits behind.
+func (t *Tracker) Feed(key FlowKey, seq uint32, payload []byte, ts time.Time) {
 	if len(payload) == 0 {
 		return
 	}
@@ -575,22 +611,131 @@ func (t *Tracker) Feed(key FlowKey, payload []byte, ts time.Time) {
 	if !ok {
 		buf = &flowBuffers{}
 		st.dirs[key] = buf
+		if !looksLikeRecordHeader(payload) {
+			// This direction's first segment to arrive is not the start of its
+			// byte stream (the other half of the handshake overtook it). Hold
+			// it until a segment that does start a record anchors the
+			// sequence space.
+			t.hold(sk, st, buf, seq, payload)
+			return
+		}
+		buf.nextSeq = seq
+		buf.anchored = true
+	} else if !buf.anchored {
+		if !looksLikeRecordHeader(payload) {
+			t.hold(sk, st, buf, seq, payload)
+			return
+		}
+		buf.nextSeq = seq
+		buf.anchored = true
+		// Segments held before the anchor that precede it are discarded by
+		// drainPending below: they are older than the stream we now read.
 	}
 
-	if len(buf.recordBuf)+len(payload) > t.maxFlowBytes {
+	switch off := int32(seq - buf.nextSeq); {
+	case off > 0:
+		// Arrived ahead of a byte we have not seen yet.
+		t.hold(sk, st, buf, seq, payload)
+		return
+	case off < 0:
+		already := int(-off)
+		if already >= len(payload) {
+			// Every byte has been consumed: a retransmission or a duplicate.
+			t.Retransmitted++
+			return
+		}
+		payload = payload[already:]
+	}
+
+	if t.consume(sk, st, key, buf, payload) {
+		return
+	}
+	t.drainPending(sk, st, key, buf)
+}
+
+// maxPendingSegments bounds how many out-of-order segments one direction may
+// hold. A handshake that arrives more scrambled than this is pathological, and
+// the bound keeps drainPending's scan cheap.
+const maxPendingSegments = 64
+
+// hold parks an out-of-order segment until the bytes before it arrive. The
+// payload is copied: the caller's buffer belongs to the packet decoder and is
+// reused for the next packet.
+func (t *Tracker) hold(sk sessionKey, st *sessionState, buf *flowBuffers, seq uint32, payload []byte) {
+	if existing, ok := buf.pending[seq]; ok && len(existing) >= len(payload) {
+		t.Retransmitted++
+		return
+	}
+	if len(buf.pending) >= maxPendingSegments {
+		// The gap in front of these segments is not going to fill: the bytes
+		// were never captured. finish counts the flow as Gapped.
+		t.finish(sk, st)
+		return
+	}
+	if len(buf.recordBuf)+buf.pendingBytes+len(payload) > t.maxFlowBytes {
 		st.session.Truncated = true
 		t.Truncated++
 		t.finish(sk, st)
 		return
 	}
+	if buf.pending == nil {
+		buf.pending = make(map[uint32][]byte)
+	}
+	if existing, ok := buf.pending[seq]; ok {
+		buf.pendingBytes -= len(existing)
+	}
+	buf.pending[seq] = append([]byte(nil), payload...)
+	buf.pendingBytes += len(payload)
+}
+
+// drainPending consumes held segments that the stream has now reached, in
+// sequence order, until the next byte needed is not held.
+func (t *Tracker) drainPending(sk sessionKey, st *sessionState, key FlowKey, buf *flowBuffers) {
+	for len(buf.pending) > 0 && !st.done {
+		progressed := false
+		for seq, seg := range buf.pending {
+			off := int32(seq - buf.nextSeq)
+			if off > 0 {
+				continue
+			}
+			delete(buf.pending, seq)
+			buf.pendingBytes -= len(seg)
+			progressed = true
+			already := int(-off)
+			if already >= len(seg) {
+				t.Retransmitted++
+				break
+			}
+			if t.consume(sk, st, key, buf, seg[already:]) {
+				return
+			}
+			break
+		}
+		if !progressed {
+			return
+		}
+	}
+}
+
+// consume appends in-sequence bytes to the direction's record stream and folds
+// every handshake message it completes into the session. It reports whether
+// the session finished.
+func (t *Tracker) consume(sk sessionKey, st *sessionState, key FlowKey, buf *flowBuffers, payload []byte) bool {
+	buf.nextSeq += uint32(len(payload))
+
+	if len(buf.recordBuf)+buf.pendingBytes+len(payload) > t.maxFlowBytes {
+		st.session.Truncated = true
+		t.Truncated++
+		t.finish(sk, st)
+		return true
+	}
 	buf.recordBuf = append(buf.recordBuf, payload...)
 
-	recs, rest, ok := drainRecords(buf.recordBuf)
-	if !ok {
-		t.Desynced++
-		t.finish(sk, st)
-		return
-	}
+	// A desynchronised stream still yields the records that precede the point
+	// where framing broke, and they are applied before the flow is abandoned:
+	// a complete ClientHello followed by bytes that make no sense is still a
+	// complete ClientHello.
+	recs, rest, recordsOK := drainRecords(buf.recordBuf)
 	buf.recordBuf = rest
 
 	handshakeOver := false
@@ -608,26 +753,28 @@ func (t *Tracker) Feed(key FlowKey, payload []byte, ts time.Time) {
 			st.session.Truncated = true
 			t.Truncated++
 			t.finish(sk, st)
-			return
+			return true
 		}
 		buf.hsBuf = append(buf.hsBuf, rec.fragment...)
 	}
 
-	msgs, hsRest, ok := drainHandshake(buf.hsBuf)
-	if !ok {
-		t.Desynced++
-		t.finish(sk, st)
-		return
-	}
+	msgs, hsRest, handshakeOK := drainHandshake(buf.hsBuf)
 	buf.hsBuf = hsRest
 
 	for _, msg := range msgs {
 		t.apply(st.session, key, msg)
 	}
 
+	if !recordsOK || !handshakeOK {
+		t.Desynced++
+		t.finish(sk, st)
+		return true
+	}
 	if handshakeOver {
 		t.finish(sk, st)
+		return true
 	}
+	return false
 }
 
 // apply folds one handshake message into the session.
@@ -691,6 +838,12 @@ func (t *Tracker) finish(sk sessionKey, st *sessionState) {
 		return
 	}
 	st.done = true
+	for _, buf := range st.dirs {
+		if len(buf.pending) > 0 {
+			t.Gapped++
+			break
+		}
+	}
 	st.dirs = nil
 	delete(t.sessions, sk)
 	if st.session.HasContent() && t.onComplete != nil {
@@ -709,6 +862,20 @@ func (t *Tracker) Flush() {
 // TLS handshake record header.
 func looksLikeHandshakeRecord(payload []byte) bool {
 	return len(payload) >= 5 && payload[0] == recordHandshake && payload[1] == 0x03 && payload[2] <= 0x04
+}
+
+// looksLikeRecordHeader reports whether a payload starts with a plausible TLS
+// record header of any content type — what the first segment of either
+// direction of a TLS stream begins with.
+func looksLikeRecordHeader(payload []byte) bool {
+	if len(payload) < 5 || payload[1] != 0x03 || payload[2] > 0x04 {
+		return false
+	}
+	switch payload[0] {
+	case recordChangeCipherSpec, recordAlert, recordHandshake, recordApplicationData:
+		return true
+	}
+	return false
 }
 
 // LimitsDescription renders the configured caps for logging.

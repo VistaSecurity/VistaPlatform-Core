@@ -569,8 +569,10 @@ classes:
     parent: hardware
     label: IoT device
     description: >-
-      A network-attached embedded device that is not OT — cameras, sensors,
-      badge readers, building controls.
+      A network-attached embedded device of the enterprise and building
+      estate that is not OT — cameras, sensors, badge readers, building
+      controls. Consumer devices (TVs, speakers, consoles, smart-home gear)
+      are smart devices.
     icon: Cctv
     cmdb_ci_type: null
     cyclonedx_type: device
@@ -586,6 +588,27 @@ classes:
         device_category:
           type: string
           description: What the thing is, e.g. camera, badge reader, thermostat.
+
+  - key: smart_device
+    parent: hardware
+    label: Smart device
+    description: >-
+      A consumer or office connected device — a TV or streaming player, a
+      smart speaker, a doorbell, plug, bulb or lock, a game console, an
+      appliance. Not an IoT device, which is the enterprise and building
+      embedded estate: cameras, sensors, badge readers, controls.
+    icon: TvMinimal
+    cmdb_ci_type: null
+    cyclonedx_type: device
+    legacy_asset_type: appliance
+    identifier_precedence:
+      [serial_number, cmdb_sys_id, mac_address, hostname, ip_address]
+    attribute_schema:
+      type: object
+      properties:
+        device_category:
+          type: string
+          description: What the thing is, e.g. tv, speaker, doorbell, console, appliance.
 
   - key: bmc
     parent: hardware

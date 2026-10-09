@@ -75,11 +75,19 @@ describe('install steps', () => {
     expect(windows).toContain('-Key KEY-1');
   });
 
-  it('download the device agent for the platform release', () => {
+  it('download the device agent and its installer for the platform release, then install', () => {
     const { linux, windows } = buildDeviceAgentCommands('KEY-2', 'v4.0.0');
     expect(linux).toContain(`curl -fLo device-agent ${RELEASE}/download/v4.0.0/device-agent-linux-amd64-v4.0.0`);
-    expect(linux).toContain('registration_key: KEY-2');
+    expect(linux).toContain('/v4.0.0/scripts/install-device-agent.sh');
+    expect(linux).toContain('sudo bash install-device-agent.sh --url');
+    expect(linux).toContain('--key KEY-2');
+    // The hand-written config + `-register` steps ran the agent as the
+    // operator's own user against a root-owned data path: registration spent
+    // the key and the certificate could not be saved.
+    expect(linux).not.toContain('-register');
+    expect(linux).not.toContain('registration_key:');
     expect(windows).toContain('device-agent-windows-amd64-v4.0.0.exe');
+    expect(windows).toContain('registration_key: KEY-2');
   });
 
   it('never invent a version when the platform has none', () => {

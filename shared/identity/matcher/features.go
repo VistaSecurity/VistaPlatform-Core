@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
-	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
+	"github.com/vistasecurity/vistaplatform/shared/ouiregistry"
 )
 
 // Side is one half of a comparison: an observation, or an existing asset.
@@ -185,7 +185,7 @@ const (
 	// meaning what the label says.
 
 	// FeatureVendorOUIMatch / FeatureVendorOUIConflict — the manufacturer
-	// behind each side's MAC addresses (the IEEE OUI, [hostobs.VendorForMAC]),
+	// behind each side's MAC addresses (the IEEE OUI, [ouiregistry.VendorForMAC]),
 	// falling back to the side's `vendor` attribute when none of its MACs has a
 	// registered prefix. Match when the two sides share a vendor, conflict when
 	// both are known and share none. Expected: NO SIGN — like vendor_match, a
@@ -548,7 +548,7 @@ func hardwareVendors(s Side) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, mac := range values(s.Identifiers, KindMACAddress) {
-		if k := vendorKey(hostobs.VendorForMAC(mac)); k != "" && !seen[k] {
+		if k := vendorKey(ouiregistry.VendorForMAC(mac)); k != "" && !seen[k] {
 			seen[k] = true
 			out = append(out, k)
 		}

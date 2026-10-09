@@ -504,8 +504,8 @@ judgement about the value), and caps that copy's confidence at 0.3.
 Some identity evidence spells another identifier. An EUI-64 IPv6 address is
 built from the MAC of the interface that holds it; some vendors use the
 interface MAC as the serial. `shared/identity/derive` recovers that MAC
-(`MACFromEUI64`, `MACFromSerialRegistered` — the latter only for an OUI the
-curated table in `standards/oui-vendors.csv` lists), and the INTAKES emit it —
+(`MACFromEUI64`, `MACFromSerialRegistered` — the latter only for a prefix the
+IEEE registry in `shared/ouiregistry` assigns to a manufacturer), and the INTAKES emit it —
 the engine never invents an identifier:
 
 | Intake | Derives | Only when |
@@ -949,6 +949,38 @@ it still decides, for that asset only.
   inferred; `address_assignment` is replaced only by a non-NULL value from a
   source at least as strong, so a pin is never lost to a sensor or to an agent's
   "dhcp" against a declaration. Contract: `identitytest.RunPinnedAddressContract`.
+
+## Lease-fresh addresses (ADR-0002 D3 erratum, 2026-10-08)
+
+The platform's own statement about a lease, beside the person's pin: an
+`ip_address` in a dynamic scope decides a match for its single owner when that
+owner's copy was **device-confirmed** at the address within the lease window
+(`leasefresh.go`). Without it, every SSH or TLS probe of a host the sensor had
+just confirmed by MAC was held as "Matches an asset" for a person to link.
+
+- **What confirms.** A resolution decided by an OBSERVED (not derived)
+  device-binding kind, from a direct, non-relayed measurement, stamps
+  `Identifier.DeviceConfirmedAt` on the addresses it attaches — on the matched
+  path (`deviceDecided`) and at creation (`deviceMet`). A name-decided match
+  stamps nothing. The stores keep the newest value and never move it back
+  (`asset_identifiers.device_confirmed_at`; `UpsertIdentifier` and the SQL
+  upsert's `GREATEST`), and `LoadSummaries` reports it.
+- **What the engine reads.** The OWNER's stored confirmation, once per
+  observation (`Engine.leaseFreshAddresses`, beside `pinnedAddresses`), for a
+  sighting that is itself a direct measurement, when exactly one linkable
+  asset owns the address, that asset carries a device binding of its own, and
+  the sighting carries no MAC the owner does not hold. The window is measured
+  from the sighting's `ObservedAt`; `Config.LeaseWindow` sets it (zero =
+  `DefaultLeaseWindow`, 24 h; negative = off).
+- **A fallback, and not a pin.** In the precedence walk a lease-fresh address
+  decides only when nothing ranked above it did, and never contradicts. Only the
+  VOTE sites read it — `kindVotes`, `leaseOnlyLink` and `AssessAdmission`,
+  through `Engine.addressDecides` — while the MOVE sites (the lease rule,
+  floating and claimed addresses) keep reading `Engine.dynamicAddress` and see
+  a lease, so "the address follows the MAC" still moves it. The walk's guards
+  (`interfaceBindingConflict`, `classifyDrift`) still apply to a match the
+  address decided. Contract: `identitytest.RunLeaseFreshAddressContract`;
+  rules: `leasefresh_test.go`.
 
 ## Claimed addresses (#1973)
 

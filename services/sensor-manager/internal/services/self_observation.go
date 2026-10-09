@@ -43,6 +43,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
+	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
 // selfObservationInterval bounds how often an UNCHANGED self-observation is
@@ -153,15 +154,17 @@ func selfHostObservation(sensorID uuid.UUID, platform, profile string, host *mod
 		ho.FQDNs = append(ho.FQDNs, fqdn)
 	}
 
-	// hostobs.HostObservation carries a single MAC (see its file header); a
-	// host with several physical NICs is identified fully by AgentID
-	// regardless, so picking one is best-effort SECONDARY evidence (it is what
-	// lets an existing MAC/IP-only unknown_host asset be retro-matched), not
-	// the primary identity. The interface flagged primary — the one the
-	// sensor reaches the control plane from — wins; otherwise the first
-	// interface that reported a usable MAC.
+	interfaces := selfIdentityInterfaces(host)
+
+	// MAC is the interface flagged primary — the one the sensor reaches the
+	// control plane from — else the first that reported a usable MAC. Every
+	// OTHER usable MAC rides in OtherMACs: a host with an Ethernet and a Wi-Fi
+	// NIC is one device, but passive capture meets each NIC on its own segment
+	// and records two assets, and this report is the only evidence that they
+	// share a chassis. The identification engine opens a merge proposal when
+	// another asset holds one of them (shared/identity, installation_claims.go).
 	var mac string
-	for _, iface := range host.Interfaces {
+	for _, iface := range interfaces {
 		if iface.MAC == "" {
 			continue
 		}
@@ -174,8 +177,13 @@ func selfHostObservation(sensorID uuid.UUID, platform, profile string, host *mod
 		}
 	}
 	ho.MAC = mac
+	for _, iface := range interfaces {
+		if iface.MAC != "" && iface.MAC != mac {
+			ho.OtherMACs = append(ho.OtherMACs, iface.MAC)
+		}
+	}
 
-	for _, iface := range host.Interfaces {
+	for _, iface := range interfaces {
 		addr, err := netip.ParseAddr(strings.TrimSpace(iface.Address))
 		if err != nil || !addr.IsValid() {
 			continue
@@ -260,11 +268,48 @@ func selfObservationHash(host *models.HostIdentity) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// selfInterfaceFingerprint covers only the interfaces that are identity
+// (selfIdentityInterfaces): a container bridge appearing or disappearing does
+// not change who the host is, and must not re-send the report. On a CI host
+// that was every few minutes rather than hourly.
 func selfInterfaceFingerprint(host *models.HostIdentity) string {
-	addrs := make([]string, 0, len(host.Interfaces))
-	for _, iface := range host.Interfaces {
+	interfaces := selfIdentityInterfaces(host)
+	addrs := make([]string, 0, len(interfaces))
+	for _, iface := range interfaces {
 		addrs = append(addrs, iface.Address+"/"+iface.MAC)
 	}
 	sort.Strings(addrs)
 	return strings.Join(addrs, ",")
+}
+
+// selfIdentityInterfaces is the subset of the host's interfaces whose
+// addresses and MACs say which host this is: every interface except the ones
+// the host created for containers, VMs, overlays and tunnels
+// (hostobs.IsVirtualInterfaceName — the same rule the device agent's host
+// inventory applies).
+//
+// A docker0 address is 172.17.0.1 on every Docker host. Recorded as an
+// identifier, it made a second Docker host running a sensor a conflict with
+// the first, and a merge proposal nobody should accept; Kubernetes and CI
+// bridges added more of the same, and churned.
+//
+// The interface the sensor reaches the control plane from is NEVER dropped,
+// whatever its name: it is by definition how the host is reached, and on a
+// Hyper-V host with an external virtual switch the real LAN address lives on
+// `vEthernet (...)`.
+//
+// The heartbeat's own interface list (agent_addresses, sensor routing) is
+// untouched: which networks a sensor can reach is a different question from
+// which host it is.
+func selfIdentityInterfaces(host *models.HostIdentity) []sharednetwork.InterfaceAddress {
+	out := make([]sharednetwork.InterfaceAddress, 0, len(host.Interfaces))
+	for _, iface := range host.Interfaces {
+		// An interface reported WITHOUT a name (an older sensor) is kept, as
+		// it always was: nothing says it is virtual.
+		if !iface.IsPrimary && strings.TrimSpace(iface.InterfaceName) != "" && hostobs.IsVirtualInterfaceName(iface.InterfaceName) {
+			continue
+		}
+		out = append(out, iface)
+	}
+	return out
 }

@@ -92,8 +92,10 @@ func AssessAdmission(obs Observation) AdmissionDecision {
 				hasAddress = true
 				// A pinned address (pinned.go) is not a lease whatever
 				// its segment says, so it binds the sighting like any static
-				// address does.
-				dynamic = dynamic || (obs.DynamicScopes[id.Scope] && !obs.addressPinned(id))
+				// address does. A lease-fresh address (leasefresh.go) is a
+				// lease the platform confirmed a device at within the window,
+				// and binds the sighting for as long as that holds.
+				dynamic = dynamic || (obs.DynamicScopes[id.Scope] && !obs.addressPinned(id) && !obs.addressLeaseFresh(id))
 			}
 		}
 	}

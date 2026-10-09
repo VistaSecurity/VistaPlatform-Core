@@ -15,16 +15,17 @@
 //     take raw payload bytes plus a little already-parsed frame context, never
 //     a gopacket Packet.
 //   - No platform coupling. No database pool, no NATS, no tenant context.
-//   - No network access. Vendor lookup is a table compiled into the binary
-//     (oui_gen.go, generated from standards/oui-vendors.csv); there is no OUI
-//     web service call, at build time or at run time.
+//   - No network access, and no OUI lookup. The manufacturer a MAC prefix is
+//     registered to (hw.vendor) is resolved on the platform at ingestion, from
+//     the full IEEE registry in shared/ouiregistry, which the sensor must not
+//     import (make sensor-no-ouiregistry-test).
 //
 // # What is collected, and what deliberately is not
 //
 // We record host PRESENCE and NAMES: a MAC, the addresses bound to it, the
-// names it answers to, the vendor its MAC prefix is registered to, and — for a
-// switch or a phone that advertises itself over LLDP or CDP — that device's own
-// name and model. That is the identity material an inventory needs.
+// names it answers to, and — for a switch or a phone that advertises itself
+// over LLDP or CDP — that device's own name and model. The vendor its MAC
+// prefix is registered to is resolved from the MAC by the platform. That is the identity material an inventory needs.
 //
 // We do NOT record an adjacency. A captured advertisement proves the advertiser
 // exists; it does not prove it is attached to the capture point, which is

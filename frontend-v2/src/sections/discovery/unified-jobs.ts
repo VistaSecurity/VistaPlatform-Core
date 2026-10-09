@@ -11,6 +11,7 @@
 // the same pattern kit.ts and scan-job-state.ts already use here.
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { jobMeta, jobTypeLabel, relTime, durationFmt } from './kit';
+import { interrogationOutcome } from './job-outcome';
 import { type ScanJob, dispatchTimeline, executorLabel, scanJobState, type TimelineStep } from './scan-job-state';
 import { depthLabel, isJobLive, planJobState, progressLine, progressPercent } from './scan-plan-view';
 
@@ -73,6 +74,8 @@ export interface UnifiedJobRow {
   statusLabel: string;
   statusColor: string;
   statusDetail?: string;
+  /** A failed run's own error text, shown in the danger colour under the status. */
+  errorDetail?: string;
   bucket: StatusBucket;
   /** Device/integration name (interrogation) or the kind label (discovery/automatic) — the Source column. */
   source: string;
@@ -110,6 +113,8 @@ export function interrogationRow(job: InterrogationJob): UnifiedJobRow {
     executor: job.executor || '—',
     statusLabel: m.l,
     statusColor: m.c,
+    statusDetail: interrogationOutcome(job),
+    errorDetail: statusBucket(job.status) === 'failed' && job.error_message ? job.error_message : undefined,
     bucket: statusBucket(job.status),
     source: job.cloud_provider || job.device_type || (job.integration_name ? 'cloud' : '—'),
     found: job.assets_discovered ?? '—',

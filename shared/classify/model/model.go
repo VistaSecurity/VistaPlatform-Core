@@ -14,8 +14,10 @@
 // A multinomial logistic regression over hashed categorical features,
 // trained offline, shipped as weights.json embedded in the binary, evaluated in
 // pure Go. No runtime, no network, no ONNX, no dependency outside the standard
-// library, shared/assetclass and shared/classify — which is what lets the
-// sensor and the device agent, which cross-compile with CGO off, carry it.
+// library, shared/assetclass, shared/classify and shared/ouiregistry (the IEEE
+// registry the vendor feature reads). CGO-free, so the device agent can carry
+// it; the sensor does not, because it must never import shared/ouiregistry
+// (vendor resolution happens on the platform — `make sensor-no-ouiregistry-test`).
 //
 // Three properties, the same three that made shared/identity/matcher a logistic
 // regression rather than something with more capacity:
@@ -47,6 +49,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/vistasecurity/vistaplatform/shared/ouiregistry"
 )
 
 // weightsJSON is the trained model, compiled into the binary.
@@ -160,63 +164,55 @@ type ClassCalibration struct {
 }
 
 // FeatureSchemaID fingerprints the feature space: the hash widths, the port
-// list, the capability vocabularies and the two class vocabularies.
+// list, the capability vocabularies, the two class vocabularies, and the OUI
+// registry the vendor feature is computed from.
 //
 // It is what makes a sparse weights file safe. shared/identity/matcher can
 // demand every weight be present because it has twenty; here a missing weight
 // is the normal case, so the thing that has to be pinned is the SHAPE — and a
-// weights file trained when the OUI table named a different set of vendors, or
-// when a width was 64 rather than 32, refers to buckets this build computes
-// differently. It would load, score, and be wrong in a way nothing could see.
+// weights file trained when the registry resolved MACs to a different set of
+// vendors, or when a width was 64 rather than 32, refers to buckets this build
+// computes differently. It would load, score, and be wrong in a way nothing
+// could see.
 func FeatureSchemaID() string {
 	deriveFromRules()
 	var b strings.Builder
-	fmt.Fprintf(&b, "v1;oui=%d;sysoid=%d,%d;pid=%d,%d;banner=%d;mdns=%d;cloud=%d;ports=%d;lldp=%d;cdp=%d;rules=%d;targets=%d",
+	fmt.Fprintf(&b, "v2;oui=%d;sysoid=%d,%d;pid=%d,%d;banner=%d;mdns=%d;cloud=%d;ports=%d;lldp=%d;cdp=%d;rules=%d;targets=%d",
 		OUIBuckets, SysOIDBuckets, SysOIDSubBuckets, PIDBuckets, PIDTokenBuckets,
 		BannerBuckets, MDNSBuckets, CloudBuckets, len(WellKnownPorts),
 		len(lldpCapabilities), len(cdpCapabilities), len(derivedClasses), len(derivedTargets))
-	// The OUI table's CONTENTS, as a hash of its sorted prefix→vendor pairs.
+	// The registry's CONTENTS, not a count of anything.
 	//
-	// It was the row COUNT, and a count is blind to the change that actually
-	// moves buckets. `NamespaceOUI` hashes the VENDOR NAME, so renaming
-	// "Cisco Systems" to "Cisco Systems, Inc." moves every Cisco device to a
-	// different bucket while `len(derivedOUI)` does not move at all — and a
-	// count is equally blind to the commoner shape of a catalogue edit, one
-	// vendor dropped and another added in the same release. Either way the
-	// weights file still loads, still scores, and is wrong about every device
-	// of that vendor with nothing anywhere saying so. That is the exact failure
-	// the fingerprint exists to make loud, so it hashes what it is protecting.
-	fmt.Fprintf(&b, ";ouirows=%d;ouihash=%s", len(derivedOUI), ouiContentHash())
+	// `NamespaceOUI` hashes the canonical VENDOR NAME the registry resolves a
+	// MAC to, so the bucket a device lands in moves when any prefix's resolved
+	// vendor changes — a refresh of the IEEE snapshot, a registrant mapped to a
+	// different canonical name, a pin. SnapshotID hashes every embedded
+	// prefix->vendor row and changes on exactly those. The canonical-name SET is
+	// hashed beside it because it decides a second thing the rows do not show:
+	// whether a vendor sets its own bucket or the shared uncatalogued feature (a
+	// registrant canonicalised under its own spelling leaves every row
+	// byte-identical). A count was the original fingerprint here and was blind
+	// to a renamed vendor; either way the weights would still load, still
+	// score, and be wrong about every device of that vendor with nothing
+	// anywhere saying so.
+	fmt.Fprintf(&b, ";ouiregistry=%s;ouicanon=%s", ouiregistry.SnapshotID(), hashNames(ouiregistry.CanonicalVendors()))
 	return b.String()
 }
 
-// ouiContentHash is a stable hash of the compiled-in OUI table's contents.
-//
-// Sorted by prefix, so it does not depend on map iteration order, and the pair
-// separator is a byte that cannot occur in either half — a prefix is hex and a
-// vendor name is a vendor name — so "ab" + "cd" and "abc" + "d" cannot collide
-// into the same bytes.
+// hashNames is a stable hash of a set of names: sorted, so it does not depend
+// on the order they arrive in, and NUL-separated, a byte no vendor name
+// contains, so {"ab", "c"} and {"a", "bc"} cannot collide into the same bytes.
 //
 // Truncated to 16 hex characters. The whole digest would make [FeatureSchemaID]
 // unreadable in the error message it exists to print, and 64 bits is far more
-// than an accidental catalogue edit will ever collide on; this is a change
-// detector, not a security boundary — nothing here defends against an attacker
-// choosing vendor names.
-func ouiContentHash() string { return hashOUITable(derivedOUI) }
-
-// hashOUITable is [ouiContentHash] over an explicit table, so the hash can be
-// tested against fabricated tables without reaching into the compiled-in one.
-func hashOUITable(table map[string]string) string {
-	prefixes := make([]string, 0, len(table))
-	for prefix := range table {
-		prefixes = append(prefixes, prefix)
-	}
-	sort.Strings(prefixes)
+// than an accidental edit will ever collide on; this is a change detector, not
+// a security boundary.
+func hashNames(names []string) string {
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
 	h := sha256.New()
-	for _, prefix := range prefixes {
-		h.Write([]byte(prefix))
-		h.Write([]byte{0})
-		h.Write([]byte(table[prefix]))
+	for _, n := range sorted {
+		h.Write([]byte(n))
 		h.Write([]byte{0})
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]

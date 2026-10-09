@@ -9,6 +9,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/classify"
+	"github.com/vistasecurity/vistaplatform/shared/ouiregistry"
 )
 
 // Input is everything the model looks at: the evidence a collector gathered,
@@ -38,16 +39,17 @@ type Input struct {
 //
 // Everything below is a BUILD CONSTANT. The widths, the port list, the
 // capability vocabularies and the two class vocabularies are fixed at compile
-// time and derived from the COMPILED-IN rule table, never from the curated
+// time and derived from the COMPILED-IN rule table and the compiled-in IEEE
+// registry (shared/ouiregistry), never from the curated
 // `classification_rules` rows a platform admin edits.
 //
 // That distinction is load-bearing and easy to get wrong in the opposite
 // direction. The rules' OUTPUT (Input.Rules) comes from the live curated
 // engine, which is right — it is the chain's first stage and an admin's rule
 // must affect it. But the feature SPACE must not: a trained weight for
-// `oui/7` means "whatever vendors hash to bucket 7 in this build", and an admin
-// adding an OUI row that landed in bucket 7 would silently change what a
-// committed weight refers to. A model whose features move under its weights is
+// `oui/7` means "whatever canonical vendors hash to bucket 7 in this build",
+// and if an admin's edit could move a vendor between buckets it would silently
+// change what a committed weight refers to. A model whose features move under its weights is
 // a model nobody can account for.
 
 // Hash widths. Each is a power of two so the modulo is exact and a width change
@@ -56,7 +58,7 @@ type Input struct {
 // # Why hash at all, and what a collision costs
 //
 // The alternative is a one-hot over every value the catalogue can produce:
-// roughly five hundred OUI vendors, every model prefix, every banner token. A
+// some hundred and fifty canonical OUI vendors, every model prefix, every banner token. A
 // feature NAME is part of the weights file, so that space would have to be
 // enumerated in the schema whether or not any of it was ever observed, and the
 // hashing trick collapses it to a fixed, stated width.
@@ -65,7 +67,7 @@ type Input struct {
 // tell them apart. The widths are set generously — the file is SPARSE, so a
 // bucket nothing ever sets costs nothing at all, and widening is therefore free
 // in everything except the schema fingerprint. At 256 OUI buckets the whole
-// five-hundred-vendor table averages two vendors per bucket, and the handful
+// canonical-vendor list averages well under one vendor per bucket, and the handful
 // that appear in any one tenant's population collide far less often than that.
 //
 // What makes a collision survivable when it does happen is that no bucket
@@ -100,16 +102,26 @@ const (
 	// could not decide, and those inputs are not a random sample of anything.
 	FeatureBias = "bias"
 
-	// NamespaceOUI is the manufacturer the MAC's 24-bit assignment belongs to,
-	// per the compiled-in OUI table, hashed. The VENDOR and not the prefix: two
-	// assignments held by one manufacturer are one fact, and hashing the hex
-	// would scatter Cisco's sixty prefixes across sixty buckets.
+	// NamespaceOUI is the CANONICAL manufacturer the IEEE registry
+	// (shared/ouiregistry) resolves the MAC to, hashed. The VENDOR and not the
+	// prefix: two assignments held by one manufacturer are one fact, and
+	// hashing the hex would scatter Cisco's thousand-odd prefixes across the
+	// whole width.
 	NamespaceOUI = "oui"
 
-	// FeatureOUIUnknown is a MAC whose assignment the table does not name. It
-	// is a feature rather than an absence because "a manufacturer we have never
-	// catalogued" is evidence — it skews away from the enterprise classes the
-	// catalogue is thickest in.
+	// FeatureOUIUncatalogued is a MAC the registry DOES attribute, to a
+	// registrant standards/oui/vendors.yaml does not canonicalise. One feature
+	// for all of them, deliberately: a raw registrant string is not stable
+	// across registry refreshes (the IEEE respells registrants), so bucketing
+	// on it would let a refresh move a device between buckets — and "a
+	// manufacturer outside the curated list" is itself the evidence, skewing
+	// away from the enterprise classes the curated list is thickest in.
+	FeatureOUIUncatalogued = "oui_uncatalogued"
+
+	// FeatureOUIUnknown is a well-formed MAC the registry does not attribute at
+	// all — unassigned, a Registration-Authority or "Private" block, or a
+	// randomised locally-administered address. A feature rather than an
+	// absence, because a randomised address is what a phone or laptop presents.
 	FeatureOUIUnknown = "oui_unknown"
 
 	// NamespaceSysOID is the IANA private-enterprise number from the SNMP
@@ -268,7 +280,9 @@ func (v Vector) Names() []string {
 //
 // # What cannot reach the model
 //
-// Not the MAC — only which manufacturer its 24-bit assignment belongs to.
+// Not the MAC — only which canonical manufacturer the IEEE registry attributes
+// it to, or that it is attributed to someone outside the curated list, or to
+// nobody.
 // Not a hostname or an address: [classify.ClassifyInput] carries neither, and
 // that is not an accident of this function, it is the shape of the struct.
 // Not a serial number, a credential or a key: none is an input to
@@ -282,21 +296,27 @@ func Features(in Input) Vector {
 	v := newVector()
 	v.set(FeatureBias, "", 1)
 
-	table := ouiTable()
-	seenOUI := map[string]bool{}
 	for _, mac := range in.Facts.MACs {
-		oui := ouiOf(mac)
-		if oui == "" || seenOUI[oui] {
+		if ouiOf(mac) == "" {
+			// Not a MAC at all: no evidence either way.
 			continue
 		}
-		seenOUI[oui] = true
-		vendor, known := table[oui]
-		if !known {
-			v.set(FeatureOUIUnknown, "the MAC prefix is not one the vendor table names", 1)
-			continue
+		entry, found := ouiregistry.Lookup(mac)
+		switch {
+		case !found:
+			v.set(FeatureOUIUnknown, "the MAC prefix is not one the IEEE registry attributes", 1)
+		case entry.Canonical:
+			// A canonical name is a curated manufacturer name, not an
+			// identifier, so the label may quote it; the feature NAME is the
+			// bucket hash.
+			v.set(bucket(NamespaceOUI, entry.Vendor, OUIBuckets),
+				"the MAC prefix is registered to "+entry.Vendor, 1)
+		default:
+			// The raw registrant is NOT quoted: it is an uncurated string,
+			// and the feature it sets is the shared uncatalogued one.
+			v.set(FeatureOUIUncatalogued,
+				"the MAC prefix is registered to a manufacturer outside the curated vendor list", 1)
 		}
-		v.set(bucket(NamespaceOUI, vendor, OUIBuckets),
-			"the MAC prefix is registered to "+vendor, 1)
 	}
 
 	if ent, sub := enterpriseArcs(in.Facts.SysObjectID); ent != "" {
@@ -768,19 +788,14 @@ func isServiceType(s string) bool {
 
 var (
 	derivedOnce    sync.Once
-	derivedOUI     map[string]string
 	derivedClasses []string
 	derivedTargets []string
 )
 
 func deriveFromRules() {
 	derivedOnce.Do(func() {
-		derivedOUI = map[string]string{}
 		classSet := map[string]bool{}
 		for _, r := range classify.Default().Rules() {
-			if r.Kind == classify.KindOUI && r.Vendor != "" {
-				derivedOUI[r.Pattern] = r.Vendor
-			}
 			if r.Class != "" {
 				classSet[r.Class] = true
 			}
@@ -821,12 +836,6 @@ func isTargetClass(key string) bool {
 	return len(assetclass.Children(key)) == 0
 }
 
-// ouiTable is the compiled-in OUI-to-vendor map.
-func ouiTable() map[string]string {
-	deriveFromRules()
-	return derivedOUI
-}
-
 // RuleClassVocabulary is every class the compiled-in rules can name, sorted. It
 // is the domain of the [NamespaceRuleTop] and [NamespaceRuleTied] features.
 func RuleClassVocabulary() []string {
@@ -847,7 +856,7 @@ func TargetClasses() []string {
 // trained file is a namespace that was never trained.
 func FeatureNames() []string {
 	deriveFromRules()
-	out := []string{FeatureBias, FeatureOUIUnknown, FeatureRuleConfidence, FeatureRuleConflict, FeatureRuleSilent}
+	out := []string{FeatureBias, FeatureOUIUnknown, FeatureOUIUncatalogued, FeatureRuleConfidence, FeatureRuleConflict, FeatureRuleSilent}
 	add := func(namespace string, width int) {
 		for i := range width {
 			out = append(out, namespace+"/"+strconv.Itoa(i))

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { clients } from '../../lib/clients';
-import { Icon, LevelBar, LevelDot, MiniBar, PercentageGauge, proportionPercent, LEVEL_MIN } from '../../components/ui';
+import { Icon, LevelBar, LevelDot, MiniBar, PercentageGauge, RiskDonut, proportionPercent, LEVEL_MIN, type DonutSegment } from '../../components/ui';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import {
   DASHBOARD_CRITICAL_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_UNSCORED_ASSETS_ROUTE,
@@ -115,6 +115,21 @@ export function DashboardPage() {
   const crypto = s?.total_crypto ?? 0;
   const unknown = s?.unknown_risk ?? 0;
   const pctHigh = proportionPercent(high, total);
+  // The posture ring is a part-to-whole of the five mutually exclusive bands the
+  // risk summary returns. "Healthy" is Low + assessed-clean ONLY: an asset nobody
+  // has scored is not healthy, so a never-scanned tenant reads 0% healthy with a
+  // grey ring, never a green one (the summary exists to keep those two apart).
+  const medium = s?.medium_risk ?? 0;
+  const low = s?.low_risk ?? 0;
+  const clean = s?.informational ?? 0;
+  const pctHealthy = proportionPercent(low + clean, total);
+  const postureSegments: DonutSegment[] = [
+    { key: 'high', label: `High risk (≥ ${LEVEL_MIN.High})`, count: high, color: RED, onClick: () => { void nav(DASHBOARD_HIGH_RISK_ASSETS_ROUTE); } },
+    { key: 'medium', label: 'Medium', count: medium, color: 'var(--warn)' },
+    { key: 'low', label: 'Low', count: low, color: BLUE },
+    { key: 'clean', label: 'Assessed, clean', count: clean, color: GREEN },
+    { key: 'unassessed', label: 'Not assessed', count: unknown, color: 'var(--neutral)', muted: true, onClick: () => { void nav(DASHBOARD_UNSCORED_ASSETS_ROUTE); } },
+  ];
   // The dashboard's PQC number is ALWAYS config adoption (% of crypto configs on PQC
   // algorithms, /pqc/progress) so the % and the config counts beside it are one metric.
   // It must never swap to the PQC Readiness framework's severity-weighted score — that
@@ -153,12 +168,12 @@ export function DashboardPage() {
   const cx = connections.data;
   const extTotal = cx?.total ?? 0;
   const extHosts = cx?.source_hosts ?? 0;
-  const extStats: [string, number][] = [
-    ['Weak crypto', cx?.weak_crypto ?? 0],
-    ['Reassessment required', cx?.reassessment_required ?? 0],
-    ['Legacy TLS', cx?.legacy_tls ?? 0],
-    ['Expired certs', cx?.expired_certs ?? 0],
-    ['PQC-resistant', cx?.pqc_resistant ?? 0],
+  const extStats: [string, number, string][] = [
+    ['Weak crypto', cx?.weak_crypto ?? 0, RED],
+    ['Legacy TLS', cx?.legacy_tls ?? 0, ORANGE],
+    ['Expired certs', cx?.expired_certs ?? 0, RED],
+    ['Reassessment required', cx?.reassessment_required ?? 0, 'var(--warn)'],
+    ['PQC-resistant', cx?.pqc_resistant ?? 0, GREEN],
   ];
 
   const tk = tickets.data;
@@ -209,25 +224,20 @@ export function DashboardPage() {
           {/* score block */}
           <div style={{ flex: '0 0 340px', minWidth: 300, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
             <div className="eyebrow-app" style={{ marginBottom: 9 }}>Cryptographic Posture</div>
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16 }}>
-              <div style={{ position: 'relative', flex: 'none', width: 92, height: 92, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <div className="hero-glow" style={{ position: 'absolute', inset: '-30%', background: 'var(--accent-glow)', opacity: 0.8 }} />
-                <div style={{ position: 'relative', width: 84, height: 84, borderRadius: 22, background: 'var(--accent-gradient)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 6px 14px rgba(0,0,0,.5)' }}>
-                  <Icon name="shield" size={42} style={{ color: 'var(--accent-fg)' }} />
-                </div>
-              </div>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                  <span className="accent-text" data-testid="dashboard-high-risk-percent" style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 76, lineHeight: 0.9, letterSpacing: '-.03em' }}>{risk.isLoading ? '…' : pctHigh === null ? '—' : `${pctHigh}%`}</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginTop: 10 }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--accent)' }}>
-                    {pctHigh === null ? 'No monitored assets' : `${high.toLocaleString()} of ${total.toLocaleString()} monitored assets`}
-                  </span>
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 4 }}>assets at high risk (risk score ≥ {LEVEL_MIN.High})</div>
-              </div>
-            </div>
+            {risk.isLoading ? (
+              <div style={{ height: 132, display: 'flex', alignItems: 'center', color: 'var(--app-t3)' }}>…</div>
+            ) : (
+              <RiskDonut
+                segments={postureSegments}
+                centerValue={pctHealthy === null ? '—' : `${pctHealthy}%`}
+                centerLabel={pctHealthy === null ? 'No monitored assets' : 'low risk or clean'}
+                ariaLabel={pctHealthy === null ? 'No monitored assets' : `${pctHealthy}% of monitored assets are low risk or assessed clean; ${high.toLocaleString()} high risk, ${unknown.toLocaleString()} not assessed`}
+              >
+                {(seg) => seg.key === 'high' && pctHigh !== null ? (
+                  <span className="mono" data-testid="dashboard-high-risk-percent" style={{ fontSize: 10.5, color: 'var(--app-t3)', minWidth: 30, textAlign: 'right' }}>{pctHigh}%</span>
+                ) : null}
+              </RiskDonut>
+            )}
             <p style={{ margin: '20px 0 0', fontSize: 14.5, lineHeight: 1.5, color: 'var(--app-t2)', maxWidth: 330 }}>
               <strong style={{ color: 'var(--app-t1)', fontWeight: 600 }}>{crit.toLocaleString()} critical</strong> findings open across{' '}
               <strong style={{ color: 'var(--app-t1)', fontWeight: 600 }}>{total.toLocaleString()}</strong> monitored assets.
@@ -263,9 +273,9 @@ export function DashboardPage() {
             )}
           </div>
 
-          {/* third-party connections — external exposure, styled to mirror the posture block (lens=connections) */}
+          {/* observed external connections — third-party traffic the sensors saw (lens=connections) */}
           <div onClick={() => nav('/inventory?lens=connections')} style={{ flex: '0 0 300px', minWidth: 240, display: 'flex', flexDirection: 'column', justifyContent: 'center', cursor: 'pointer' }}>
-            <div className="eyebrow-app" style={{ marginBottom: 9 }}>External Exposure</div>
+            <div className="eyebrow-app" style={{ marginBottom: 9 }}>Observed External Connections</div>
             {connections.isError ? (
               <p style={{ margin: 0, fontSize: 12.5, color: 'var(--app-t3)' }}>Couldn't load external connections.</p>
             ) : (
@@ -277,11 +287,17 @@ export function DashboardPage() {
                   observed 3rd-party connections from{' '}
                   <strong style={{ color: 'var(--app-t1)', fontWeight: 600 }}>{extHosts.toLocaleString()}</strong> internal {extHosts === 1 ? 'host' : 'hosts'}.
                 </p>
-                <div style={{ display: 'flex', gap: 22, marginTop: 20, flexWrap: 'wrap' }}>
-                  {extStats.map(([k, v]) => (
-                    <div key={k}>
-                      <div className="mono" style={{ fontSize: 19, fontWeight: 700, color: 'var(--app-t1)', letterSpacing: '-.01em' }}>{connections.isLoading ? '…' : v.toLocaleString()}</div>
-                      <div className="eyebrow-app" style={{ marginTop: 3 }}>{k}</div>
+                {/* Bars, not a donut: one connection can be weak AND on legacy TLS AND
+                    expired, so these overlap and do not sum to the total. Each bar is
+                    "how many of the N connections", on one shared scale. */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginTop: 18 }} data-testid="external-connections-bars">
+                  {extStats.map(([k, v, color]) => (
+                    <div key={k} style={{ display: 'flex', alignItems: 'center', gap: 8 }} title={`${v.toLocaleString()} of ${extTotal.toLocaleString()} connections`}>
+                      <span style={{ fontSize: 11.5, color: 'var(--app-t2)', width: 118, flex: 'none', whiteSpace: 'nowrap' }}>{k}</span>
+                      <span style={{ flex: 1, height: 8, borderRadius: 4, background: 'var(--app-track)', overflow: 'hidden' }}>
+                        <span style={{ display: 'block', height: '100%', borderRadius: 4, background: color, width: `${extTotal > 0 ? Math.min(100, (v / extTotal) * 100) : 0}%`, minWidth: v > 0 ? 3 : 0 }} />
+                      </span>
+                      <span className="mono" style={{ fontSize: 12, fontWeight: 700, color: 'var(--app-t1)', width: 34, textAlign: 'right' }}>{connections.isLoading ? '…' : v.toLocaleString()}</span>
                     </div>
                   ))}
                 </div>

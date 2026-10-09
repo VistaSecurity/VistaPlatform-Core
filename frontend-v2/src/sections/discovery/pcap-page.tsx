@@ -18,6 +18,23 @@ function sizeFmt(bytes?: number | null): string {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
+// A capture whose snapshot length cut its packets short keeps the headers and
+// little else, so its TLS handshakes and certificates cannot be read and the
+// job completes with far fewer discoveries than the traffic it saw. Without
+// this notice the upload looked like a quiet network rather than a capture
+// that could not be read.
+export function truncationNotice(job: {
+  truncated_packet_count?: number | null;
+  packet_count?: number | null;
+  snapshot_length?: number | null;
+}): string | null {
+  const cut = job.truncated_packet_count ?? 0;
+  if (cut <= 0) return null;
+  const of = job.packet_count ? ` of ${job.packet_count.toLocaleString()}` : '';
+  const to = job.snapshot_length ? ` to ${job.snapshot_length} bytes` : '';
+  return `${cut.toLocaleString()}${of} packets were cut short${to} when captured, so TLS handshakes and certificates in them could not be read. Capture full-length packets (for example tcpdump -s 0) and upload again.`;
+}
+
 export function PcapPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -91,6 +108,7 @@ export function PcapPage() {
             </div>
             {jobs.map((j, i) => {
               const m = jobMeta(j.status);
+              const truncated = truncationNotice(j);
               return (
                 <div key={j.id} style={{ padding: '11px 18px', borderTop: i ? '1px solid var(--app-border)' : 'none', display: 'flex', gap: 12, alignItems: 'center' }}>
                   <span style={{ width: 7, height: 7, borderRadius: 50, background: m.c, flex: 'none' }} />
@@ -100,6 +118,7 @@ export function PcapPage() {
                       {[sizeFmt(j.file_size_bytes), j.packet_count ? `${j.packet_count} packets` : null, `${j.discovery_count} discoveries`, relTime(j.created_at)].filter(Boolean).join(' · ')}
                     </div>
                     {j.error_message && <div className="mono" style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 2 }}>✗ {j.error_message}</div>}
+                    {truncated && <div role="note" style={{ fontSize: 11, color: 'var(--warn-strong)', marginTop: 3, lineHeight: 1.45 }}>⚠ {truncated}</div>}
                   </div>
                   <span style={{ fontSize: 11, color: m.c, flex: 'none' }}>{m.l}</span>
                 </div>

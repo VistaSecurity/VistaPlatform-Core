@@ -27,6 +27,20 @@ func u24(v int) []byte {
 	return []byte{byte(v >> 16), byte(v >> 8), byte(v)}
 }
 
+// feedNext feeds payload as the next in-sequence segment of its direction:
+// at the direction's next expected sequence number once one is known, and at
+// an arbitrary initial sequence number otherwise. Tests that are about content
+// rather than ordering use it so they read as a plain byte stream.
+func feedNext(tr *Tracker, key FlowKey, payload []byte, ts time.Time) {
+	seq := uint32(1_000_000)
+	if st, ok := tr.sessions[key.session()]; ok {
+		if buf, ok := st.dirs[key]; ok && buf.anchored {
+			seq = buf.nextSeq
+		}
+	}
+	tr.Feed(key, seq, payload, ts)
+}
+
 // tlsRecord wraps a fragment in a TLS record header.
 func tlsRecord(contentType byte, version uint16, fragment []byte) []byte {
 	out := []byte{contentType}
@@ -232,10 +246,10 @@ func TestClientOfferIsNeverNegotiated(t *testing.T) {
 	ch := clientHelloBody(0x0303, []uint16{0x1301, 0xC02F},
 		clientSupportedVersions(0x0304, 0x0303),
 		sniExtension("api.example.com"))
-	tr.Feed(c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, ch)), ts)
+	feedNext(tr, c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, ch)), ts)
 
 	sh := serverHelloBody(0x0303, 0xC02F) // TLS 1.2-only server
-	tr.Feed(s, tlsRecord(0x16, 0x0303, handshakeMsg(0x02, sh)), ts)
+	feedNext(tr, s, tlsRecord(0x16, 0x0303, handshakeMsg(0x02, sh)), ts)
 	tr.Flush()
 
 	if len(*got) != 1 {
@@ -261,7 +275,7 @@ func TestClientHelloOnlyLeavesVersionUnobserved(t *testing.T) {
 	tr, got := collect(t)
 
 	ch := clientHelloBody(0x0303, []uint16{0x1301}, clientSupportedVersions(0x0304))
-	tr.Feed(c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, ch)), time.Now())
+	feedNext(tr, c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, ch)), time.Now())
 	tr.Flush()
 
 	if len(*got) != 1 {
@@ -347,15 +361,15 @@ func TestCertificateAcrossTwoSegments(t *testing.T) {
 
 	// ClientHello first so the flow starts, then the server flight split
 	// mid-record across two segments.
-	tr.Feed(c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01,
+	feedNext(tr, c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01,
 		clientHelloBody(0x0303, []uint16{0xC02F}, sniExtension("pcap-leaf.example.com")))), ts)
 
 	split := len(rec) / 2
-	tr.Feed(s, rec[:split], ts)
+	feedNext(tr, s, rec[:split], ts)
 	if len(*got) != 0 {
 		t.Fatal("session emitted before the Certificate message was complete")
 	}
-	tr.Feed(s, rec[split:], ts)
+	feedNext(tr, s, rec[split:], ts)
 	tr.Flush()
 
 	if len(*got) != 1 {
@@ -397,13 +411,13 @@ func TestMultipleRecordsInOneSegment(t *testing.T) {
 	tr, got := collect(t)
 	ts := time.Now()
 
-	tr.Feed(c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01,
+	feedNext(tr, c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01,
 		clientHelloBody(0x0303, []uint16{0xC02F}))), ts)
 
 	leaf := selfSignedDER(t, "multi-record.example.com")
 	flight := tlsRecord(0x16, 0x0303, handshakeMsg(0x02, serverHelloBody(0x0303, 0xC02F)))
 	flight = append(flight, tlsRecord(0x16, 0x0303, handshakeMsg(0x0b, certificateBody(leaf)))...)
-	tr.Feed(s, flight, ts)
+	feedNext(tr, s, flight, ts)
 	tr.Flush()
 
 	if len(*got) != 1 {
@@ -463,8 +477,8 @@ func TestServerEndpointIsTheAsset(t *testing.T) {
 	tr, got := collect(t)
 	ts := time.Now()
 
-	tr.Feed(c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, clientHelloBody(0x0303, []uint16{0xC02F}))), ts)
-	tr.Feed(s, tlsRecord(0x16, 0x0303, handshakeMsg(0x02, serverHelloBody(0x0303, 0xC02F))), ts)
+	feedNext(tr, c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, clientHelloBody(0x0303, []uint16{0xC02F}))), ts)
+	feedNext(tr, s, tlsRecord(0x16, 0x0303, handshakeMsg(0x02, serverHelloBody(0x0303, 0xC02F))), ts)
 	tr.Flush()
 
 	sess := (*got)[0]
@@ -482,7 +496,7 @@ func TestServerHelloOnlyStillIdentifiesServer(t *testing.T) {
 	_, s := flow()
 	tr, got := collect(t)
 
-	tr.Feed(s, tlsRecord(0x16, 0x0303, handshakeMsg(0x02, serverHelloBody(0x0303, 0xC02F))), time.Now())
+	feedNext(tr, s, tlsRecord(0x16, 0x0303, handshakeMsg(0x02, serverHelloBody(0x0303, 0xC02F))), time.Now())
 	tr.Flush()
 
 	if len(*got) != 1 {
@@ -501,12 +515,12 @@ func TestApplicationDataCompletesSession(t *testing.T) {
 	tr, got := collect(t)
 	ts := time.Now()
 
-	tr.Feed(c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, clientHelloBody(0x0303, []uint16{0xC02F}))), ts)
-	tr.Feed(s, tlsRecord(0x16, 0x0303, handshakeMsg(0x02, serverHelloBody(0x0303, 0xC02F))), ts)
+	feedNext(tr, c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, clientHelloBody(0x0303, []uint16{0xC02F}))), ts)
+	feedNext(tr, s, tlsRecord(0x16, 0x0303, handshakeMsg(0x02, serverHelloBody(0x0303, 0xC02F))), ts)
 	if len(*got) != 0 {
 		t.Fatal("session emitted too early")
 	}
-	tr.Feed(s, tlsRecord(0x17, 0x0303, []byte{0xde, 0xad, 0xbe, 0xef}), ts)
+	feedNext(tr, s, tlsRecord(0x17, 0x0303, []byte{0xde, 0xad, 0xbe, 0xef}), ts)
 	if len(*got) != 1 {
 		t.Fatalf("session should be emitted once application data starts, got %d", len(*got))
 	}
@@ -563,10 +577,10 @@ func TestFlowByteCapAbandonsRunawayFlow(t *testing.T) {
 	// by a flood of well-framed records: the handshake buffer would grow
 	// without bound if the cap were not enforced.
 	hdr := append([]byte{0x01}, u24(250000)...)
-	tr.Feed(c, tlsRecord(0x16, 0x0303, hdr), ts)
+	feedNext(tr, c, tlsRecord(0x16, 0x0303, hdr), ts)
 	chunk := make([]byte, 16*1024)
 	for i := 0; i < 20; i++ {
-		tr.Feed(c, tlsRecord(0x16, 0x0303, chunk), ts)
+		feedNext(tr, c, tlsRecord(0x16, 0x0303, chunk), ts)
 	}
 	tr.Flush()
 
@@ -593,7 +607,7 @@ func TestSessionCapEvicts(t *testing.T) {
 
 	for i := 0; i < 20; i++ {
 		key := FlowKey{SrcIP: "10.0.0.9", SrcPort: 40000 + i, DstIP: "10.0.0.1", DstPort: 443}
-		tr.Feed(key, partial, ts)
+		feedNext(tr, key, partial, ts)
 	}
 	if len(tr.sessions) > 4 {
 		t.Errorf("tracked sessions = %d, want <= 4", len(tr.sessions))
@@ -608,7 +622,7 @@ func TestSessionCapEvicts(t *testing.T) {
 func TestNonTLSTrafficIsNotTracked(t *testing.T) {
 	c, _ := flow()
 	tr, got := collect(t)
-	tr.Feed(c, []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"), time.Now())
+	feedNext(tr, c, []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"), time.Now())
 	if len(tr.sessions) != 0 {
 		t.Errorf("non-TLS payload allocated %d flow(s)", len(tr.sessions))
 	}
@@ -625,8 +639,8 @@ func TestDesyncedFlowIsAbandoned(t *testing.T) {
 	tr, got := collect(t)
 	ts := time.Now()
 
-	tr.Feed(c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, clientHelloBody(0x0303, []uint16{0xC02F}))), ts)
-	tr.Feed(c, []byte{0x99, 0x99, 0x99, 0x99, 0x99, 0x99}, ts) // not a record header
+	feedNext(tr, c, tlsRecord(0x16, 0x0301, handshakeMsg(0x01, clientHelloBody(0x0303, []uint16{0xC02F}))), ts)
+	feedNext(tr, c, []byte{0x99, 0x99, 0x99, 0x99, 0x99, 0x99}, ts) // not a record header
 	if tr.Desynced != 1 {
 		t.Errorf("desynced = %d, want 1", tr.Desynced)
 	}

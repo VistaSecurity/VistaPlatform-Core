@@ -9,7 +9,7 @@
 - Nothing appears in Discovery → Approvals or in Inventory ❌
 
 **First: check the job detail, not the job row.** Click the job on Discovery →
-Discovery Jobs or Job Logs. The **Outcome** panel shows *Discovered* and *Into
+Discovery Jobs. The **Outcome** panel shows *Discovered* and *Into
 inventory* separately. If they disagree, the run found assets but failed to
 materialize them, and **Processing errors** names the reason.
 
@@ -164,7 +164,7 @@ If some fields are empty after auto-discovery:
 
 If you hit something this page does not cover:
 
-1. **Read the run's own detail.** Open the job on **Discovery → Job Logs**. The
+1. **Read the run's own detail.** Open the job on **Discovery → Discovery Jobs**. The
    **Outcome** panel separates what was discovered from what reached inventory,
    and **Processing errors** names the reason when those two disagree.
 2. **Check both queues.** **Discovery → Approvals** holds pending assets *and*

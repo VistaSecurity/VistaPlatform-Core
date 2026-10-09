@@ -1,89 +1,151 @@
 package classify
 
 import (
+	"bufio"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
+	"github.com/vistasecurity/vistaplatform/shared/ouiregistry"
 )
 
-// OUI -> vendor has exactly one owner: standards/oui-vendors.csv.
+// One manufacturer, one name, and the name is standards/oui/vendors.yaml's.
 //
-// Two packages read it. shared/hostobs compiles it into the sensor so a passive
-// capture can name a manufacturer with no network call; this package derives an
-// `oui` classification rule per prefix from the same file. Both are generated,
-// from one source, which is the arrangement — and this test is what says the
-// arrangement is still in force.
+// MAC -> vendor has one owner on the platform: the IEEE registry compiled into
+// shared/ouiregistry, canonicalised by standards/oui/vendors.yaml. The engine
+// reports that canonical vendor for every MAC it resolves, so every OTHER place
+// a vendor is named — the `oui_classes` keys the `oui_vendor` rules are derived
+// from, and the `vendor:` of every hand-written rule — has to use the same
+// spelling, or the two cancel in the vendor arbitration rather than agreeing
+// (a Dell server seen by MAC and by sysObjectID came back with NO vendor while
+// the two were spelled `Dell` and `Dell Inc.`).
 //
-// It is not hypothetical. The first cut of standards/classification-rules.yaml
-// carried 123 hand-written OUI rules; when the CSV landed, 27 of them disagreed
-// with it about a vendor's own name for the SAME prefix — Netgear/NETGEAR,
-// Brother/Brother Industries, Rockwell Automation/Allen-Bradley. Nothing would
-// have failed. The two tables would simply have told a customer two different
-// things about one device, depending on which code path answered.
-func TestOUIRules_AgreeWithTheSharedVendorTable(t *testing.T) {
-	rules := 0
+// The generator enforces this at `make generate` time; this is the same
+// property asserted over the generated table, with
+// `vendors_outside_oui_table` as the only escape hatch.
+func TestRuleVendors_AreCanonicalOrDeclaredOutside(t *testing.T) {
+	outside := map[string]bool{}
+	for _, v := range rulesYAML(t).VendorsOutside {
+		if ouiregistry.IsCanonicalVendor(v) {
+			t.Errorf("vendors_outside_oui_table lists %q, which IS a canonical vendor in standards/oui/vendors.yaml", v)
+		}
+		outside[v] = true
+	}
+	checked := 0
 	for _, r := range generatedRules {
-		if r.Kind != KindOUI {
-			continue
-		}
-		rules++
-
 		if r.Vendor == "" {
-			t.Errorf("oui rule %s has no vendor; every prefix in the CSV has one", r.Pattern)
 			continue
 		}
-
-		// hostobs keys on the colon-separated lower-case spelling; a rule keys
-		// on 6 uppercase hex digits. Same 24 bits, and the conversion here is
-		// the only place that has to know both.
-		mac := strings.ToLower(r.Pattern[0:2] + ":" + r.Pattern[2:4] + ":" + r.Pattern[4:6] + ":00:00:01")
-		got := hostobs.VendorForMAC(mac)
-		if got != r.Vendor {
-			t.Errorf("prefix %s: classification rule says vendor %q, shared/hostobs says %q",
-				r.Pattern, r.Vendor, got)
+		checked++
+		if !ouiregistry.IsCanonicalVendor(r.Vendor) && !outside[r.Vendor] {
+			t.Errorf("%s rule %q names vendor %q, which is neither a canonical vendor in "+
+				"standards/oui/vendors.yaml nor declared in vendors_outside_oui_table", r.Kind, r.Pattern, r.Vendor)
 		}
 	}
-
-	if rules < 100 {
-		t.Fatalf("only %d oui rules; they are no longer being derived from the CSV", rules)
-	}
-
-	// Every prefix in the shared table has a rule. A prefix the sensor can name
-	// a vendor for but the classifier cannot is a gap with no reason to exist:
-	// both read the same file.
-	if rules != hostobs.OUICount() {
-		t.Errorf("%d oui rules for %d prefixes in shared/hostobs — the two are no longer derived from one file",
-			rules, hostobs.OUICount())
+	if checked < 50 {
+		t.Fatalf("only %d rules name a vendor; this test is not looking at the generated table", checked)
 	}
 }
 
-// Most OUI rules carry a VENDOR and no class, and that is the rule of thumb
+// Every `oui_classes` key became exactly one `oui_vendor` rule, named by its
+// CANONICAL spelling — the only spelling the engine matches an oui_vendor rule
+// against — and the rule's vendor is its pattern.
+func TestOUIVendorRules_AreTheOUIClassesMap(t *testing.T) {
+	classes := rulesYAML(t).OUIClasses
+	if len(classes) < 20 {
+		t.Fatalf("only %d oui_classes entries read from the YAML", len(classes))
+	}
+	seen := map[string]bool{}
+	for _, r := range generatedRules {
+		if r.Kind != KindOUIVendor {
+			continue
+		}
+		seen[r.Pattern] = true
+		if !ouiregistry.IsCanonicalVendor(r.Pattern) {
+			t.Errorf("oui_vendor rule %q is not a canonical vendor; it can never match", r.Pattern)
+		}
+		if r.Vendor != r.Pattern {
+			t.Errorf("oui_vendor rule %q carries vendor %q", r.Pattern, r.Vendor)
+		}
+		want, ok := classes[r.Pattern]
+		if !ok {
+			t.Errorf("oui_vendor rule %q has no oui_classes entry; it was not derived from the map", r.Pattern)
+			continue
+		}
+		if r.Class != want.Class || r.Confidence != want.Confidence {
+			t.Errorf("oui_vendor rule %q = %s@%.2f, oui_classes says %s@%.2f",
+				r.Pattern, r.Class, r.Confidence, want.Class, want.Confidence)
+		}
+	}
+	for v := range classes {
+		if !seen[v] {
+			t.Errorf("oui_classes names %q but no oui_vendor rule was generated for it", v)
+		}
+	}
+}
+
+// Every shipped `oui_vendor` rule fires on a REAL assignment of its vendor.
+//
+// A rule whose pattern the registry never produces is a well-formed row that
+// matches nothing, for ever, while nothing says so — the shape of a check that
+// cannot fail. Driving each one through the engine with a MAC taken from the
+// embedded registry is what proves the canonical-name wiring end to end.
+func TestOUIVendorRules_EachMatchesARealAssignment(t *testing.T) {
+	e := Default()
+	n := 0
+	for _, r := range generatedRules {
+		if r.Kind != KindOUIVendor {
+			continue
+		}
+		n++
+		mac := firstMACOf(t, r.Pattern)
+		got := e.Classify(t.Context(), ClassifyInput{MACs: []string{mac}})
+		if got.Vendor != r.Pattern {
+			t.Errorf("%s (%s): Vendor = %q", r.Pattern, mac, got.Vendor)
+		}
+		fired := false
+		for _, m := range got.MatchedRules {
+			if m.Kind == KindOUIVendor && m.Pattern == r.Pattern && m.Class == r.Class {
+				fired = true
+			}
+		}
+		if !fired {
+			t.Errorf("oui_vendor rule %q did not fire on %s (matched %+v)", r.Pattern, mac, got.MatchedRules)
+		}
+	}
+	if n == 0 {
+		t.Fatal("no oui_vendor rules in the generated table")
+	}
+}
+
+// Most manufacturers get a vendor and NO class, and that is the rule of thumb
 // working rather than a gap to be filled in.
 //
 // A manufacturer selling servers, switches and printers under one IEEE
-// assignment has no majority worth guessing at. If this ratio ever inverts,
+// assignment has no majority worth guessing at, so only a minority of the
+// canonical vendors appear in `oui_classes`. If this ratio ever inverts,
 // somebody has been filling in blanks, and the next thing to happen is a
 // plausible wrong class getting bulk-approved.
-func TestOUIRules_AreMostlyVendorOnly(t *testing.T) {
-	var withClass, vendorOnly int
+func TestOUIVendorRules_AreAMinorityOfVendors(t *testing.T) {
+	var classed int
 	for _, r := range generatedRules {
-		if r.Kind != KindOUI {
-			continue
-		}
-		if r.Class == "" {
-			vendorOnly++
-		} else {
-			withClass++
+		if r.Kind == KindOUIVendor && r.Class != "" {
+			classed++
 		}
 	}
-	if withClass == 0 {
-		t.Fatal("no oui rule proposes a class; the oui_classes map is not being applied")
+	all := len(ouiregistry.CanonicalVendors())
+	if classed == 0 {
+		t.Fatal("no oui_vendor rule proposes a class; the oui_classes map is not being applied")
 	}
-	if vendorOnly <= withClass {
-		t.Errorf("%d oui rules carry a class and only %d are vendor-only — "+
-			"a wrong class is worse than none, and this ratio says the blanks are being filled in",
-			withClass, vendorOnly)
+	if classed*2 >= all {
+		t.Errorf("%d of %d canonical vendors carry a class — a wrong class is worse than none, "+
+			"and this ratio says the blanks are being filled in", classed, all)
 	}
 }
 
@@ -133,4 +195,85 @@ func setOf(values []string) map[string]bool {
 		out[v] = true
 	}
 	return out
+}
+
+// ---- helpers ----------------------------------------------------------------
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(thisFile), "..", "..")
+}
+
+type rulesYAMLDoc struct {
+	VendorsOutside []string `yaml:"vendors_outside_oui_table"`
+	OUIClasses     map[string]struct {
+		Class      string  `yaml:"class"`
+		Confidence float64 `yaml:"confidence"`
+	} `yaml:"oui_classes"`
+}
+
+func rulesYAML(t *testing.T) rulesYAMLDoc {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), "standards", "classification-rules.yaml"))
+	if err != nil {
+		t.Fatalf("read classification-rules.yaml: %v", err)
+	}
+	var doc rulesYAMLDoc
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse classification-rules.yaml: %v", err)
+	}
+	return doc
+}
+
+var (
+	registryRowsOnce sync.Once
+	registryRows     map[string]string // vendor -> first 24-bit prefix (or a longer one when it has none)
+)
+
+// firstMACOf returns a MAC, in colon form, that the embedded registry resolves
+// to vendor, taken from shared/ouiregistry's own generated table — so the test
+// exercises the registry the engine uses, not a hand-picked list that could
+// drift from it.
+func firstMACOf(t *testing.T, vendor string) string {
+	t.Helper()
+	registryRowsOnce.Do(func() {
+		registryRows = map[string]string{}
+		f, err := os.Open(filepath.Join(repoRoot(t), "shared", "ouiregistry", "registry_gen.tsv"))
+		if err != nil {
+			return
+		}
+		defer func() { _ = f.Close() }()
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			line := sc.Text()
+			if line == "" || line[0] == '#' {
+				continue
+			}
+			hex, v, ok := strings.Cut(line, "\t")
+			if !ok {
+				continue
+			}
+			if prev, have := registryRows[v]; !have || (len(prev) > 6 && len(hex) == 6) {
+				registryRows[v] = hex
+			}
+		}
+	})
+	hex, ok := registryRows[vendor]
+	if !ok {
+		t.Fatalf("the embedded registry has no assignment resolving to %q", vendor)
+	}
+	full := (hex + "123456789ABC")[:12]
+	var b strings.Builder
+	for i := 0; i < 12; i += 2 {
+		if i > 0 {
+			b.WriteByte(':')
+		}
+		b.WriteString(full[i : i+2])
+	}
+	mac := b.String()
+	if got := ouiregistry.VendorForMAC(mac); got != vendor {
+		t.Fatalf("constructed %s for %q but the registry resolves it to %q", mac, vendor, got)
+	}
+	return mac
 }

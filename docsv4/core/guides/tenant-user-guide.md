@@ -314,8 +314,11 @@ Full reference: [Sensor Registration & Management](../features/SENSOR_REGISTRATI
 
 ### Discovery Jobs
 
-**Discovery → Discovery Jobs** lists every job: id, type, target, source, how many
-assets it found, duration and status. A failed or cancelled interrogation can be
+**Discovery → Discovery Jobs** (under **Activity** in the rail) lists every job: id,
+type, target, source, how many assets it found, duration and status. Under the
+status, an interrogation's row says what the run produced — "12 instances,
+3 subnets", "412 packages, 18 listeners", "5 awaiting approval" — and a failed
+run shows its own error message. A failed or cancelled interrogation can be
 **retried** from its row; a running job can be **cancelled**. If a cancel is
 refused — the job finished in the meantime, say — the page says why. Click a row
 for the run detail.
@@ -410,8 +413,9 @@ can try again. The former **Discovery → Active Scan** page is now this view. S
 **New schedule** and give it:
 
 - a **Name** and optional **Description**,
-- a **Cron expression** — standard five fields, for example `0 2 * * *` for daily
-  at 02:00,
+- when it **runs** — every few hours, daily, weekly on chosen days, or monthly,
+  at a time of day in a time zone you pick (your browser's by default); or
+  **Custom** for a five-field cron expression,
 - a **Target type** and target: a specific device, or a cloud integration.
 
 From the list you can **run a schedule now**, **edit** it, toggle it on and off,
@@ -512,10 +516,14 @@ once.
 
 **Merge proposals.** "This looks like something you already have." The matcher
 thinks a new sighting and an existing asset are the same thing, and shows you the
-candidates with a match percentage and the identifiers they share. Pick the
-surviving asset and click **Merge** — the survivor's History records what was
-merged in. **Keep separate** says they are different things; the matcher will not
-propose it again, and the discovery goes back to waiting for ordinary approval.
+candidates with a match percentage and the identifiers they share. **Merge as
+is** applies the recommended merge — the highest-scoring record survives and the
+rest fold into it — and the survivor's History records what was merged in.
+**Review merge** opens that recommendation so you can change the survivor, leave
+a record out or resolve a conflicting field before merging. **Keep separate**
+says they are different things; the matcher will not propose it again, and the
+discovery goes back to waiting for ordinary approval. A reason is optional on
+every merge; who decided is recorded regardless.
 
 **Relationship proposals.** A claim that two assets are connected in a particular
 way, read left to right: this → relationship → that, with a confidence bar and how
@@ -543,13 +551,6 @@ When nothing has been merged the section says so.
 > only made when every read succeeded.
 
 Full detail: [Asset Approval](../features/asset-approval.md).
-
-### Job Logs
-
-**Discovery → Job Logs** is the run stream: every job with its short id, status,
-when it started, what type it was, what it was pointed at, what it found, and how
-long it took. Failures show their error message inline. Click any entry for the
-full run detail.
 
 ### Sources
 

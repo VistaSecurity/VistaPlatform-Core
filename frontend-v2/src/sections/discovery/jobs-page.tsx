@@ -92,7 +92,14 @@ export function JobsPage() {
   const discoveryJobs = useMemo(() => (discoveryQ.data?.jobs ?? []) as ScanJob[], [discoveryQ.data]);
   const allRows = useMemo(() => mergeJobs(deviceJobs, discoveryJobs), [deviceJobs, discoveryJobs]);
 
-  const [filters, setFilters] = useState<JobFilters>(DEFAULT_FILTERS);
+  // ?job=<id> opens a discovery job's detail (below); ?status=<bucket> starts
+  // the list filtered — how Command Center's "Failed jobs" card lands on just
+  // the failures.
+  const [params, setParams] = useSearchParams();
+  const [filters, setFilters] = useState<JobFilters>(() => {
+    const status = params.get('status');
+    return status && status in STATUS_BUCKET_LABELS ? { ...DEFAULT_FILTERS, status: status as StatusBucket } : DEFAULT_FILTERS;
+  });
   const rows = useMemo(() => filterRows(allRows, filters), [allRows, filters]);
   const executorOptions = useMemo(() => distinctExecutors(allRows), [allRows]);
 
@@ -103,7 +110,6 @@ export function JobsPage() {
   // ?job=<id> opens that discovery job's detail — how the Discover wizard's
   // "track it in Discovery Jobs" link lands on the scan it started. A job not
   // on the first page still opens: the detail reads the job itself.
-  const [params, setParams] = useSearchParams();
   const linkedJobId = params.get('job');
   const linkedJob = useMemo<ScanJob | null>(
     () => (linkedJobId ? discoveryJobs.find((j) => j.id === linkedJobId) ?? { id: linkedJobId, status: '' } : null),
@@ -262,6 +268,11 @@ export function JobsPage() {
                   {r.statusDetail && (
                     <span style={{ fontSize: 10, color: 'var(--app-t3)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.statusDetail}>
                       {r.statusDetail}
+                    </span>
+                  )}
+                  {r.errorDetail && (
+                    <span className="mono" style={{ fontSize: 10, color: 'var(--danger-text)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.errorDetail}>
+                      ✗ {r.errorDetail}
                     </span>
                   )}
                 </span>

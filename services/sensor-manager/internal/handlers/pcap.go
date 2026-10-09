@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 )
@@ -367,14 +368,7 @@ func (h *Handler) UpdatePcapJobResults(c *gin.Context) {
 		return
 	}
 
-	var input struct {
-		Status           string                 `json:"status" binding:"required"`
-		DiscoveryCount   *int                   `json:"discovery_count,omitempty"`
-		PacketCount      *int64                 `json:"packet_count,omitempty"`
-		ProtocolsFound   map[string]int         `json:"protocols_found,omitempty"`
-		CaptureTimeRange map[string]interface{} `json:"capture_time_range,omitempty"`
-		ErrorMessage     *string                `json:"error_message,omitempty"`
-	}
+	var input models.PcapJobResultUpdate
 
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
@@ -405,6 +399,14 @@ func (h *Handler) UpdatePcapJobResults(c *gin.Context) {
 	}
 	if input.ErrorMessage != nil {
 		updates["error_message"] = *input.ErrorMessage
+	}
+	if input.TruncatedPacketCount != nil {
+		updates["truncated_packet_count"] = *input.TruncatedPacketCount
+	}
+	// 0 is "the file did not say", stored as NULL like the processor's direct
+	// write does, never as a snapshot length of zero bytes.
+	if input.SnapshotLength != nil && *input.SnapshotLength > 0 {
+		updates["snapshot_length"] = *input.SnapshotLength
 	}
 
 	err = h.pcapService.UpdateJobStatus(jobID, input.Status, updates)

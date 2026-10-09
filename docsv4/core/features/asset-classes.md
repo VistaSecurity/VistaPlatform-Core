@@ -26,11 +26,11 @@ rules behind it.
 ## Classes
 
 Every asset has **exactly one class** — the kind of thing it is. The class is
-drawn from a fixed tree of **49 classes** under **7 top-level branches**:
+drawn from a fixed tree of **50 classes** under **7 top-level branches**:
 
 | Branch | What it covers |
 |---|---|
-| **Hardware** | Anything with a chassis — computers, servers, workstations, laptops, mobiles, network devices (switch, router, firewall, load balancer, wireless controller, access point, VPN gateway), storage, printers, OT devices (PLC, RTU, HMI, IED), IoT devices, and BMCs. |
+| **Hardware** | Anything with a chassis — computers, servers, workstations, laptops, mobiles, network devices (switch, router, firewall, load balancer, wireless controller, access point, VPN gateway), storage, printers, OT devices (PLC, RTU, HMI, IED), IoT devices, smart devices (TVs, speakers, consoles and other consumer connected devices), and BMCs. |
 | **Virtual** | Virtual machines, containers, clusters, hypervisors. |
 | **Cloud resource** | Compute instances, managed databases, object storage, key stores, cloud load balancers, API gateways, CDN distributions, serverless functions, virtual networks, subnets. |
 | **Application** | Web applications, database instances, service daemons, middleware. |

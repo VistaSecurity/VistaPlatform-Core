@@ -42,7 +42,7 @@ func (h *AssetPhase1Handler) PreviewAssetMerge(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"preview": out})
 }
 
-// ExecuteAssetMerge requires a preview revision and a reason for the decision.
+// ExecuteAssetMerge requires a preview revision; the reason is an optional note.
 func (h *AssetPhase1Handler) ExecuteAssetMerge(c *gin.Context) {
 	tenant, actor, ok := tenantAndUser(c)
 	if !ok {

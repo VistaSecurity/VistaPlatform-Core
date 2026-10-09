@@ -245,7 +245,7 @@ agent, or for a cloud resource.
 
 There is no per-device detail panel: a device *is* an asset, so its history,
 endpoints, certificates and findings are on **the asset's own page**, which the
-row links to. Run history is on **Discovery → Discovery Jobs** and **Job Logs**.
+row links to. Run history is on **Discovery → Discovery Jobs**.
 
 ## Scheduled Interrogations
 
@@ -255,19 +255,27 @@ row links to. Run history is on **Discovery → Discovery Jobs** and **Job Logs*
 2. Give it a **name** and an optional description.
 3. Pick the **target** — a device, or a cloud integration. The target is fixed
    once the schedule exists; to point at something else, make a new schedule.
-4. Enter a **cron expression** — a standard five-field cron, for example
-   `0 2 * * *` for 02:00 daily. There is no preset picker; the field is the
-   expression itself.
+4. Choose when it **runs**:
+   - **Every few hours** — every 1, 2, 3, 4, 6, 8 or 12 hours, at a chosen
+     number of minutes past the hour.
+   - **Daily** — at a time of day.
+   - **Weekly** — on the days you tick, at a time of day.
+   - **Monthly** — on a day of the month (1st–28th, so it never skips a short
+     month), at a time of day.
+   - **Custom (cron expression)** — a standard five-field cron, for anything
+     the options above don't cover (for example `*/15 9-17 * * 1-5`, every 15
+     minutes during working hours on weekdays).
+
+   Times are in the **time zone** shown beside them, which defaults to your
+   browser's; daylight-saving changes are handled. A sentence under the
+   fields ("Runs every weekday at 2:00 AM (America/Chicago).") confirms what
+   you picked.
 5. Save.
 
-Common cadences, if you want them to hand:
-
-| Cadence | Expression |
-|---|---|
-| Every hour, on the hour | `0 * * * *` |
-| Daily at midnight | `0 0 * * *` |
-| Weekly, Sunday midnight | `0 0 * * 0` |
-| Monthly, 1st at midnight | `0 0 1 * *` |
+A custom cron runs in UTC unless you prefix it with a zone, for example
+`CRON_TZ=Europe/London 0 2 * * *`. Schedules created before the picker existed
+keep running in UTC; editing one shows its zone as **UTC (server time)** and
+leaves it unchanged unless you pick another.
 
 ### Managing schedules
 
@@ -292,8 +300,7 @@ everything else on **Discovery → Discovery Jobs**.
 
 ### Job Details
 
-Click any row on **Discovery → Discovery Jobs** or **Discovery → Job Logs** to
-open that run's detail.
+Click any row on **Discovery → Discovery Jobs** to open that run's detail.
 
 **Execution** — target device or integration, status, created / started /
 completed times, duration, and the error message if it failed.
@@ -508,7 +515,7 @@ which covers the failures that look like nothing happened.
 
 If you hit something this page does not cover:
 
-1. Open the run on **Discovery → Job Logs** and read its **Outcome** and
+1. Open the run on **Discovery → Discovery Jobs** and read its **Outcome** and
    **Processing errors** — a job that "completed" can still have materialized
    nothing, and that is where it says so.
 2. Check **Discovery → Approvals** before concluding an asset is missing.

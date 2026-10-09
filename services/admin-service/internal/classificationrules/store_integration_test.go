@@ -243,6 +243,16 @@ func TestIntegration_ClassificationRules_SeededRowsBuildAnEngine(t *testing.T) {
 		seen[r.Kind]++
 	}
 	for _, kind := range classify.Kinds {
+		// `oui` (a per-prefix rule) is a kind an admin curates and the seed no
+		// longer ships: the engine resolves MACs through the IEEE registry and
+		// the seeded MAC rules are `oui_vendor`. A seeded `oui` row would be a
+		// regression to the retired per-prefix table, not coverage.
+		if kind == classify.KindOUI {
+			if seen[kind] != 0 {
+				t.Errorf("%d oui (per-prefix) rules were seeded; the shipped catalogue speaks per vendor (oui_vendor)", seen[kind])
+			}
+			continue
+		}
 		if seen[kind] == 0 {
 			t.Errorf("no %s rules were seeded", kind)
 		}

@@ -201,6 +201,9 @@ func (c *OutboundClient) Register(version string) error {
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
+		if isPermanentRegistrationStatus(resp.StatusCode) {
+			return &RegistrationRejectedError{StatusCode: resp.StatusCode, Body: string(body)}
+		}
 		return fmt.Errorf("registration failed: %s (status: %d)", string(body), resp.StatusCode)
 	}
 
@@ -262,6 +265,33 @@ func (c *OutboundClient) Register(version string) error {
 	}
 
 	return nil
+}
+
+// RegistrationRejectedError is a registration the control plane refused for a
+// reason retrying cannot fix: the key is invalid, expired or already used, or
+// the tenant cannot take another agent. Callers stop rather than loop, and say
+// a new key is needed.
+type RegistrationRejectedError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *RegistrationRejectedError) Error() string {
+	return fmt.Sprintf("registration rejected: %s (status: %d)", e.Body, e.StatusCode)
+}
+
+// isPermanentRegistrationStatus: a 4xx is the platform's answer about this
+// request, except the ones that mean "not now" (timeout, too early, rate
+// limited). A 5xx is the platform's own trouble and may clear.
+func isPermanentRegistrationStatus(status int) bool {
+	if status < 400 || status >= 500 {
+		return false
+	}
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return false
+	}
+	return true
 }
 
 // applyAdvertisedPlatformURL validates and applies the mTLS passthrough URL

@@ -5,7 +5,7 @@ package services
 // Postgres. Skips without TEST_DATABASE_URL.
 //
 // The serial below spells a MAC under 00:00:0C, a long-standing registered
-// prefix in the curated OUI table (derive.MACFromSerialRegistered consults it);
+// prefix in the IEEE registry (derive.MACFromSerialRegistered consults it);
 // the rest of the serial is invented. Addresses are RFC 3849 / ULA.
 
 import (

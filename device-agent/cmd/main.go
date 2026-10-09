@@ -205,53 +205,64 @@ func main() {
 
 	// Register with platform if requested
 	if *register {
+		// Where the agent ID is kept. Without -config it used to be kept
+		// nowhere, so the next start registered again with a spent key.
+		savePath := *configFile
+		if savePath == "" {
+			savePath = filepath.Join(cfg.DataPath, "agent-config.yaml")
+		}
+		// Before anything is sent: an enrollment this process cannot save is
+		// a spent key and an identity nobody holds (enrollment.go).
+		if err := checkEnrollmentWritable(cfg.DataPath, savePath); err != nil {
+			log.Fatalf("❌ %s", enrollmentUnwritableMessage(err, cfg.DataPath))
+		}
 		log.Println("📝 Registering agent with platform...")
 		if err := apiClient.Register(Version); err != nil {
-			log.Fatalf("❌ Failed to register agent: %v", err)
+			logRegistrationFailure(err)
+			os.Exit(1)
 		}
 		log.Println("✅ Agent registered successfully")
 
-		// Save certificates to disk
 		if err := saveCertificates(cfg); err != nil {
-			log.Printf("⚠️  Failed to save certificates to disk: %v", err)
-			// Continue anyway - certificates are in memory
-		} else {
-			log.Printf("✅ Certificates saved to: %s/certs", cfg.DataPath)
+			log.Fatalf("❌ %s", enrollmentLostMessage(cfg.AgentID, err))
 		}
+		log.Printf("✅ Certificates saved to: %s/certs", cfg.DataPath)
 
 		// Save config file with agent ID and certificate paths
-		if *configFile != "" {
-			if err := saveConfigFile(*configFile, cfg); err != nil {
-				log.Printf("⚠️  Failed to save config file: %v", err)
-			} else {
-				log.Printf("💾 Configuration saved to: %s", *configFile)
-			}
+		if err := saveConfigFile(savePath, cfg); err != nil {
+			log.Fatalf("❌ %s", enrollmentLostMessage(cfg.AgentID, err))
 		}
+		log.Printf("💾 Configuration saved to: %s", savePath)
 
 		return
 	}
 
 	// Sensor-style bootstrap: registration key present but no enrolled agent yet
 	if cfg.RegistrationKey != "" && cfg.AgentID == "" {
+		if configPath == "" {
+			configPath = filepath.Join(cfg.DataPath, "agent-config.yaml")
+		}
+		if err := checkEnrollmentWritable(cfg.DataPath, configPath); err != nil {
+			log.Fatalf("❌ %s", enrollmentUnwritableMessage(err, cfg.DataPath))
+		}
 		log.Println("📝 Registration key set without agent_id — registering with control plane...")
 		if err := apiClient.Register(Version); err != nil {
-			log.Printf("⚠️  Auto-registration failed (continuing without enrollment): %v", err)
-		} else {
-			log.Println("✅ Agent enrolled successfully")
-			if err := saveCertificates(cfg); err != nil {
-				log.Printf("⚠️  Failed to save certificates to disk: %v", err)
-			} else {
-				log.Printf("✅ Certificates saved to: %s/certs", cfg.DataPath)
-			}
-			if configPath == "" {
-				configPath = filepath.Join(cfg.DataPath, "agent-config.yaml")
-			}
-			if err := saveConfigFile(configPath, cfg); err != nil {
-				log.Printf("⚠️  Failed to save config file: %v", err)
-			} else {
-				log.Printf("💾 Configuration saved to: %s", configPath)
-			}
+			// Exit rather than run unenrolled: an agent with no identity can
+			// poll for nothing, and it never tried again. Under a service
+			// manager the restart IS the retry; a rejected key is reported
+			// as such, and the installers stop the service on it.
+			logRegistrationFailure(err)
+			os.Exit(1)
 		}
+		log.Println("✅ Agent enrolled successfully")
+		if err := saveCertificates(cfg); err != nil {
+			log.Fatalf("❌ %s", enrollmentLostMessage(cfg.AgentID, err))
+		}
+		log.Printf("✅ Certificates saved to: %s/certs", cfg.DataPath)
+		if err := saveConfigFile(configPath, cfg); err != nil {
+			log.Fatalf("❌ %s", enrollmentLostMessage(cfg.AgentID, err))
+		}
+		log.Printf("💾 Configuration saved to: %s", configPath)
 	}
 
 	runAgent(cfg, configPath, apiClient)
@@ -1136,32 +1147,30 @@ urlLoop:
 		cfg.Security.ServerCACert = pinnedCA
 	}
 
+	configPath := filepath.Join(cfg.DataPath, "agent-config.yaml")
+	if err := checkEnrollmentWritable(cfg.DataPath, configPath); err != nil {
+		return nil, "", nil, fmt.Errorf("%s", enrollmentUnwritableMessage(err, cfg.DataPath))
+	}
+
 	// Create API client and register
 	apiClient := api.NewOutboundClient(cfg)
 	apiClient.SetAgentVersion(Version)
 
 	log.Println("📝 Registering with platform...")
 	if err := apiClient.Register(Version); err != nil {
+		logRegistrationFailure(err)
 		return nil, "", nil, fmt.Errorf("registration failed: %w", err)
 	}
 	log.Println("✅ Agent registered successfully")
 
-	// Save certificates
 	if err := saveCertificates(cfg); err != nil {
-		log.Printf("⚠️  Failed to save certificates: %v", err)
-	} else {
-		log.Printf("✅ Certificates saved to: %s/certs", cfg.DataPath)
+		return nil, "", nil, fmt.Errorf("%s", enrollmentLostMessage(cfg.AgentID, err))
 	}
-
-	// Determine config file path
-	configPath := filepath.Join(cfg.DataPath, "agent-config.yaml")
-
-	// Save config file
+	log.Printf("✅ Certificates saved to: %s/certs", cfg.DataPath)
 	if err := saveConfigFile(configPath, cfg); err != nil {
-		log.Printf("⚠️  Failed to save config file: %v", err)
-	} else {
-		log.Printf("💾 Configuration saved to: %s", configPath)
+		return nil, "", nil, fmt.Errorf("%s", enrollmentLostMessage(cfg.AgentID, err))
 	}
+	log.Printf("💾 Configuration saved to: %s", configPath)
 
 	fmt.Println()
 	fmt.Printf("ℹ️  On the next start the agent reads %s automatically — run the\n", configPath)

@@ -23,7 +23,8 @@ const DefaultCoalesceCapacity = 4096
 // busy segment, all saying the same thing. With it, one host produces one
 // observation per window carrying everything every decoder learned about it:
 // the MAC from ARP, the hostname from DHCP, the service types from mDNS, the
-// vendor from the OUI table.
+// model from LLDP or CDP. (The OUI vendor is not resolved here: the platform
+// resolves it at ingestion.)
 //
 // Safe for concurrent use.
 type Coalescer struct {

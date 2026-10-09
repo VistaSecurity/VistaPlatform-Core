@@ -27,6 +27,7 @@ import (
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
+	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
@@ -135,6 +136,26 @@ type PcapResult struct {
 	// distinct crypto flows than one file is allowed to contribute, and the
 	// result is a truncation rather than the whole picture.
 	DiscoveriesDropped int `json:"discoveries_dropped,omitempty"`
+	// TruncatedPackets counts packets the capture recorded shorter than they
+	// were on the wire, because its snapshot length cut them off. Non-zero
+	// means part of the traffic was unreadable no matter how it is parsed —
+	// a 128-byte snapshot keeps the headers and about 60 bytes of payload,
+	// which is enough for a QUIC version or an ARP sighting and never enough
+	// for a TLS handshake or a certificate. The job carries it so the person
+	// who uploaded the file can see why it yielded so little.
+	TruncatedPackets int `json:"truncated_packets,omitempty"`
+	// SnapshotLength is the capture file's snapshot length (the most bytes it
+	// keeps per packet), 0 when the file does not say.
+	SnapshotLength int `json:"snapshot_length,omitempty"`
+}
+
+// protocolCounts is the job's protocols_found: discoveries per protocol.
+func (r *PcapResult) protocolCounts() map[string]int {
+	counts := make(map[string]int)
+	for _, d := range r.Discoveries {
+		counts[d.Protocol]++
+	}
+	return counts
 }
 
 // AuditSink records one unit of consumer work on the shared audit path.
@@ -150,6 +171,12 @@ type Processor struct {
 	sem        chan struct{}
 	natsClient *events.NATSClient
 	audit      AuditSink
+	// httpClient carries the result callback to sensor-manager. Under the
+	// service mesh that is https://sensor-manager:8443, which demands a client
+	// certificate and is signed by the Platform CA — a plain http.Client
+	// failed every callback there with "certificate signed by unknown
+	// authority", and only the direct-DB fallback kept jobs completing.
+	httpClient *http.Client
 }
 
 // New creates a new Processor.
@@ -163,7 +190,24 @@ func New(db *sqlx.DB, cfg *config.Config, natsClient *events.NATSClient, auditSi
 		sem:        make(chan struct{}, cfg.MaxConcurrentJobs),
 		natsClient: natsClient,
 		audit:      auditSink,
+		httpClient: newPeerClient(cfg),
 	}
+}
+
+// newPeerClient builds the client for S2S calls: mTLS with this service's
+// client certificate when the mesh is on, plain HTTP otherwise. A mesh client
+// that cannot be built (certificate material missing) is logged and replaced
+// by a plain one, so the job still completes through the direct-DB fallback
+// rather than the service refusing to start over a status callback.
+func newPeerClient(cfg *config.Config) *http.Client {
+	if cfg.UseMTLS {
+		c, err := sharedhttp.NewMTLSClient(cfg.ClientCertPath, cfg.ClientKeyPath, cfg.PlatformCACertPath)
+		if err == nil {
+			return c
+		}
+		log.Printf("[PCAP] Warning: cannot build the mTLS client for sensor-manager callbacks, results will be written directly: %v", err)
+	}
+	return &http.Client{Timeout: 30 * time.Second}
 }
 
 // logJobAudit records the outcome of one PCAP job.
@@ -315,7 +359,8 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 	packetSource.NoCopy = true
 
 	result := &PcapResult{
-		Discoveries: make([]CryptoDiscovery, 0),
+		Discoveries:    make([]CryptoDiscovery, 0),
+		SnapshotLength: handle.SnapLen(),
 	}
 	protocolSet := make(map[string]bool)
 
@@ -351,6 +396,9 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 		}
 
 		result.PacketsProcessed++
+		if md := packet.Metadata(); md.CaptureLength < md.Length {
+			result.TruncatedPackets++
+		}
 
 		// Track capture time range
 		ts := packet.Metadata().Timestamp
@@ -394,15 +442,17 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 				continue
 			}
 
-			// Feed TLS handshake bytes into the per-flow reassembler. It emits
-			// a session (via the onComplete callback above) when the handshake
-			// finishes, is abandoned, or at Flush.
+			// Feed TLS handshake bytes into the per-flow reassembler. It orders
+			// them by sequence number and emits a session (via the onComplete
+			// callback above) when the handshake finishes, is abandoned, or at
+			// Flush. A payload the snapshot length cut short is fed as it is:
+			// the bytes present are real, and the missing rest is a gap.
 			tracker.Feed(tlsparse.FlowKey{
 				SrcIP:   srcIP,
 				SrcPort: srcPort,
 				DstIP:   dstIP,
 				DstPort: dstPort,
-			}, payload, ts)
+			}, tcp.Seq, payload, ts)
 
 			// Check for SSH banners
 			if d := p.analyzeSSH(payload, srcIP, srcPort, dstIP, dstPort, ts); d != nil {
@@ -421,7 +471,12 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 			payload := udp.Payload
 
 			if d := p.analyzeQUIC(payload, srcIP, srcPort, dstIP, dstPort, ts); d != nil {
-				key := fmt.Sprintf("quic|%s:%d-%s:%d", d.SourceIP, d.SourcePort, d.DestIP, d.DestPort)
+				// Keyed on the conversation, not the direction. Both ends send
+				// Initial packets, and the client's comes first: it is the one
+				// that names the server. Keying per direction recorded the
+				// server's reply too, as a second "connection" whose
+				// destination was the client's ephemeral port.
+				key := "quic|" + conversationKey(d.SourceIP, d.SourcePort, d.DestIP, d.DestPort)
 				if sink.add(key, *d) {
 					protocolSet["QUIC"] = true
 				}
@@ -434,8 +489,13 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 
 	// One row per host for the whole file. The coalescing window is longer
 	// than any plausible capture, so this drain is the only thing that emits.
+	//
+	// Keyed on the observation's own identity (MAC, else address, else name).
+	// The key was once the discovery's SourceIP, which a host observation never
+	// sets, so every host in the file shared one key and all but one — whichever
+	// the coalescer happened to drain first — were thrown away.
 	for _, d := range hostObs.Discoveries() {
-		key := fmt.Sprintf("host|%s|%s", d.SourceIP, d.Protocol)
+		key := "host|" + d.HostObservation.Key()
 		if sink.add(key, d) {
 			protocolSet[d.Protocol] = true
 		}
@@ -460,9 +520,13 @@ func (p *Processor) processPcapFile(ctx context.Context, filePath string, sensor
 			hostObs.decoded, hostObs.malformed, dropped, hostobs.DefaultCoalesceCapacity)
 	}
 
-	if tracker.Evicted > 0 || tracker.Truncated > 0 || tracker.Desynced > 0 {
-		log.Printf("[PCAP] TLS reassembly limits hit (%s): %d flows dropped over the flow cap, %d truncated over the per-direction byte cap, %d abandoned on desynchronised record framing",
-			tracker.LimitsDescription(), tracker.Evicted, tracker.Truncated, tracker.Desynced)
+	if tracker.Evicted > 0 || tracker.Truncated > 0 || tracker.Desynced > 0 || tracker.Gapped > 0 {
+		log.Printf("[PCAP] TLS reassembly limits hit (%s): %d flows dropped over the flow cap, %d truncated over the per-direction byte cap, %d abandoned on desynchronised record framing, %d ended at a gap in the captured bytes (%d retransmitted segments ignored)",
+			tracker.LimitsDescription(), tracker.Evicted, tracker.Truncated, tracker.Desynced, tracker.Gapped, tracker.Retransmitted)
+	}
+	if result.TruncatedPackets > 0 {
+		log.Printf("[PCAP] Capture truncated: %d of %d packets cut short by a snapshot length of %d bytes",
+			result.TruncatedPackets, result.PacketsProcessed, result.SnapshotLength)
 	}
 
 	result.DiscoveryCount = len(result.Discoveries)
@@ -483,6 +547,17 @@ func tlsSessionDedupeKey(s *tlsparse.Session) string {
 	}
 	return fmt.Sprintf("%s:%d|sni=%q|version=%q|cipher=%q|leaf=%q",
 		s.ServerIP, s.ServerPort, s.SNI, s.NegotiatedVersion, s.CipherSuite, leafFingerprint)
+}
+
+// conversationKey names a UDP or TCP conversation independently of which end
+// sent the packet.
+func conversationKey(aIP string, aPort int, bIP string, bPort int) string {
+	a := fmt.Sprintf("%s:%d", aIP, aPort)
+	b := fmt.Sprintf("%s:%d", bIP, bPort)
+	if b < a {
+		a, b = b, a
+	}
+	return a + "-" + b
 }
 
 // discoveryFromTLSSession converts a reassembled TLS session into the discovery
@@ -593,22 +668,24 @@ func (p *Processor) analyzeQUIC(payload []byte, srcIP string, srcPort int, dstIP
 	// QUIC v1: 0x00000001, QUIC v2: 0x6b3343cf
 	version := binary.BigEndian.Uint32(payload[1:5])
 
+	// The same spelling the sensor's passive QUIC parser uses
+	// (sensor/internal/capture/quic_parser.go), so an uploaded capture and a
+	// live sensor describe the same connection identically. The exact draft
+	// number stays in quic_version_hex.
+	//
+	// Version 0 is not accepted: it marks a Version Negotiation packet, which
+	// a server sends and whose type bits are arbitrary, so a zero in them is
+	// not an Initial.
 	var versionStr string
-	switch version {
-	case 0x00000001:
-		versionStr = "1"
-	case 0x6b3343cf:
-		versionStr = "2"
-	case 0x00000000:
-		// Version negotiation
-		versionStr = "negotiation"
+	switch {
+	case version == 0x00000001:
+		versionStr = "QUIC v1"
+	case version == 0x6b3343cf:
+		versionStr = "QUIC v2"
+	case version&0xff000000 == 0xff000000:
+		versionStr = "QUIC draft"
 	default:
-		// Could be a draft version or not QUIC
-		if version&0xff000000 == 0xff000000 {
-			versionStr = fmt.Sprintf("draft-%d", version&0xff)
-		} else {
-			return nil
-		}
+		return nil
 	}
 
 	// Packet type (bits 4-5 of first byte for long header)
@@ -638,12 +715,6 @@ func (p *Processor) analyzeQUIC(payload []byte, srcIP string, srcPort int, dstIP
 func (p *Processor) submitResults(ctx context.Context, jobID uuid.UUID, tenantID uuid.UUID, result *PcapResult) error {
 	url := fmt.Sprintf("%s/api/v1/sensor-manager/internal/pcap/jobs/%s/results", p.cfg.SensorManagerURL, jobID)
 
-	// Build protocols_found as map[string]int (handler expects this format)
-	protocolCounts := make(map[string]int)
-	for _, proto := range result.ProtocolsFound {
-		protocolCounts[proto]++
-	}
-
 	// Build capture_time_range as map (handler expects this format)
 	captureTimeRange := make(map[string]interface{})
 	if result.CaptureStartTime != nil {
@@ -655,11 +726,13 @@ func (p *Processor) submitResults(ctx context.Context, jobID uuid.UUID, tenantID
 
 	// Build payload matching the handler's input struct
 	payload := map[string]interface{}{
-		"status":             "completed",
-		"discovery_count":    result.DiscoveryCount,
-		"packet_count":       int64(result.PacketsProcessed),
-		"protocols_found":    protocolCounts,
-		"capture_time_range": captureTimeRange,
+		"status":                 "completed",
+		"discovery_count":        result.DiscoveryCount,
+		"packet_count":           int64(result.PacketsProcessed),
+		"protocols_found":        result.protocolCounts(),
+		"capture_time_range":     captureTimeRange,
+		"truncated_packet_count": result.TruncatedPackets,
+		"snapshot_length":        result.SnapshotLength,
 	}
 
 	body, err := json.Marshal(payload)
@@ -676,8 +749,7 @@ func (p *Processor) submitResults(ctx context.Context, jobID uuid.UUID, tenantID
 	req.Header.Set("X-Tenant-ID", tenantID.String())
 	serviceauth.SignRequestFromEnv(req)
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("submit discoveries: %w", err)
 	}
@@ -870,7 +942,10 @@ func (p *Processor) updateJobStatus(ctx context.Context, tenantID, jobID uuid.UU
 	// UPDATE runs inside WithTenantTx (sets app.tenant_id). The policy's USING
 	// clause confines the row set to the caller's tenant; the WHERE id remains the
 	// primary control.
-	query := `UPDATE pcap_upload_jobs SET status = $1, error_message = $2, updated_at = NOW() WHERE id = $3`
+	query := `UPDATE pcap_upload_jobs
+		SET status = $1, error_message = $2, updated_at = NOW(),
+			processing_started_at = CASE WHEN $1 = 'processing' THEN NOW() ELSE processing_started_at END
+		WHERE id = $3`
 	err := shareddatabase.WithTenantTx(ctx, p.db.DB, tenantID, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, query, status, errorMsg, jobID)
 		return e
@@ -884,12 +959,7 @@ func (p *Processor) updateJobStatus(ctx context.Context, tenantID, jobID uuid.UU
 // updateJobCompletedDB is a fallback that writes results directly to the DB
 // when the sensor-manager HTTP endpoint is unreachable.
 func (p *Processor) updateJobCompletedDB(ctx context.Context, tenantID, jobID uuid.UUID, result *PcapResult) error {
-	// Build protocols_found as map[string]int for JSONB storage
-	protocolCounts := make(map[string]int)
-	for _, proto := range result.ProtocolsFound {
-		protocolCounts[proto]++
-	}
-	protocolsJSON, _ := json.Marshal(protocolCounts)
+	protocolsJSON, _ := json.Marshal(result.protocolCounts())
 
 	// Build capture_time_range as JSONB
 	captureRange := make(map[string]interface{})
@@ -910,17 +980,29 @@ func (p *Processor) updateJobCompletedDB(ctx context.Context, tenantID, jobID uu
 			packet_count = $2,
 			protocols_found = $3,
 			capture_time_range = $4,
+			truncated_packet_count = $5,
+			snapshot_length = $6,
 			completed_at = NOW(),
 			updated_at = NOW()
-		WHERE id = $5`
+		WHERE id = $7`
 	err := shareddatabase.WithTenantTx(ctx, p.db.DB, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query, result.DiscoveryCount, result.PacketsProcessed, string(protocolsJSON), string(captureRangeJSON), jobID)
+		_, e := tx.ExecContext(ctx, query, result.DiscoveryCount, result.PacketsProcessed, string(protocolsJSON), string(captureRangeJSON),
+			result.TruncatedPackets, nullableSnapshotLength(result.SnapshotLength), jobID)
 		return e
 	})
 	if err != nil {
 		return fmt.Errorf("update job completed: %w", err)
 	}
 	return nil
+}
+
+// nullableSnapshotLength stores an unknown snapshot length as NULL rather
+// than 0, which would read as "keeps nothing".
+func nullableSnapshotLength(n int) interface{} {
+	if n <= 0 {
+		return nil
+	}
+	return n
 }
 
 // updateJobFailed marks a job as failed with an error message.

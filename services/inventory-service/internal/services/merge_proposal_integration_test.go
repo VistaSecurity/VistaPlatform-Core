@@ -1570,3 +1570,37 @@ func TestIntegration_ListPending_HidesSingleCandidateRows(t *testing.T) {
 		t.Errorf("answerable proposal lost its conflict flag: observation=%v candidate=%v", flags[pairObs], flags[pairCand])
 	}
 }
+
+// The reason is a note, not a gate: a merge with no reason is recorded with
+// the actor, the revision and the field choices like any other. Three
+// characters was the floor before, and it produced "asdf", not reasons.
+func TestIntegration_MergeExecute_ReasonIsOptional(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	survivor := seedAsset(t, db, tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	source := seedAsset(t, db, tenant, "source.example.test", "server", "hardware.computer.server", "production", 0, 0)
+	svc := NewMergeProposalService(db)
+	selection := MergeSelection{SourceAssetIDs: []uuid.UUID{source}, SurvivorAssetID: survivor, FieldResolutions: map[string]uuid.UUID{"hostname": survivor, "display_name": survivor}}
+	preview, err := svc.PreviewMerge(t.Context(), tenant, uuid.Nil, selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := seedUser(t, db, tenant)
+	result, err := svc.ExecuteMerge(t.Context(), tenant, uuid.Nil, actor, MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision})
+	if err != nil {
+		t.Fatalf("merge without a reason refused: %v", err)
+	}
+	var reason string
+	var recordedActor uuid.UUID
+	if err := db.QueryRow(`SELECT reason, actor_user_id FROM asset_merge_audits WHERE tenant_id=$1 AND id=$2`, tenant, result.ID).Scan(&reason, &recordedActor); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "" || recordedActor != actor {
+		t.Fatalf("audit = (%q, %s), want an empty reason recorded against the actor %s", reason, recordedActor, actor)
+	}
+	if _, err := svc.ExecuteMerge(t.Context(), tenant, uuid.Nil, actor, MergeExecutionRequest{MergeSelection: selection, Revision: preview.Revision, Reason: strings.Repeat("x", 2001)}); !errors.Is(err, ErrMergeSelection) {
+		t.Fatalf("over-long reason accepted: %v", err)
+	}
+}

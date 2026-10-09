@@ -26,6 +26,12 @@ package services
 //     ADR-0008 D3 sends a machine's proposal through Approvals, and ADR-0002 D5
 //     forbids the auto-decide; a rule that changed its mind six months after
 //     somebody approved a class would be a silent rewrite of the inventory.
+//     The one exception is an asset still on the unassigned FLOOR
+//     (`unknown_host` / `external`), which holds no answer to override: a
+//     RULE's class is promoted onto it ([classproposal.Promote]), over the
+//     evidence the asset has accumulated (asset_class_evidence.go). See
+//     classOutcomeForResolution, and class_floor_sweep.go for the same move
+//     made over assets nothing observes any more.
 //
 // # What this never does
 //
@@ -181,6 +187,7 @@ func findingClassEvidence(f IngestFinding) classEvidence {
 		MDNSServices:      rawDataStrings(f.RawData, "mdns_services", "services"),
 		LLDPCapabilities:  rawDataStrings(f.RawData, "lldp_capabilities"),
 		CDPCapabilities:   rawDataStrings(f.RawData, "cdp_capabilities"),
+		DHCPVendorClass:   rawDataString(f.RawData, "dhcp_vendor_class", "dhcp_vendor_class_identifier"),
 	}
 	if mac := rawDataString(f.RawData, "mac_address", "mac"); mac != "" {
 		ev.MACs = append(ev.MACs, mac)
@@ -270,6 +277,62 @@ func (s *AssetService) recordClassOutcome(
 	outcome identity.Outcome, prop classify.ClassProposal,
 ) error {
 	return classproposal.Record(ctx, tx, tenantID, assetID, outcome, prop)
+}
+
+// classOutcomeForResolution does the class work a resolution owes, on the
+// engine's transaction, and reports whether it moved the asset off the floor.
+//
+// Two shapes, decided by the outcome:
+//
+//   - **Anything but a match** (a created asset, a conflict's new pending
+//     asset, a provisional one, a supporting sighting): exactly what intake did
+//     before — [classproposal.Record] with the proposal applyClassProposal
+//     computed from the observation alone. On a create that proposal is
+//     already the asset's class hint.
+//   - **A match**: the asset exists and may have been seen many times. The
+//     classifier is re-run over the ACCUMULATED evidence
+//     (accumulatedClassEvidence) — this observation's plus what the asset has
+//     stored — and the answer is offered to [classproposal.Promote] and then
+//     to [classproposal.Record].
+//
+// # Promote first, then propose
+//
+// The order device-interrogation-service's ObservationSink.recordClassOutcome
+// established, for the same reason. An existing asset still on the unassigned
+// floor gets the rules' class applied directly — nothing was ever decided about
+// it, so there is nothing to review — and Record then sees a class equal to the
+// proposal and correctly writes nothing. An asset holding a real class is left
+// alone by Promote and gets a proposal from Record, which is what stops two
+// measured classes flapping against each other on every observation. Running
+// Record FIRST would raise a proposal and then immediately satisfy it, leaving
+// a pending question in Approvals whose answer is already on the asset.
+//
+// A MODEL's answer is refused by Promote's first guard and reaches Record, so
+// it goes to Approvals exactly as before.
+//
+// mayPromote is false when something with a better claim than a rule is about
+// to classify the asset on this same transaction (a sensor's self-report — see
+// applyHostObservationContext); the proposal is still recorded.
+func (s *AssetService) classOutcomeForResolution(
+	ctx context.Context, tx *sqlx.Tx, tenantID, assetID uuid.UUID,
+	outcome identity.Outcome, observationProp classify.ClassProposal, current classEvidence, mayPromote bool,
+) (bool, error) {
+	if outcome != identity.OutcomeMatched {
+		return false, s.recordClassOutcome(ctx, tx, tenantID, assetID, outcome, observationProp)
+	}
+	ev, err := accumulatedClassEvidence(ctx, tx, tenantID, assetID, current)
+	if err != nil {
+		return false, err
+	}
+	prop := s.classifyEvidence(ctx, ev)
+	promoted := false
+	if mayPromote {
+		promoted, err = classproposal.Promote(ctx, tx, tenantID, assetID, prop)
+		if err != nil {
+			return false, err
+		}
+	}
+	return promoted, s.recordClassOutcome(ctx, tx, tenantID, assetID, outcome, prop)
 }
 
 // ---------------------------------------------------------------------------
@@ -369,8 +432,9 @@ func numberAsInt(v any) (int, bool) {
 //
 // This is the path row 7 of the 2.5 note was waiting on. Everything it reads was
 // already being decoded and stored — the OUI vendor, the stated model, the mDNS
-// service types, the LLDP and CDP capability bits — and none of it could reach a
-// class, because there was nowhere honest to record one.
+// service types, the LLDP and CDP capability bits, the DHCP option 60 vendor
+// class — and none of it could reach a class, because there was nowhere honest
+// to record one.
 //
 // The locally-administered MAC is passed ANYWAY, even though the builder refuses
 // to use it as an identifier. The two are different questions: it is not a
@@ -378,6 +442,11 @@ func numberAsInt(v any) (int, bool) {
 // rotation), but the OUI half of it still says what minted the address —
 // `02:42:AC` is Docker's, `52:54:00` is QEMU's, `FA:16:3E` is OpenStack's — and
 // those are precisely the prefixes whose rules carry a class.
+//
+// ho.Vendor is the platform's answer by the time this runs: the ingest entry
+// points call resolveHostObservationVendor first, which puts the full IEEE
+// registry's manufacturer there whenever it has one (oui_vendor.go), and leaves
+// the observation's own value only for a prefix the registry does not determine.
 func hostObservationClassEvidence(ho *hostobs.HostObservation) classEvidence {
 	if ho == nil {
 		return classEvidence{}
@@ -392,6 +461,7 @@ func hostObservationClassEvidence(ho *hostobs.HostObservation) classEvidence {
 	}
 	ev.LLDPCapabilities = attributeStrings(ho.Attributes, "lldp_capabilities")
 	ev.CDPCapabilities = attributeStrings(ho.Attributes, "cdp_capabilities")
+	ev.DHCPVendorClass = attributeString(ho.Attributes, "dhcp_vendor_class")
 	return ev
 }
 
@@ -418,6 +488,19 @@ func attributeStrings(attrs map[string]any, key string) []string {
 	default:
 		return nil
 	}
+}
+
+// attributeString reads a decoder attribute holding one string — the DHCP
+// option 60 vendor class identifier, `dhcp_vendor_class`. Anything else under
+// the key (a number, a list) reads as absent rather than being stringified: a
+// rule matching the Go rendering of a value no client sent is a rule matching
+// nothing real.
+func attributeString(attrs map[string]any, key string) string {
+	if attrs == nil {
+		return ""
+	}
+	s, _ := attrs[key].(string)
+	return strings.TrimSpace(s)
 }
 
 // manualClassEvidence projects a declared or imported asset onto the rule

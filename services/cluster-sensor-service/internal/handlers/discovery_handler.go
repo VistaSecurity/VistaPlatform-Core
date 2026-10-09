@@ -239,8 +239,16 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 	} else {
 		err = h.rateLimiter.CheckRateLimit(tenantID)
 	}
+	var refused *services.RateLimitExceededError
+	if errors.As(err, &refused) {
+		// Which limit, and the count against it, is what a person needs to
+		// act on a 429. A failure to CHECK is not a refusal.
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded", "detail": refused.Error()})
+		return
+	}
 	if err != nil {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+		log.Printf("[DiscoveryHandler] rate-limit check failed for tenant %s: %v", tenantID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not check rate limits"})
 		return
 	}
 

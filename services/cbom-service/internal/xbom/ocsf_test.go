@@ -275,7 +275,7 @@ func TestOCSF_DeviceTypeMapping(t *testing.T) {
 		"server": 1, "compute_instance": 1,
 		"workstation": 2, "laptop": 3, "mobile": 5,
 		"virtual_machine": 6, "container": 6,
-		"iot_device": 7, "plc": 7, "printer": 7,
+		"iot_device": 7, "smart_device": 7, "plc": 7, "printer": 7,
 		"firewall": 9, "switch": 10, "router": 12,
 		"load_balancer": 15,
 		// No OCSF device counterpart → Unknown, never Other.

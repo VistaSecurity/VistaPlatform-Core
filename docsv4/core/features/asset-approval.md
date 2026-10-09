@@ -320,15 +320,23 @@ When nothing has been merged, the section says **"Nothing has been merged
 automatically in the last 30 days."** If the list itself cannot be read the page
 says that instead, with a **Retry** button — an unreadable list is not an empty one.
 
-Two actions:
+Three actions:
 
-- **Merge** — the records become one asset. The surviving asset's **History**
-  tab records what was merged into it, so the decision is auditable and the old
-  identity is not lost.
+- **Merge as is** — applies the recommended merge in one click: the record the
+  matcher scored highest survives, and the other records on the card fold into
+  it. The surviving asset's **History** tab records what was merged into it, so
+  the decision is auditable and the old identity is not lost. If both records
+  declare a different value for the same field, the review opens instead so you
+  can choose which to keep.
+- **Review merge** — opens the same recommendation for adjustment: change which
+  record survives, which records fold in, and how conflicting fields resolve,
+  with a preview of the result before you merge.
 - **Keep separate** — they stay two assets, and the matcher will not propose
   this pair again.
 
-Merging needs the same permission as approving an asset.
+Merging needs the same permission as approving an asset. A reason is optional;
+who merged, from which preview and with which field choices is recorded either
+way.
 
 **A proposal needs two records to be a question.** Approvals lists a merge
 proposal only while it names at least two records that still exist — not
@@ -545,15 +553,19 @@ confident they might be one thing but not confident enough to act, it opens a
 Merge proposals appear in **Discovery → Approvals** alongside pending assets.
 Each one shows both candidates side by side with the evidence — the identifiers
 that matched — so you can see *why* it was proposed rather than being asked to
-rubber-stamp it. You have two answers:
+rubber-stamp it. You have three answers:
 
-- **Merge** — you pick which asset survives; the platform never chooses for you,
-  because merging is not easily undone. Everything the other asset carried moves
-  across: its endpoints, identifiers, crypto configurations, facts, software
-  installs, relationships and its history, so the surviving asset's timeline
-  includes what happened before the merge rather than starting at it. Where both
-  assets had the same endpoint or identifier, they become one, and the earliest
-  first-seen and latest last-seen are kept.
+- **Merge as is** — accept the platform's recommendation: the highest-scoring
+  record survives and the others fold into it. Everything the other asset
+  carried moves across: its endpoints, identifiers, crypto configurations,
+  facts, software installs, relationships and its history, so the surviving
+  asset's timeline includes what happened before the merge rather than starting
+  at it. Where both assets had the same endpoint or identifier, they become one,
+  and the earliest first-seen and latest last-seen are kept.
+- **Review merge** — the same recommendation, open for adjustment. Choose a
+  different survivor, leave a record out, or pick between conflicting declared
+  values, and preview the result before merging. Merging is not easily undone,
+  so this is the path when the evidence is not clear-cut.
 - **Keep separate** — these are genuinely two things. The proposal is resolved
   and the newly-discovered asset stays in the pending queue for the ordinary
   approve/deny decision, because "this is not that" is not the same answer as

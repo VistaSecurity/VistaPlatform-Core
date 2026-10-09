@@ -39,13 +39,15 @@ import { AcceptUpdateButton, SeededContentBadges } from './seeded-content';
 import {
   useClassificationRules, useCreateClassificationRule, useUpdateClassificationRule,
   useDeleteClassificationRule, useAcceptClassificationRuleUpdate, errMsg,
-  RULE_KIND_LABEL, RULE_KIND_HINT, MIN_CONFIDENCE, MAX_CONFIDENCE, PAGE_SIZE,
+  RULE_KIND_LABEL, RULE_KIND_HINT, MIN_CONFIDENCE, MAX_CONFIDENCE, PAGE_SIZE, ouiVendorProblem,
+  dhcpVendorClassCaution,
   type ClassificationRule, type ClassificationRuleInput, type ClassificationRuleKind,
 } from './catalog-queries';
 import { safeHttpUrl } from '../../lib/url';
 
 const KIND_COLOR: Record<string, string> = {
   oui: 'var(--chart-1)',
+  oui_vendor: 'var(--chart-1)',
   sysobjectid: 'var(--info)',
   enip: 'var(--warn)',
   cloud_type: 'var(--ok-lime)',
@@ -57,6 +59,7 @@ const KIND_COLOR: Record<string, string> = {
   lldp_capability: 'var(--ok-lime)',
   mdns_service: 'var(--warn)',
   os_name: 'var(--chart-1)',
+  dhcp_vendor_class: 'var(--info)',
 };
 
 /** The empty form, used for "Add rule" and as the reset after a save. */
@@ -117,6 +120,15 @@ function RuleForm({
 
   const assertsSomething =
     (form.class_key ?? '') !== '' || (form.vendor ?? '') !== '' || (form.model ?? '') !== '';
+
+  // The one shape check the form makes itself, because the engine's answer to
+  // it would otherwise read as a mystery: a manufacturer rule's vendor IS its
+  // pattern, so a different vendor is a contradiction, not extra information.
+  // Everything else about the pattern is left to the server's validator.
+  const vendorRuleProblem = form.rule_kind === 'oui_vendor' ? ouiVendorProblem(form) : null;
+  // Advisory only — the server compiles the pattern and decides. It does not
+  // disable Save: an unanchored pattern is legal, just usually a mistake.
+  const dhcpCaution = form.rule_kind === 'dhcp_vendor_class' ? dhcpVendorClassCaution(form.pattern) : null;
 
   return (
     <form
@@ -211,12 +223,22 @@ function RuleForm({
           waste a reviewer's time.
         </div>
       )}
+      {vendorRuleProblem && (
+        <div style={{ fontSize: 12, color: 'var(--warn)' }} data-testid="rule-oui-vendor-problem">
+          {vendorRuleProblem}
+        </div>
+      )}
+      {dhcpCaution && (
+        <div style={{ fontSize: 12, color: 'var(--warn)' }} data-testid="rule-dhcp-vendor-class-caution">
+          {dhcpCaution}
+        </div>
+      )}
       {error && (
         <div style={{ fontSize: 12, color: 'var(--danger)' }} data-testid="rule-form-error">{error}</div>
       )}
 
       <div style={{ display: 'flex', gap: 8 }}>
-        <button className="op-btn sm primary" type="submit" disabled={saving || !assertsSomething}>
+        <button className="op-btn sm primary" type="submit" disabled={saving || !assertsSomething || vendorRuleProblem !== null}>
           {saving ? 'Saving…' : 'Save rule'}
         </button>
         <button className="op-btn sm" type="button" onClick={onCancel}>Cancel</button>

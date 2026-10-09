@@ -26,7 +26,11 @@ func (s *MergeProposalService) ExecuteMerge(ctx context.Context, tenant, proposa
 		return nil, err
 	}
 	in.MergeSelection = selection
-	if len(strings.TrimSpace(in.Reason)) < 3 || len(in.Reason) > 2000 || len(in.Revision) != 64 {
+	// The reason is OPTIONAL. The audit already records who merged what, from
+	// which preview revision, with which field choices; a reason is the
+	// reviewer's note on top of that, not a gate. A minimum length only ever
+	// produced "asdf".
+	if len(in.Reason) > 2000 || len(in.Revision) != 64 {
 		return nil, ErrMergeSelection
 	}
 	var result AssetMergeResult

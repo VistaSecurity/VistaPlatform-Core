@@ -48,8 +48,8 @@
 // # Its dependencies
 //
 // Outside the standard library, three pure-Go lookups the identity stack already
-// shares: shared/assetclass (class ancestry), shared/hostobs (the OUI table
-// behind the v2 vendor features) and shared/identity/hostnamequality (generic
+// shares: shared/assetclass (class ancestry), shared/ouiregistry (the IEEE
+// registry behind the v2 vendor features) and shared/identity/hostnamequality (generic
 // and synthetic names). None of them imports shared/identity or the seams. It
 // deliberately does not import shared/identity: that package imports
 // shared/ai/seams, and the seam adapter that registers this model lives in

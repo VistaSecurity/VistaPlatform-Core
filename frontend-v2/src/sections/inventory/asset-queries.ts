@@ -20,6 +20,7 @@ export type SavedView = inventoryComponents['schemas']['SavedView'];
 export type MergeProposal = inventoryComponents['schemas']['MergeProposal'];
 export type MergeCandidate = inventoryComponents['schemas']['MergeCandidate'];
 export type MergeScoreFactor = inventoryComponents['schemas']['MergeScoreFactor'];
+export type AssetMergeSelection = inventoryComponents['schemas']['AssetMergeSelection'];
 export type IdentificationSettings = inventoryComponents['schemas']['IdentificationSettings'];
 export type QueryDiagnostic = inventoryComponents['schemas']['QueryDiagnostic'];
 
@@ -618,6 +619,53 @@ export function useSetAutoMergeExisting() {
       void qc.invalidateQueries({ queryKey: ['settings', 'identification'] });
       // The Approvals section reads the same setting's consequences.
       void qc.invalidateQueries({ queryKey: ['discovery', 'auto-accepted-merges'] });
+    },
+  });
+}
+
+/** What "Merge as is" did: merged, or stopped because a field needs a person's choice. */
+export type MergeAsIsOutcome = { outcome: 'merged' } | { outcome: 'needs-review'; note: string };
+
+/**
+ * Apply a proposal's recommended merge without opening the review.
+ *
+ * Preview, then merge on the preview's revision — the same two calls the
+ * review makes, with the recommendation as the selection and no reason. The
+ * one thing this will not do unattended is pick between two DECLARED values
+ * for the same field: a preview reporting a conflict that `requires_resolution`
+ * ends in `needs-review`, and the caller opens the review on the same
+ * selection with the note. The server refuses such a merge anyway; stopping
+ * here is what turns that refusal into a next step.
+ */
+export async function mergeAsIs(proposalID: string, selection: AssetMergeSelection): Promise<MergeAsIsOutcome> {
+  const previewed = await clients.inventory.POST('/approvals/merge-proposals/{id}/preview', {
+    params: { path: { id: proposalID } }, body: selection,
+  });
+  if (previewed.error || !previewed.data?.preview) throw new Error(errorMessage(previewed.error) ?? 'Could not prepare the merge');
+  const preview = previewed.data.preview;
+  const conflicted = preview.conflicts.filter((c) => c.requires_resolution).map((c) => c.field.replace(/_/g, ' '));
+  if (conflicted.length > 0) {
+    return { outcome: 'needs-review', note: `Both records declare a different ${conflicted.join(', ')}. Choose which to keep, then merge.` };
+  }
+  const merged = await clients.inventory.POST('/approvals/merge-proposals/{id}/merge', {
+    params: { path: { id: proposalID } },
+    body: { ...selection, revision: preview.revision, reason: '' },
+  });
+  if (merged.response.status === 409) throw new Error('The records changed while merging. Review the merge and try again.');
+  if (merged.error) throw new Error(errorMessage(merged.error) ?? 'Could not merge the records');
+  return { outcome: 'merged' };
+}
+
+export function useMergeAsIs() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ proposalID, selection }: { proposalID: string; selection: AssetMergeSelection }) => mergeAsIs(proposalID, selection),
+    onSuccess: (r) => { if (r.outcome === 'merged') toast.success('Assets merged'); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Could not merge the records'),
+    onSettled: (r) => {
+      if (r?.outcome !== 'merged') return;
+      // A merge changes asset children, findings, topology and dashboard totals.
+      void qc.invalidateQueries();
     },
   });
 }

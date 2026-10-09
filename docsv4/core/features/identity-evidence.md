@@ -36,6 +36,10 @@ confirm** only when nothing you already have owns the observation's address or
 any other of its identifiers. If exactly one asset does, Confirm would be
 refused — it would create a second record of the same device — so the row reads
 **Matches an asset** and its suggested action is **Link to** that asset's name.
+This happens only when nothing has confirmed that device at the address
+recently: a probe of an address a sensor has seen the asset's MAC at within the
+last day attaches to the asset itself and never reaches the table, and the
+asset's timeline records the match as decided by a lease-fresh address.
 If more than one asset owns identifiers of it — or the one that does is deleted,
 archived or denied and cannot take a link — it reads **Several match** and has
 no one-click action: compare the assets (merge them if they are one

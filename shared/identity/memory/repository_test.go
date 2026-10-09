@@ -29,6 +29,7 @@ func TestSingletonGuardContract(t *testing.T) {
 // rule: an address its owner holds static votes inside a dynamic scope.
 func TestPinnedAddressContract(t *testing.T) {
 	identitytest.RunPinnedAddressContract(t, func() identity.Repository { return memory.New() })
+	identitytest.RunLeaseFreshAddressContract(t, func() identity.Repository { return memory.New() })
 }
 
 // TestClaimedAddressContract is the same arrangement for's

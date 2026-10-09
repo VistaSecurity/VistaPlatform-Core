@@ -112,7 +112,12 @@ func TestIntegration_ClassProposal_UnknownStaysUnknown(t *testing.T) {
 
 // --- the PROPOSAL on an existing asset ---------------------------------------
 
-// An asset that already exists gets a proposal, not a rewrite.
+// An asset that already HOLDS a class gets a proposal, not a rewrite.
+//
+// It holds a real one here — `server`, measured, as a sensor's self-report
+// leaves it. An asset still on the unassigned floor is a different case: a
+// rule's class is promoted onto it without Approvals (classproposal.Promote,
+// TestIntegration_FloorPromotion_PassiveMatchPromotesARuleClass).
 func TestIntegration_ClassProposal_ExistingAssetIsProposedAgainstNotOverwritten(t *testing.T) {
 	svc, db, tenant := newHostObsFixture(t)
 
@@ -124,6 +129,7 @@ func TestIntegration_ClassProposal_ExistingAssetIsProposedAgainstNotOverwritten(
 	})}); err != nil {
 		t.Fatalf("first ingest: %v", err)
 	}
+	holdMeasuredClass(t, db, tenant, "later-a-printer")
 
 	// Second sighting of the SAME MAC, now advertising IPP.
 	if _, err := svc.IngestFindings(tenant, []IngestFinding{observationFinding(t, &hostobs.HostObservation{
@@ -136,7 +142,7 @@ func TestIntegration_ClassProposal_ExistingAssetIsProposedAgainstNotOverwritten(
 
 	var classKey, sourceKind, sourceRef, status string
 	readAsset(t, db, tenant, "later-a-printer", &classKey, &sourceKind, &sourceRef, &status)
-	if classKey != "unknown_host" {
+	if classKey != "server" {
 		t.Errorf("class_key = %q; an existing asset's class must not be rewritten by a rule", classKey)
 	}
 
@@ -147,8 +153,8 @@ func TestIntegration_ClassProposal_ExistingAssetIsProposedAgainstNotOverwritten(
 	if proposals[0].ProposedClassKey != "printer" {
 		t.Errorf("proposed class = %q, want printer", proposals[0].ProposedClassKey)
 	}
-	if proposals[0].CurrentClassKey != "unknown_host" {
-		t.Errorf("current class on the proposal = %q, want unknown_host — a proposal is a comparison", proposals[0].CurrentClassKey)
+	if proposals[0].CurrentClassKey != "server" {
+		t.Errorf("current class on the proposal = %q, want server — a proposal is a comparison", proposals[0].CurrentClassKey)
 	}
 	if len(proposals[0].MatchedRules) == 0 {
 		t.Error("the proposal carries no matched rules; a proposal a reviewer cannot audit is one they can only rubber-stamp")
@@ -174,6 +180,7 @@ func TestIntegration_ClassProposal_OnePendingProposalPerAssetAndClass(t *testing
 	if _, err := svc.IngestFindings(tenant, []IngestFinding{seed()}); err != nil {
 		t.Fatalf("first ingest: %v", err)
 	}
+	holdMeasuredClass(t, db, tenant, "chatty-printer")
 	for i := 0; i < 4; i++ {
 		if _, err := svc.IngestFindings(tenant, []IngestFinding{seed("_ipp._tcp")}); err != nil {
 			t.Fatalf("ingest %d: %v", i, err)
@@ -287,7 +294,7 @@ func TestIntegration_ClassProposal_ARejectedClassIsNotProposedAgain(t *testing.T
 	}
 	var classKey, sourceKind, sourceRef, status string
 	readAsset(t, db, tenant, "not-a-printer", &classKey, &sourceKind, &sourceRef, &status)
-	if classKey != "unknown_host" {
+	if classKey != "server" {
 		t.Errorf("rejecting changed the class to %q; it must leave the asset exactly as it was", classKey)
 	}
 
@@ -343,7 +350,9 @@ func TestIntegration_ClassProposal_IsTenantIsolated(t *testing.T) {
 
 // seedOneClassProposal drives the real ingest twice — once with no classifying
 // evidence, once with it — so the proposal under test is the one production
-// writes rather than a hand-built row.
+// writes rather than a hand-built row. Between the two the asset is given a
+// measured `server` class (holdMeasuredClass): an asset still on the floor
+// would have the rules' class PROMOTED onto it instead of proposed.
 func seedOneClassProposal(t *testing.T, svc *AssetService, db *database.DB, tenant uuid.UUID, hostname string) []ClassProposalView {
 	t.Helper()
 	mac := "98:3b:7c:cc:dd:ee"
@@ -354,6 +363,7 @@ func seedOneClassProposal(t *testing.T, svc *AssetService, db *database.DB, tena
 	})}); err != nil {
 		t.Fatalf("seed ingest 1: %v", err)
 	}
+	holdMeasuredClass(t, db, tenant, hostname)
 	if _, err := svc.IngestFindings(tenant, []IngestFinding{observationFinding(t, &hostobs.HostObservation{
 		Source: hostobs.SourceMDNS, MAC: mac, Addresses: addrsFor(t, addr),
 		Hostnames: []string{hostname}, Services: []string{"_ipp._tcp"}, ObservedAt: time.Now().UTC(),
@@ -365,6 +375,16 @@ func seedOneClassProposal(t *testing.T, svc *AssetService, db *database.DB, tena
 		t.Fatalf("seeded %d proposals, want 1", len(out))
 	}
 	return out
+}
+
+// holdMeasuredClass gives the asset a real, MEASURED class — `server`, as a
+// sensor's self-report sets it — so it is no longer on the unassigned floor and
+// a rule that disagrees raises a proposal rather than being promoted.
+func holdMeasuredClass(t *testing.T, db *database.DB, tenant uuid.UUID, hostname string) {
+	t.Helper()
+	execTenant(t, db, tenant, `UPDATE assets SET class_key = 'server', class_path = '`+classPathForKey("server")+`',
+		class_source_kind = 'measured', class_source_ref = 'sensor:self-report-test'
+		WHERE tenant_id = $1 AND hostname = '`+hostname+`'`)
 }
 
 // seedClassReviewer creates the person whose decision the history records.

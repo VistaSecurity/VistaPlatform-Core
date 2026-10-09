@@ -45,8 +45,8 @@ print_header() {
 # Show usage
 show_usage() {
     cat << EOF
-Crypto Inventory Sensor Installer v1.0.0
-========================================
+Crypto Inventory Sensor Installer
+=================================
 
 Usage: $0 [options]
 
@@ -55,7 +55,8 @@ Options:
     -k, --key KEY              Registration key (required)
     -n, --name NAME            Sensor name (default: auto-detect)
     -i, --interfaces IFACES    Network interfaces (default: auto-detect)
-    -p, --profile PROFILE      Deployment profile (default: $PROFILE)
+    -p, --profile PROFILE      Deployment profile (default: $PROFILE; not yet applied —
+                               the sensor registers as datacenter_host)
     -d, --dir DIRECTORY        Installation directory (default: $INSTALL_DIR)
     --ip IP_ADDRESS            Expected IP address for validation (required)
     --interactive              Run in interactive mode (ask for all settings)
@@ -170,10 +171,12 @@ check_sensor_dependencies() {
     print_error "The Linux sensor requires the libpcap runtime and a compatible system loader."
     printf '%s\n' "$loader_output"
     print_status "If libpcap is missing, install it using your distribution's package manager:"
-    echo "  Debian / Ubuntu: sudo apt-get update && sudo apt-get install libpcap0.8"
-    echo "  Newer Debian / Ubuntu releases may name the package libpcap0.8t64."
-    echo "  RHEL / Fedora:   sudo dnf install libpcap"
-    echo "  SUSE:            sudo zypper install libpcap1"
+    echo "  Debian / Ubuntu:                    sudo apt-get update && sudo apt-get install libpcap0.8"
+    echo "                                      (apt installs libpcap0.8t64 on Ubuntu 24.04+ / Debian 13+)"
+    echo "  RHEL / Fedora / Rocky / Alma:       sudo dnf install libpcap"
+    echo "  Amazon Linux 2 / CentOS 7 (yum):    sudo yum install libpcap"
+    echo "  SUSE / openSUSE:                    sudo zypper install libpcap1"
+    echo "  Arch / Manjaro:                     sudo pacman -S libpcap"
     echo "  For offline hosts, provide the distribution's libpcap package and its dependencies from an approved local repository."
     print_error "If libpcap is installed, check that the binary matches this host's architecture and libc; installing libpcap alone cannot fix an incompatible build."
     echo "  Retry: bash scripts/install-sensor.sh --check-dependencies"
@@ -348,7 +351,11 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-print_header "🚀 Crypto Inventory Sensor Installer v1.0.0"
+# The version the platform will show is the one stamped into this binary — the
+# sensor reports it itself at registration and on every heartbeat.
+SENSOR_VERSION=$(./crypto-sensor --version 2>/dev/null | head -1 | sed -n 's/.* v\([^ ]*\)$/\1/p')
+
+print_header "🚀 Crypto Inventory Sensor Installer"
 echo "=================================================="
 
 # Step 1: Detect environment
@@ -375,11 +382,16 @@ fi
 
 print_status "Environment detected:"
 echo "  Platform: $PLATFORM/$ARCH"
+echo "  Sensor Version: ${SENSOR_VERSION:-unknown}"
 echo "  Interfaces: $INTERFACES"
 echo "  Sensor Name: $SENSOR_NAME"
 echo "  Profile: $PROFILE"
 echo "  Control Plane: $CONTROL_PLANE_URL"
 echo "  Expected IP: $EXPECTED_IP"
+
+if [[ "$PROFILE" != "datacenter_host" ]]; then
+    print_warning "--profile $PROFILE is not applied yet: the sensor registers itself and reports the datacenter_host profile."
+fi
 
 # Step 1.5: Validate IP address
 print_status "Validating IP address..."
@@ -405,13 +417,36 @@ print_status "Creating installation directory: $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/data"
 mkdir -p "$INSTALL_DIR/logs"
-mkdir -p "$INSTALL_DIR/certs"
 
-# Step 4: Download and install sensor binary
+CONFIG_FILE="$INSTALL_DIR/sensor-config.yaml"
+UUID_RE='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+# Prints the value of a top-level `key: value` line in the sensor config, with
+# optional surrounding double quotes removed (the sensor writes sensorId quoted
+# and controlPlaneUrl bare).
+read_config_value() {
+    sed -n "s/^$1:[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*\$/\1/p" "$2" 2>/dev/null | head -1
+}
+
+# A host this key already enrolled keeps its identity. Re-running the same
+# install command (to upgrade the binary, or by mistake) must not discard the
+# certificate and UUID the sensor holds and send it back to register with a key
+# it has already spent. A different key means the operator wants a fresh
+# enrolment, and gets one.
+KEEP_ENROLMENT=false
+if [[ -f "$CONFIG_FILE" ]] \
+    && [[ "$(read_config_value sensorId "$CONFIG_FILE")" =~ $UUID_RE ]] \
+    && [[ "$(read_config_value registrationKey "$CONFIG_FILE")" == "$REGISTRATION_KEY" ]]; then
+    KEEP_ENROLMENT=true
+    print_status "This host is already enrolled with this key (sensor $(read_config_value sensorId "$CONFIG_FILE")); keeping its identity and configuration."
+fi
+
+# Stop a previous install: its binary cannot be replaced while it runs ("Text
+# file busy"), and it must not rewrite the config while we replace it.
+systemctl stop crypto-sensor.service 2>/dev/null || true
+
+# Step 4: Install sensor binary
 print_status "Installing sensor binary..."
-
-# For this example, we'll copy the local binary
-# In production, you would download from a secure repository
 if [[ -f "./crypto-sensor" ]]; then
     cp ./crypto-sensor "$INSTALL_DIR/"
     chmod +x "$INSTALL_DIR/crypto-sensor"
@@ -423,53 +458,91 @@ else
 fi
 
 # Step 5: Create configuration file
-print_status "Creating configuration file..."
-# Flat camelCase keys — this is the schema the sensor's config loader
-# (sensor/internal/config.ConfigFile) actually parses. A nested
-# control_plane:/url: block is silently ignored, which makes the sensor fall
-# back to its localhost default instead of the real control plane, so the
-# config MUST be written in this shape and at this filename (sensor-config.yaml,
-# which is what the binary reads via -config below).
-cat > "$INSTALL_DIR/sensor-config.yaml" << EOF
+#
+# The installer does NOT register the sensor. The sensor binary registers itself
+# on first start: it generates its keypair locally (the private key never leaves
+# the host), proposes a UUID, sends a CSR along with its build-stamped version
+# and capabilities, then rewrites this file with the UUID and the paths of the
+# certificate it was issued. An installer that registered on the sensor's behalf
+# spent the single-use key before the binary could use it, recorded a version
+# the installer made up rather than the binary's, and left the sensor unable to
+# enrol — it retried "Registration key has already been used" while the console
+# showed a sensor that had never heartbeated.
+#
+# sensorId carries the sensor NAME until registration: the loader uses a
+# non-UUID sensorId as the registration name, and the sensor replaces it with
+# the UUID the platform accepts. Flat camelCase keys — the schema the loader
+# (sensor/internal/config.ConfigFile) parses; a nested control_plane:/url: block
+# is silently ignored.
+if [[ "$KEEP_ENROLMENT" != "true" ]]; then
+    print_status "Creating configuration file..."
+
+    # Earlier versions of this installer registered with curl and left the response
+    # — including a control-plane-generated private key — beside the config. That
+    # identity was never usable by the sensor; do not leave its key on disk. A fresh
+    # enrolment also must not inherit the previous sensor's certificate.
+    rm -f "$INSTALL_DIR/registration-response.json"
+    rm -rf "$INSTALL_DIR/certs" "$INSTALL_DIR/data/certs"
+
+    yaml_quote() {
+        local s=${1//\\/\\\\}
+        s=${s//\"/\\\"}
+        printf '"%s"' "$s"
+    }
+
+    INTERFACES_YAML=""
+    IFS=',' read -ra INTERFACE_ARRAY <<< "$INTERFACES"
+    for iface in "${INTERFACE_ARRAY[@]}"; do
+        iface="${iface//[[:space:]]/}"
+        [[ -z "$iface" ]] && continue
+        [[ -n "$INTERFACES_YAML" ]] && INTERFACES_YAML+=", "
+        INTERFACES_YAML+=$(yaml_quote "$iface")
+    done
+
+    # Holds the registration key until the sensor redeems it: owner-only before any
+    # content is written (cat > keeps the mode of the file it truncates).
+    : > "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    cat > "$CONFIG_FILE" << EOF
 # Vista Platform Sensor configuration (generated by install-sensor.sh)
-sensorId: "$SENSOR_NAME"
-controlPlaneUrl: "$CONTROL_PLANE_URL"
-registrationKey: "$REGISTRATION_KEY"
+# sensorId holds the sensor's name until it registers, then its UUID.
+sensorId: $(yaml_quote "$SENSOR_NAME")
+controlPlaneUrl: $(yaml_quote "$CONTROL_PLANE_URL")
+registrationKey: $(yaml_quote "$REGISTRATION_KEY")
 reportingIntervalSeconds: 30
 
 capture:
-  interfaces: [$(echo "$INTERFACES" | sed 's/,/", "/g' | sed 's/^/"/' | sed 's/$/"/')]
+  interfaces: [$INTERFACES_YAML]
   activeProbing: true
   networkDiscovery: true
 
 storage:
-  dataPath: "$INSTALL_DIR/data"
-
-security:
-  useTLS: true
-  clientCertPath: "$INSTALL_DIR/certs/client.crt"
-  clientKeyPath: "$INSTALL_DIR/certs/client.key"
-  serverCACertPath: "$INSTALL_DIR/certs/server-ca.crt"
+  dataPath: $(yaml_quote "$INSTALL_DIR/data")
 EOF
+fi
 
 # Step 6: Create systemd service
 print_status "Creating systemd service..."
 cat > "/etc/systemd/system/crypto-sensor.service" << EOF
 [Unit]
 Description=Crypto Inventory Network Sensor
-After=network.target
-Wants=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR
-# The sensor is registered out-of-band below (Step 8) and its certs are on disk
-# before this service starts, so run in normal mode pointed at the generated
-# config. (Passing --register here as well would re-register with an
-# already-consumed key on every restart.)
-ExecStart=$INSTALL_DIR/crypto-sensor --verbose -config $INSTALL_DIR/sensor-config.yaml
+# The address the operator entered when creating the registration key (--ip),
+# already checked to be on this host. Pinning it makes registration report the
+# address the platform expects even on a multi-homed host, where the sensor's
+# own guess (the source address of its route to the control plane) can differ.
+# Remove this line to have the sensor report whatever address it detects.
+Environment=SENSOR_IP_ADDRESS=$EXPECTED_IP
+# Registers on first start with the key in the config, then runs from the
+# certificate it was issued.
+ExecStart=$INSTALL_DIR/crypto-sensor --verbose -config $CONFIG_FILE
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
 RestartSec=10
@@ -493,83 +566,70 @@ WantedBy=multi-user.target
 EOF
 
 # Step 7: Set permissions
+# The sensor rewrites its config and writes its certificate under data/, so the
+# service user must own both.
 print_status "Setting permissions..."
 chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
 chmod 755 "$INSTALL_DIR"
-chmod 644 "$INSTALL_DIR/sensor-config.yaml"
-chmod 600 "$INSTALL_DIR/certs" 2>/dev/null || true
+chmod 600 "$CONFIG_FILE"
 
-# Step 8: Register sensor with control plane
-print_status "Registering sensor with control plane..."
-
-# Convert interfaces to JSON array
-IFS=',' read -ra INTERFACE_ARRAY <<< "$INTERFACES"
-INTERFACES_JSON="["
-for i in "${!INTERFACE_ARRAY[@]}"; do
-    if [[ $i -gt 0 ]]; then
-        INTERFACES_JSON+=","
-    fi
-    INTERFACES_JSON+="\"${INTERFACE_ARRAY[i]}\""
-done
-INTERFACES_JSON+="]"
-
-# Create registration payload
-REGISTRATION_PAYLOAD=$(cat << EOF
-{
-  "registration_key": "$REGISTRATION_KEY",
-  "name": "$SENSOR_NAME",
-  "description": "Sensor installed on $(hostname)",
-  "platform": "$PLATFORM",
-  "version": "1.0.0",
-  "profile": "$PROFILE",
-  "network_interfaces": $INTERFACES_JSON,
-  "ip_address": "$EXPECTED_IP"
-}
-EOF
-)
-
-# Register with control plane
-if curl -s -X POST "$CONTROL_PLANE_URL/api/v1/sensor-manager/sensors/register" \
-    -H "Content-Type: application/json" \
-    -d "$REGISTRATION_PAYLOAD" > "$INSTALL_DIR/registration-response.json"; then
-    print_status "Sensor registered successfully"
-    
-    # Extract certificates from response
-    if command -v jq &> /dev/null; then
-        jq -r '.client_cert' "$INSTALL_DIR/registration-response.json" > "$INSTALL_DIR/certs/client.crt"
-        jq -r '.client_key' "$INSTALL_DIR/registration-response.json" > "$INSTALL_DIR/certs/client.key"
-        jq -r '.server_ca_cert' "$INSTALL_DIR/registration-response.json" > "$INSTALL_DIR/certs/server-ca.crt"
-        chmod 600 "$INSTALL_DIR/certs/"*.crt "$INSTALL_DIR/certs/"*.key
-        print_status "Certificates installed"
-    else
-        print_warning "jq not found, certificates not extracted"
-    fi
-else
-    print_error "Failed to register sensor with control plane"
-    print_warning "Sensor will be installed but not registered"
-fi
-
-# Step 9: Enable and start service
-print_status "Enabling and starting service..."
+# Step 8: Start the service; the sensor registers itself
+print_status "Starting the sensor; it registers itself with the control plane..."
 systemctl daemon-reload
 systemctl enable crypto-sensor.service
-
-if systemctl start crypto-sensor.service; then
-    print_status "Sensor service started successfully"
-else
+START_EPOCH=$(date +%s)
+if ! systemctl restart crypto-sensor.service; then
     print_error "Failed to start sensor service"
     print_status "Check logs with: journalctl -u crypto-sensor -f"
     exit 1
 fi
 
-# Step 10: Verify installation
-print_status "Verifying installation..."
-sleep 2
+# Step 9: Wait for registration
+#
+# Registration is confirmed only by the sensor itself: it rewrites sensorId with
+# the UUID the platform accepted. A running service is not a registered sensor —
+# an unregistered one captures traffic and can submit none of it.
+REGISTRATION_TIMEOUT=${REGISTRATION_TIMEOUT:-90}
+print_status "Waiting up to ${REGISTRATION_TIMEOUT}s for the sensor to register..."
+SENSOR_ID=""
+REJECTED=false
+while (( $(date +%s) - START_EPOCH < REGISTRATION_TIMEOUT )); do
+    current_id=$(read_config_value sensorId "$CONFIG_FILE")
+    if [[ "$current_id" =~ $UUID_RE ]]; then
+        SENSOR_ID="$current_id"
+        break
+    fi
+    if journalctl -u crypto-sensor.service --since "@$START_EPOCH" --no-pager -o cat 2>/dev/null \
+        | grep -q 'Registration was REJECTED'; then
+        REJECTED=true
+        break
+    fi
+    sleep 2
+done
 
-if systemctl is-active --quiet crypto-sensor.service; then
-    print_status "✅ Sensor is running"
-else
-    print_error "❌ Sensor is not running"
+if [[ -z "$SENSOR_ID" ]]; then
+    echo ""
+    journalctl -u crypto-sensor.service --since "@$START_EPOCH" --no-pager -o cat 2>/dev/null \
+        | grep -E '⛔|❌|Registration (FAILED|retry failed)' | tail -8 || true
+    echo ""
+    if [[ "$REJECTED" == "true" ]]; then
+        # A rejected key never succeeds; stop the service rather than leave it
+        # restarting every 10 seconds.
+        systemctl stop crypto-sensor.service || true
+        systemctl disable crypto-sensor.service 2>/dev/null || true
+        print_error "The control plane REJECTED the registration key (see above): it is invalid, expired, or already used."
+        print_error "Generate a new key (Discovery → Sensors & Agents → Register) and re-run this installer with it."
+        print_status "The sensor service has been stopped and disabled."
+    else
+        print_error "The sensor did not register within ${REGISTRATION_TIMEOUT}s."
+        print_status "It is still running and retrying in the background; check that $CONTROL_PLANE_URL is reachable from this host."
+        print_status "Watch it with: journalctl -u crypto-sensor -f"
+    fi
+    exit 1
+fi
+
+if ! systemctl is-active --quiet crypto-sensor.service; then
+    print_error "❌ The sensor registered but is not running"
     print_status "Check logs with: journalctl -u crypto-sensor -f"
     exit 1
 fi
@@ -578,8 +638,10 @@ fi
 print_header "🎉 Installation Complete!"
 echo "================================"
 echo "Sensor Name: $SENSOR_NAME"
+echo "Sensor ID: $SENSOR_ID"
+echo "Sensor Version: $SENSOR_VERSION"
 echo "Installation Directory: $INSTALL_DIR"
-echo "Configuration: $INSTALL_DIR/sensor-config.yaml"
+echo "Configuration: $CONFIG_FILE"
 echo "Service: crypto-sensor.service"
 echo "Control Plane: $CONTROL_PLANE_URL"
 echo ""
@@ -590,25 +652,5 @@ echo "  Restart:    systemctl restart crypto-sensor"
 echo "  Stop:       systemctl stop crypto-sensor"
 echo "  Uninstall:  systemctl stop crypto-sensor && systemctl disable crypto-sensor"
 echo ""
-echo "🔍 Monitoring:"
-echo "  Check sensor health: curl $CONTROL_PLANE_URL/api/v1/sensors/$SENSOR_NAME/health"
-echo "  View discoveries: curl $CONTROL_PLANE_URL/api/v1/sensors/$SENSOR_NAME/discoveries"
-echo ""
-print_status "Sensor is now monitoring network traffic on: $INTERFACES"
-
-# Display copy-paste command for future reference
-echo ""
-print_header "📋 Copy-Paste Installation Command"
-echo "======================================"
-echo "For future installations or documentation, use this command:"
-echo ""
-echo "curl -sSL https://app.vistasecurity.io/scripts/install-sensor.sh | sudo bash -s -- \\"
-echo "  --key $REGISTRATION_KEY \\"
-echo "  --ip $EXPECTED_IP \\"
-echo "  --name $SENSOR_NAME \\"
-echo "  --profile $PROFILE \\"
-echo "  --interfaces \"$INTERFACES\" \\"
-echo "  --url $CONTROL_PLANE_URL"
-echo ""
-print_status "You can also run the installer interactively:"
-echo "curl -sSL https://app.vistasecurity.io/scripts/install-sensor.sh | sudo bash -s -- --interactive"
+print_status "Sensor is registered and monitoring network traffic on: $INTERFACES"
+print_status "It appears under Discovery → Sensors & Agents once its first heartbeat arrives."

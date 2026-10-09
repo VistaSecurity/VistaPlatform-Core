@@ -51,7 +51,7 @@ afterEach(() => {
 
 async function render(p: MergeProposal) {
   await act(async () => root.render(
-    <MemoryRouter><MergeProposalRow proposal={p} onAccept={vi.fn()} onKeepSeparate={vi.fn()} /></MemoryRouter>,
+    <MemoryRouter><MergeProposalRow proposal={p} onMergeAsIs={vi.fn()} onAccept={vi.fn()} onKeepSeparate={vi.fn()} /></MemoryRouter>,
   ));
   return host.querySelector('[data-testid="merge-pair-score"]');
 }

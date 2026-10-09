@@ -23,7 +23,7 @@ Someone running the estate wants to know what is out there, what is waiting for 
 
 #### Cryptographic posture
 
-The top panel. The headline is the **percentage of monitored assets that are high-risk**, with the numerator and denominator shown beside it. It is a population share, so it does not receive an individual-risk band. An empty monitored population shows a dash rather than 0%. The panel also shows the thirty-day individual-risk trend, observed third-party exposure, open critical findings, and post-quantum adoption.
+The top panel. A ring splits your monitored assets into **High risk**, **Medium**, **Low**, **Assessed, clean** and **Not assessed**, with a count beside each; High risk and Not assessed open the matching assets in the inventory. The number in the middle is the share of assets that are **low risk or assessed clean**. Assets nobody has scored yet count against it rather than for it, so an estate that has never been scanned reads 0% on a grey ring, never a reassuring green one. An empty monitored population shows a dash. The panel also shows the thirty-day individual-risk trend, **Observed External Connections** (the third-party traffic your sensors have seen, as bars for weak crypto, legacy TLS, expired certificates, reassessment required and PQC-resistant connections, each out of the total), open critical findings, and post-quantum adoption.
 
 #### Assets Monitored
 
@@ -44,8 +44,6 @@ Every one of these is a link. The big number opens the whole inventory; **Pendin
 The bars show **top-level** classes — Hardware, Virtual, Cloud resource, Application, Service, External party, Unknown host — not the specific class of each asset. Those top-level classes divide the estate exactly: every asset is in one and only one, so the bars add up to the total beside them.
 
 Past the fifth, the rest are rolled into a single **Other** row. Other is a remainder rather than a class, so it is not clickable; expand the inventory's class facet to see what is in it.
-
-The **Topology** link beside the heading opens the [map's topology view](./map.md#the-topology-view) — the same estate arranged by site and segment instead of by class.
 
 ### Reading "Data quality"
 
@@ -141,7 +139,7 @@ Anyone who can view assets can see all four dashboards. The individual tiles lin
 ## See also
 
 - [Inventory & Lenses](./inventory-and-lenses.md) — the list every class bar opens
-- [The Map](./map.md) — including the topology view the "By class" heading links to
+- [The Map](./map.md) — the estate arranged by site and segment
 - [Asset Approval](./asset-approval.md) — the queue behind "Pending approval"
 - [Compliance Frameworks](./compliance-frameworks.md) — Inventory Hygiene and the rest
 - [Findings](./findings.md) — what "open" means, and who produces them

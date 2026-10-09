@@ -741,6 +741,28 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       },
     },
   },
+  "smart_device": {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      "vendor": {
+        type: "string",
+        description: "Manufacturer or brand as reported by the device.",
+      },
+      "model": {
+        type: "string",
+        description: "Manufacturer model designation.",
+      },
+      "asset_tag": {
+        type: "string",
+        description: "Organisation's own inventory tag, if one is affixed.",
+      },
+      "device_category": {
+        type: "string",
+        description: "What the thing is, e.g. tv, speaker, doorbell, console, appliance.",
+      },
+    },
+  },
   "bmc": {
     type: 'object',
     additionalProperties: false,

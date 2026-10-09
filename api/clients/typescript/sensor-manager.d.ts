@@ -1280,6 +1280,18 @@ export interface components {
             } | null;
             capture_time_range: Record<string, never> | null;
             error_message?: string;
+            /**
+             * @description Packets the capture recorded shorter than they were on the wire,
+             *     because its snapshot length cut them off. Their TLS handshakes and
+             *     certificates cannot be read; non-zero means the job yielded less
+             *     than the traffic it saw. 0 for a full-length capture.
+             */
+            truncated_packet_count: number;
+            /**
+             * @description The most bytes the capture file keeps per packet. Omitted until the
+             *     job is processed, or when the file does not state one.
+             */
+            snapshot_length?: number;
             /** Format: date-time */
             processing_started_at?: string;
             /** Format: date-time */

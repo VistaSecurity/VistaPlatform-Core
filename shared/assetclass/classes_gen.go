@@ -36,6 +36,7 @@ const (
 	KeyHmi                Key = "hmi"
 	KeyIed                Key = "ied"
 	KeyIotDevice          Key = "iot_device"
+	KeySmartDevice        Key = "smart_device"
 	KeyBmc                Key = "bmc"
 	KeyVirtual            Key = "virtual"
 	KeyVirtualMachine     Key = "virtual_machine"
@@ -353,6 +354,17 @@ var All = []Class{
 		Path:                 "hardware.iot_device",
 		Label:                "IoT device",
 		Icon:                 "Cctv",
+		CMDBCIType:           "",
+		CycloneDXType:        "device",
+		IdentifierPrecedence: []string{"serial_number", "cmdb_sys_id", "mac_address", "hostname", "ip_address"},
+		LegacyAssetType:      "appliance",
+	},
+	{
+		Key:                  "smart_device",
+		Parent:               "hardware",
+		Path:                 "hardware.smart_device",
+		Label:                "Smart device",
+		Icon:                 "TvMinimal",
 		CMDBCIType:           "",
 		CycloneDXType:        "device",
 		IdentifierPrecedence: []string{"serial_number", "cmdb_sys_id", "mac_address", "hostname", "ip_address"},

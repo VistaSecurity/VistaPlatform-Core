@@ -110,11 +110,11 @@ var unifiUplinkFields = []string{
 // version but never a manufacturer — it does not need to, because it adopts
 // nothing else.
 //
-// Spelled as standards/oui-vendors.csv spells it, which is not cosmetic in two
+// Spelled as standards/oui/vendors.yaml spells it, which is not cosmetic in two
 // places at once. It is the vendor GUARD on the `model` rules for UniFi device
 // types, so a different spelling here silently stops every one of them from
-// firing; and it is the same string shared/hostobs derives from a captured
-// frame, so a device seen passively and a device seen through the controller
+// firing; and it is the same string the platform resolves from a captured
+// frame's MAC, so a device seen passively and a device seen through the controller
 // have to agree or they read as two manufacturers.
 const unifiVendor = "Ubiquiti Networks"
 

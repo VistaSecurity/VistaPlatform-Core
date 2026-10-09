@@ -213,6 +213,13 @@ type Config struct {
 	// two machines (ADR-0002 D3).
 	DynamicScopes map[string]bool
 
+	// LeaseWindow is how long a device confirmation keeps an address in a
+	// dynamic scope deciding a match for its owner (leasefresh.go, ADR-0002
+	// D3 erratum "the lease-fresh address"). ZERO means [DefaultLeaseWindow];
+	// a NEGATIVE value turns the rule off, which is the kill-switch: every
+	// address in a dynamic scope is then a lease to the vote, as before.
+	LeaseWindow time.Duration
+
 	// Precedence overrides the per-class identifier order. ADR-0002 D3 makes
 	// the order "editable per tenant under Settings → Identification rules",
 	// and a tenant leaf subclass is a runtime row the generated registry does
@@ -252,8 +259,11 @@ type Engine struct {
 	// verdicts, the same "unset means never" the threshold has.
 	autoMerge bool
 	dynamic   map[string]bool
-	prec      func(ctx context.Context, tenantID, classKey string) ([]Kind, bool)
-	now       func() time.Time
+	// leaseWindow is Config.LeaseWindow with zero replaced by the default;
+	// negative is "off" (leasefresh.go).
+	leaseWindow time.Duration
+	prec        func(ctx context.Context, tenantID, classKey string) ([]Kind, bool)
+	now         func() time.Time
 
 	// operatorScan is a verified person's scan request for THIS resolution
 	// ([Engine.WithOperatorScanRequest]). Like observationID it rides only on a
@@ -278,8 +288,12 @@ func New(cfg Config) (*Engine, error) {
 		matcher:          cfg.Matcher,
 		threshold:        cfg.AutoAcceptThreshold,
 		dynamic:          cfg.DynamicScopes,
+		leaseWindow:      cfg.LeaseWindow,
 		prec:             cfg.Precedence,
 		now:              cfg.Now,
+	}
+	if e.leaseWindow == 0 {
+		e.leaseWindow = DefaultLeaseWindow
 	}
 	if e.matcher == nil {
 		e.matcher = seams.Default().Matcher
@@ -499,6 +513,15 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			if len(refs) == 0 {
 				continue
 			}
+			if decided != "" && refs[0].ID != decided && e.dynamicAddress(obs, id) && obs.addressLeaseFresh(id) {
+				// A lease-fresh address is a FALLBACK (leasefresh.go): it
+				// decides when nothing stronger did, and never contradicts a
+				// kind ranked above it. B's name, or B's derived MAC, seen at
+				// A's recently confirmed address is B, with A's lease left
+				// where it was for lease.go to judge — not a cross-kind
+				// conflict, and not a floating address.
+				continue
+			}
 			for _, r := range refs {
 				note(r.ID, id)
 			}
@@ -530,19 +553,25 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		}
 	}
 
+	// A host's own report decided by the installation identity we issued is
+	// that installation's host (installation_claims.go): a weaker identifier
+	// another asset holds does not detach it. The other asset is proposed
+	// beside the match instead, after it is applied.
+	installation := decided != "" && !corrupt && installationDecides(obs, decidedBy)
+
 	// The floating-address rule, BEFORE the conflict path (floating.go). A MAC
 	// resolving to one asset and an address to another is a cross-kind
 	// conflict in every case but one: when that is ALL the observation says,
 	// it is a node announcing an address that floats — and the floor below
 	// would otherwise turn it into a merge proposal on every gratuitous ARP.
-	if conflicting && !corrupt {
+	if conflicting && !corrupt && !installation {
 		if pair, ok := e.floatingAddress(obs, ids, owners, decided, decidedBy, candidateSeq); ok {
 			return e.resolveFloating(ctx, obs, at, ids, owners, pair)
 		}
 	}
 
 	switch {
-	case conflicting:
+	case conflicting && !installation:
 		return e.resolveConflict(ctx, obs, at, ids, owners, evidence, candidateSeq, conflictWhy)
 	case decided != "":
 		ref := AssetRef{TenantID: obs.TenantID, ID: decided}
@@ -602,6 +631,11 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			// mac_address" knows the MAC was worked out, not seen.
 			changes["decided_by_inferred"] = decider.Source.Ref
 		}
+		if decidedBy == KindIPAddress && obs.addressLeaseFresh(decider) {
+			// A reviewer reading "decided by ip_address" on a DHCP segment
+			// needs to see why that was allowed (leasefresh.go).
+			changes["lease_fresh"] = true
+		}
 		mode, err := e.provisionalMatchMode(ctx, ref, evidence[decided])
 		if err != nil {
 			return Resolution{}, err
@@ -658,6 +692,11 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			changes["claimed_rehomed"] = identifierKeys(claimed)
 		}
 
+		// A match an observed device binding decided confirms the device at
+		// every address it attaches (leasefresh.go): that is what lets the
+		// next address-only probe of it match inside a dynamic scope.
+		attach = stampDeviceConfirmation(at, attach, deviceDecided(obs, decidedBy, decider))
+
 		if err := e.applyToAsset(ctx, ref, obs, at, attach, unattached, ActionUpdated, changes); err != nil {
 			return Resolution{}, err
 		}
@@ -671,14 +710,26 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		if err != nil {
 			return Resolution{}, err
 		}
-		return Resolution{
+		res := Resolution{
 			Outcome:           OutcomeMatched,
 			Asset:             ref,
 			DecidedBy:         decidedBy,
 			DecidedByInferred: decider.Inferred(),
 			Unattached:        unattached,
 			Drift:             applied,
-		}, nil
+		}
+		if installation {
+			p, err := e.proposeSameInstallation(ctx, obs, at, ref, decidedBy, ids, owners, evidence, candidateSeq, unattached)
+			if err != nil {
+				return Resolution{}, err
+			}
+			res.Candidates = p.candidates
+			res.Proposal = p.proposal
+			res.TopScore = p.topScore
+			res.MergeRecommended = p.mergeRecommended
+			res.Suppressed = p.suppressed
+		}
+		return res, nil
 	default:
 		if e.admissionDecision != nil && !e.admissionDecision.Established {
 			claimed := ownerSet(owners)
@@ -1031,9 +1082,10 @@ func (e *Engine) kindVotes(obs Observation, id Identifier) bool {
 	if id.Kind.RequiresScope() && id.Scope == "" {
 		return false
 	}
-	if e.dynamicAddress(obs, id) {
+	if !e.addressDecides(obs, id) {
 		// ADR-0002 D3: an address in a dynamic scope decides nothing — unless
-		// its owner holds it pinned (pinned.go, decision 1).
+		// its owner holds it pinned (pinned.go, decision 1) or was
+		// device-confirmed there within the lease window (leasefresh.go).
 		return false
 	}
 	return true
@@ -1094,6 +1146,10 @@ func (e *Engine) resolveCreate(ctx context.Context, obs Observation, at time.Tim
 			ErrNoUsableIdentifier, identifierKeys(attach))
 	}
 	classKey, classSource, classRef, classConf := e.classForCreate(obs)
+	// A device met directly, by an observed device binding, is confirmed at
+	// the addresses it is created with (leasefresh.go) — the first sighting
+	// is as good a confirmation as any later one.
+	attach = stampDeviceConfirmation(at, attach, deviceMet(obs, attach))
 	newAsset := NewAsset{
 		ClassKey:        classKey,
 		ClassSourceKind: classSource,
@@ -1484,6 +1540,7 @@ func (e *Engine) applyToAsset(ctx context.Context, ref AssetRef, obs Observation
 var descriptiveChangeKeys = map[string]bool{
 	"decided_by":          true,
 	"decided_by_inferred": true,
+	"lease_fresh":         true,
 	"supporting":          true,
 	"sighting":            true,
 	"observation_id":      true,

@@ -101,7 +101,7 @@
     "class": "printer",
     "facts": {
       "macs": [
-        "48:a4:93:11:22:07"
+        "00:05:12:11:22:07"
       ],
       "open_ports": [
         9100
@@ -1294,8 +1294,8 @@
     }
   },
   {
-    "name": "iot/amazon-echo",
-    "class": "iot_device",
+    "name": "smart/amazon-echo",
+    "class": "smart_device",
     "facts": {
       "macs": [
         "00:bb:3a:bb:cc:01"
@@ -1311,8 +1311,8 @@
     }
   },
   {
-    "name": "iot/amazon-fire-tv",
-    "class": "iot_device",
+    "name": "smart/amazon-fire-tv",
+    "class": "smart_device",
     "facts": {
       "macs": [
         "0c:47:c9:bb:cc:02"
@@ -1327,8 +1327,8 @@
     }
   },
   {
-    "name": "iot/google-nest-hub",
-    "class": "iot_device",
+    "name": "smart/google-nest-hub",
+    "class": "smart_device",
     "facts": {
       "macs": [
         "00:1a:11:bb:cc:03"
@@ -1343,8 +1343,8 @@
     }
   },
   {
-    "name": "iot/google-chromecast",
-    "class": "iot_device",
+    "name": "smart/google-chromecast",
+    "class": "smart_device",
     "facts": {
       "macs": [
         "3c:5a:b4:bb:cc:04"
@@ -1358,8 +1358,8 @@
     }
   },
   {
-    "name": "iot/sonos-speaker",
-    "class": "iot_device",
+    "name": "smart/sonos-speaker",
+    "class": "smart_device",
     "facts": {
       "macs": [
         "00:0e:58:bb:cc:05"
@@ -1374,8 +1374,8 @@
     }
   },
   {
-    "name": "iot/roku-player",
-    "class": "iot_device",
+    "name": "smart/roku-player",
+    "class": "smart_device",
     "facts": {
       "macs": [
         "b0:a7:37:bb:cc:06"
@@ -1426,6 +1426,128 @@
       "open_ports": [
         80,
         554
+      ]
+    }
+  },
+  {
+    "name": "iot/dahua-camera",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "08:ed:ed:bb:cc:10"
+      ],
+      "open_ports": [
+        80,
+        554,
+        37777
+      ]
+    }
+  },
+  {
+    "name": "iot/hikvision-nvr",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "04:03:12:bb:cc:11"
+      ],
+      "open_ports": [
+        80,
+        554,
+        8000
+      ]
+    }
+  },
+  {
+    "name": "iot/axis-camera-advertised",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "b8:a4:4f:bb:cc:12"
+      ],
+      "open_ports": [
+        80,
+        554
+      ],
+      "mdns_services": [
+        "_axis-video._tcp"
+      ]
+    }
+  },
+  {
+    "name": "iot/axis-door-controller",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "ac:cc:8e:bb:cc:13"
+      ],
+      "open_ports": [
+        80,
+        443
+      ]
+    }
+  },
+  {
+    "name": "iot/espressif-env-sensor",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "00:4b:12:bb:cc:14"
+      ],
+      "open_ports": [
+        1883
+      ]
+    }
+  },
+  {
+    "name": "iot/honeywell-bacnet-controller",
+    "class": "iot_device",
+    "facts": {
+      "macs": [
+        "00:06:4a:bb:cc:15"
+      ],
+      "open_ports": [
+        80,
+        47808
+      ]
+    }
+  },
+  {
+    "name": "smart/roku-tv-cast",
+    "class": "smart_device",
+    "facts": {
+      "macs": [
+        "10:59:32:bb:cc:16"
+      ],
+      "open_ports": [
+        8008,
+        8060
+      ],
+      "mdns_services": [
+        "_googlecast._tcp"
+      ]
+    }
+  },
+  {
+    "name": "smart/amazon-fire-tv-stick",
+    "class": "smart_device",
+    "facts": {
+      "macs": [
+        "00:71:47:bb:cc:17"
+      ],
+      "open_ports": [
+        8009
+      ],
+      "mdns_services": [
+        "_amzn-wplay._tcp"
+      ]
+    }
+  },
+  {
+    "name": "smart/ring-doorbell",
+    "class": "smart_device",
+    "facts": {
+      "macs": [
+        "18:7f:88:bb:cc:18"
       ]
     }
   },

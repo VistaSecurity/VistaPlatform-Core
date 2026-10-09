@@ -238,6 +238,14 @@ func TestIntegration_HostObservation_BecomesAnAssetWithIdentifiersAndFacts(t *te
 			t.Fatal(err)
 		}
 		facts[key] = value
+		if key == "hw.vendor" {
+			// Not a frame's statement: the platform's lookup of the MAC in the
+			// IEEE registry, written as a catalogue resolution (oui_vendor.go).
+			if sourceKind != "imported" || sourceRef != ouiVendorSourceRef {
+				t.Errorf("hw.vendor is %q from %q; want the registry lookup (imported, %s)", sourceKind, sourceRef, ouiVendorSourceRef)
+			}
+			continue
+		}
 		if sourceKind != "measured" {
 			t.Errorf("fact %s is %q; a frame stated it, so it is measured", key, sourceKind)
 		}

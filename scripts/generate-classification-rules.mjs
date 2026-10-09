@@ -17,13 +17,14 @@
 // two from drifting — which is the failure this repo has paid for often enough
 // to generate everything with two homes.
 //
-// OUI rules are NOT written out in the YAML. standards/oui-vendors.csv owns
-// OUI -> vendor (workstream 2.5 compiles it into the sensor as
-// shared/hostobs/oui_gen.go), and this generator reads it: one `oui` rule per
-// CSV prefix, carrying the CSV's vendor, plus the class the YAML's
-// `oui_classes` map attaches to that vendor. A second hand-written copy of the
-// same mapping is a second copy that drifts, and it already had — see the note
-// above `oui_classes` in the YAML.
+// MAC-keyed rules are written against the VENDOR, not the prefix. The IEEE
+// registry (shared/ouiregistry, generated from standards/oui/) resolves a MAC
+// to a canonical manufacturer inside the engine, so the vendor needs no rule
+// at all; a CLASS for a manufacturer whose networked products are all one
+// thing comes from the YAML's `oui_classes` map, which this generator turns
+// into one `oui_vendor` rule per entry. Every vendor named anywhere must be a
+// canonical name in standards/oui/vendors.yaml (read here, never restated) or
+// be declared in `vendors_outside_oui_table`.
 //
 // Validation here is the FIRST of the two gates the rules pass. This one
 // checks shape: known kind, well-formed pattern for that kind, a class key
@@ -42,7 +43,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const root = path.resolve(__dirname, '..');
 
-const fail = (msg) => sharedFail('classification-rules', msg);
+/** A generation failure. Thrown so the tests can provoke each guard; main()
+ * turns it into the usual message and exit status. */
+export class GenError extends Error {}
+const fail = (msg) => { throw new GenError(msg); };
 
 // Confidence bounds. The floor is 0.50 because a rule that is less than
 // even money is not a proposal, it is noise in the approval queue; the ceiling
@@ -52,8 +56,8 @@ const MIN_CONFIDENCE = 0.5;
 const MAX_CONFIDENCE = 0.95;
 
 const KIND_ORDER = [
-  'oui', 'sysobjectid', 'enip', 'cloud_type', 'banner', 'port_profile', 'model', 'platform',
-  'cdp_capabilities', 'lldp_capability', 'mdns_service', 'os_name',
+  'oui', 'oui_vendor', 'sysobjectid', 'enip', 'cloud_type', 'banner', 'port_profile', 'model', 'platform',
+  'cdp_capabilities', 'lldp_capability', 'mdns_service', 'os_name', 'dhcp_vendor_class',
 ];
 
 const OUI = /^[0-9A-F]{6}$/;
@@ -73,81 +77,60 @@ const MDNS_SERVICE = /^_[a-z0-9][a-z0-9-]*\._(tcp|udp)$/;
 // load + validate
 // ---------------------------------------------------------------------------
 
-const OUI_CSV = path.join('standards', 'oui-vendors.csv');
-const CSV_PREFIX = /^[0-9A-F]{2}:[0-9A-F]{2}:[0-9A-F]{2}$/;
+const VENDORS_YAML = path.join('standards', 'oui', 'vendors.yaml');
 
 /**
- * Reads standards/oui-vendors.csv into [{pattern, vendor}], pattern rendered
- * the way a classification rule spells it: 6 uppercase hex digits, no
- * separators.
+ * Reads the canonical vendor names from standards/oui/vendors.yaml, with the
+ * `source:` each one carries where it has one.
  *
- * Deliberately a second parser rather than an import of
- * generate-oui-table.mjs's: that one's job is to emit a Go map and it fails the
- * whole run on a malformed row, which is right for it. This one only needs the
- * pairs, and any row IT would reject has already failed `make generate` before
- * reaching here, because the OUI generator runs first.
+ * Read here rather than restated: that file is the ONE place a manufacturer's
+ * spelling is decided (scripts/generate-oui-registry.mjs compiles it into
+ * shared/ouiregistry, which is what the engine resolves MACs against). A second
+ * list in this generator would be a second spelling authority, which is the
+ * drift this whole arrangement exists to prevent.
+ *
+ * Returns Map<vendor, sourceURL|null>.
  */
-function loadOUIVendors() {
-  const csv = fs.readFileSync(path.join(root, OUI_CSV), 'utf8');
-  const out = [];
-  const seen = new Set();
-  for (const raw of csv.split('\n')) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#') || line === 'prefix,vendor') continue;
-    const comma = line.indexOf(',');
-    if (comma < 0) fail(`${OUI_CSV}: expected "prefix,vendor", got ${JSON.stringify(line)}`);
-    const prefix = line.slice(0, comma).trim();
-    const vendor = line.slice(comma + 1).trim();
-    if (!CSV_PREFIX.test(prefix)) fail(`${OUI_CSV}: bad prefix ${JSON.stringify(prefix)}`);
-    if (!vendor) fail(`${OUI_CSV}: ${prefix} has no vendor`);
-    const pattern = prefix.replace(/:/g, '');
-    if (seen.has(pattern)) fail(`${OUI_CSV}: duplicate prefix ${prefix}`);
-    seen.add(pattern);
-    out.push({ pattern, vendor });
+export function loadCanonicalVendors(text) {
+  const doc = yaml.parse(text);
+  const out = new Map();
+  for (const [i, e] of (doc?.vendors || []).entries()) {
+    const name = e?.vendor;
+    if (typeof name !== 'string' || !name) fail(`${VENDORS_YAML}: vendors[${i}] has no vendor name`);
+    out.set(name, typeof e.source === 'string' && e.source ? e.source : null);
   }
-  if (out.length < 100) fail(`${OUI_CSV}: only ${out.length} prefixes read; the parse is not finding the table`);
+  if (out.size < 50) fail(`${VENDORS_YAML}: only ${out.size} canonical vendors read; the parse is not finding the list`);
   return out;
 }
 
 /**
- * Turns the CSV plus the YAML's vendor -> class map into `oui` rules.
+ * Turns the YAML's vendor -> class map into `oui_vendor` rules, one per entry.
  *
- * A vendor the map does not mention gets a VENDOR-ONLY rule, which is the
- * majority and the intended default: of the prefixes in the CSV only about a
- * third belong to a manufacturer whose networked products are all one thing.
+ * A vendor that is NOT in the map needs no rule at all: the engine reports the
+ * registry's canonical vendor for every MAC it resolves, rule or none. The map
+ * exists only for the minority of manufacturers whose networked products are
+ * all one thing.
+ *
+ * The canonical-vendor gate is the check that has to be able to fail. An
+ * `oui_vendor` rule matches only a CANONICAL name, so a key spelled any other
+ * way — "Brother" for "Brother Industries" — is a class that silently applies
+ * to nothing, ever. `vendors_outside_oui_table` does not excuse it either: a
+ * vendor the registry lacks can never be what a MAC resolves to.
  */
-function ouiRules(reg, classKeys, vendors) {
+export function ouiVendorRules(reg, classKeys, canonical) {
   const map = reg.oui_classes || {};
-  const sources = ouiSources(reg, vendors);
-
-  const defaultConfidence = reg.oui_vendor_only_confidence;
-  if (typeof defaultConfidence !== 'number') {
-    fail('oui_vendor_only_confidence is required and must be a number');
-  }
-  if (defaultConfidence < MIN_CONFIDENCE || defaultConfidence > MAX_CONFIDENCE) {
-    fail(`oui_vendor_only_confidence ${defaultConfidence} is outside ${MIN_CONFIDENCE}-${MAX_CONFIDENCE}`);
+  const ieee = reg.sources?.ieee;
+  if (typeof ieee !== 'string' || !/^https?:\/\//.test(ieee)) {
+    fail('sources.ieee must be the IEEE registry URL — it is the citation every oui_vendor rule carries');
   }
 
-  // A vendor in the map that the CSV does not contain is a typo that would
-  // otherwise be a class silently applying to nothing — the shape of a check
-  // that cannot fail.
-  const known = new Set(vendors.map((v) => v.vendor));
-  for (const vendor of Object.keys(map)) {
-    if (!known.has(vendor)) {
-      fail(`oui_classes names ${JSON.stringify(vendor)}, which is not a vendor in ${OUI_CSV}. `
-        + 'Spell it exactly as the CSV does, or add the prefix there first.');
+  return Object.entries(map).map(([vendor, entry]) => {
+    if (!canonical.has(vendor)) {
+      fail(`oui_classes names ${JSON.stringify(vendor)}, which is not a canonical vendor in ${VENDORS_YAML}. `
+        + 'An oui_vendor rule matches only the canonical spelling, so this class would apply to nothing. '
+        + `Spell it as ${VENDORS_YAML} does, or add the vendor (with its IEEE registrant strings) there first.`);
     }
-  }
-
-  return vendors.map(({ pattern, vendor }) => {
-    const sourceURL = sources.get(pattern) ?? IEEE_URL;
-    const entry = map[vendor];
-    if (entry === undefined) {
-      return {
-        kind: 'oui', pattern, class: '', vendor, model: '',
-        confidence: defaultConfidence, sourceURL,
-      };
-    }
+    if (!entry || typeof entry !== 'object') fail(`oui_classes[${JSON.stringify(vendor)}] is not a mapping`);
     if (!entry.class) fail(`oui_classes[${JSON.stringify(vendor)}] has no class`);
     if (!classKeys.has(entry.class)) {
       fail(`oui_classes[${JSON.stringify(vendor)}]: class ${JSON.stringify(entry.class)} is not in standards/asset-classes.yaml`);
@@ -158,96 +141,62 @@ function ouiRules(reg, classKeys, vendors) {
     if (entry.confidence < MIN_CONFIDENCE || entry.confidence > MAX_CONFIDENCE) {
       fail(`oui_classes[${JSON.stringify(vendor)}]: confidence ${entry.confidence} is outside ${MIN_CONFIDENCE}-${MAX_CONFIDENCE}`);
     }
+    if (Math.round(entry.confidence * 100) !== entry.confidence * 100) {
+      fail(`oui_classes[${JSON.stringify(vendor)}]: confidence ${entry.confidence} has more than two decimal places`);
+    }
     for (const key of Object.keys(entry)) {
       if (!['class', 'confidence'].includes(key)) {
         fail(`oui_classes[${JSON.stringify(vendor)}]: unknown field ${JSON.stringify(key)}`);
       }
     }
+    // The citation. IEEE by default, because that is where MAC -> vendor comes
+    // from. A vendor whose entry in vendors.yaml carries a `source:` is one the
+    // IEEE does not (truthfully) attribute — a locally-administered convention
+    // such as QEMU's 52:54:00, or a prefix registered to someone else that only
+    // ever carries one product (08:00:27, VirtualBox) — and citing the IEEE for
+    // it would be a citation that does not say what the rule says.
+    const sourceURL = canonical.get(vendor) ?? ieee;
     return {
-      kind: 'oui', pattern, class: entry.class, vendor, model: '',
+      kind: 'oui_vendor', pattern: vendor, class: entry.class, vendor, model: '',
       confidence: entry.confidence, sourceURL,
     };
   });
 }
 
-const IEEE_URL = 'https://standards-oui.ieee.org/';
-
 /**
- * Reads `oui_sources` — the per-prefix citation override — and checks it covers
- * exactly the prefixes IEEE did not assign.
- *
- * An OUI rule cites the IEEE registry, because that is where OUI -> vendor comes
- * from. For a LOCALLY-ADMINISTERED prefix that citation is simply false: the U/L
- * bit means nobody registered it, and `FA:16:3E -> OpenStack` is a convention of
- * that platform's own, documented by that platform. Pointing at
- * standards-oui.ieee.org for it is worse than citing nothing — it is a citation
- * that does not say what the rule says, aimed at a reader who will not go and
- * check.
- *
- * So: a locally-administered prefix MUST carry an override, and an override for
- * a prefix the CSV does not have is a typo. A universally-administered prefix
- * MAY carry one, for the case where the registry assigned the prefix to somebody
- * other than the name the table uses (08:00:27 is registered to Cadmus Computer
- * Systems; every frame carrying it in practice is a VirtualBox guest).
+ * Keys this generator used to read and no longer does. Present in the YAML,
+ * each would look like it still did something.
  */
-function ouiSources(reg, vendors) {
-  const raw = reg.oui_sources || {};
-  const byPrefix = new Map(vendors.map((v) => [v.pattern, v.vendor]));
-  const out = new Map();
-
-  for (const [prefix, url] of Object.entries(raw)) {
-    const pattern = String(prefix).replace(/:/g, '').toUpperCase();
-    if (!byPrefix.has(pattern)) {
-      fail(`oui_sources names prefix ${JSON.stringify(prefix)}, which is not in ${OUI_CSV}`);
-    }
-    if (typeof url !== 'string' || !/^https?:\/\//.test(url)) {
-      fail(`oui_sources[${JSON.stringify(prefix)}]: ${JSON.stringify(url)} is not an http(s) URL`);
-    }
-    out.set(pattern, url);
-  }
-
-  // The check that has to be able to fail: every locally-administered prefix
-  // needs its own citation, because the IEEE default is wrong for all of them.
-  for (const { pattern, vendor } of vendors) {
-    if (!isLocallyAdministered(pattern) || out.has(pattern)) continue;
-    fail(`${OUI_CSV}: ${pattern} (${vendor}) is a LOCALLY-ADMINISTERED prefix — the U/L bit is set, `
-      + 'so IEEE assigned it to nobody and the default citation would be false. '
-      + 'Add an oui_sources entry pointing at the platform that documents the convention.');
-  }
-  return out;
-}
-
-/** True when the U/L bit of the first octet is set — i.e. IEEE assigned nothing. */
-function isLocallyAdministered(pattern) {
-  return (parseInt(pattern.slice(0, 2), 16) & 0x02) !== 0;
-}
+const RETIRED_KEYS = {
+  oui_sources: `per-prefix citations now live in ${VENDORS_YAML} as a pin's \`source:\``,
+  oui_vendor_only_confidence: 'the registry\'s own vendor statement carries classify.RegistryVendorConfidence; no vendor-only rows are generated',
+};
 
 /**
- * Checks that every vendor named by a HAND-WRITTEN rule is spelled exactly as
- * standards/oui-vendors.csv spells it.
+ * Checks that every vendor a rule names — and every `oui_classes` key — is
+ * spelled exactly as standards/oui/vendors.yaml spells a canonical vendor, or
+ * is declared in `vendors_outside_oui_table`.
  *
  * One manufacturer, one name. Two spellings is not a cosmetic problem here: the
- * engine's vendor arbitration refuses to choose between two rules naming
- * DIFFERENT vendors at similar confidence, so `Dell` on the OUI rule and
- * `Dell Inc.` on the sysObjectID rule did not disagree loudly — they cancelled,
- * and a Dell server seen by both MAC and SNMP came back with no vendor and no
- * class at all. The same pair also breaks the hw.vendor join the end-of-life
- * catalogue exists for.
+ * engine's vendor arbitration refuses to choose between two statements naming
+ * DIFFERENT vendors at similar confidence, so `Dell` from the registry and
+ * `Dell Inc.` on a sysObjectID rule do not disagree loudly — they cancel, and a
+ * Dell server seen by both MAC and SNMP comes back with no vendor at all. The
+ * same pair also breaks the hw.vendor join the end-of-life catalogue exists for.
  *
- * A vendor with no prefix in the CSV is legitimate — Zyxel, Brocade and Citrix
- * are reached by SNMP and have never turned up in the MAC table — but it has to
- * be DECLARED, so that adding their OUI later cannot quietly introduce a second
- * spelling.
+ * A manufacturer the IEEE registry genuinely lacks is legitimate, but it has to
+ * be DECLARED, so that adding it to vendors.yaml later cannot quietly introduce
+ * a second spelling — and a declared one that IS canonical fails, because the
+ * declaration would then be hiding nothing.
  */
-function checkVendorSpellings(reg, rules, vendors) {
-  const csvVendors = new Set(vendors.map((v) => v.vendor));
-  const declared = reg.vendors_outside_oui_table || [];
+export function checkVendorSpellings(reg, rules, canonical) {
+  const declared = reg.vendors_outside_oui_table ?? [];
   if (!Array.isArray(declared)) fail('vendors_outside_oui_table must be a list');
 
   for (const vendor of declared) {
-    if (csvVendors.has(vendor)) {
-      fail(`vendors_outside_oui_table lists ${JSON.stringify(vendor)}, which IS in ${OUI_CSV} now. `
-        + 'Remove it from the list — the CSV is the spelling, and the list is only for manufacturers absent from it.');
+    if (canonical.has(vendor)) {
+      fail(`vendors_outside_oui_table lists ${JSON.stringify(vendor)}, which IS a canonical vendor in ${VENDORS_YAML}. `
+        + 'Remove it from the list — vendors.yaml is the spelling, and the list is only for manufacturers the IEEE registry lacks.');
     }
   }
   const allowed = new Set(declared);
@@ -256,10 +205,10 @@ function checkVendorSpellings(reg, rules, vendors) {
   // Near-match the way the engine's own vendorAgrees does — fold-equal, or one
   // folded name a prefix of the other — so the message can NAME the spelling to
   // use. "Dell Inc." against "Dell" is the common shape and the one an exact
-  // lookup would miss, leaving the author to go and grep the CSV.
+  // lookup would miss, leaving the author to go and grep the vendor file.
   const near = (vendor) => {
     const f = fold(vendor);
-    for (const v of csvVendors) {
+    for (const v of canonical.keys()) {
       const g = fold(v);
       if (f === g) return v;
       const [short, long] = f.length <= g.length ? [f, g] : [g, f];
@@ -268,16 +217,20 @@ function checkVendorSpellings(reg, rules, vendors) {
     return null;
   };
 
-  for (const r of rules) {
-    if (r.kind === 'oui' || !r.vendor || csvVendors.has(r.vendor) || allowed.has(r.vendor)) continue;
-    const suggestion = near(r.vendor);
-    fail(`${r.kind} rule ${JSON.stringify(r.pattern)} names vendor ${JSON.stringify(r.vendor)}, `
+  const named = [
+    ...Object.keys(reg.oui_classes || {}).map((v) => ({ what: `oui_classes key`, vendor: v })),
+    ...rules.filter((r) => r.vendor).map((r) => ({ what: `${r.kind} rule ${JSON.stringify(r.pattern)}`, vendor: r.vendor })),
+  ];
+  for (const { what, vendor } of named) {
+    if (canonical.has(vendor) || allowed.has(vendor)) continue;
+    const suggestion = near(vendor);
+    fail(`${what} names vendor ${JSON.stringify(vendor)}, `
       + (suggestion
-        ? `which ${OUI_CSV} spells ${JSON.stringify(suggestion)}. One manufacturer, one name: the engine `
-          + 'refuses to choose between two rules naming different vendors at similar confidence, so two '
+        ? `which ${VENDORS_YAML} spells ${JSON.stringify(suggestion)}. One manufacturer, one name: the engine `
+          + 'refuses to choose between two statements naming different vendors at similar confidence, so two '
           + 'spellings do not disagree — they cancel, and the asset comes back with no vendor.'
-        : `which is not in ${OUI_CSV}. Either add the prefix there, or declare the name in `
-          + 'vendors_outside_oui_table with the reason it has no MAC prefix.'));
+        : `which is not a canonical vendor in ${VENDORS_YAML}. Either add it there (with its IEEE registrant `
+          + 'strings), or — only if the IEEE registry genuinely lacks it — declare the name in vendors_outside_oui_table.'));
   }
 }
 
@@ -319,12 +272,19 @@ function normalise(rule, index, classKeys, kinds) {
 
   switch (kind) {
     case 'oui':
-      // OUI rules come from standards/oui-vendors.csv plus `oui_classes`, not
-      // from the rules list. A hand-written one here would be the second copy
-      // this arrangement exists to prevent.
-      fail(`${where}: oui rules are generated from ${OUI_CSV} and the oui_classes map — `
-        + 'do not write one in the rules list. To give a vendor a class, add it to oui_classes; '
-        + 'to add a prefix, add it to the CSV.');
+      // A PREFIX rule, for the rare assignment a vendor-level statement cannot
+      // express. It outranks the vendor rules for the MACs it covers. Not the
+      // way to name a vendor (the registry does that) or to give one a class
+      // (oui_classes does that).
+      if (!OUI.test(pattern)) {
+        fail(`${where}: oui pattern ${JSON.stringify(pattern)} must be 6 uppercase hex digits with no separators`);
+      }
+      break;
+    case 'oui_vendor':
+      // Generated from oui_classes, one per entry. A hand-written one here
+      // would be a second place a vendor's class is decided.
+      fail(`${where}: oui_vendor rules are generated from the oui_classes map — `
+        + 'do not write one in the rules list. To give a vendor a class, add it to oui_classes.');
       break;
     case 'sysobjectid':
       if (!SYSOBJECTID.test(pattern)) {
@@ -341,11 +301,12 @@ function normalise(rule, index, classKeys, kinds) {
         fail(`${where}: cloud_type pattern ${JSON.stringify(pattern)} must be a lower_snake resource type`);
       }
       break;
-    // `os_name` shares every check here: both kinds are RE2 patterns carrying
-    // their own anchoring, and a second copy of the RE2-vs-JS reasoning below
-    // is a second copy that drifts.
+    // `os_name` and `dhcp_vendor_class` share every check here: all three kinds
+    // are RE2 patterns carrying their own anchoring, and a second copy of the
+    // RE2-vs-JS reasoning below is a second copy that drifts.
     case 'banner':
-    case 'os_name': {
+    case 'os_name':
+    case 'dhcp_vendor_class': {
       // NOT `new RegExp(pattern)`. These patterns are Go RE2, and the two
       // engines disagree in both directions: JS rejects RE2's inline `(?i)`
       // flag group outright, and JS ACCEPTS backreferences and lookaround,
@@ -354,7 +315,8 @@ function normalise(rule, index, classKeys, kinds) {
       //
       // So this checks for the constructs that would pass a JS compile and
       // fail a Go one, and the authoritative compile happens in Go:
-      // shared/classify's Rule.Validate builds every banner and os_name regexp
+      // shared/classify's Rule.Validate builds every banner, os_name and
+      // dhcp_vendor_class regexp
       // at engine construction, and TestGeneratedRules_AreValid runs it over
       // this table.
       const unsupported = [
@@ -387,6 +349,16 @@ function normalise(rule, index, classKeys, kinds) {
       }
       if (inClass) fail(`${where}: ${kind} pattern ${JSON.stringify(pattern)} has an unclosed '['`);
       if (depth !== 0) fail(`${where}: ${kind} pattern ${JSON.stringify(pattern)} has an unmatched '('`);
+      // A shipped option 60 rule must be anchored at the start. The identifier
+      // is one short string the client chose, and an unanchored pattern
+      // (`MSFT`, `AP`) matches inside somebody else's — `Cisco AP c3700`
+      // contains `AP`, `MSFT 5.0 XBOX` contains `MSFT 5.0`. Shipped rules
+      // only: an admin's rule is the engine's to validate, and it compiles.
+      if (kind === 'dhcp_vendor_class' && !/^(\(\?[a-zA-Z]+\))?\^/.test(pattern)) {
+        fail(`${where}: dhcp_vendor_class pattern ${JSON.stringify(pattern)} must be anchored with a leading ^ `
+          + '(after an optional flag group such as (?i)) — an option 60 identifier is one short string, and an '
+          + 'unanchored pattern matches inside another client\'s');
+      }
       break;
     }
     case 'port_profile': {
@@ -475,14 +447,26 @@ function normalise(rule, index, classKeys, kinds) {
   return { kind, pattern, class: cls, vendor, model, confidence, sourceURL };
 }
 
-function load() {
-  const file = path.join(root, 'standards', 'classification-rules.yaml');
+/** The committed inputs, as text, so a test can mutate one and rebuild. */
+export function readInputs() {
+  return {
+    rulesYAML: fs.readFileSync(path.join(root, 'standards', 'classification-rules.yaml'), 'utf8'),
+    vendorsYAML: fs.readFileSync(path.join(root, VENDORS_YAML), 'utf8'),
+  };
+}
+
+/** Builds the ordered rule table from the inputs, or throws a GenError. */
+export function build(inputs = readInputs()) {
   // maxAliasCount: the IEEE and IANA citations are YAML anchors reused by every
   // rule in their block, which trips the library's default billion-laughs guard
   // at 100 expansions. The guard is for untrusted input; this file is in the
   // repo and is reviewed like code, and the alternative — spelling the same URL
   // out 150 times — is the version that drifts.
-  const reg = yaml.parse(fs.readFileSync(file, 'utf8'), { maxAliasCount: 10000 });
+  const reg = yaml.parse(inputs.rulesYAML, { maxAliasCount: 10000 });
+
+  for (const [key, why] of Object.entries(RETIRED_KEYS)) {
+    if (key in reg) fail(`${key} is no longer read: ${why}. Remove it.`);
+  }
 
   const kinds = reg.kinds || [];
   if (!kinds.length) fail('no kinds declared');
@@ -499,12 +483,12 @@ function load() {
   const rules = (reg.rules || []).map((r, i) => normalise(r, i, classKeys, kindSet));
   if (!rules.length) fail('no rules defined');
 
-  const ouiVendors = loadOUIVendors();
-  checkVendorSpellings(reg, rules, ouiVendors);
+  const canonical = loadCanonicalVendors(inputs.vendorsYAML);
+  checkVendorSpellings(reg, rules, canonical);
 
-  // The OUI rules are derived, not authored. Appended after the YAML's rules
+  // The vendor rules are derived, not authored. Appended after the YAML's rules
   // and then sorted with them below, so the two outputs are one ordered table.
-  rules.push(...ouiRules(reg, classKeys, ouiVendors));
+  rules.push(...ouiVendorRules(reg, classKeys, canonical));
 
   // (kind, pattern) is the table's unique index. A duplicate here would make
   // the seed's ON CONFLICT silently collapse two rules into one, and the Go
@@ -627,7 +611,7 @@ function spliceRegion(src, marker, body, commentPrefix) {
 
 async function main() {
   const checkOnly = process.argv.includes('--check');
-  const { rules, kinds } = load();
+  const { rules, kinds } = build();
 
   const seedPath = path.join(root, 'scripts', 'database', 'seed.sql');
   const seed = spliceRegion(
@@ -667,4 +651,6 @@ async function main() {
   console.log(`  ${rules.length} rules: ${summary}`);
 }
 
-main().catch((e) => fail(e.stack || e.message));
+if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+  main().catch((e) => sharedFail('classification-rules', e instanceof GenError ? e.message : (e.stack || e.message)));
+}

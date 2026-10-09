@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -64,9 +65,27 @@ type SubscriptionConfig struct {
 }
 
 // Subscriber manages JetStream subscriptions with proper ack/nack semantics.
+//
+// Every durable consumer it subscribes to is OWNED by the platform, not by
+// whichever pod happened to create it: Subscribe creates the consumer from
+// the code's configuration if it is missing and then binds to it
+// (nats.Bind), so no pod's Drain or Unsubscribe can delete it. With the
+// library-created consumer nats.go used before, a rolling update — new pod
+// binds, old pod drains — deleted the consumer out from under the new pod,
+// which then sat subscribed to nothing, silently, for as long as it lived.
 type Subscriber struct {
 	client *NATSClient
-	subs   []*nats.Subscription
+	mu     sync.Mutex
+	subs   []*subscription
+	closed bool
+}
+
+// subscription remembers what a subscription was made from, so Reconcile can
+// make it again.
+type subscription struct {
+	cfg     SubscriptionConfig
+	handler MessageHandler
+	sub     *nats.Subscription
 }
 
 // NewSubscriber creates a subscriber backed by the given NATSClient.
@@ -141,11 +160,21 @@ func settleMessage(msg messageSettler, subject string, handlerErr error, panicke
 // with the given handler. Messages are acked on success, nacked on a transient
 // error, and terminated on a panic or a Permanent error.
 func (s *Subscriber) Subscribe(cfg SubscriptionConfig, handler MessageHandler) error {
-	js := s.client.JetStream()
-	if js == nil {
-		return fmt.Errorf("JetStream context not available")
+	cfg = withSubscriptionDefaults(cfg)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("subscriber is closed")
 	}
+	sub, err := s.subscribe(cfg, handler)
+	if err != nil {
+		return err
+	}
+	s.subs = append(s.subs, &subscription{cfg: cfg, handler: handler, sub: sub})
+	return nil
+}
 
+func withSubscriptionDefaults(cfg SubscriptionConfig) SubscriptionConfig {
 	if cfg.AckWait == 0 {
 		cfg.AckWait = 30 * time.Second
 	}
@@ -155,17 +184,44 @@ func (s *Subscriber) Subscribe(cfg SubscriptionConfig, handler MessageHandler) e
 	if cfg.MaxDeliver == 0 {
 		cfg.MaxDeliver = 5
 	}
+	return cfg
+}
 
-	opts := []nats.SubOpt{
-		nats.Durable(cfg.Durable),
-		nats.AckExplicit(),
-		nats.ManualAck(),
-		nats.MaxDeliver(cfg.MaxDeliver),
-		nats.AckWait(cfg.AckWait),
+// subscribe makes one subscription. Caller holds s.mu.
+func (s *Subscriber) subscribe(cfg SubscriptionConfig, handler MessageHandler) (*nats.Subscription, error) {
+	js := s.client.JetStream()
+	if js == nil {
+		return nil, fmt.Errorf("JetStream context not available")
 	}
 
-	if cfg.Stream != "" {
-		opts = append(opts, nats.BindStream(cfg.Stream))
+	var opts []nats.SubOpt
+	if cfg.Durable != "" {
+		if cfg.Stream == "" {
+			stream, err := js.StreamNameBySubject(cfg.Subject)
+			if err != nil {
+				return nil, fmt.Errorf("failed to find the stream for %s: %w", cfg.Subject, err)
+			}
+			cfg.Stream = stream
+		}
+		if err := ensureConsumer(js, cfg); err != nil {
+			return nil, fmt.Errorf("failed to ensure consumer %s on %s: %w", cfg.Durable, cfg.Stream, err)
+		}
+		// Bind: the consumer exists and is ours; the library must never
+		// delete it. The consumer's own settings (ack wait, max deliver,
+		// filter, deliver group) are read from the server — passing them
+		// here too would make a legacy consumer with other values a refusal.
+		opts = []nats.SubOpt{nats.Bind(cfg.Stream, cfg.Durable), nats.ManualAck()}
+	} else {
+		// An ephemeral consumer: created and deleted with the subscription.
+		opts = []nats.SubOpt{
+			nats.AckExplicit(),
+			nats.ManualAck(),
+			nats.MaxDeliver(cfg.MaxDeliver),
+			nats.AckWait(cfg.AckWait),
+		}
+		if cfg.Stream != "" {
+			opts = append(opts, nats.BindStream(cfg.Stream))
+		}
 	}
 
 	wrappedHandler := func(msg *nats.Msg) {
@@ -190,28 +246,160 @@ func (s *Subscriber) Subscribe(cfg SubscriptionConfig, handler MessageHandler) e
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to subscribe to %s: %w", cfg.Subject, err)
+		return nil, fmt.Errorf("failed to subscribe to %s: %w", cfg.Subject, err)
 	}
 
-	s.subs = append(s.subs, sub)
 	log.Printf("[NATS] Subscribed to %s (durable=%s, stream=%s)", cfg.Subject, cfg.Durable, cfg.Stream)
+	return sub, nil
+}
+
+// deliverSubject is the push deliver subject of a platform-owned durable.
+// Fixed, not an inbox of whichever connection created the consumer, so the
+// consumer's identity does not depend on any pod.
+func deliverSubject(stream, durable string) string {
+	return "_VISTA_DELIVER." + stream + "." + durable
+}
+
+// consumerConfig is the consumer a SubscriptionConfig describes.
+func consumerConfig(cfg SubscriptionConfig) *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable:        cfg.Durable,
+		Description:    "platform-owned durable (shared/events); subscribers bind, never delete",
+		FilterSubject:  cfg.Subject,
+		DeliverSubject: deliverSubject(cfg.Stream, cfg.Durable),
+		DeliverGroup:   cfg.QueueGroup,
+		DeliverPolicy:  nats.DeliverAllPolicy,
+		AckPolicy:      nats.AckExplicitPolicy,
+		AckWait:        cfg.AckWait,
+		MaxDeliver:     cfg.MaxDeliver,
+	}
+}
+
+// ensureConsumer makes sure the durable exists. A consumer already there is
+// kept as it is (its ack wait and max deliver are brought up to the code's
+// values where the server allows it); a missing one is created from the
+// code's configuration. Two replicas creating it at once is fine: the
+// configuration is the same, and a loser binds to the winner's.
+func ensureConsumer(js nats.JetStreamContext, cfg SubscriptionConfig) error {
+	info, err := js.ConsumerInfo(cfg.Stream, cfg.Durable)
+	if err == nil {
+		reconcileConsumerSettings(js, cfg, info)
+		return nil
+	}
+	if !errors.Is(err, nats.ErrConsumerNotFound) {
+		return err
+	}
+	if _, err := js.AddConsumer(cfg.Stream, consumerConfig(cfg)); err != nil {
+		if errors.Is(err, nats.ErrConsumerNameAlreadyInUse) {
+			// A sibling replica created it between our lookup and our create,
+			// possibly an older release's pod with the library's configuration.
+			// Either way it exists; bind to it.
+			log.Printf("[NATS] Consumer %s on %s was created by another replica; binding to it", cfg.Durable, cfg.Stream)
+			return nil
+		}
+		return err
+	}
+	log.Printf("[NATS] Created durable consumer %s on %s (deliver=%s, group=%s)", cfg.Durable, cfg.Stream, deliverSubject(cfg.Stream, cfg.Durable), cfg.QueueGroup)
 	return nil
 }
 
+// reconcileConsumerSettings carries a changed AckWait or MaxDeliver in the
+// code to a consumer that already exists, which is what a release that
+// changes either means to happen. Before, the live consumer's values won
+// forever and nothing said so. Other differences are only reported: a
+// consumer's filter and group are its identity, and changing them under a
+// running subscriber is not something to do on the quiet.
+func reconcileConsumerSettings(js nats.JetStreamContext, cfg SubscriptionConfig, info *nats.ConsumerInfo) {
+	live := info.Config
+	if live.FilterSubject != cfg.Subject || live.DeliverGroup != cfg.QueueGroup {
+		log.Printf("[NATS] WARNING: consumer %s on %s differs from the code (filter=%q group=%q, code wants filter=%q group=%q); the live consumer wins — delete it to adopt the code's values",
+			cfg.Durable, cfg.Stream, live.FilterSubject, live.DeliverGroup, cfg.Subject, cfg.QueueGroup)
+	}
+	if live.AckWait == cfg.AckWait && live.MaxDeliver == cfg.MaxDeliver {
+		return
+	}
+	updated := live
+	updated.AckWait = cfg.AckWait
+	updated.MaxDeliver = cfg.MaxDeliver
+	if _, err := js.UpdateConsumer(cfg.Stream, &updated); err != nil {
+		log.Printf("[NATS] WARNING: consumer %s on %s keeps ack_wait=%s max_deliver=%d (code wants %s/%d); update failed: %v",
+			cfg.Durable, cfg.Stream, live.AckWait, live.MaxDeliver, cfg.AckWait, cfg.MaxDeliver, err)
+		return
+	}
+	log.Printf("[NATS] Consumer %s on %s updated: ack_wait %s→%s, max_deliver %d→%d",
+		cfg.Durable, cfg.Stream, live.AckWait, cfg.AckWait, live.MaxDeliver, cfg.MaxDeliver)
+}
+
+// Reconcile re-creates any durable consumer that has gone missing and
+// re-subscribes to it, reporting how many it repaired. A push subscription
+// whose consumer is deleted gets no error and no messages, ever, and nothing
+// else notices — run this from a periodic sweep. A stream that is missing is
+// reported, not invented.
+func (s *Subscriber) Reconcile() (repaired int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, nil
+	}
+	js := s.client.JetStream()
+	if js == nil {
+		return 0, fmt.Errorf("JetStream context not available")
+	}
+	var errs []error
+	for _, e := range s.subs {
+		if e.cfg.Durable == "" || e.cfg.Stream == "" {
+			continue
+		}
+		_, infoErr := js.ConsumerInfo(e.cfg.Stream, e.cfg.Durable)
+		if infoErr == nil {
+			continue
+		}
+		if !errors.Is(infoErr, nats.ErrConsumerNotFound) {
+			errs = append(errs, fmt.Errorf("consumer %s on %s: %w", e.cfg.Durable, e.cfg.Stream, infoErr))
+			continue
+		}
+		log.Printf("[NATS] Consumer %s on %s is MISSING; this subscription has been delivering nothing. Re-creating it", e.cfg.Durable, e.cfg.Stream)
+		if e.sub != nil {
+			_ = e.sub.Unsubscribe() // bound, so this deletes nothing
+		}
+		sub, subErr := s.subscribe(e.cfg, e.handler)
+		if subErr != nil {
+			errs = append(errs, subErr)
+			continue
+		}
+		e.sub = sub
+		repaired++
+	}
+	return repaired, errors.Join(errs...)
+}
+
 // Drain drains all subscriptions, finishing in-flight messages before returning.
+// The durable consumers stay: they are bound, not owned by this process.
 func (s *Subscriber) Drain() error {
-	for _, sub := range s.subs {
-		if err := sub.Drain(); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	for _, e := range s.subs {
+		if e.sub == nil {
+			continue
+		}
+		if err := e.sub.Drain(); err != nil {
 			log.Printf("[NATS] Failed to drain subscription: %v", err)
 		}
 	}
 	return nil
 }
 
-// Unsubscribe removes all subscriptions immediately.
+// Unsubscribe removes all subscriptions immediately. The durable consumers stay.
 func (s *Subscriber) Unsubscribe() error {
-	for _, sub := range s.subs {
-		if err := sub.Unsubscribe(); err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	for _, e := range s.subs {
+		if e.sub == nil {
+			continue
+		}
+		if err := e.sub.Unsubscribe(); err != nil {
 			log.Printf("[NATS] Failed to unsubscribe: %v", err)
 		}
 	}

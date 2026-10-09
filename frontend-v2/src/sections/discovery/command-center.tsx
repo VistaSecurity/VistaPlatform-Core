@@ -94,7 +94,7 @@ export function CommandCenterPage() {
       <div className="fade-up" style={{ display: 'flex', gap: 14, marginBottom: 16 }}>
         <StatCard label="Fleet online" val={fleetError ? '—' : statsQ.isLoading || agentsQ.isLoading ? '…' : `${online}/${total}`} sub={fleetError ? 'Failed to load' : offline > 0 ? `${offline} offline` : 'all healthy'} tone={fleetError ? 'var(--danger)' : offline > 0 ? 'var(--warn-strong)' : 'var(--ok)'} icon="radar" to="/discovery/sensors" />
         <StatCard label="Jobs running" val={dash(jobStatsQ, running)} sub="in progress" tone="var(--info)" icon="loader" to="/discovery/jobs" />
-        <StatCard label="Failed jobs" val={dash(jobStatsQ, failed)} sub={failed > 0 ? 'need attention' : 'none failing'} tone={failed > 0 ? 'var(--danger)' : 'var(--app-t3)'} icon="x-circle" to="/discovery/logs" />
+        <StatCard label="Failed jobs" val={dash(jobStatsQ, failed)} sub={failed > 0 ? 'need attention' : 'none failing'} tone={failed > 0 ? 'var(--danger)' : 'var(--app-t3)'} icon="x-circle" to="/discovery/jobs?status=failed" />
         <StatCard label="Pending approvals" val={dash(pendingQ, pending)} sub="awaiting review" tone="var(--info)" icon="inbox" to="/discovery/approvals" />
       </div>
 

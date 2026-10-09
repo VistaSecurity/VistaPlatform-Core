@@ -167,3 +167,106 @@ func TestSelfObservationHash_IgnoresInterfaceOrder(t *testing.T) {
 		t.Fatal("hash depends on interface order")
 	}
 }
+
+// dockerNodeHost is the shape a Kubernetes node running Docker reports: one
+// real NIC (the primary), a Wi-Fi NIC on a second network, and the bridges and
+// overlays its container runtimes created. docker0's 172.17.0.1 is the same
+// address on every Docker host.
+func dockerNodeHost(bridges ...sharednetwork.InterfaceAddress) *models.HostIdentity {
+	return &models.HostIdentity{
+		Hostname: "node-a",
+		Interfaces: append([]sharednetwork.InterfaceAddress{
+			{InterfaceName: "enp2s0", Address: "10.0.0.10", MAC: "00:1a:2b:3c:4d:01", IsPrimary: true},
+			{InterfaceName: "wlp4s0", Address: "10.1.0.10", MAC: "00:1a:2b:3c:4d:02"},
+			{InterfaceName: "docker0", Address: "172.17.0.1"},
+			{InterfaceName: "br-0bd1b3acd33d", Address: "172.18.0.1"},
+			{InterfaceName: "flannel.1", Address: "10.42.0.0"},
+		}, bridges...),
+	}
+}
+
+// TestSelfHostObservation_ContainerBridgesAreNotIdentity: a container bridge's
+// address names every host running the same software, so it must not reach the
+// identification engine as this host's address.
+func TestSelfHostObservation_ContainerBridgesAreNotIdentity(t *testing.T) {
+	ho := selfHostObservation(selfObsSensorID, "linux", "", dockerNodeHost())
+	got := map[string]bool{}
+	for _, a := range ho.Addresses {
+		got[a.String()] = true
+	}
+	for _, bridge := range []string{"172.17.0.1", "172.18.0.1", "10.42.0.0"} {
+		if got[bridge] {
+			t.Errorf("self-observation carries container bridge address %s as identity: %v", bridge, ho.Addresses)
+		}
+	}
+	for _, real := range []string{"10.0.0.10", "10.1.0.10"} {
+		if !got[real] {
+			t.Errorf("self-observation dropped the host's own address %s: %v", real, ho.Addresses)
+		}
+	}
+}
+
+// TestSelfHostObservation_CarriesEveryHardwareMAC: a host's Ethernet and Wi-Fi
+// are one device, and this report is the only evidence of it. The primary
+// interface's MAC stays in MAC; the other NIC's rides in OtherMACs.
+func TestSelfHostObservation_CarriesEveryHardwareMAC(t *testing.T) {
+	ho := selfHostObservation(selfObsSensorID, "linux", "", dockerNodeHost())
+	if ho.MAC != "00:1a:2b:3c:4d:01" {
+		t.Fatalf("MAC = %q, want the primary NIC's", ho.MAC)
+	}
+	if len(ho.OtherMACs) != 1 || ho.OtherMACs[0] != "00:1a:2b:3c:4d:02" {
+		t.Fatalf("OtherMACs = %v, want the Wi-Fi NIC's 00:1a:2b:3c:4d:02", ho.OtherMACs)
+	}
+}
+
+// TestSelfHostObservation_PrimaryInterfaceIsNeverDropped: on a Hyper-V host
+// with an external virtual switch the host's real LAN address lives on
+// "vEthernet (...)". The interface the sensor reaches the platform from is how
+// the host is reached, whatever it is called.
+func TestSelfHostObservation_PrimaryInterfaceIsNeverDropped(t *testing.T) {
+	host := &models.HostIdentity{Hostname: "hv", Interfaces: []sharednetwork.InterfaceAddress{
+		{InterfaceName: "vEthernet (External Switch)", Address: "10.0.0.20", MAC: "00:15:5d:01:02:03", IsPrimary: true},
+		{InterfaceName: "vEthernet (WSL)", Address: "172.29.48.1", MAC: "00:15:5d:aa:bb:cc"},
+	}}
+	ho := selfHostObservation(selfObsSensorID, "windows", "", host)
+	if len(ho.Addresses) != 1 || ho.Addresses[0].String() != "10.0.0.20" {
+		t.Fatalf("Addresses = %v, want only the primary vEthernet's 10.0.0.20", ho.Addresses)
+	}
+	if ho.MAC != "00:15:5d:01:02:03" || len(ho.OtherMACs) != 0 {
+		t.Fatalf("MAC/OtherMACs = %q/%v, want the primary's MAC and not the WSL switch's", ho.MAC, ho.OtherMACs)
+	}
+}
+
+// TestSelfHostObservation_UnnamedInterfacesAreKept: an older sensor that
+// reports no interface names keeps every address it always carried. Nothing
+// says those interfaces are virtual.
+func TestSelfHostObservation_UnnamedInterfacesAreKept(t *testing.T) {
+	host := &models.HostIdentity{Hostname: "h", Interfaces: []sharednetwork.InterfaceAddress{
+		{Address: "10.0.0.1", MAC: "00:1a:2b:3c:4d:5e", IsPrimary: true},
+		{Address: "10.0.1.1", MAC: "00:1a:2b:3c:4d:5f"},
+	}}
+	ho := selfHostObservation(selfObsSensorID, "linux", "", host)
+	if len(ho.Addresses) != 2 || len(ho.OtherMACs) != 1 {
+		t.Fatalf("Addresses/OtherMACs = %v/%v, want both unnamed interfaces kept", ho.Addresses, ho.OtherMACs)
+	}
+}
+
+// TestSelfObservationHash_IgnoresContainerBridgeChurn: CI jobs and container
+// workloads create and remove bridges constantly. Identity did not change, so
+// the throttled report must not be re-sent — before this it went out every few
+// minutes on a CI host instead of hourly.
+func TestSelfObservationHash_IgnoresContainerBridgeChurn(t *testing.T) {
+	before := dockerNodeHost()
+	after := dockerNodeHost(
+		sharednetwork.InterfaceAddress{InterfaceName: "br-5c3026f94607", Address: "172.21.0.1"},
+		sharednetwork.InterfaceAddress{InterfaceName: "veth9a8b7c6", Address: ""},
+	)
+	if selfObservationHash(before) != selfObservationHash(after) {
+		t.Fatal("hash changed when only container bridges came and went")
+	}
+	moved := dockerNodeHost()
+	moved.Interfaces[1].Address = "10.1.0.11"
+	if selfObservationHash(before) == selfObservationHash(moved) {
+		t.Fatal("hash ignored a real NIC's address changing")
+	}
+}

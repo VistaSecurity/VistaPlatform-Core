@@ -118,7 +118,7 @@ func TestClassHintParity_EveryPre210aHintSurvivedTheMoveToRules(t *testing.T) {
 	// point of this test is that nothing changes SILENTLY, not that nothing
 	// changes.
 	//
-	// VENDOR SPELLINGS now follow standards/oui-vendors.csv, because the rules
+	// VENDOR SPELLINGS now follow standards/oui/vendors.yaml, because the rules
 	// and the OUI table have to name a manufacturer identically or the engine's
 	// vendor arbitration cancels them against each other: `Dell` from the OUI
 	// rule against `Dell Inc.` from here meant a Dell server seen by both MAC

@@ -104,8 +104,8 @@ func TestIntegration_AssetClassHistory_AcceptingAProposalRecordsTheMove(t *testi
 		t.Fatalf("got %d class-history rows, want 2 (creation + acceptance): %+v", len(rows), rows)
 	}
 	move := rows[0]
-	if move.FromClassKey == nil || *move.FromClassKey != "unknown_host" {
-		t.Errorf("from_class_key = %v, want unknown_host — the row is a COMPARISON, and "+
+	if move.FromClassKey == nil || *move.FromClassKey != "server" {
+		t.Errorf("from_class_key = %v, want server — the row is a COMPARISON, and "+
 			"half of it is not readable", move.FromClassKey)
 	}
 	if move.ToClassKey != "printer" {

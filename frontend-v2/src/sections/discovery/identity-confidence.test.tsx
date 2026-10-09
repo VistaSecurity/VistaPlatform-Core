@@ -48,6 +48,7 @@ describe('identity confidence component wiring', () => {
             candidate('asset-1', 'One percent candidate', 0.01),
             candidate('asset-2', 'Certain candidate', 1),
           ] })}
+          onMergeAsIs={vi.fn()}
           onAccept={vi.fn()}
           onKeepSeparate={vi.fn()}
         />
@@ -84,7 +85,7 @@ describe('merge source eligibility', () => {
   it.each([1, 2, 3])('allows candidate-only review when %s records are available', (count) => {
     const html = renderToStaticMarkup(<MemoryRouter><MergeProposalRow
       proposal={proposal({ candidates: Array.from({ length: count }, (_, i) => candidate(`asset-${i}`, `Asset ${i}`, 0.8)) })}
-      onAccept={vi.fn()} onKeepSeparate={vi.fn()} /></MemoryRouter>);
+      onMergeAsIs={vi.fn()} onAccept={vi.fn()} onKeepSeparate={vi.fn()} /></MemoryRouter>);
     const mergeButton = html.match(/<button[^>]*>.*?Review merge<\/button>/)?.[0];
     expect(mergeButton).toBeDefined();
     expect(mergeButton?.includes('disabled')).toBe(count < 2);

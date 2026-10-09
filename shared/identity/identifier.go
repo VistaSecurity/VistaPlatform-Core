@@ -316,6 +316,20 @@ type Identifier struct {
 	// identity: [Identifier.Key] ignores it.
 	Assignment AddressAssignment `json:"address_assignment,omitempty"`
 
+	// DeviceConfirmedAt is when an `ip_address` was last shown to be held by
+	// the DEVICE its owner describes: a direct measurement decided by an
+	// observed device-binding kind (a MAC, a host key, a serial, an agent)
+	// that attached or re-attached the address to that owner (leasefresh.go,
+	// ADR-0002 D3 erratum "the lease-fresh address"). A sighting that
+	// touched the row by name does not advance it.
+	//
+	// Like Assignment it travels both ways: the engine sets it on the
+	// addresses it attaches under a device-decided match, the stores keep
+	// the newest value (`asset_identifiers.device_confirmed_at`, never moved
+	// backwards) and LoadSummaries reports it on the owner's copy. Meaningful
+	// for `ip_address` only; zero means nothing has confirmed a device there.
+	DeviceConfirmedAt time.Time `json:"device_confirmed_at,omitzero"`
+
 	// KeyAlgorithm is the key type of an `ssh_host_key_fingerprint` — the
 	// family [NormalizeSSHKeyAlgorithm] returns (`ed25519`, `rsa`,
 	// `ecdsa-p256`, …) — and empty for every other kind, or when the observer
@@ -452,6 +466,13 @@ func UpsertIdentifier(prev, next Identifier) Identifier {
 	out.Assignment = prevAssign
 	if nextAssign != "" && nextRank >= prevRank {
 		out.Assignment = nextAssign
+	}
+	// A device confirmation never moves backwards (leasefresh.go), as the SQL
+	// upsert's GREATEST does: a late-arriving sighting cannot make an address
+	// look less recently confirmed than it is, and a sighting that confirmed
+	// nothing (zero) does not erase one that did.
+	if prev.DeviceConfirmedAt.After(next.DeviceConfirmedAt) {
+		out.DeviceConfirmedAt = prev.DeviceConfirmedAt
 	}
 	return out
 }

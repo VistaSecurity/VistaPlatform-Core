@@ -59,13 +59,15 @@ export const SECTIONS: NavSection[] = [
         label: 'Sensors & Scanning',
         items: [
           { path: '/discovery/sensors', label: 'Sensors & Agents' },
-          { path: '/discovery/jobs', label: 'Discovery Jobs' },
           { path: '/discovery/devices', label: 'Devices' },
           { path: '/discovery/scans', label: 'Scheduled Scans' },
         ],
       },
+      // What you deploy (above) is separate from what has run. Job Logs used
+      // to be its own group here; it listed a subset of these same runs, so
+      // it was folded into Discovery Jobs.
+      { label: 'Activity', items: [{ path: '/discovery/jobs', label: 'Discovery Jobs' }] },
       { label: 'Review', items: [{ path: '/discovery/observations', label: 'Observations' }, { path: '/discovery/approvals', label: 'Approvals' }] },
-      { label: 'Logs', items: [{ path: '/discovery/logs', label: 'Job Logs' }] },
       {
         label: 'Sources',
         items: [

@@ -98,8 +98,11 @@ func TestHostObsCollectorEmitsOneRowPerHost(t *testing.T) {
 	if arp.DestIP != "192.168.10.50" {
 		t.Errorf("ARP DestIP = %q", arp.DestIP)
 	}
-	if arp.HostObservation.Vendor != "Apple" {
-		t.Errorf("ARP vendor = %q, want Apple from the OUI table", arp.HostObservation.Vendor)
+	// No vendor: OUI lookup is not done where the frames are decoded any more.
+	// The platform resolves hw.vendor from the MAC at ingestion, from the full
+	// IEEE registry (inventory-service, oui_vendor.go).
+	if arp.HostObservation.Vendor != "" {
+		t.Errorf("ARP vendor = %q; the decoder no longer resolves vendors", arp.HostObservation.Vendor)
 	}
 	// The merged observation carries the LATEST frame's time: a capture file's
 	// "last seen" is the last time the host appeared in it.
@@ -162,13 +165,15 @@ func TestHostObsMetadataCarriesTheObservation(t *testing.T) {
 	if !ok {
 		t.Fatalf("host_observation did not survive as an object: %s", blob)
 	}
-	for _, k := range []string{"mac", "source", "vendor", "facts"} {
+	for _, k := range []string{"mac", "source"} {
 		if _, ok := ho[k]; !ok {
 			t.Errorf("host_observation is missing %q: %s", k, blob)
 		}
 	}
-	if ho["vendor"] != "Cisco Systems" {
-		t.Errorf("vendor = %v, want the OUI-derived Cisco Systems", ho["vendor"])
+	// No vendor (and so, for this frame, no facts): the platform resolves
+	// hw.vendor from the MAC at ingestion, from the full IEEE registry.
+	if v, ok := ho["vendor"]; ok {
+		t.Errorf("vendor = %v; the decoder no longer resolves vendors", v)
 	}
 }
 

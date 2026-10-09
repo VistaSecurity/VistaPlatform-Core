@@ -14,7 +14,7 @@ package services
 // discoveryObservation: almost nothing a crypto finding carries is present here.
 // There is no port, no protocol version, no cipher suite, no endpoint, and
 // often no address at all. What there IS instead — a MAC that identifies on its
-// own, a set of names the host answered to, a vendor from the OUI table — has no
+// own, a set of names the host answered to, a vendor resolved from its OUI — has no
 // equivalent on the crypto path. Threading both through one builder would mean a
 // function whose every other line asks which kind it is holding.
 //
@@ -417,11 +417,16 @@ func hostObservationLabel(ho *hostobs.HostObservation) string {
 // hostObservationFacts projects the payload's registered-key map onto the rows
 // asset_facts stores.
 //
-// The map is written AS GIVEN. shared/hostobs already restricted it to keys the
-// registry lists the sensor producers for (hw.vendor, hw.model,
-// net.mdns_services), UpsertFacts re-checks both the key and the producer, and
-// re-deriving anything here would be a second opinion about a measurement
-// somebody else made.
+// The map is written AS GIVEN, with one exception decided before this runs:
+// hw.vendor. shared/hostobs restricts the map to keys the registry lists the
+// sensor producers for (hw.vendor, hw.model, net.mdns_services), UpsertFacts
+// re-checks both the key and the producer, and re-deriving anything here would
+// be a second opinion about a measurement somebody else made. hw.vendor was
+// never a measurement — it was a sensor-side OUI table lookup — so when the
+// platform's full IEEE registry answers for the MAC, resolveHostObservationVendor
+// removes it from this map and it is written once, as the `enricher` producer's
+// fact (oui_vendor.go). It reaches this map only from an older sensor, for a
+// prefix the registry does not determine.
 //
 // # What is deliberately not written
 //
@@ -458,7 +463,7 @@ func hostObservationFacts(ho *hostobs.HostObservation, source identity.Source, o
 			Value: value,
 			// MEASURED, not inferred: a frame stated this. An inferred fact
 			// would owe a model id and a confidence (ADR-0005 D2), and there is
-			// no model here — the OUI table is a lookup, not a judgement.
+			// no model here.
 			SourceKind: identity.SourceMeasured,
 			SourceRef:  source.Ref,
 			Confidence: confidence,
@@ -514,6 +519,10 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 	if !ok {
 		return identity.Resolution{}, fmt.Errorf("finding is marked %s but carries no readable host_observation payload", KindHostObservation)
 	}
+	// The platform's OUI answer, before anything reads the vendor: the class
+	// evidence below and the facts applyHostObservationContext writes both see
+	// the registry's manufacturer when it has one (oui_vendor.go).
+	resolveHostObservationVendor(ho)
 
 	intake, err := s.hostObservationIntake(tenantID, f, ho)
 	if err != nil {
@@ -687,6 +696,7 @@ func (s *AssetService) materializeRetainedHostObservation(ctx context.Context, t
 	if !ok {
 		return fmt.Errorf("retained host observation has no typed payload")
 	}
+	resolveHostObservationVendor(ho)
 	intake, err := s.hostObservationIntake(tenantID, f, ho)
 	if err != nil {
 		return err
@@ -734,7 +744,36 @@ func (s *AssetService) applyHostObservationContext(ctx context.Context, repo *pg
 			return fmt.Errorf("writing host-observation facts: %w", ferr)
 		}
 	}
-	if cerr := s.recordClassOutcome(ctx, tx, tenantID, assetID, res.Outcome, classProp); cerr != nil {
+	// The registry-resolved vendor, as the enricher's fact (oui_vendor.go).
+	// Only when resolveHostObservationVendor put the registry's answer on the
+	// observation: a vendor that merely arrived on the wire (an older sensor's
+	// own table, for a prefix the registry does not determine) stays the
+	// sensor's fact above.
+	if rv := registryVendorForObservation(ho); rv != "" && ho.Vendor == rv {
+		if _, verr := applyRegistryVendorFact(ctx, repo, tx, res.Asset, rv, obs.ObservedAt); verr != nil {
+			return fmt.Errorf("writing the OUI-resolved vendor: %w", verr)
+		}
+	}
+	// The class, LAST among this observation's writes and before the
+	// self-report's own upgrade below. This is the point the accumulated
+	// evidence is read at, deliberately: the engine attached this
+	// observation's identifiers (its MAC) during Resolve, before this callback
+	// ran; the facts above (hw.model, net.mdns_services, the registry vendor)
+	// and the metadata applyAssetContext merged (host_observation_attributes)
+	// are written on this same transaction. Read any earlier and the classifier
+	// would miss the observation's own facts as stored evidence; read on any
+	// other transaction and it would not see them at all.
+	//
+	// A sensor's SELF-report that names a class (classHintForSelfReport) is the
+	// host measuring itself, which outranks a rule (ADR-0002 D4), and
+	// upgradeUnknownHostClass applies it below. A promotion here would move the
+	// asset off the floor first and that measured class would then never land,
+	// so on that path the rules only propose. upgradeUnknownHostClass is left
+	// exactly as it was.
+	selfReportClasses := strings.TrimSpace(ho.AgentID) != "" && obs.Admission.Authoritative &&
+		classHintForSelfReport(ho) != assetclass.KeyUnknownHost
+	if _, cerr := s.classOutcomeForResolution(ctx, tx, tenantID, assetID, res.Outcome, classProp,
+		hostObservationClassEvidence(ho), !selfReportClasses); cerr != nil {
 		return cerr
 	}
 	if agentID := strings.TrimSpace(ho.AgentID); agentID != "" && obs.Admission.Authoritative {

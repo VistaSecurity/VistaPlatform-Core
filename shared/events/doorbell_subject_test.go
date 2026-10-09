@@ -45,3 +45,19 @@ func TestDoorbellSubjectsAreOutsideEveryStream(t *testing.T) {
 		t.Fatal("subjectMatches is broken; the stream check above would be inert")
 	}
 }
+
+// A platform-owned durable's deliver subject must sit outside every stream,
+// or the server would capture the deliveries back into a stream (a cycle it
+// refuses on create, with a confusing error).
+func TestDeliverSubjectsAreOutsideEveryStream(t *testing.T) {
+	for _, st := range DefaultStreams {
+		subj := deliverSubject(st.Name, "any-durable")
+		for _, other := range DefaultStreams {
+			for _, pattern := range other.Subjects {
+				if subjectMatches(pattern, subj) {
+					t.Fatalf("deliver subject %q is inside stream %s (%q)", subj, other.Name, pattern)
+				}
+			}
+		}
+	}
+}

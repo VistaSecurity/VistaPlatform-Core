@@ -202,40 +202,38 @@ function isDeviceAgentProfile(profile?: string): boolean {
   return profile === 'device_interrogation';
 }
 
-// The device agent is a separate binary — not install-sensor.sh. It reads a
-// YAML config (platform_url + registration_key), auto-enrolls on first start
-// (registration_key set, agent_id empty), saves its client cert, and then polls
-// outbound-only. Commands below mirror docsv4 partner/deployment/
-// device-agent-deployment.md using verified flags (-register/-config) and
-// config keys (platform_url/registration_key/poll_interval). The binary comes
-// from the public release matching this platform's version (agent-downloads.ts);
-// the platform does not serve it. It is statically linked and needs nothing.
+// The device agent is a separate binary with its own installer. On Linux the
+// steps mirror the sensor's: download the binary and install-device-agent.sh
+// from the public release matching this platform's version
+// (agent-downloads.ts), then one command installs it as a service, starts it,
+// and waits for it to enroll itself — it generates its key on the host, saves
+// its certificate under the install directory, and reports its agent ID. The
+// hand-written config + `-register` steps this replaced ran the agent as the
+// operator's own user, whose default data path is root-owned: registration
+// spent the key and the certificate could not be saved.
+//
+// Windows keeps the manual steps until the agent can run as a Windows service
+// (its default data path, under LOCALAPPDATA, is the user's own, so they
+// work); the agent is statically linked and needs nothing installed.
 export function buildDeviceAgentCommands(key: string, tag: string | null): { linux: string; windows: string } {
   const origin = window.location.origin;
   return {
     linux: [
       ...(tag
         ? [
-            `# 1) Download the device agent (linux/amd64; use -arm64 on ARM), release ${tag}:`,
+            `# 1) Download the device agent (linux/amd64; use -arm64 on ARM) and its installer, release ${tag}:`,
             `curl -fLo device-agent ${binaryUrl(tag, 'device-agent', 'linux')}`,
+            `curl -fLO ${installerUrl(tag, 'install-device-agent.sh')}`,
+            `chmod +x device-agent`,
           ]
         : [
             `# 1) From ${CORE_RELEASES_URL}, take the release matching this platform's`,
-            `#    version (profile menu → About) and save its device-agent binary for this`,
-            `#    host as ./device-agent.`,
+            `#    version (profile menu → About): save the device-agent binary for this host`,
+            `#    as ./device-agent (chmod +x), and scripts/install-device-agent.sh from that tag.`,
           ]),
-      `chmod +x device-agent`,
       ``,
-      `# 2) Write its config:`,
-      `cat > device-agent.yaml <<'EOF'`,
-      `platform_url: ${origin}`,
-      `registration_key: ${key}`,
-      `poll_interval: 30s`,
-      `EOF`,
-      ``,
-      `# 3) Enroll, then run:`,
-      `./device-agent -register -config device-agent.yaml`,
-      `./device-agent -config device-agent.yaml`,
+      `# 2) Install and enroll (runs it as a service):`,
+      `sudo bash install-device-agent.sh --url ${origin} --key ${key}`,
     ].join('\n'),
     windows: [
       ...(tag

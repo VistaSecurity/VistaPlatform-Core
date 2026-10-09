@@ -25,6 +25,7 @@ func mustRuleEngine(t *testing.T, rules ...classify.Rule) *classify.Engine {
 func TestRuleClassifier_MapsEveryInputFieldOutOfAssetFacts(t *testing.T) {
 	engine := mustRuleEngine(t,
 		classify.Rule{Kind: classify.KindOUI, Pattern: "005056", Vendor: "VMware", Confidence: 0.85, SourceURL: "u"},
+		classify.Rule{Kind: classify.KindOUIVendor, Pattern: "Brother Industries", Model: "brother", Confidence: 0.85, SourceURL: "u"},
 		classify.Rule{Kind: classify.KindSysObjectID, Pattern: "1.3.6.1.4.1.9", Vendor: "Cisco Systems", Confidence: 0.85, SourceURL: "u"},
 		classify.Rule{Kind: classify.KindENIP, Pattern: "1", Vendor: "Rockwell", Confidence: 0.80, SourceURL: "u"},
 		classify.Rule{Kind: classify.KindCloudType, Pattern: "aws_s3_bucket", Model: "bucket", Confidence: 0.95, SourceURL: "u"},
@@ -36,12 +37,14 @@ func TestRuleClassifier_MapsEveryInputFieldOutOfAssetFacts(t *testing.T) {
 		classify.Rule{Kind: classify.KindLLDPCapability, Pattern: "wlan_access_point", Model: "lldp-ap", Confidence: 0.75, SourceURL: "u"},
 		classify.Rule{Kind: classify.KindMDNSService, Pattern: "_ipp._tcp", Model: "ipp-printer", Confidence: 0.75, SourceURL: "u"},
 		classify.Rule{Kind: classify.KindOSName, Pattern: `(?i)\bwindows[ ]+server\b`, Model: "windows-server", Confidence: 0.80, SourceURL: "u"},
+		classify.Rule{Kind: classify.KindDHCPVendorClass, Pattern: `^MSFT 5\.0$`, Model: "msft-dhcp", Confidence: 0.75, SourceURL: "u"},
 	)
 	c := RuleClassifier{Engine: engine}
 
 	facts := AssetFacts{
 		Identifiers: map[string]string{FactMACAddress: "00:50:56:aa:bb:cc"},
 		Facts: map[string]any{
+			FactMACAddresses:      []string{"00:1b:a9:11:22:33"}, // a Brother Industries assignment
 			FactSysObjectID:       "1.3.6.1.4.1.9.1.1745",
 			FactENIPVendorID:      1,
 			FactCloudResourceType: "aws_s3_bucket",
@@ -53,6 +56,7 @@ func TestRuleClassifier_MapsEveryInputFieldOutOfAssetFacts(t *testing.T) {
 			FactLLDPCapabilities:  []string{"wlan_access_point"},
 			FactCDPCapabilities:   []string{"switch"},
 			FactOSName:            "Microsoft Windows Server 2022 Datacenter",
+			FactDHCPVendorClass:   "MSFT 5.0",
 		},
 	}
 
@@ -60,7 +64,11 @@ func TestRuleClassifier_MapsEveryInputFieldOutOfAssetFacts(t *testing.T) {
 
 	byKind := map[string]bool{}
 	for _, r := range got.MatchedRules {
-		byKind[r.Kind] = true
+		// The registry's own vendor statement is not a rule matching; counting
+		// it would let the oui_vendor kind pass with no rule fired at all.
+		if !r.IsRegistryStatement() {
+			byKind[r.Kind] = true
+		}
 	}
 	for _, kind := range classify.Kinds {
 		if !byKind[kind] {
@@ -98,8 +106,8 @@ func TestRuleClassifier_ReadsFactsThatHaveBeenThroughJSON(t *testing.T) {
 		t.Fatalf("Unmarshal: %v", err)
 	}
 
-	nativeRules := len(c.Explain(context.Background(), native).MatchedRules)
-	decodedRules := len(c.Explain(context.Background(), decoded).MatchedRules)
+	nativeRules := ruleRows(c.Explain(context.Background(), native).MatchedRules)
+	decodedRules := ruleRows(c.Explain(context.Background(), decoded).MatchedRules)
 
 	if nativeRules != 4 {
 		t.Fatalf("the native facts matched %d rules, want 4 — the test's own fixture is wrong", nativeRules)
@@ -259,4 +267,16 @@ func TestRuleClassifier_ExplainReportsTheRulesAndTheirCitations(t *testing.T) {
 			t.Errorf("matched rule of kind %s has no pattern; a reviewer cannot see what fired", r.Kind)
 		}
 	}
+}
+
+// ruleRows counts matched rule rows, leaving out the IEEE registry's own vendor
+// statement, which the engine adds for every MAC it resolves.
+func ruleRows(refs []classify.RuleRef) int {
+	n := 0
+	for _, r := range refs {
+		if !r.IsRegistryStatement() {
+			n++
+		}
+	}
+	return n
 }

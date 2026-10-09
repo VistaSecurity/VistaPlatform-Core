@@ -83,7 +83,7 @@ generate: node_modules_check scripts-deps generate-k8s-ingress ## Generate share
 	node ./scripts/generate-alert-registry.mjs
 	node ./scripts/generate-findings-registry.mjs
 	node ./scripts/generate-fact-keys.mjs
-	node ./scripts/generate-oui-table.mjs
+	node ./scripts/generate-oui-registry.mjs
 	node ./scripts/generate-connectors.mjs
 	node ./scripts/generate-permissions.mjs
 	node ./scripts/generate-asset-classes.mjs
@@ -1072,6 +1072,19 @@ chart-lint: ## helm lint the chart against values.schema.json (catches schema/te
 		--set platform.internalAuthSecret=l \
 		--set platform.encryptionMasterKey=l
 
+# The IEEE OUI snapshot (standards/oui/ieee-*.tsv) is vendored, not fetched at
+# build time: `make generate` and `make audit` must stay offline. An operator
+# refreshes it here, then runs `make generate`, which fails if a registrant
+# named in standards/oui/vendors.yaml no longer matches the new snapshot.
+refresh-oui: scripts-deps ## Re-download the IEEE MA-L/MA-M/MA-S registries into standards/oui/ (network; operator-only)
+	node ./scripts/refresh-oui-snapshot.mjs
+
+oui-registry-test: scripts-deps ## Test + mutation-test the OUI registry generator (registrant typo, unsourced pin, duplicate pin/vendor...)
+	node --test ./scripts/generate-oui-registry.test.mjs
+
+classification-rules-test: scripts-deps ## Test + mutation-test the classification-rule generator (non-canonical vendor, retired keys, hand-written oui_vendor...)
+	node --test ./scripts/generate-classification-rules.test.mjs
+
 changelog-audit-test: ## Mutation-test the CHANGELOG.md duplication guard
 	node ./scripts/audit-changelog.test.mjs
 
@@ -1112,7 +1125,7 @@ lint-workflows:   ## Lint GitHub Actions workflows (context availability, expres
 drift-check:   ## Check for configuration drift
 	@echo "Drift check complete!"
 
-standards-check: rating-contract-test rating-ladder-test generate verify-generated chart-lint changelog-audit-test mcp-tool-docs-test lint-workflows  ## Generate, verify and run all standards checks
+standards-check: rating-contract-test rating-ladder-test generate verify-generated chart-lint changelog-audit-test mcp-tool-docs-test oui-registry-test classification-rules-test lint-workflows  ## Generate, verify and run all standards checks
 
 registry-first: generate verify-generated  ## Complete registry-first workflow
 	@echo "✅ Registry-first workflow complete!"

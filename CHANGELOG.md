@@ -7,9 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.5.0-rc.2] - 2026-10-07
+## [4.5.0-rc.3] - 2026-10-07
 
-**Version 4.5.0 is a security-hardening and dependency release.** The edge, sign-in and
+**Version 4.5.0 is a security-hardening and dependency release, and it also improves
+classification, DHCP matching and the agent installers.** The edge, sign-in and
 sessions, authorization and tenant isolation, outbound requests, request sizes and the
 chart's defaults were reviewed, and every confirmed, bounded finding is fixed: a signed-in
 session can no longer rewrite the account's sign-in email, a viewer can no longer read
@@ -18,13 +19,21 @@ platform scans no longer reach the cluster's own network, and a second round clo
 agent port, the edge's service-to-service routes and the legacy token window, enforces
 row-level security under Docker Compose, and refuses to start in production on weak
 platform secrets. The bundled NATS server moves off a release its project no longer
-patches, and Go, npm and container dependencies are current. Both product lines are cut
-from the same commit: `v4.5.0` (commercial) and `core-v4.5.0` (Core). Upgrade from 4.4.0.
+patches, and Go, npm and container dependencies are current.
+
+It also classifies far more of the inventory, matches probes to a device just seen at a
+DHCP address, ships sensor and device-agent installers that actually enroll, and sets up
+scheduled scans in plain language.
+
+Both product lines are cut from the same commit: `v4.5.0` (commercial) and `core-v4.5.0`
+(Core). Upgrade from 4.4.0.
 
 **Read Breaking / Upgrading first** — in production a service now refuses to start on a
 missing or short platform secret, the bundled NATS upgrade has no clean rollback, scans run
 by the platform now need your cluster's real network ranges, the edge's auth rate limit is
-lower, and the legacy HS256 session secret is now removed from verifiers by default.
+lower, the legacy HS256 session secret is now removed from verifiers by default, the
+schema upgrade retires the per-prefix MAC classification rules Vista shipped, and a sensor
+installed with an earlier installer needs a new registration key.
 
 ### Highlights
 
@@ -81,10 +90,38 @@ lower, and the legacy HS256 session secret is now removed from verifiers by defa
   accept only the release workflow run from a release tag (the commercial line also from
   `main`).
 
+- **Far more of the inventory is classified.** MACs resolve against the full IEEE registry
+  (about 53,000 prefixes) on the platform; a new **Smart device** class covers consumer
+  devices; a host's DHCP vendor class (option 60) classifies Windows, Android, access points
+  and printers; and unknown hosts are reclassified as evidence accumulates. A class a person
+  declared or a reviewer rejected is never touched.
+
+- **Installers that actually enroll.** The sensor installers used to spend the single-use
+  registration code themselves, so a sensor installed with the install command never sent a
+  heartbeat. The Linux and Windows installers now let the sensor enroll itself, wait until
+  it has and print its ID and version; the Linux device-agent installer does the same and
+  never spends a key it cannot save; and the sensor now runs as a Windows service.
+
+- **Scheduled scans in plain language.** Pick every few hours, daily, weekly on chosen days
+  or monthly, at a time in your own time zone, and a sentence confirms when it will run.
+  Existing schedules keep running as before; a custom cron expression remains available.
+
+- **DHCP addresses a device was just seen at decide a match.** An SSH, TLS or QUIC probe of
+  an address whose owner a sensor confirmed by MAC within the last day attaches to that
+  owner instead of waiting in Discovery → Observations as "Matches an asset".
+
+- **Clearer screens.** A posture donut on the dashboard, run outcomes on Discovery Jobs
+  (Job Logs links redirect there), and **Merge as is** / **Review merge** / **Keep
+  separate** on merge proposals.
+
 - **Operational fixes.** Passive QUIC is reported once per flow
   instead of about sixteen times; **Scan anyway** scans the whole selection; a device
   interrogation that uses its full time limit completes with its results; the bundled NATS
-  server's probes no longer log a TLS error every ten seconds.
+  server's probes no longer log a TLS error every ten seconds; scan jobs are still picked
+  up after an upgrade or restart, and a queued scan no longer counts as its own concurrent
+  job; uploaded packet captures report truncation and keep more of what they observed; and
+  a sensor's own host report can reconcile its physical NICs without treating container
+  bridges as host identity.
 
 - **The bundled NATS server is 2.14,** replacing 2.10, which the NATS project no longer
   patches.
@@ -101,9 +138,12 @@ lower, and the legacy HS256 session secret is now removed from verifiers by defa
 ### Breaking / Upgrading
 
 Back up your database (`pg_dump`) first, as always. Upgrade from 4.4.0. The schema upgrade
-is additive: it turns on row-level security for the compliance score history table and every
-audit-log partition. As in earlier releases, pass a `helm upgrade --timeout` that covers the
-migration plus the rollout.
+is additive except for one deletion, described below: it turns on row-level security for the
+compliance score history table and every audit-log partition, adds two bookkeeping tables
+(`oui_vendor_backfill_state`, `class_floor_sweep_state`), one nullable column on
+`asset_identifiers` (`device_confirmed_at`) and two on `pcap_upload_jobs`, and widens the rule
+kinds `classification_rules` accepts. As in earlier releases, pass a `helm upgrade --timeout`
+that covers the migration plus the rollout.
 
 - **In production a service refuses to start on a missing or weak platform secret.** With
   `ENV=production` (the chart default), `INTERNAL_AUTH_SECRET` and `ENCRYPTION_MASTER_KEY`
@@ -129,6 +169,36 @@ migration plus the rollout.
   (with `--build` as usual); no new secret is needed. If `db-roles` exits non-zero because
   the volume's schema predates the roles, re-apply the schema as its log describes (the
   command is in the full list of changes).
+- **Rolling back to 4.4.0 after this upgrade needs your backup, not `helm rollback`.** The
+  4.4.0 schema re-adds the narrower rule-kind constraint on `classification_rules`, which the
+  new `oui_vendor` and `dhcp_vendor_class` rules violate, so its schema job would stop.
+  Together with the NATS note below, plan a rollback as a restore.
+- **The shipped per-prefix MAC classification rules are retired.** The upgrade deletes the
+  496 `oui` rules Vista shipped and nobody edited, and the seed supplies one `oui_vendor`
+  rule per manufacturer in their place. An `oui` rule an administrator edited or added is
+  kept, and, being the more specific statement about its MAC, still applies before a vendor
+  rule. Catalog ▸ Classification rules shows what remains.
+- **Vendors and classes fill in after the upgrade, in the background.** A backfill resolves
+  every existing asset's vendor from its MAC identifiers, and a sweep (after start-up, then
+  every six hours) reclassifies assets still shown as unknown hosts; each move is recorded in
+  the asset's class history. A vendor a device agent, interrogation, connector or import
+  reported is kept. Sensors need no upgrade for this.
+- **The lease-fresh DHCP rule starts empty.** Nothing is backfilled: an address becomes
+  eligible after the platform next sees its device's MAC there (minutes on a sensored
+  network), and a probe is matched this way only within 24 hours of that sighting. Until
+  then probes behave as in 4.4.0, and a row already waiting in Observations stays until you
+  link or dismiss it.
+- **A sensor or device agent installed by an earlier installer must be installed again,
+  with a new registration key.** Earlier installers spent the single-use code themselves, so
+  such a sensor shows at v1.0.0 with no heartbeat. Generate a new key (Discovery → Sensors &
+  Agents → Register), run the new installer and delete the old row; re-running it with the key
+  that enrolled a host upgrades in place. A device agent that logged `Failed to save
+  certificates to disk` must be deleted and installed again with a new key. Windows sensors
+  need Npcap installed first.
+- **During the rolling upgrade a queued scan can wait briefly.** The 4.4.0 pods delete the
+  scan-job consumer as they drain; the new pods own it, and the stuck-job sweep re-creates
+  it before republishing queued work. Nothing is lost, and the next upgrade does not repeat
+  this.
 - **Single-sign-on sign-ins in progress during the upgrade must be started again once,** for
   staff sign-in to the admin console and, on Enterprise, tenant and platform sign-in. An
   external Redis must be 6.2 or later.

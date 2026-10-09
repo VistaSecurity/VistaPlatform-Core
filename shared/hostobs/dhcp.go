@@ -121,7 +121,8 @@ func DecodeDHCP(f Frame) (*HostObservation, error) {
 			// The vendor CLASS ("MSFT 5.0", "udhcp 1.30", "Cisco Systems, Inc.
 			// IP Phone CP-8841") identifies the DHCP client software, not the
 			// hardware manufacturer. It is a classification signal, never
-			// hw.vendor — that fact stays OUI-derived, as the registry says.
+			// hw.vendor — that fact is OUI-derived, resolved by the platform at
+			// ingestion from the MAC, as the fact registry says.
 			if v := boundIdentifier(string(val)); v != "" {
 				obs.setAttr("dhcp_vendor_class", v)
 			}

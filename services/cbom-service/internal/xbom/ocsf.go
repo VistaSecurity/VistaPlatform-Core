@@ -482,7 +482,7 @@ func ocsfDeviceTypeID(classKey string) int {
 		return 5
 	case "virtual", "virtual_machine", "container", "hypervisor", "cluster":
 		return 6
-	case "iot_device", "ot_device", "plc", "rtu", "hmi", "ied", "printer", "access_point", "bmc":
+	case "iot_device", "smart_device", "ot_device", "plc", "rtu", "hmi", "ied", "printer", "access_point", "bmc":
 		return 7
 	case "firewall", "vpn_gateway":
 		return 9

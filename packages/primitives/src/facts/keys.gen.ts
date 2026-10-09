@@ -151,9 +151,9 @@ export const FACT_KEY_DEFS: Record<FactKey, FactKeyDef> = {
   'hw.vendor': {
     key: 'hw.vendor',
     type: 'string',
-    producers: ['device-agent', 'device-interrogation', 'sensor', 'platform-sensor', 'connector', 'import'],
+    producers: ['device-agent', 'device-interrogation', 'sensor', 'platform-sensor', 'connector', 'import', 'enricher'],
     redact: false,
-    description: 'Hardware manufacturer ("Dell Inc.", "Cisco Systems", "Siemens"). Seeded by DMI on hosts, by sysObjectID or LLDP on network gear, and by OUI lookup when nothing better is available.',
+    description: 'Hardware manufacturer ("Dell Inc.", "Cisco Systems", "Siemens"). Seeded by DMI on hosts, by sysObjectID or LLDP on network gear, and — when nothing better is available — by OUI lookup of the MAC, which the platform performs at ingestion against the full IEEE registry (enricher). The sensors no longer resolve it; an older sensor binary may still send its own table\'s answer, which the platform\'s supersedes.',
   },
   'hw.model': {
     key: 'hw.model',

@@ -8,6 +8,19 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 )
 
+// countRuleRows counts the matched refs that are rule rows, leaving out the
+// registry's own vendor statement, which the engine adds for every MAC it can
+// resolve whether or not a rule exists.
+func countRuleRows(refs []RuleRef) int {
+	n := 0
+	for _, r := range refs {
+		if !r.IsRegistryStatement() {
+			n++
+		}
+	}
+	return n
+}
+
 func mustEngine(t *testing.T, rules ...Rule) *Engine {
 	t.Helper()
 	e, err := NewStrict(rules)
@@ -37,6 +50,14 @@ func TestClassify_EveryKindMatchesItsOwnEvidence(t *testing.T) {
 			hit:   ClassifyInput{MACs: []string{"00:00:0c:11:22:33"}},
 			miss:  ClassifyInput{MACs: []string{"00:00:0d:11:22:33"}},
 			class: "network_device",
+		},
+		{
+			// 00:1B:A9 is a Brother Industries MA-L assignment; 00:00:0C is Cisco.
+			name:  "oui_vendor",
+			rule:  Rule{Kind: KindOUIVendor, Pattern: "Brother Industries", Class: "printer", Confidence: 0.85, SourceURL: "https://x"},
+			hit:   ClassifyInput{MACs: []string{"00-1B-A9-11-22-33"}},
+			miss:  ClassifyInput{MACs: []string{"00:00:0c:11:22:33"}},
+			class: "printer",
 		},
 		{
 			name:  "sysobjectid",
@@ -115,6 +136,13 @@ func TestClassify_EveryKindMatchesItsOwnEvidence(t *testing.T) {
 			miss:  ClassifyInput{OS: "Microsoft Windows 11 Pro"},
 			class: "server",
 		},
+		{
+			name:  "dhcp_vendor_class",
+			rule:  Rule{Kind: KindDHCPVendorClass, Pattern: `^MSFT 5\.0$`, Class: "computer", Confidence: 0.75, SourceURL: "https://x"},
+			hit:   ClassifyInput{DHCPVendorClass: " MSFT 5.0 "},    // surrounding whitespace trimmed
+			miss:  ClassifyInput{DHCPVendorClass: "MSFT 5.0 XBOX"}, // the anchor holds
+			class: "computer",
+		},
 	}
 
 	seen := map[string]bool{}
@@ -130,8 +158,8 @@ func TestClassify_EveryKindMatchesItsOwnEvidence(t *testing.T) {
 			if got.Unknown {
 				t.Error("hit: Unknown = true despite a class")
 			}
-			if len(got.MatchedRules) != 1 {
-				t.Errorf("hit: matched %d rules, want 1", len(got.MatchedRules))
+			if n := countRuleRows(got.MatchedRules); n != 1 {
+				t.Errorf("hit: matched %d rules, want 1 (%+v)", n, got.MatchedRules)
 			}
 
 			got = e.Classify(ctx, tc.miss)
@@ -652,19 +680,29 @@ func TestGeneratedRules_EveryRuleCitesASource(t *testing.T) {
 // (kind, pattern) is the table's unique index, so a duplicate in the generated
 // set means the seed's ON CONFLICT silently collapses two rules into one while
 // the Go table keeps both — the two homes disagreeing, quietly.
-func TestGeneratedRules_MatterServiceIsIoTDevice(t *testing.T) {
+func TestGeneratedRules_ConsumerServicesAreSmartDevices(t *testing.T) {
 	e := Default()
-	got := e.Classify(context.Background(), ClassifyInput{MDNSServices: []string{"_matter._tcp"}})
-	if got.Unknown || got.Class != "iot_device" {
-		t.Fatalf("Classify(_matter._tcp) = %+v, want iot_device", got)
+	// Protocols only a consumer device RECEIVES on name the smart_device class.
+	// Matter used to say iot_device; it is the consumer smart-home standard.
+	for _, svc := range []string{"_matter._tcp", "_googlecast._tcp"} {
+		got := e.Classify(context.Background(), ClassifyInput{MDNSServices: []string{svc}})
+		if got.Unknown || got.Class != "smart_device" {
+			t.Errorf("Classify(%s) = %+v, want smart_device", svc, got)
+		}
 	}
-	// HAP and AirPlay stay deferred: a HomeKit bridge advertises for
-	// accessories it is not, and there is no media-device class.
-	if got := e.Classify(context.Background(), ClassifyInput{MDNSServices: []string{"_hap._tcp"}}); !got.Unknown {
-		t.Errorf("_hap._tcp classified as %q; deferred until a bridge is not the accessory", got.Class)
-	}
-	if got := e.Classify(context.Background(), ClassifyInput{MDNSServices: []string{"_airplay._tcp"}}); !got.Unknown {
-		t.Errorf("_airplay._tcp classified as %q; deferred until there is a media-device class", got.Class)
+	// Advertised by general-purpose computers too, so deliberately ruleless:
+	// every Mac is an AirPlay receiver, the Spotify desktop app advertises
+	// Connect, every Apple device advertises companion-link, and a Linux host
+	// running Homebridge advertises HomeKit. A wrong class is worse than no
+	// class.
+	for _, svc := range []string{
+		"_airplay._tcp", "_raop._tcp", "_spotify-connect._tcp",
+		"_ssh._tcp", "_sftp-ssh._tcp", "_companion-link._tcp", "_dns-sd._udp",
+		"_hap._tcp",
+	} {
+		if got := e.Classify(context.Background(), ClassifyInput{MDNSServices: []string{svc}}); !got.Unknown {
+			t.Errorf("%s classified as %q; it is advertised by computers too and must stay unclassified", svc, got.Class)
+		}
 	}
 }
 
@@ -686,27 +724,40 @@ func TestGeneratedRules_HaveNoDuplicateIdentity(t *testing.T) {
 // unrelated classes at similar confidence, which the engine would then refuse
 // to decide. That is correct behaviour for a curated rule an admin added, and a
 // bug in the seed, where we control both rules.
-func TestGeneratedRules_DoNotConflictOnOneOUI(t *testing.T) {
+//
+// Run over a real assignment of every vendor the seeded rules name, and over
+// every seeded prefix rule if the YAML ever ships one.
+func TestGeneratedRules_DoNotConflictOnOneMAC(t *testing.T) {
 	e := Default()
 	ctx := context.Background()
+	checked := 0
 	for _, r := range generatedRules {
-		if r.Kind != KindOUI {
+		var mac string
+		switch r.Kind {
+		case KindOUI:
+			mac = r.Pattern + "AABBCC"
+		case KindOUIVendor:
+			mac = firstMACOf(t, r.Pattern)
+		default:
 			continue
 		}
-		mac := r.Pattern + "AABBCC"
+		checked++
 		got := e.Classify(ctx, ClassifyInput{MACs: []string{mac}})
 		if got.Conflict {
-			t.Errorf("OUI %s alone produces a conflict between %v — two seeded rules disagree",
-				r.Pattern, got.ConflictingClasses)
+			t.Errorf("%s %q: one MAC (%s) alone produces a conflict between %v — two seeded rules disagree",
+				r.Kind, r.Pattern, mac, got.ConflictingClasses)
 		}
+	}
+	if checked == 0 {
+		t.Fatal("no MAC-keyed seeded rules were checked; this test would then prove nothing")
 	}
 }
 
 // One manufacturer, one name — proved on the SEEDED table, through the engine.
 //
-// The rules in this table come from two files: the OUI rules are DERIVED from
-// standards/oui-vendors.csv, and every other kind is hand-written in
-// standards/classification-rules.yaml. When the two spelled a manufacturer
+// The rules in this table come from two files: the oui_vendor rules are DERIVED
+// from the oui_classes map against standards/oui/vendors.yaml's canonical names,
+// and every other kind is hand-written in standards/classification-rules.yaml. When the two spelled a manufacturer
 // differently they did not disagree loudly — the vendor arbitration refuses to
 // choose between two names inside the conflict epsilon, so they CANCELLED. A
 // Dell server seen by both its MAC and its sysObjectID came back with no vendor
@@ -937,5 +988,24 @@ func TestEstateHostClassificationEvidence(t *testing.T) {
 				t.Fatalf("class=%s want %s (%+v)", got.Class, tc.want, got)
 			}
 		})
+	}
+}
+
+// The smart-device vendors classify from the MAC alone, and eero — Amazon's
+// router line, under its own registrant — stays a network device rather than
+// inheriting the Amazon Technologies smart-device rule.
+func TestGeneratedRules_SmartDeviceVendors(t *testing.T) {
+	e := Default()
+	cases := map[string]string{
+		"b0:a7:37:00:00:01": "smart_device",   // Roku
+		"00:bb:3a:00:00:01": "smart_device",   // Amazon Technologies
+		"18:7f:88:00:00:01": "smart_device",   // Ring
+		"00:ab:48:00:00:01": "network_device", // eero
+	}
+	for mac, want := range cases {
+		got := e.Classify(context.Background(), ClassifyInput{MACs: []string{mac}})
+		if got.Class != want {
+			t.Errorf("Classify(%s) = %q (vendor %q), want %q", mac, got.Class, got.Vendor, want)
+		}
 	}
 }

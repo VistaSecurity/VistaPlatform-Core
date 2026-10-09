@@ -422,6 +422,22 @@ func Record(
 // IP. Three of that tenant's four assets were in the same state, and
 // `asset_class_history` held exactly one row each, all written at creation.
 //
+// Three callers re-ask it, each running Promote BEFORE [Record] so a promoted
+// asset leaves no pending question behind:
+//
+//   - device-interrogation-service, for FIRST-HAND evidence (a host inventory),
+//     never for a peer a neighbour table described;
+//   - inventory-service's intake, when the identity engine MATCHED an
+//     observation to an existing asset — the passive host-observation path and
+//     the discovery-finding path — over the evidence the asset has ACCUMULATED
+//     (its stored MACs, mDNS services, LLDP/CDP capabilities and
+//     device-identity vendor/model, merged with the observation's), so a rule
+//     that needs a MAC's manufacturer can meet a service type that arrived in a
+//     different frame;
+//   - inventory-service's class floor sweep, for floor assets nothing observes
+//     any more. It calls Promote ONLY, never Record: a sweep that raised
+//     proposals would flood Approvals with questions nothing new prompted.
+//
 // # Why it does not go through Approvals
 //
 // Because there is nothing to review. [Record]'s case 4 raises a proposal when

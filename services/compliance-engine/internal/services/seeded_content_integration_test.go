@@ -110,10 +110,10 @@ func nextReleaseSeed(t *testing.T) string {
 	for _, r := range [][2]string{
 		// Best Practices BP-001's title (the admin edits this one).
 		{"'TLS Version Requirements',", "'TLS Version Requirements (v2)',"},
-		// Cisco's OUI confidence (the admin edits this one).
-		{"('oui', '00000C', 'network_device', 'Cisco Systems', NULL, 0.70,", "('oui', '00000C', 'network_device', 'Cisco Systems', NULL, 0.75,"},
-		// Omron's OUI confidence (nobody touches this one).
-		{"('oui', '00000A', 'ot_device', 'Omron', NULL, 0.70,", "('oui', '00000A', 'ot_device', 'Omron', NULL, 0.72,"},
+		// Cisco's oui_vendor rule confidence (the admin edits this one).
+		{"('oui_vendor', 'Cisco Systems', 'network_device', 'Cisco Systems', NULL, 0.70,", "('oui_vendor', 'Cisco Systems', 'network_device', 'Cisco Systems', NULL, 0.75,"},
+		// Omron's oui_vendor rule confidence (nobody touches this one).
+		{"('oui_vendor', 'Omron', 'ot_device', 'Omron', NULL, 0.70,", "('oui_vendor', 'Omron', 'ot_device', 'Omron', NULL, 0.72,"},
 	} {
 		if strings.Count(s, r[0]) != 1 {
 			t.Fatalf("next-release fixture: %q occurs %d times in seed.sql, want exactly 1 — the fixture no longer matches the seed", r[0], strings.Count(s, r[0]))
@@ -140,11 +140,11 @@ func (f *seededFixture) adminEdits(t *testing.T) {
 		WHERE c.id = cm.control_id AND c.control_id = 'BP-002' AND cm.framework_type = 'platform'`); n < 1 {
 		t.Fatalf("delete BP-002's rule: %d rows", n)
 	}
-	if n := f.exec(t, `UPDATE classification_rules SET confidence = 0.55 WHERE rule_kind = 'oui' AND pattern = '00000C'`); n != 1 {
-		t.Fatalf("edit 00000C: %d rows", n)
+	if n := f.exec(t, `UPDATE classification_rules SET confidence = 0.55 WHERE rule_kind = 'oui_vendor' AND pattern = 'Cisco Systems'`); n != 1 {
+		t.Fatalf("edit the Cisco Systems rule: %d rows", n)
 	}
-	if n := f.exec(t, `DELETE FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '000001'`); n != 1 {
-		t.Fatalf("delete 000001: %d rows", n)
+	if n := f.exec(t, `DELETE FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Xen'`); n != 1 {
+		t.Fatalf("delete the Xen rule: %d rows", n)
 	}
 }
 
@@ -177,11 +177,11 @@ func TestIntegration_SeededContent_ReseedKeepsAdminEditsAndDeletions(t *testing.
 		WHERE c.control_id = 'BP-002' AND cm.framework_type = 'platform'`); got != 0 {
 		t.Errorf("deleted measurement rule of BP-002 is back after re-seed (%d rows)", got)
 	}
-	if got := f.str(t, `SELECT confidence::text FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '00000C'`); got != "0.55" {
-		t.Errorf("00000C confidence after re-seed = %s, want the admin's 0.55", got)
+	if got := f.str(t, `SELECT confidence::text FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Cisco Systems'`); got != "0.55" {
+		t.Errorf("Cisco Systems rule confidence after re-seed = %s, want the admin's 0.55", got)
 	}
-	if got := f.count(t, `SELECT count(*) FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '000001'`); got != 0 {
-		t.Errorf("deleted classification rule 000001 is back after re-seed")
+	if got := f.count(t, `SELECT count(*) FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Xen'`); got != 0 {
+		t.Errorf("deleted classification rule Xen is back after re-seed")
 	}
 
 	// Nothing new shipped, so nothing is on offer — on any seeded table.
@@ -219,16 +219,16 @@ func TestIntegration_SeededContent_NewShippedVersionIsOfferedAndAcceptApplies(t 
 	if got := f.str(t, `SELECT seed_offer::text FROM platform_framework_controls WHERE id = $1`, bp001); got != `{"title": "TLS Version Requirements (v2)"}` {
 		t.Errorf("BP-001 offer = %s, want exactly the new shipped title", got)
 	}
-	if got := f.str(t, `SELECT confidence::text FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '00000A'`); got != "0.72" {
-		t.Errorf("untouched rule 00000A confidence = %s, want the new shipped 0.72 (pristine rows follow the seed)", got)
+	if got := f.str(t, `SELECT confidence::text FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Omron'`); got != "0.72" {
+		t.Errorf("untouched rule Omron confidence = %s, want the new shipped 0.72 (pristine rows follow the seed)", got)
 	}
-	if got := f.str(t, `SELECT seed_offer::text FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '00000A'`); got != "" {
-		t.Errorf("untouched rule 00000A has an offer %s; it should simply have been updated", got)
+	if got := f.str(t, `SELECT seed_offer::text FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Omron'`); got != "" {
+		t.Errorf("untouched rule Omron has an offer %s; it should simply have been updated", got)
 	}
-	if got := f.str(t, `SELECT confidence::text || ' ' || seed_offer::text FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '00000C'`); got != `0.55 {"confidence": 0.75}` {
-		t.Errorf("edited rule 00000C = %s, want the admin's 0.55 with 0.75 on offer", got)
+	if got := f.str(t, `SELECT confidence::text || ' ' || seed_offer::text FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Cisco Systems'`); got != `0.55 {"confidence": 0.75}` {
+		t.Errorf("edited rule Cisco Systems = %s, want the admin's 0.55 with 0.75 on offer", got)
 	}
-	// Other offers: none. BP-001 and 00000C are the only admin rows the next
+	// Other offers: none. BP-001 and the Cisco Systems rule are the only admin rows the next
 	// release changed.
 	if got := f.count(t, `SELECT (SELECT count(*) FROM platform_framework_controls WHERE seed_offer IS NOT NULL)
 		+ (SELECT count(*) FROM classification_rules WHERE seed_offer IS NOT NULL)
@@ -302,7 +302,7 @@ func TestIntegration_SeededContent_NewShippedVersionIsOfferedAndAcceptApplies(t 
 	// The classification rule's offer is accepted by the same database action
 	// admin-service calls.
 	var ruleID uuid.UUID
-	if err := f.raw.QueryRow(`SELECT id FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '00000C'`).Scan(&ruleID); err != nil {
+	if err := f.raw.QueryRow(`SELECT id FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Cisco Systems'`).Scan(&ruleID); err != nil {
 		t.Fatal(err)
 	}
 	var ok bool

@@ -56,25 +56,26 @@ func TestLocallyAdministeredMACIsFlagged(t *testing.T) {
 	}
 }
 
-func TestVendorForMAC(t *testing.T) {
-	if n := OUICount(); n < 200 {
-		t.Fatalf("compiled OUI table holds %d prefixes; a generator that emitted an empty map would make every lookup silently return \"\"", n)
+// TestFinalizeDoesNotResolveVendor pins the move of OUI lookup off the sensor:
+// a Finalize that consulted any OUI table would fill Vendor for Cisco's first
+// prefix. The platform resolves hw.vendor at ingestion from the full IEEE
+// registry (shared/ouiregistry) instead.
+func TestFinalizeDoesNotResolveVendor(t *testing.T) {
+	o := &HostObservation{MAC: "00:00:0c:12:34:56", Source: SourceARP}
+	o.Finalize()
+	if o.Vendor != "" {
+		t.Errorf("Vendor = %q; Finalize must not derive a vendor from the MAC", o.Vendor)
 	}
-	cases := []struct{ mac, vendor string }{
-		{"00:1a:2f:11:22:33", "Cisco Systems"},
-		{"28:CF:DA:01:02:03", "Apple"},
-		{"b8:27:eb:ff:ee:dd", "Raspberry Pi"},
-		{"52:54:00:12:34:56", "QEMU virtual NIC"},
-		{"00:50:56:aa:bb:cc", "VMware"},
-		// Not in the curated table: "" means NOT DETERMINED, never "Unknown".
-		{"aa:bb:cc:dd:ee:f0", ""},
-		{"", ""},
-		{"garbage", ""},
+	if v, ok := o.Facts[facts.KeyHWVendor]; ok {
+		t.Errorf("hw.vendor = %v; Finalize must not derive a vendor from the MAC", v)
 	}
-	for _, tc := range cases {
-		if got := VendorForMAC(tc.mac); got != tc.vendor {
-			t.Errorf("VendorForMAC(%q) = %q, want %q", tc.mac, got, tc.vendor)
-		}
+
+	// A vendor an observation already carries (an older sensor's wire value,
+	// or a future decoder's measured field) is kept and becomes the fact.
+	k := &HostObservation{MAC: "00:00:0c:12:34:56", Source: SourceARP, Vendor: "Cisco Systems"}
+	k.Finalize()
+	if k.Vendor != "Cisco Systems" || k.Facts[facts.KeyHWVendor] != "Cisco Systems" {
+		t.Errorf("carried vendor lost: Vendor=%q facts=%v", k.Vendor, k.Facts)
 	}
 }
 
@@ -129,6 +130,7 @@ func TestFactsAreRegisteredAndWritable(t *testing.T) {
 	o := &HostObservation{
 		Source:   SourceLLDP,
 		MAC:      "00:1a:2f:11:22:33",
+		Vendor:   "Cisco Systems", // set explicitly: Finalize no longer derives it
 		Services: []string{"_ipp._tcp"},
 		Model:    "WS-C2960-24TT-L",
 	}
@@ -417,6 +419,7 @@ func TestObservationJSONShape(t *testing.T) {
 		Hostnames:  []string{"sw1"},
 		FQDNs:      []string{"sw1.corp.example"},
 		Services:   []string{"_ipp._tcp"},
+		Vendor:     "Cisco Systems", // an older sensor still sends it
 		Model:      "WS-C2960-24TT-L",
 		ObservedAt: fixedTime,
 	}

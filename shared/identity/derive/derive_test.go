@@ -159,12 +159,17 @@ func TestMACFromSerialRegistered(t *testing.T) {
 		wantMAC string
 		wantOK  bool
 	}{
-		// 00:00:0c is in the generated table (a long-standing Cisco prefix).
+		// 00:00:0c is a long-standing Cisco prefix.
 		{"registered OUI", "00000C1A2B3C", "00:00:0c:1a:2b:3c", true},
 		{"registered OUI, lower-case", "00000c1a2b3c", "00:00:0c:1a:2b:3c", true},
-		// 00:11:22 is not in the curated table.
-		{"unlisted OUI", "0011223344 55", "", false},
-		{"unlisted OUI, bare", "001122334455", "", false},
+		// 00:b4:63 (Ring) is in the IEEE registry but was never in the old
+		// curated table: the full registry is what this now consults.
+		{"registered OUI outside the old curated table", "00B46312AB34", "00:b4:63:12:ab:34", true},
+		// 00:ab:12 is not assigned in the IEEE registry. (The old curated
+		// table's case, 00:11:22, is assigned — to CIMSYS Inc — and so now
+		// derives, correctly: the registry says it is a manufacturer's prefix.)
+		{"unlisted OUI", "00AB123344 55", "", false},
+		{"unlisted OUI, bare", "00AB12334455", "", false},
 		{"numeric part number", "123456789012", "", false},
 		{"registered OUI but locally administered", "02000C1A2B3C", "", false},
 	}

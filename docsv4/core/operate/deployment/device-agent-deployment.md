@@ -56,7 +56,36 @@ The sections below assume you've downloaded the asset for your platform and
 renamed it to `device-agent` (`device-agent.exe` on Windows) for brevity —
 substitute the versioned filename if you'd rather keep it as-is.
 
-### Linux (AMD64)
+### Linux (recommended): the installer
+
+The registration screen (**Discovery → Sensors & Agents → Register → Device
+agent**) shows these commands with your platform URL, key and release filled in:
+
+```bash
+# from the release matching your platform's version
+curl -fLo device-agent https://github.com/VistaSecurity/VistaPlatform-Core/releases/download/<version>/device-agent-linux-amd64-<version>
+curl -fLO https://raw.githubusercontent.com/VistaSecurity/VistaPlatform-Core/<version>/scripts/install-device-agent.sh
+chmod +x device-agent
+
+sudo bash install-device-agent.sh --url https://platform.example.com --key YOUR_REGISTRATION_KEY
+```
+
+The installer is the device agent's counterpart of the sensor installer. It
+installs the agent to `/opt/crypto-device-agent` as the `crypto-device-agent`
+systemd service, running as its own user. It keeps the agent's certificate and
+the platform's CA under the install directory, starts the service, and **waits
+until the agent has enrolled**, then prints its agent ID and version. If the
+platform rejects the key (expired, invalid or already used), it stops the
+service and says so. Re-running the same command on that host keeps the agent's
+enrollment and replaces only the binary, which is how to upgrade it. For a
+platform whose certificate this host does not already trust, add
+`--ca-fingerprint <sha256>` (see
+[Platforms with a privately-signed certificate](#platforms-with-a-privately-signed-certificate)).
+`bash install-device-agent.sh --check-dependencies` checks the binary runs on
+this host without installing anything. Use `-arm64` in the download for ARM
+hosts.
+
+### Linux (AMD64): running the binary yourself
 
 ```bash
 # after downloading device-agent-linux-amd64-<version> from the release page
@@ -66,6 +95,12 @@ chmod +x device-agent
 # Run it — with no arguments the agent walks you through setup and then starts
 ./device-agent
 ```
+
+> **Data path.** The agent's default data path on Linux is
+> `/var/lib/crypto-device-agent`, which only root can create. Run it as root,
+> or choose a data path your user can write. The agent checks it can save its
+> enrollment **before** it sends the registration key, and refuses to start
+> with "cannot store its enrollment" if it can't. The key is then still unused.
 
 Running the binary with no arguments opens the interactive installer: it asks
 for the platform URL (and tests reachability), the registration key, the data
@@ -470,7 +505,7 @@ One **asset** per host, and everything the collection learned about it:
 | One entry per listening socket, with the process holding it and whether it is reachable from the network | The asset's **Endpoints** |
 | Its installed packages | The asset's **Software** tab, and the Inventory **Software** lens |
 | "Last host inventory: 2h ago — 412 packages, 18 listeners" | **Discovery → Sensors & Agents**, on the agent's row |
-| The same counts per run | **Discovery → Job Logs** |
+| The same counts per run | **Discovery → Discovery Jobs**, under the run's status |
 
 The asset arrives **pending approval**, like everything else the platform
 discovers: it appears in Approvals for someone to admit deliberately, and does
@@ -579,6 +614,19 @@ Removing an agent:
 ### HTTP 401 on job polling or heartbeat
 
 Usually means the agent request hit a route that still required a **tenant JWT** (browser session) instead of **agent mTLS**. Ensure the platform runs a build where outbound routes (`/agents/:id/jobs`, `/results`, `/heartbeat`) are protected by agent auth, not only JWT. Also confirm `agent_id` in the config file matches the enrolled agent (after registration, the agent should persist `agent_id` automatically).
+
+### "This agent cannot store its enrollment"
+
+The agent could not create or write its data path (`<data_path>/certs`) or its
+config file, so it stopped **before** contacting the platform. The registration
+key is still unused. Install with `install-device-agent.sh`, run the agent as a
+user that can write the data path, or set `data_path` in its config to a
+directory that user can write.
+
+Agents older than this check sent the key first and then failed to save. They
+logged `Failed to save certificates to disk`, and every later call failed with
+`certificate signed by unknown authority`. That enrollment cannot be recovered:
+delete the agent in the console, generate a new key, and install again.
 
 ### Invalid or rejected registration key
 

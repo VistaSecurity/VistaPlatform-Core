@@ -112,6 +112,7 @@ func ClassFacts(in classify.ClassifyInput) AssetFacts {
 			FactCDPCapabilities:   in.CDPCapabilities,
 			FactOSName:            in.OS,
 			FactOSVersion:         in.OSVersion,
+			FactDHCPVendorClass:   in.DHCPVendorClass,
 		},
 	}
 }

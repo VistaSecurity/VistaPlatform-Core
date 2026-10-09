@@ -428,7 +428,8 @@ export function useAcceptClassificationRuleUpdate() {
 
 /** Human label per rule kind, for the filter and the table. */
 export const RULE_KIND_LABEL: Record<string, string> = {
-  oui: 'MAC OUI',
+  oui: 'MAC OUI prefix',
+  oui_vendor: 'MAC manufacturer',
   sysobjectid: 'SNMP sysObjectID',
   enip: 'EtherNet/IP vendor',
   cloud_type: 'Cloud resource type',
@@ -440,6 +441,7 @@ export const RULE_KIND_LABEL: Record<string, string> = {
   lldp_capability: 'LLDP capabilities',
   mdns_service: 'Advertised mDNS service',
   os_name: 'Operating system',
+  dhcp_vendor_class: 'DHCP vendor class',
 };
 
 /**
@@ -448,7 +450,8 @@ export const RULE_KIND_LABEL: Record<string, string> = {
  * you get it wrong is a form that gets it wrong repeatedly.
  */
 export const RULE_KIND_HINT: Record<string, string> = {
-  oui: '6 uppercase hex digits, no separators — e.g. 00000C',
+  oui: '6 uppercase hex digits, no separators — e.g. 00000C. Outranks a manufacturer rule for the MACs it covers.',
+  oui_vendor: "A canonical manufacturer name from the platform's IEEE registry, spelled exactly — e.g. Brother Industries. Matches every MAC the registry assigns to that manufacturer.",
   sysobjectid: 'An OID under 1.3.6.1.4.1 — e.g. 1.3.6.1.4.1.9. Longest prefix wins.',
   enip: 'An ODVA vendor id in decimal — e.g. 1',
   cloud_type: "The provider's own resource type — e.g. aws_s3_bucket",
@@ -460,7 +463,46 @@ export const RULE_KIND_HINT: Record<string, string> = {
   lldp_capability: 'IEEE 802.1AB capability names, ascending, ALL of which must be advertised — e.g. bridge,router. The most specific matching set wins.',
   mdns_service: 'A DNS-SD service type, lowercase — e.g. _ipp._tcp',
   os_name: 'A Go RE2 regexp over the reported OS name, anchored — e.g. (?i)\\bwindows[ ]+server\\b',
+  dhcp_vendor_class: 'An RE2 regexp over the DHCP option 60 vendor class identifier, anchored — e.g. ^MSFT 5\\.0$',
 };
+
+/** Longest canonical manufacturer name the registry can produce. */
+const MAX_OUI_VENDOR_LEN = 64;
+
+/**
+ * A caution about a DHCP vendor class rule's pattern, or null. Advisory, not a
+ * refusal: the server compiles the RE2 pattern and is the authority (a JS
+ * RegExp disagrees with RE2 both ways, so the form does not try). What it can
+ * say is that an unanchored pattern matches INSIDE another client's
+ * identifier — `MSFT 5.0` is inside `MSFT 5.0 XBOX` — which is why every
+ * shipped rule starts with `^`.
+ */
+export function dhcpVendorClassCaution(pattern: string): string | null {
+  if (pattern.trim() === '') return null;
+  if (!/^(\(\?[a-zA-Z]+\))?\^/.test(pattern)) {
+    return 'Not anchored: without a leading ^ this also matches inside other clients’ identifiers.';
+  }
+  return null;
+}
+
+/**
+ * What is wrong with a manufacturer (oui_vendor) rule's shape, or null. Mirrors
+ * the engine's own checks for this kind so the admin hears about them before
+ * saving; the server still runs the authoritative validator.
+ */
+export function ouiVendorProblem(form: ClassificationRuleInput): string | null {
+  const pattern = form.pattern;
+  if (pattern !== pattern.trim()) {
+    return 'A manufacturer name has no leading or trailing spaces.';
+  }
+  if ([...pattern].length > MAX_OUI_VENDOR_LEN) {
+    return `A canonical manufacturer name is at most ${MAX_OUI_VENDOR_LEN} characters.`;
+  }
+  if (form.vendor && form.vendor !== pattern) {
+    return 'A manufacturer rule\'s vendor is its pattern — leave Vendor empty or make it match.';
+  }
+  return null;
+}
 
 /** Confidence bounds, mirroring the engine's band. */
 export const MIN_CONFIDENCE = 0.5;

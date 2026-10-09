@@ -4074,6 +4074,11 @@ CREATE TABLE IF NOT EXISTS public.pcap_upload_jobs (
     protocols_found jsonb DEFAULT '{}'::jsonb,
     capture_time_range jsonb DEFAULT '{}'::jsonb,
     error_message text,
+    -- Packets the capture's snapshot length cut short, and that snapshot
+    -- length (NULL until processed or when the file does not say). Also added
+    -- in POST-MIGRATIONS for existing databases.
+    truncated_packet_count bigint DEFAULT 0 NOT NULL,
+    snapshot_length integer,
     processing_started_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -18525,6 +18530,7 @@ CREATE TABLE IF NOT EXISTS public.asset_identifiers (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     address_assignment text,
+    device_confirmed_at timestamp with time zone,
     CONSTRAINT asset_identifiers_pkey PRIMARY KEY (id),
     CONSTRAINT asset_identifiers_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
     CONSTRAINT asset_identifiers_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1),
@@ -19534,7 +19540,7 @@ CREATE TABLE IF NOT EXISTS public.classification_rules (
     seed_shipped jsonb,
     seed_offer jsonb,
     CONSTRAINT classification_rules_pkey PRIMARY KEY (id),
-    CONSTRAINT classification_rules_rule_kind_check CHECK (rule_kind = ANY (ARRAY['oui'::text, 'sysobjectid'::text, 'enip'::text, 'cloud_type'::text, 'banner'::text, 'port_profile'::text, 'model'::text, 'platform'::text, 'cdp_capabilities'::text, 'lldp_capability'::text, 'mdns_service'::text, 'os_name'::text])),
+    CONSTRAINT classification_rules_rule_kind_check CHECK (rule_kind = ANY (ARRAY['oui'::text, 'oui_vendor'::text, 'sysobjectid'::text, 'enip'::text, 'cloud_type'::text, 'banner'::text, 'port_profile'::text, 'model'::text, 'platform'::text, 'cdp_capabilities'::text, 'lldp_capability'::text, 'mdns_service'::text, 'os_name'::text, 'dhcp_vendor_class'::text])),
     CONSTRAINT classification_rules_confidence_range_check CHECK (confidence >= 0 AND confidence <= 1),
     -- A rule that asserts nothing is a row that can only waste a reviewer's
     -- time. At least one of class, vendor or model has to be populated.
@@ -20721,16 +20727,20 @@ DO $$ BEGIN
     -- covers one that already created the table. Workstream 2.10b added
     -- `cdp_capabilities`, `lldp_capability` and `mdns_service` to the eight
     -- 2.10a shipped; `os_name` came later, with the host-inventory
-    -- reclassification path. Without THIS half, the seeded os_name rows fail
-    -- the CHECK on every upgraded database and the seed Job stops there.
+    -- reclassification path; `oui_vendor` (a rule keyed on the canonical
+    -- manufacturer the IEEE registry resolves a MAC to) after that; `dhcp_vendor_class`
+    -- (DHCP option 60, the client's vendor class identifier) last. Without
+    -- THIS half, the seeded rows of a new kind fail the CHECK on every
+    -- upgraded database and the seed Job stops there.
     ALTER TABLE public.classification_rules
         DROP CONSTRAINT IF EXISTS classification_rules_rule_kind_check;
     ALTER TABLE public.classification_rules
         ADD CONSTRAINT classification_rules_rule_kind_check
-        CHECK (rule_kind = ANY (ARRAY['oui'::text, 'sysobjectid'::text, 'enip'::text,
-            'cloud_type'::text, 'banner'::text, 'port_profile'::text, 'model'::text,
-            'platform'::text, 'cdp_capabilities'::text, 'lldp_capability'::text,
-            'mdns_service'::text, 'os_name'::text]));
+        CHECK (rule_kind = ANY (ARRAY['oui'::text, 'oui_vendor'::text, 'sysobjectid'::text,
+            'enip'::text, 'cloud_type'::text, 'banner'::text, 'port_profile'::text,
+            'model'::text, 'platform'::text, 'cdp_capabilities'::text,
+            'lldp_capability'::text, 'mdns_service'::text, 'os_name'::text,
+            'dhcp_vendor_class'::text]));
 
     IF NOT EXISTS (
       SELECT 1 FROM pg_constraint
@@ -22718,6 +22728,67 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+-- ----------------------------------------------------------------------------
+-- oui_vendor_backfill_state: the IEEE registry snapshot each tenant's OUI
+-- vendor backfill last completed under.
+-- ----------------------------------------------------------------------------
+-- hw.vendor from a MAC prefix is resolved on the platform, at ingestion, from
+-- the IEEE registry compiled into the services (shared/ouiregistry). Assets
+-- ingested before that, or under an older registry snapshot, are brought up to
+-- date by inventory-service's backfill (services/oui_vendor_backfill.go), which
+-- records here the snapshot it finished a tenant under. A tenant whose row
+-- names the running snapshot is skipped; a new snapshot (a new release with a
+-- refreshed registry) makes every tenant due again. One row per tenant, RLS-
+-- isolated like every tenant table; the job enumerates due tenants through the
+-- bypass connection and writes each row inside that tenant's own session.
+CREATE TABLE IF NOT EXISTS public.oui_vendor_backfill_state (
+    tenant_id uuid NOT NULL,
+    snapshot_id text NOT NULL,
+    assets_written integer DEFAULT 0 NOT NULL,
+    completed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT oui_vendor_backfill_state_pkey PRIMARY KEY (tenant_id)
+);
+
+ALTER TABLE public.oui_vendor_backfill_state ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  CREATE POLICY oui_vendor_backfill_state_tenant_isolation ON public.oui_vendor_backfill_state
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ----------------------------------------------------------------------------
+-- class_floor_sweep_state: when each tenant's class floor sweep last completed,
+-- and what it did.
+-- ----------------------------------------------------------------------------
+-- inventory-service's class floor sweep (services/class_floor_sweep.go) walks
+-- every live asset still on the unassigned floor (`unknown_host` / `external`)
+-- whose class nobody declared, re-classifies the evidence the asset has
+-- accumulated, and promotes a RULE's class onto it. It runs every six hours
+-- for every tenant and records here the last completed pass: how many floor
+-- assets it considered, how many it promoted, and how many the rules
+-- contradicted themselves about. A separate table rather than a second purpose
+-- for oui_vendor_backfill_state, whose name and snapshot column describe a
+-- different job. One row per tenant, RLS-isolated like every tenant table; the
+-- job enumerates tenants through the bypass connection and writes each row
+-- inside that tenant's own session.
+CREATE TABLE IF NOT EXISTS public.class_floor_sweep_state (
+    tenant_id uuid NOT NULL,
+    assets_considered integer DEFAULT 0 NOT NULL,
+    assets_promoted integer DEFAULT 0 NOT NULL,
+    conflicts integer DEFAULT 0 NOT NULL,
+    completed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT class_floor_sweep_state_pkey PRIMARY KEY (tenant_id)
+);
+
+ALTER TABLE public.class_floor_sweep_state ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  CREATE POLICY class_floor_sweep_state_tenant_isolation ON public.class_floor_sweep_state
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
 -- `GRANT ... ON ALL TABLES IN SCHEMA x` is not a standing rule: Postgres
@@ -24140,6 +24211,45 @@ CREATE OR REPLACE TRIGGER zz_seeded_content_guard BEFORE INSERT OR UPDATE ON pub
 CREATE OR REPLACE TRIGGER zz_seeded_content_tombstone AFTER DELETE ON public.classification_rules
     FOR EACH ROW EXECUTE FUNCTION public.seeded_content_tombstone('classification_rule');
 
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: retire the shipped per-prefix `oui` rules
+-- ----------------------------------------------------------------------------
+-- Until the IEEE registry (shared/ouiregistry) landed, the seed shipped one
+-- `oui` rule per row of the sensor's curated OUI table — about 500 prefixes,
+-- most of them vendor-only — because a per-prefix rule was the only way to
+-- carry a vendor. The engine now resolves every MAC through the whole registry
+-- itself and the catalogue speaks per VENDOR (`oui_vendor`, generated from
+-- standards/classification-rules.yaml's oui_classes), so those rows are no
+-- longer in the seed's VALUES list and nothing would ever update them again.
+-- Left in place they would OUTRANK the vendor rules — a matching prefix rule is
+-- the more specific statement for its MAC — and freeze the old answers.
+--
+-- Only rows Vista shipped and nobody touched: content_origin = 'seed' AND
+-- admin_modified_at IS NULL. A shipped row an admin edited is the admin's now
+-- and stays, as does every row an admin added (origin 'admin') and any row the
+-- ownership marking could not place (origin NULL), which the seeded-content
+-- rules above already treat as possibly the admin's.
+--
+-- vista.seed_apply = on for the DELETE, because this is Vista retiring content,
+-- which the tombstone trigger must not record as an admin deletion: a tombstone
+-- would block a later release from ever shipping that (kind, pattern) again.
+-- The setting is transaction-local and restored to its previous value before
+-- the block ends. The seed cannot re-insert the rows — they are not in its
+-- VALUES list — so this is idempotent and a no-op on every later run.
+DO $$
+DECLARE
+    v_prev text := COALESCE(current_setting('vista.seed_apply', true), '');
+BEGIN
+    IF to_regclass('public.classification_rules') IS NOT NULL THEN
+        PERFORM set_config('vista.seed_apply', 'on', true);
+        DELETE FROM public.classification_rules
+         WHERE rule_kind = 'oui'
+           AND content_origin = 'seed'
+           AND admin_modified_at IS NULL;
+        PERFORM set_config('vista.seed_apply', v_prev, true);
+    END IF;
+END $$;
+
 -- The accept action behind "Update available". Applies the row's seed_offer and
 -- clears it; returns false when the row has no offer (or does not exist). The
 -- mode is transaction-local and reset before returning, so it cannot leak into
@@ -24485,6 +24595,21 @@ UPDATE public.asset_identifiers
 UPDATE public.asset_identifiers
    SET address_assignment = 'static', updated_at = now()
  WHERE kind = 'ip_address' AND source_kind = 'declared' AND address_assignment IS NULL;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: asset_identifiers.device_confirmed_at — the lease-fresh address
+-- ----------------------------------------------------------------------------
+-- ADR-0002 D3 erratum "the lease-fresh address" (shared/identity/leasefresh.go).
+-- When an `ip_address` row was last shown to be held by the DEVICE its asset
+-- describes: a direct measurement decided by an observed device binding (a
+-- MAC, a host key, a serial, an agent) attached or re-attached the address to
+-- the asset. Within the lease window such an address still decides a match
+-- for that asset inside a segment flagged dynamic. NULL means nothing has
+-- confirmed a device there; the identifier upsert keeps the newest value and
+-- never moves it backwards. No backfill: a live device is re-confirmed by its
+-- next MAC sighting, minutes on a sensored network.
+ALTER TABLE IF EXISTS public.asset_identifiers
+    ADD COLUMN IF NOT EXISTS device_confirmed_at timestamp with time zone;
 
 -- ----------------------------------------------------------------------------
 -- POST-MIGRATIONS: tenant-scoped tables cascade from tenants
@@ -24899,3 +25024,17 @@ ALTER TABLE public.asset_endpoints ADD COLUMN IF NOT EXISTS tls_handshake_outcom
 -- the index is there and 100x faster. Soft-deleted rows are a small fraction.
 CREATE INDEX IF NOT EXISTS idx_assets_tenant_primary_host
     ON public.assets USING btree (tenant_id, host(primary_address));
+
+-- ----------------------------------------------------------------------------
+-- pcap_upload_jobs: how much of the capture its snapshot length cut off
+-- ----------------------------------------------------------------------------
+-- A capture taken with a short snapshot length (a gateway's built-in capture
+-- tool defaulting to 128 bytes, say) keeps the headers of each packet and
+-- little of the payload. Its TLS handshakes and certificates cannot be read,
+-- yet the job completed with a handful of discoveries and nothing to say why.
+-- The upload page now warns from these. Existing rows read 0 / NULL, which is
+-- "nothing known to be truncated" for jobs processed before this was measured.
+-- The columns are also in the CREATE TABLE above for fresh installs.
+ALTER TABLE public.pcap_upload_jobs
+    ADD COLUMN IF NOT EXISTS truncated_packet_count bigint DEFAULT 0 NOT NULL,
+    ADD COLUMN IF NOT EXISTS snapshot_length integer;

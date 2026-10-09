@@ -32,6 +32,8 @@ const (
 	MaxAddresses = 8
 	// MaxHostnames is the number of distinct short names kept per subject.
 	MaxHostnames = 8
+	// MaxOtherMACs bounds a self-report's additional interface MACs.
+	MaxOtherMACs = 8
 	// MaxFQDNs is the number of distinct fully-qualified names kept per subject.
 	MaxFQDNs = 8
 	// MaxServices is the number of mDNS service types kept per subject.
@@ -64,10 +66,11 @@ const (
 // common case rather than the edge one.
 //
 // So the advertiser is emitted as its own [HostObservation] — chassis MAC,
-// system name, management address, OUI vendor, and the model when the frame
-// states one — with Source "lldp" or "cdp". `net.neighbors` stays what it
-// already was: a fact device-interrogation writes after reading a device's OWN
-// LLDP, CDP or ARP table, which really is a statement about that device's
+// system name, management address, and the model when the frame states one —
+// with Source "lldp" or "cdp"; the platform resolves its OUI vendor at
+// ingestion. `net.neighbors` stays what it already was: a fact
+// device-interrogation writes after reading a device's OWN LLDP, CDP or ARP
+// table, which really is a statement about that device's
 // neighbours.
 
 // HostObservation is one passive statement that a host exists, with whatever
@@ -118,6 +121,17 @@ type HostObservation struct {
 	// protocol is recorded in Attributes as `virtual_mac_protocol`.
 	MACVirtual bool `json:"mac_virtual,omitempty"`
 
+	// OtherMACs travel ONLY on a self-report (AgentID set): the burned-in
+	// hardware addresses of the host's OTHER physical interfaces, beside the
+	// one in MAC. A passive frame shows one interface; a host describing itself
+	// knows all of them, and a laptop's Ethernet and Wi-Fi are one device the
+	// platform otherwise meets as two — each NIC seen passively on its own
+	// segment, with nothing but this report to say they share a chassis.
+	// Finalize keeps only stable identifiers: normalised, never MAC itself,
+	// never locally administered or a virtual-router address, bounded by
+	// MaxOtherMACs, and dropped entirely when AgentID is empty.
+	OtherMACs []string `json:"other_macs,omitempty"`
+
 	// Addresses are the IP addresses bound to the subject, in observation
 	// order, bounded by MaxAddresses.
 	Addresses []netip.Addr `json:"addresses,omitempty"`
@@ -129,8 +143,13 @@ type HostObservation struct {
 	// to, with the trailing root dot stripped.
 	FQDNs []string `json:"fqdns,omitempty"`
 
-	// Vendor is the OUI-registered manufacturer of MAC. Empty when the prefix
-	// is not in the compiled table or MAC is locally administered.
+	// Vendor is a manufacturer the frame itself STATED for MAC. No decoder in
+	// this package sets it today, so a current sensor sends it empty: the
+	// OUI-registered manufacturer is resolved on the platform, at ingestion,
+	// from the full IEEE registry (shared/ouiregistry), which a sensor binary
+	// must not carry. Finalize never derives it. An older sensor binary still
+	// fills it from its own compiled OUI table; the platform's answer wins
+	// over that when the registry has one.
 	Vendor string `json:"vendor,omitempty"`
 
 	// Model is the hardware model the subject STATED — the CDP platform TLV,
@@ -183,10 +202,9 @@ func (o *HostObservation) Finalize() {
 			o.MACVirtual = true
 			o.setAttr("virtual_mac_protocol", proto)
 		}
-		if o.Vendor == "" {
-			o.Vendor = VendorForMAC(o.MAC)
-		}
 	}
+
+	o.OtherMACs = o.stableOtherMACs()
 
 	o.Addresses = boundAddrs(o.Addresses, MaxAddresses)
 	o.Hostnames = boundStrings(o.Hostnames, MaxHostnames)
@@ -204,6 +222,32 @@ func (o *HostObservation) Finalize() {
 	}
 
 	o.Facts = o.buildFacts()
+}
+
+// stableOtherMACs applies OtherMACs' contract (see the field): a self-report's
+// other hardware addresses, normalised, de-duplicated, without MAC itself and
+// without any address that is not a stable identifier of a chassis.
+func (o *HostObservation) stableOtherMACs() []string {
+	if o.AgentID == "" {
+		return nil
+	}
+	seen := map[string]bool{o.MAC: true}
+	var out []string
+	for _, raw := range o.OtherMACs {
+		mac := NormalizeMAC(raw)
+		if mac == "" || seen[mac] || macLocallyAdministered(mac) {
+			continue
+		}
+		if _, virtual := VirtualMACProtocol(mac); virtual {
+			continue
+		}
+		seen[mac] = true
+		out = append(out, mac)
+		if len(out) == MaxOtherMACs {
+			break
+		}
+	}
+	return out
 }
 
 // buildFacts derives the registered-key map. The keys here are exactly those

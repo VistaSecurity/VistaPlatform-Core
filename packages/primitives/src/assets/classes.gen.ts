@@ -34,6 +34,7 @@ export type AssetClassKey =
   | "hmi"
   | "ied"
   | "iot_device"
+  | "smart_device"
   | "bmc"
   | "virtual"
   | "virtual_machine"
@@ -345,8 +346,20 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     parent: "hardware",
     path: "hardware.iot_device",
     label: "IoT device",
-    description: "A network-attached embedded device that is not OT — cameras, sensors, badge readers, building controls.",
+    description: "A network-attached embedded device of the enterprise and building estate that is not OT — cameras, sensors, badge readers, building controls. Consumer devices (TVs, speakers, consoles, smart-home gear) are smart devices.",
     icon: "Cctv",
+    cmdbCiType: null,
+    cyclonedxType: "device",
+    identifierPrecedence: ["serial_number", "cmdb_sys_id", "mac_address", "hostname", "ip_address"],
+    legacyAssetType: "appliance",
+  },
+  "smart_device": {
+    key: "smart_device",
+    parent: "hardware",
+    path: "hardware.smart_device",
+    label: "Smart device",
+    description: "A consumer or office connected device — a TV or streaming player, a smart speaker, a doorbell, plug, bulb or lock, a game console, an appliance. Not an IoT device, which is the enterprise and building embedded estate: cameras, sensors, badge readers, controls.",
+    icon: "TvMinimal",
     cmdbCiType: null,
     cyclonedxType: "device",
     identifierPrecedence: ["serial_number", "cmdb_sys_id", "mac_address", "hostname", "ip_address"],
@@ -725,6 +738,7 @@ export const CLASS_TREE: AssetClassNode[] = [
         ],
       },
       { key: "iot_device", children: [] },
+      { key: "smart_device", children: [] },
       { key: "bmc", children: [] },
     ],
   },

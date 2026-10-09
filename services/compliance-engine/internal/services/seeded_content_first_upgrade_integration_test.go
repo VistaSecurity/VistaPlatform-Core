@@ -184,14 +184,14 @@ func TestIntegration_SeededContent_FirstUpgradeComparesTheWholeShippedRow(t *tes
 func TestIntegration_SeededContent_RekeyTombstonesTheShippedKey(t *testing.T) {
 	f := newSeededFixture(t)
 
-	f.exec(t, `UPDATE classification_rules SET pattern = 'AD0039' WHERE rule_kind = 'oui' AND pattern = '000039'`)
+	f.exec(t, `UPDATE classification_rules SET pattern = 'Kyocera (ours)' WHERE rule_kind = 'oui_vendor' AND pattern = 'Kyocera'`)
 	f.exec(t, `UPDATE platform_framework_controls SET control_id = 'BP-004-OURS' WHERE control_id = 'BP-004'`)
 	f.exec(t, `INSERT INTO classification_rules (rule_kind, pattern, class_key, vendor, confidence)
 		VALUES ('oui', 'AD0001', NULL, 'Ours', 0.5)`)
 	f.exec(t, `UPDATE classification_rules SET pattern = 'AD0002' WHERE rule_kind = 'oui' AND pattern = 'AD0001'`)
 
 	for _, want := range []struct{ entity, key string }{
-		{"classification_rule", `["oui", "000039"]`},
+		{"classification_rule", `["oui_vendor", "Kyocera"]`},
 		{"control", `["best-practices", "1.0", "BP-004"]`},
 	} {
 		if got := f.count(t, `SELECT count(*) FROM seeded_content_tombstones WHERE entity = $1 AND natural_key = $2`, want.entity, want.key); got != 1 {
@@ -206,10 +206,10 @@ func TestIntegration_SeededContent_RekeyTombstonesTheShippedKey(t *testing.T) {
 	testdb.ForceApplySeed(t, f.raw)
 
 	for q, want := range map[string]int{
-		`SELECT count(*) FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '000039'`: 0,
-		`SELECT count(*) FROM classification_rules WHERE rule_kind = 'oui' AND pattern = 'AD0039'`: 1,
-		`SELECT count(*) FROM platform_framework_controls WHERE control_id = 'BP-004'`:             0,
-		`SELECT count(*) FROM platform_framework_controls WHERE control_id = 'BP-004-OURS'`:        1,
+		`SELECT count(*) FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Kyocera'`:        0,
+		`SELECT count(*) FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Kyocera (ours)'`: 1,
+		`SELECT count(*) FROM platform_framework_controls WHERE control_id = 'BP-004'`:                            0,
+		`SELECT count(*) FROM platform_framework_controls WHERE control_id = 'BP-004-OURS'`:                       1,
 	} {
 		if got := f.count(t, q); got != want {
 			t.Errorf("after re-seeding: %s = %d, want %d (a re-keyed shipped row's original came back)", q, got, want)
@@ -304,7 +304,7 @@ func TestIntegration_SeededContent_SeedStatementsWithoutAWholeRowNeverStampPrist
 		// A seed INSERT that really inserts (no conflict) — its shipped row is
 		// handed off — followed by a correction to a DIFFERENT pre-marker row.
 		`INSERT INTO classification_rules (rule_kind, pattern, class_key, vendor, confidence) VALUES ('oui', 'ADFFFF', 'ot_device', 'Shipped later', 0.60)`,
-		`UPDATE classification_rules SET confidence = 0.66 WHERE rule_kind = 'oui' AND pattern = '00000A'`,
+		`UPDATE classification_rules SET confidence = 0.66 WHERE rule_kind = 'oui_vendor' AND pattern = 'Omron'`,
 	} {
 		if _, err := tx.Exec(q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -320,11 +320,11 @@ func TestIntegration_SeededContent_SeedStatementsWithoutAWholeRowNeverStampPrist
 	if got := f.count(t, `SELECT count(*) FROM platform_framework_controls WHERE control_id = 'BP-001' AND seed_shipped IS NOT NULL`); got != 0 {
 		t.Error("BP-001: a non-upsert seed statement recorded the row's own values as 'what Vista shipped'")
 	}
-	if got := f.str(t, `SELECT confidence::text FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '00000A'`); got != "0.70" {
-		t.Errorf("00000A confidence = %s: a correction overwrote a pre-marker row it could not vouch for", got)
+	if got := f.str(t, `SELECT confidence::text FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Omron'`); got != "0.70" {
+		t.Errorf("Omron rule confidence = %s: a correction overwrote a pre-marker row it could not vouch for", got)
 	}
-	if got := f.ownershipOf(t, `SELECT * FROM classification_rules WHERE rule_kind = 'oui' AND pattern = '00000A'`); got != (ownership{"seed", true, `{"confidence": 0.66}`}) {
-		t.Errorf("00000A ownership = %+v; want kept, with exactly the correction on offer (not the other rule's shipped row)", got)
+	if got := f.ownershipOf(t, `SELECT * FROM classification_rules WHERE rule_kind = 'oui_vendor' AND pattern = 'Omron'`); got != (ownership{"seed", true, `{"confidence": 0.66}`}) {
+		t.Errorf("Omron rule ownership = %+v; want kept, with exactly the correction on offer (not the other rule's shipped row)", got)
 	}
 }
 

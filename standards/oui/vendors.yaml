@@ -1,0 +1,559 @@
+# Canonical manufacturer names for the IEEE OUI registry (shared/ouiregistry).
+#
+# The IEEE registry spells one manufacturer many ways ("Cisco Systems, Inc",
+# "Cisco Systems Inc", "Cisco SPVTG"; "Hewlett Packard" / "HP Inc." /
+# "Hewlett Packard Enterprise"). The rule engine, the identity matcher and the
+# end-of-life join each need ONE spelling per manufacturer, so this file maps
+# registrant strings onto a canonical display name. A registrant that is not
+# listed here resolves to its own cleaned IEEE spelling, uncanonicalised.
+#
+# Inputs, and how they combine (scripts/generate-oui-registry.mjs):
+#
+#   standards/oui/ieee-{mal,mam,mas}.tsv   the vendored IEEE snapshot
+#                                          (`make refresh-oui`; never hand-edited)
+#   this file                              registrant -> canonical, plus pins
+#
+# Fields:
+#
+#   vendor:       the canonical display name (at most 64 characters, unique).
+#   registrants:  EXACT registrant strings as they appear in the snapshot
+#                 (after whitespace normalisation). Each must match at least one
+#                 snapshot row, and may belong to only one vendor.
+#   pins:         prefixes claimed by name REGARDLESS of registrant. A pin beats
+#                 the registrant mapping of its own prefix. 24-bit "AA:BB:CC",
+#                 28-bit "AA:BB:CC:D", 36-bit "AA:BB:CC:DE:F". A prefix may be
+#                 pinned to only one vendor.
+#   source:       REQUIRED when any pin is absent from the IEEE snapshot
+#                 (locally-administered or convention prefixes): the public
+#                 document that says what the prefix means.
+#
+# "IEEE Registration Authority" and "Private" are not manufacturers: they mean
+# the registry does not say who owns the block, and the lookup returns nothing
+# for them. The generator rejects a vendor entry naming either.
+#
+# Generation FAILS when a registrant or an unsourced pin matches nothing in the
+# snapshot. After `make refresh-oui`, a registrant the IEEE renamed shows up
+# here as a generation failure, which is the cue to update this file.
+#
+# Sections group vendors by the kind of thing they mostly make; they are
+# comments only and carry no meaning for the generator.
+
+vendors:
+
+  # --- Workstations, laptops, phones ---------------------------------------
+  - vendor: Apple
+    registrants: ["Apple, Inc."]
+  - vendor: Dell
+    registrants: ["Dell Inc.", "Dell Technologies", "Dell"]
+  - vendor: Hewlett Packard
+    registrants: ["Hewlett Packard", "HP Inc.", "Hewlett Packard Enterprise"]
+  - vendor: Intel
+    registrants: ["Intel Corporate", "Intel Corporation", "Intel Wireless Network Group"]
+  - vendor: Hon Hai Precision
+    registrants:
+      - "Hon Hai Precision Ind. Co.,Ltd."
+      - "Hon Hai Precision Ind. CO.,Ltd."
+      - "Hon Hai Precision IND.CO.,LTD"
+      - "Hon Hai Precision Industry Co., Ltd."
+      - "Hon Hai Precision Industry Co.,LTD"
+      - "HON HAI-CCPBG PRECISION IND.CO.,LTD."
+      - "FOXCONN"
+      - "Foxconn Technology Co., Ltd."
+      - "Foxconn(NanJing) Communication Co.,Ltd."
+  - vendor: ASUSTek Computer
+    registrants: ["ASUSTek COMPUTER INC."]
+  - vendor: Micro-Star International
+    registrants:
+      - "MSI"
+      - "MICRO-STAR INT'L CO.,LTD."
+      - "MICRO-STAR INT'L CO.,LTD"
+      - "MICRO-STAR INT'L CO., LTD."
+      - "Micro-Star INT'L CO., LTD"
+      - "Micro-Star INT'L CO., LTD."
+      - "Micro-Star INTL CO., LTD."
+      - "Micro-Star Int'l Co, Ltd"
+      - "Micro-Star International"
+      - "MICRO-STAR INTERNATIONAL CO., LTD."
+  - vendor: GIGA-BYTE Technology
+    registrants:
+      - "GIGA-BYTE TECHNOLOGY CO.,LTD."
+      - "GIGA-BYTE TECHNOLOGY CO., LTD."
+      - "GIGA-BYTE TECHNOLOGY CO., Ltd."
+      - "Giga-Byte Technology Co., Ltd."
+      - "Giga-Byte"
+  - vendor: Toshiba
+    registrants:
+      - "TOSHIBA CORPORATION"
+      - "Toshiba Corporation"
+      - "Toshiba Corp."
+      - "Toshiba"
+      - "TOSHIBA CLIENT SOLUTIONS CO., LTD."
+  - vendor: Fujitsu
+    registrants:
+      - "FUJITSU LIMITED"
+      - "Fujitsu Limited"
+      - "Fujitsu Technology Solutions GmbH"
+      - "Fujitsu Client Computing Limited"
+      - "Fujitsu Siemens Computers"
+  - vendor: IBM
+    registrants: ["IBM Corp", "IBM", "IBM Corporation", "International Business Machines"]
+  - vendor: Samsung Electronics
+    registrants:
+      - "Samsung Electronics Co.,Ltd"
+      - "Samsung Electronics Co., Ltd"
+      - "Samsung Electronics Co., Ltd."
+      - "Samsung Electronics Co., Ltd. ARTIK"
+      - "Samsung Electronics Co., Ltd., Memory Division"
+      - "Samsung Electronics.,LTD"
+      - "Samsung Electronics"
+      - "SAMSUNG ELECTRONICS"
+      - "SAMSUNG Electronics. Co. LTD"
+      - "SAMSUNG ELECTRO MECHANICS CO., LTD."
+      - "SAMSUNG ELECTRO-MECHANICS(THAILAND)"
+  - vendor: LG Electronics
+    registrants:
+      - "LG Electronics (Mobile Communications)"
+      - "LG Electronics"
+      - "LG ELECTRONICS"
+      - "LG Electronics Inc."
+      - "LG ELECTRONICS INC"
+      - "LG Electronics NV"
+      - "LG Electornics"
+  - vendor: Huawei Technologies
+    registrants: ["HUAWEI TECHNOLOGIES CO.,LTD", "Huawei Technologies Co., Ltd.", "Huawei Device Co., Ltd."]
+  - vendor: ZTE
+    registrants: ["zte corporation"]
+  - vendor: Xiaomi
+    registrants:
+      - "Xiaomi Communications Co Ltd"
+      - "XIAOMI Electronics,CO.,LTD"
+      - "Beijing Xiaomi Electronics Co., Ltd."
+      - "Beijing Xiaomi Electronics Co.,Ltd"
+      - "Beijing Xiaomi Mobile Software Co., Ltd"
+  - vendor: Lenovo
+    registrants:
+      - "Lenovo"
+      - "Lenovo (Beijing) Co., Ltd."
+      - "LENOVO(BEIJING)CO., LTD."
+      - "Lenovo (Beijing) Limited."
+      - "Lenovo Data Center Group"
+      - "Lenovo India Private Limited"
+      - "Lenovo Information Products (Shenzhen)Co.,Ltd"
+      - "Lenovo Mobile Communication Technology Ltd."
+      - "Lenovo Mobile Communication (Wuhan) Company Limited"
+      - "Lenovo Future Communication Technology (Chongqing) Company Limited"
+  # Lenovo's phone business, kept apart from Lenovo PCs: the classifier wants
+  # to tell a phone from a laptop, and this is the registrant that can.
+  - vendor: Motorola Mobility
+    registrants:
+      - "Motorola Mobility LLC, a Lenovo Company"
+      - "Motorola (Wuhan) Mobility Technologies Communication Co., Ltd."
+      - "Motorola(Wuhan) Mobility Technologies Communication Co.,Ltd"
+  - vendor: OPPO
+    registrants: ["GUANGDONG OPPO MOBILE TELECOMMUNICATIONS CORP.,LTD"]
+  - vendor: vivo
+    registrants: ["vivo Mobile Communication Co., Ltd."]
+
+  # --- Network infrastructure ----------------------------------------------
+  - vendor: Cisco Systems
+    registrants: ["Cisco Systems, Inc", "Cisco Systems Inc", "Cisco SPVTG"]
+  - vendor: Cisco Meraki
+    registrants: ["Cisco Meraki"]
+  # Registered to Hewlett Packard Enterprise, but these are Aruba access points
+  # and controllers: HPE bought Aruba and kept its prefixes.
+  - vendor: Aruba Networks
+    pins: ["00:0B:86", "00:1A:1E", "00:24:6C", "24:DE:C6", "6C:F3:7F", "94:B4:0F", "D8:C7:C8"]
+  - vendor: Juniper Networks
+    registrants: ["Juniper Networks"]
+  - vendor: Arista Networks
+    registrants: ["Arista Networks", "Arista Networks, Inc.", "Arista Network, Inc."]
+  - vendor: Extreme Networks
+    registrants: ["Extreme Networks, Inc."]
+  - vendor: Nortel Networks
+    registrants: ["Nortel Networks", "NORTEL", "Nortel Networks Broadband Access"]
+  - vendor: Alcatel-Lucent
+    registrants:
+      - "Alcatel-Lucent Enterprise"
+      - "Alcatel-Lucent"
+      - "ALCATEL-LUCENT"
+      - "Alcatel Lucent"
+      - "Alcatel-Lucent IPD"
+  - vendor: Allied Telesis
+    registrants:
+      - "Allied Telesis, Inc."
+      - "Allied Telesis K.K."
+      - "ALLIED TELESIS K.K."
+      - "ALLIED TELESIS, K.K."
+      - "Allied Telesis Labs, Inc."
+      - "Allied Telesis Labs Ltd"
+      - "Allied Telesis (Hong Kong) Ltd."
+      - "ALLIED TELESIS INTERNATIONAL CORPORATION"
+      - "Allied Telesyn Inc."
+      - "ALLIED TELESYN INTERNAIONAL"
+  - vendor: 3Com
+    registrants: ["3COM", "3COM EUROPE LTD", "3Com Ltd"]
+  - vendor: Fortinet
+    registrants: ["Fortinet, Inc."]
+  - vendor: Palo Alto Networks
+    registrants: ["Palo Alto Networks"]
+  - vendor: Check Point Software
+    registrants: ["Check Point Software Technologies", "Check Point Software Technologies Ltd."]
+  - vendor: SonicWall
+    registrants: ["Sonicwall", "SonicWall", "SonicWALL"]
+  - vendor: WatchGuard Technologies
+    registrants: ["WatchGuard Technologies, Inc."]
+  - vendor: F5 Networks
+    registrants: ["F5 Inc."]
+  - vendor: Riverbed Technology
+    registrants: ["Riverbed Technology, Inc."]
+  - vendor: MikroTik
+    registrants: ["Routerboard.com"]
+  - vendor: Ubiquiti Networks
+    registrants: ["Ubiquiti Inc"]
+  - vendor: Ruckus Wireless
+    registrants: ["Ruckus Wireless"]
+  - vendor: Cambium Networks
+    registrants: ["Cambium Networks Limited"]
+  - vendor: NETGEAR
+    registrants: ["NETGEAR"]
+  - vendor: TP-Link Technologies
+    registrants: ["TP-LINK TECHNOLOGIES CO.,LTD.", "TP-Link Systems Inc", "TP-Link Systems Inc."]
+  - vendor: D-Link
+    registrants:
+      - "D-Link Corporation"
+      - "D-Link International"
+      - "D-LINK SYSTEMS, INC."
+      - "D-Link Middle East FZCO"
+      - "D-Link (Shanghai) Limited Corp."
+  - vendor: Belkin International
+    registrants: ["Belkin International Inc.", "Belkin Corporation", "BELKIN COMPONENTS"]
+  # C0:56:27 is registered to Belkin, which owns Linksys; the standards CSV
+  # names it Linksys and so does this map.
+  - vendor: Linksys
+    registrants: ["Cisco-Linksys, LLC", "Linksys USA, Inc"]
+    pins: ["C0:56:27"]
+  - vendor: Buffalo
+    registrants: ["BUFFALO.INC"]
+  - vendor: AVM GmbH
+    registrants: ["AVM GmbH", "AVM Audiovisuelles Marketing und Computersysteme GmbH"]
+  - vendor: Technicolor
+    registrants:
+      - "Thomson Telecom Belgium"
+      - "Technicolor (China) Technology Co., Ltd."
+      - "Technicolor CH USA Inc for Telus"
+  # 00:15:A2 and 00:0C:E5 are registered to Commscope, which bought ARRIS (and,
+  # with it, Motorola's cable-modem line). The CSV names them by product brand.
+  - vendor: ARRIS Group
+    registrants: ["Arris"]
+    pins: ["00:15:A2"]
+  - vendor: Motorola
+    registrants:
+      - "WIRELESS DATA GROUP MOTOROLA"
+      - "Motorola"
+      - "MOTOROLA"
+      - "Motorola Solutions Inc."
+      - "MOTOROLA SOLUTIONS MALAYSIA SDN. BHD."
+      - "Motorola, Broadband Solutions Group"
+      - "Motorola - BSG"
+      - "Motorola Korea"
+    pins: ["00:0C:E5"]
+  - vendor: Commscope
+    registrants: ["Commscope", "Commscope, Inc", "CommScope Inc"]
+  - vendor: Ericsson
+    registrants: ["Ericsson Group", "Ericsson", "Ericsson AB", "Ericsson, EAB/RWI/K", "Ericsson - North America"]
+  - vendor: Nokia
+    registrants:
+      - "Nokia"
+      - "Nokia Corporation"
+      - "Nokia Danmark A/S"
+      - "Nokia Bell Labs"
+      - "Nokia Bell N.V."
+      - "Nokia Shanghai Bell Co., Ltd."
+      - "Nokia Siemens Networks GmbH & Co. KG."
+      - "Nokia Solutions and Networks GmbH & Co. KG"
+      - "Nokia Solutions and Network India Private Limited"
+      - "Nokia Solutions and Networks India Private Limited"
+      - "Nokia Solutions (Shanghai) Co.,Ltd."
+      - "Nokia NET Product Operations"
+      - "NOKIA MULTIMEDIA TERMINALS"
+      - "NOKIA WIRELESS BUSINESS COMMUN"
+  - vendor: H3C
+    registrants:
+      - "New H3C Technologies Co., Ltd"
+      - "New H3C Intelligence Terminal Co., Ltd."
+      - "Hangzhou H3C Technologies Co., Limited"
+  - vendor: Mellanox
+    registrants: ["Mellanox Technologies, Inc."]
+  - vendor: Zyxel
+    registrants: ["Zyxel Communications Corporation"]
+  # Brocade and Citrix were reached only over SNMP when the classification rules
+  # first named them, and were listed as "outside the OUI table"; the IEEE
+  # registry has both, so they are canonical here like everyone else.
+  - vendor: Brocade
+    registrants: ["Brocade Communications Systems LLC"]
+  - vendor: Citrix
+    registrants: ["Citrix Systems, Inc."]
+  - vendor: eero
+    registrants: ["eero inc."]
+  - vendor: Sagemcom
+    registrants: ["Sagemcom Broadband SAS"]
+  - vendor: Arcadyan
+    registrants: ["Arcadyan Corporation"]
+  - vendor: Sky
+    registrants: ["SKY UK LIMITED"]
+  - vendor: Broadcom
+    registrants: ["Broadcom", "Broadcom Corporation", "Broadcom Inc.", "Broadcom Limited", "Broadcom Technologies"]
+  - vendor: Marvell Semiconductor
+    registrants: ["MARVELL SEMICONDUCTOR, INC.", "Marvell Semiconductors"]
+  - vendor: Qualcomm
+    registrants: ["Qualcomm Inc.", "QUALCOMM Incorporated"]
+  - vendor: MediaTek
+    registrants: ["MediaTek Inc"]
+  - vendor: Realtek Semiconductor
+    registrants: ["REALTEK SEMICONDUCTOR CORP.", "Realtek Semiconductor Corp."]
+
+  # --- Radio modules and chipsets ------------------------------------------
+  # Module makers: a hit names who built the radio, not the product it sits in.
+  - vendor: Texas Instruments
+    registrants: ["Texas Instruments"]
+  - vendor: Silicon Laboratories
+    registrants: ["Silicon Laboratories"]
+  - vendor: Murata Manufacturing
+    registrants: ["Murata Manufacturing Co., Ltd.", "Murata Manufacturing CO., Ltd."]
+  - vendor: AzureWave Technology
+    registrants: ["AzureWave Technology Inc.", "AzureWave Technologies (Shanghai) Inc."]
+  - vendor: Quectel
+    registrants: ["Quectel Wireless Solutions Co.,Ltd."]
+  - vendor: Liteon Technology
+    registrants:
+      - "Liteon Technology Corporation"
+      - "LITE-ON Technology Corp."
+      - "Lite-On Technogy Corp."
+      - "LiteON"
+      - "Liteon, Inc."
+  - vendor: Hui Zhou Gaoshengda Technology
+    registrants: ["Hui Zhou Gaoshengda Technology Co.,LTD"]
+
+  # --- Virtualisation and platform NICs ------------------------------------
+  - vendor: VMware
+    registrants: ["VMware, Inc."]
+  - vendor: Microsoft
+    registrants: ["Microsoft Corporation", "Microsoft", "Microsoft Corp.", "MICROSOFT CORP."]
+  # Registered to Microsoft Corporation, but this one block is the Hyper-V
+  # guest-NIC pool; the rest of Microsoft's prefixes are Surface and Xbox.
+  - vendor: Microsoft Hyper-V
+    pins: ["00:15:5D"]
+  - vendor: Xen
+    registrants: ["Xensource, Inc."]
+  # Registered to Cadmus Computer Systems (now PCS Systemtechnik); every frame
+  # carrying it in practice is a VirtualBox guest.
+  - vendor: Oracle VirtualBox
+    pins: ["08:00:27"]
+    source: https://www.virtualbox.org/manual/ch06.html
+  - vendor: Parallels
+    registrants: ["Parallels, Inc."]
+  # Locally administered: absent from the IEEE registry by construction.
+  - vendor: QEMU virtual NIC
+    pins: ["52:54:00"]
+    source: https://libvirt.org/formatdomain.html
+  - vendor: OpenStack
+    pins: ["FA:16:3E"]
+    source: https://docs.openstack.org/neutron/latest/configuration/neutron.html
+  - vendor: Docker
+    pins: ["02:42:AC"]
+    source: https://docs.docker.com/engine/network/drivers/bridge/
+  - vendor: Nutanix
+    registrants: ["Nutanix"]
+  - vendor: NetApp
+    registrants: ["NetApp"]
+  - vendor: EMC
+    registrants: ["CLARIION", "EMC Corporation", "Dell EMC"]
+  # The IEEE lists 24:A9:37 under "Everpure, Inc."; the standards CSV names it
+  # Pure Storage. Pinned to keep that answer until a reviewer settles it.
+  - vendor: Pure Storage
+    pins: ["24:A9:37"]
+  - vendor: Synology
+    registrants: ["Synology Incorporated"]
+  - vendor: QNAP Systems
+    registrants: ["QNAP Systems, Inc.", "ICP Electronics Inc."]
+  - vendor: Western Digital
+    registrants: ["Western Digital Technologies, Inc.", "WESTERN DIGITAL", "WESTERN DIGITAL CORPORATION"]
+  - vendor: Super Micro Computer
+    registrants: ["Super Micro Computer, Inc."]
+
+  # --- Printers, cameras, telephony ----------------------------------------
+  - vendor: Xerox
+    registrants: ["XEROX CORPORATION", "Xerox Corporation", "Xerox International Partners"]
+  - vendor: Fuji Xerox
+    registrants: ["FUJIFILM Business Innovation Corp."]
+  - vendor: Seiko Epson
+    registrants: ["Seiko Epson Corporation"]
+  - vendor: Ricoh
+    registrants: ["RICOH COMPANY LTD.", "RICOH COMPANY,LTD.", "RICOH COMPANY, LTD."]
+  - vendor: Canon
+    registrants: ["CANON INC."]
+  - vendor: Brother Industries
+    registrants: ["Brother industries, LTD.", "Brother Industries, LTD."]
+  - vendor: Lexmark
+    registrants: ["LEXMARK INTERNATIONAL, INC."]
+  - vendor: Konica Minolta
+    registrants: ["KONICA MINOLTA HOLDINGS, INC."]
+  - vendor: Kyocera
+    registrants:
+      - "KYOCERA Display Corporation"
+      - "KYOCERA Document Solutions Inc."
+      - "KYOCERA Corporation"
+      - "KYOCERA CORPORATION"
+  - vendor: Zebra Technologies
+    registrants: ["Zebra Technologies Corp.", "Zebra Technologies Inc", "Zebra Technologies Inc."]
+  - vendor: Axis Communications
+    registrants: ["Axis Communications AB"]
+  - vendor: Hikvision
+    registrants: ["Hangzhou Hikvision Digital Technology Co.,Ltd."]
+  - vendor: Dahua Technology
+    registrants: ["Zhejiang Dahua Technology Co., Ltd.", "ZHEJIANG DAHUA TECHNOLOGYCO.,LTD"]
+  - vendor: Polycom
+    registrants: ["Polycom"]
+  - vendor: Avaya
+    registrants: ["Avaya Inc", "Avaya LLC"]
+  - vendor: Mitel
+    registrants: ["MITEL CORPORATION", "Mitel Corporation", "Mitel Networks Corporation"]
+  # 00:08:5D is an Aastra handset block registered under Mitel's name since
+  # Mitel bought Aastra; the CSV names it by the handset brand.
+  - vendor: Aastra
+    registrants: ["Aastra Telecom"]
+    pins: ["00:08:5D"]
+  - vendor: Grandstream Networks
+    registrants: ["Grandstream Networks, Inc.", "Grandstream Networks Inc"]
+  - vendor: Yealink
+    registrants: ["XIAMEN YEALINK NETWORK TECHNOLOGY CO.,LTD", "YEALINK(XIAMEN) NETWORK TECHNOLOGY CO.,LTD."]
+  - vendor: Snom Technology
+    registrants: ["snom technology GmbH"]
+
+  # --- Industrial, building and OT ------------------------------------------
+  - vendor: Siemens
+    registrants:
+      - "SIEMENS AG"
+      - "Siemens AG"
+      - "Siemens AG,"
+      - "Siemens AG, Automations & Drives,"
+      - "Siemens Industry, Inc."
+      - "Siemens Numerical Control Ltd., Nanjing"
+      - "Siemens Industrial Automation Products Ltd., Chengdu"
+  - vendor: Rockwell Automation
+    registrants: ["Rockwell Automation"]
+  - vendor: Omron
+    registrants: ["OMRON TATEISI ELECTRONICS CO.", "OMRON Corporation"]
+  - vendor: Schneider Electric
+    registrants:
+      - "Schneider Electric"
+      - "TELEMECANIQUE ELECTRIQUE"
+      - "Schneider Electric USA"
+      - "Schneider Electric Motion USA"
+  - vendor: American Power Conversion
+    registrants: ["AMERICAN POWER CONVERSION CORP", "APC by Schneider Electric"]
+  - vendor: Phoenix Contact
+    registrants: ["Phoenix Contact GmbH & Co. KG"]
+  - vendor: Moxa
+    registrants: ["MOXA TECHNOLOGIES CORP., LTD.", "Moxa.Inc"]
+  - vendor: Hirschmann
+    registrants: ["Hirschmann Automation and Control GmbH", "Hirschmann Automation"]
+  - vendor: Beckhoff Automation
+    registrants: ["Beckhoff Automation GmbH"]
+  - vendor: WAGO
+    registrants: ["WAGO Kontakttechnik GmbH"]
+  - vendor: Digi International
+    registrants: ["DigiBoard"]
+  - vendor: Lantronix
+    registrants: ["PRONET GMBH", "Lantronix"]
+  - vendor: Advantech
+    registrants: ["ADVANTECH CO., LTD.", "ADVANTECH TECHNOLOGIES CO.,LTD", "Advantech Technology (CHINA) Co., Ltd."]
+  - vendor: Crestron Electronics
+    registrants: ["CRESTRON ELECTRONICS, INC."]
+  - vendor: Extron Electronics
+    registrants: ["Extron Electronics"]
+  - vendor: AMX
+    registrants: ["PHAST CORPORATION"]
+  - vendor: Barco
+    registrants: ["Barco NV"]
+  - vendor: Avocent
+    registrants: ["Emerson Network Power, Avocent Division"]
+  - vendor: Raritan
+    registrants: ["Raritan Computer, Inc"]
+  - vendor: Honeywell
+    registrants:
+      - "Honeywell"
+      - "Honeywell Analytics"
+      - "Honeywell Analytics Ltd"
+      - "Honeywell (China) Co., LTD"
+      - "Honeywell CMSS"
+      - "Honeywell Co., Ltd. (KOREA)"
+      - "Honeywell Connected Building"
+      - "HONEYWELL-DATING"
+      - "Honeywell Environmental & Combustion Controls"
+      - "Honeywell Environmental & Combustion Controls (Tianjin) Co., Ltd."
+      - "Honeywell Fire System (Shanghai) Co,. Ltd."
+      - "Honeywell GmbH"
+      - "Honeywell International"
+      - "Honeywell International Inc"
+      - "Honeywell Life Safety"
+      - "Honeywell Safety Products (Shanghai) Co.,Ltd"
+      - "Honeywell Safety Products USA, Inc"
+      - "Honeywell Security (China) Co., Ltd."
+      - "Honeywell spol. s.r.o. HTS CZ o.z."
+      - "Honeywell SPS"
+      - "Honeywell Video Systems"
+  - vendor: Midea
+    registrants:
+      - "Midea Group Co., Ltd."
+      - "GD Midea Air-Conditioning Equipment Co.,Ltd."
+      - "GD Midea Heating & Ventilating Equipment Co., Ltd"
+
+  # --- Consumer and IoT -----------------------------------------------------
+  - vendor: Espressif
+    registrants: ["Espressif Inc.", "Espressif Systems (Singapore) Pte. Ltd"]
+  - vendor: Raspberry Pi
+    registrants: ["Raspberry Pi Trading Ltd", "Raspberry Pi (Trading) Ltd", "Raspberry Pi Foundation"]
+  - vendor: Amazon Technologies
+    registrants: ["Amazon Technologies Inc."]
+  - vendor: Ring
+    registrants: ["Ring LLC"]
+  - vendor: Google
+    registrants: ["Google, Inc."]
+  - vendor: Nest Labs
+    registrants: ["Nest Labs Inc."]
+  - vendor: Philips Lighting
+    registrants: ["Philips Lighting BV", "Signify B.V."]
+  - vendor: GE Lighting
+    registrants: ["GE Lighting"]
+  - vendor: Tuya
+    registrants: ["Tuya Smart Inc."]
+  - vendor: Sonos
+    registrants: ["Sonos, Inc.", "Sonos Inc."]
+  - vendor: Roku
+    registrants: ["Roku, Inc", "Roku, Inc."]
+  - vendor: Vizio
+    registrants: ["Vizio, Inc"]
+  - vendor: Top Victory Electronics
+    registrants: ["Top Victory Electronics (Taiwan) Co., Ltd."]
+  - vendor: Bose
+    registrants: ["Bose Corporation"]
+  - vendor: Nintendo
+    registrants: ["Nintendo Co., Ltd.", "Nintendo Co.,Ltd"]
+  - vendor: Sony Interactive Entertainment
+    registrants: ["Sony Interactive Entertainment Inc.", "Sony Computer Entertainment America"]
+  - vendor: Sony
+    registrants:
+      - "Sony Corporation"
+      - "Sony Home Entertainment&Sound Products Inc"
+      - "Sony Video & Sound Products Inc."
+      - "SONY Visual Products Inc."
+      - "Sony Imaging Products & Solutions Inc."
+  - vendor: Panasonic
+    registrants:
+      - "MATSUSHITA ELECTRIC IND. CO"
+      - "Matsushita Electric Industrial Co.,Ltd."
+      - "Panasonic Corporation"
+      - "Panasonic Corporation AVC Networks Company"
+      - "Panasonic Connect Co., Ltd."
+      - "Panasonic Communications Co., Ltd."

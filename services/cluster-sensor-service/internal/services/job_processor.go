@@ -150,6 +150,19 @@ func (jp *JobProcessor) withTenantTxx(ctx context.Context, tenantID string, fn f
 	return tx.Commit()
 }
 
+// discoveryJobSubscription is the durable this processor consumes jobs from.
+// A platform-owned consumer (shared/events): every replica binds to the one
+// consumer, and no replica's shutdown deletes it.
+var discoveryJobSubscription = events.SubscriptionConfig{
+	Stream:            "DISCOVERY_JOBS",
+	Subject:           events.SubjectDiscoveryJobsSubmit,
+	Durable:           "discovery-job-processor",
+	QueueGroup:        "cluster-sensor",
+	MaxDeliver:        3,
+	AckWait:           jobAckWait,
+	ProcessingTimeout: 4 * time.Minute,
+}
+
 func (jp *JobProcessor) Start() {
 	if jp.natsClient == nil || !jp.natsClient.IsConnected() {
 		log.Printf("NATS client not available, job processor cannot start")
@@ -164,15 +177,7 @@ func (jp *JobProcessor) Start() {
 	// context to the scan — that context expires after ProcessingTimeout, and
 	// a scan bound to it would be cut off at four minutes. What makes a
 	// redelivery harmless anyway is the claim in processDiscoveryJobByID.
-	err := jp.subscriber.Subscribe(events.SubscriptionConfig{
-		Stream:            "DISCOVERY_JOBS",
-		Subject:           events.SubjectDiscoveryJobsSubmit,
-		Durable:           "discovery-job-processor",
-		QueueGroup:        "cluster-sensor",
-		MaxDeliver:        3,
-		AckWait:           jobAckWait,
-		ProcessingTimeout: 4 * time.Minute,
-	}, jp.handleDiscoveryJobJS)
+	err := jp.subscriber.Subscribe(discoveryJobSubscription, jp.handleDiscoveryJobJS)
 	if err != nil {
 		log.Printf("Failed to subscribe to discovery jobs: %v", err)
 		return
@@ -221,6 +226,12 @@ func (jp *JobProcessor) pollForStuckJobs() {
 // false when the queued-job read failed, as the loop always has. A function of
 // its own so a test can drive the wiring — publish is the NATS publish.
 func (jp *JobProcessor) stuckJobPass(publish func(jobID string) error) bool {
+	// Republishing is pointless with nothing to deliver to. A push
+	// subscription whose consumer has been deleted gets no error and no
+	// messages, ever — this sweep republished into exactly that for a day
+	// (712 times) while the pod reported healthy. Put the consumer back first.
+	jp.healSubscription()
+
 	// RLS: cross-tenant — runs on the bypass role (Phase 4). This is a
 	// platform-wide background sweep across ALL tenants' queued jobs (no
 	// tenant filter), so it cannot set a single app.tenant_id. Belongs
@@ -251,6 +262,22 @@ func (jp *JobProcessor) stuckJobPass(publish func(jobID string) error) bool {
 		}
 	}
 	return true
+}
+
+// healSubscription re-creates the job consumer if it has gone missing (an
+// operator deleted it, or an older release's pod took it with it on
+// shutdown). Nothing else notices: the subscription stays open and silent.
+func (jp *JobProcessor) healSubscription() {
+	if jp.subscriber == nil {
+		return
+	}
+	repaired, err := jp.subscriber.Reconcile()
+	if err != nil {
+		log.Printf("Job processor: could not verify the discovery-job consumer: %v", err)
+	}
+	if repaired > 0 {
+		log.Printf("Job processor: re-created the discovery-job consumer; queued jobs will be republished and delivered again")
+	}
 }
 
 func (jp *JobProcessor) republishJob(jobID string) error {
@@ -421,8 +448,9 @@ func (jp *JobProcessor) processDiscoveryJobByID(jobID string) error {
 		return nil
 	}
 
-	// Check rate limits
-	err = jp.rateLimiter.CheckRateLimit(job.TenantID)
+	// Check rate limits — against the OTHER jobs; this one is in the queue
+	// already and must not count as its own concurrent job.
+	err = jp.rateLimiter.CheckRateLimitForJob(job.TenantID, jobID)
 	if err != nil {
 		log.Printf("Rate limit exceeded for tenant %s: %v", job.TenantID, err)
 		errorMsg := err.Error()

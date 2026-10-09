@@ -26,6 +26,7 @@ import type {
 /** How a rule kind reads to somebody who has never opened the rule table. */
 const KIND_LABEL: Readonly<Record<string, string>> = {
   oui: 'MAC prefix',
+  oui_vendor: 'MAC manufacturer',
   sysobjectid: 'SNMP object ID',
   enip: 'EtherNet/IP vendor',
   cloud_type: 'Cloud resource type',
@@ -36,6 +37,7 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   cdp_capabilities: 'CDP capabilities',
   lldp_capability: 'LLDP capabilities',
   mdns_service: 'Advertised service',
+  dhcp_vendor_class: 'DHCP vendor class',
 };
 
 function ruleKindLabel(kind: string): string {

@@ -90,3 +90,28 @@ func TestAdmissionTreatsAPinnedAddressAsStatic(t *testing.T) {
 		t.Fatalf("a pin on another address established this one: %+v", got)
 	}
 }
+
+// TestAdmissionTreatsALeaseFreshAddressAsStatic: a lease-fresh address
+// (leasefresh.go) establishes exactly as a pinned one does, and only for the
+// address it names.
+// Mutation: drop addressLeaseFresh from AssessAdmission's dynamic test → the
+// fresh address is refused as a dynamic address.
+func TestAdmissionTreatsALeaseFreshAddressAsStatic(t *testing.T) {
+	addr := Identifier{Kind: KindIPAddress, Value: "192.0.2.1", Scope: "lan"}
+	o := Observation{
+		TenantID: "tenant", Source: Source{Kind: SourceMeasured, Ref: "sensor:a"}, ObservedAt: time.Now(), Confidence: 1,
+		Identifiers: []Identifier{addr}, Admission: AdmissionEvidence{Direct: true},
+		Network: Network{SegmentID: "lan"}, DynamicScopes: map[string]bool{"lan": true},
+	}
+	if got := AssessAdmission(o); got.Established {
+		t.Fatalf("not fresh: admission = %+v, want refused as a dynamic address", got)
+	}
+	o.leaseFresh = map[string]bool{addr.Key(): true}
+	if got := AssessAdmission(o); !got.Established || got.Reasons[0] != "direct_scoped_address" {
+		t.Fatalf("lease-fresh: admission = %+v, want established as a direct scoped address", got)
+	}
+	o.leaseFresh = map[string]bool{Identifier{Kind: KindIPAddress, Value: "192.0.2.9", Scope: "lan"}.Key(): true}
+	if got := AssessAdmission(o); got.Established {
+		t.Fatalf("a fresh lease on another address established this one: %+v", got)
+	}
+}

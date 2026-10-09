@@ -376,6 +376,19 @@ func hostObservationSighting(tenantID uuid.UUID, f IngestFinding, ho *hostobs.Ho
 	if mac := strings.TrimSpace(ho.MAC); mac != "" {
 		sg.Identifiers = append(sg.Identifiers, identity.SightedIdentifier{Kind: identity.KindMACAddress, Value: mac})
 	}
+	if verifiedSelfReport {
+		// The host's other NICs. Only a verified self-report may say "these
+		// hardware addresses are all mine": a passive frame shows one
+		// interface, and an unverified row naming a list of MACs is a claim
+		// about somebody else's chassis. When another asset already holds one,
+		// the engine keeps this match and opens a merge proposal
+		// (shared/identity, installation_claims.go).
+		for _, mac := range ho.OtherMACs {
+			if v := strings.TrimSpace(mac); v != "" {
+				sg.Identifiers = append(sg.Identifiers, identity.SightedIdentifier{Kind: identity.KindMACAddress, Value: v})
+			}
+		}
+	}
 	for _, name := range ho.FQDNs {
 		if v := strings.TrimSpace(name); v != "" {
 			sg.Identifiers = append(sg.Identifiers, identity.SightedIdentifier{Kind: identity.KindFQDN, Value: v})

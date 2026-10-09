@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { Modal, ModalField, ModalSelect } from '../../components/ui';
 import { clients } from '../../lib/clients';
 import { errorMessage, useAssetsQuery, type MergeCandidate, type MergeProposal } from '../inventory/asset-queries';
-import { candidateName } from './merge-proposal-row';
+import { candidateName, defaultSurvivor } from './merge-proposal-row';
 
 type Preview = inventoryComponents['schemas']['AssetMergePreview'];
 type Selection = inventoryComponents['schemas']['AssetMergeSelection'];
@@ -12,6 +12,23 @@ type Selection = inventoryComponents['schemas']['AssetMergeSelection'];
 export function mergeChoices(proposal: MergeProposal): MergeCandidate[] {
   const choices = [...(proposal.observation ? [proposal.observation] : []), ...proposal.candidates];
   return choices.filter((c, index) => !c.deleted && c.asset_status !== 'archived' && c.asset_status !== 'denied' && choices.findIndex((other) => other.asset_id === c.asset_id) === index);
+}
+
+/**
+ * The merge the platform recommends for a proposal: every record still on the
+ * card folded into the candidate the matcher scored highest. A proposal exists
+ * because the sighting resolved to these records, so "they are probably one
+ * thing" is the premise; the recommendation turns it into a concrete selection
+ * the reviewer can take as is or adjust. Null when fewer than two records are
+ * left to merge.
+ */
+export function recommendedMerge(proposal: MergeProposal): Selection | null {
+  const choices = mergeChoices(proposal);
+  const survivor = defaultSurvivor(proposal.candidates.filter((c) => choices.some((x) => x.asset_id === c.asset_id)));
+  if (!survivor) return null;
+  const sources = choices.filter((c) => c.asset_id !== survivor).map((c) => c.asset_id).slice(0, 20);
+  if (sources.length === 0) return null;
+  return { survivor_asset_id: survivor, source_asset_ids: sources, field_resolutions: {} };
 }
 function displayValue(value: unknown): string {
   if (value == null || value === '') return 'Not set';
@@ -49,25 +66,37 @@ function EvidenceSummary({ evidence }: { evidence: Preview['evidence'] }) {
   })}</ul>;
 }
 
-/** Selection and preview are separate steps; neither similarity nor a group
- * membership selects sources on the operator's behalf. */
-export function AssetMergeModal({ proposal, initialAssets = [], onClose }: { proposal?: MergeProposal; initialAssets?: MergeCandidate[]; onClose: () => void }) {
+/**
+ * Review a merge before applying it.
+ *
+ * For a proposal the modal opens on the RECOMMENDED selection ({@link recommendedMerge})
+ * with its preview already requested, so review means reading and adjusting
+ * rather than rebuilding the platform's own suggestion from blank controls.
+ * Every change still re-previews before the merge button enables. For records
+ * picked by hand from Inventory there is no recommendation; the operator
+ * selects. `note` is shown above the controls — "Merge as is" sends the
+ * reviewer here with the reason it could not merge unattended.
+ */
+export function AssetMergeModal({ proposal, initialAssets = [], note, onClose }: { proposal?: MergeProposal; initialAssets?: MergeCandidate[]; note?: string; onClose: () => void }) {
   const cache = useQueryClient();
+  const recommended = proposal ? recommendedMerge(proposal) : null;
   const [added, setAdded] = useState<MergeCandidate[]>(initialAssets);
   const [search, setSearch] = useState('');
   const [searchPage, setSearchPage] = useState(1);
   const [addID, setAddID] = useState('');
   const matches = useAssetsQuery(`(status:monitoring OR status:pending_approval)${search.trim() ? ` AND ${JSON.stringify(search.trim())}` : ''}`, searchPage, !proposal);
   const choices = proposal ? mergeChoices(proposal) : added;
-  const [survivor, setSurvivor] = useState('');
-  const [sources, setSources] = useState<string[]>([]);
+  const [survivor, setSurvivor] = useState(recommended?.survivor_asset_id ?? '');
+  const [sources, setSources] = useState<string[]>(recommended?.source_asset_ids ?? []);
   const [resolutions, setResolutions] = useState<Record<string, string>>({});
   const [reason, setReason] = useState('');
   const [preview, setPreview] = useState<Preview>();
   const [previewKey, setPreviewKey] = useState('');
-  const [busy, setBusy] = useState(false);
+  // Opening on a recommendation opens mid-request: its preview is in flight
+  // from the first render, so the modal starts busy and stale.
+  const [busy, setBusy] = useState(!!recommended);
   const [error, setError] = useState('');
-  const [stale, setStale] = useState(false);
+  const [stale, setStale] = useState(!!recommended);
   const selection: Selection = { source_asset_ids: sources, survivor_asset_id: survivor, field_resolutions: resolutions };
   const key = JSON.stringify(selection);
   const selectionValid = !!survivor && sources.length > 0 && sources.length <= 20 && !sources.includes(survivor);
@@ -80,8 +109,11 @@ export function AssetMergeModal({ proposal, initialAssets = [], onClose }: { pro
     return asset ? candidateName(asset) : id;
   };
 
-  async function loadPreview() {
+  function loadPreview() {
     setBusy(true); setError(''); setStale(true);
+    void requestPreview();
+  }
+  async function requestPreview() {
     try {
       const { data, error: failure } = proposal ? await clients.inventory.POST('/approvals/merge-proposals/{id}/preview', {
         params: { path: { id: proposal.id } }, body: selection,
@@ -91,10 +123,20 @@ export function AssetMergeModal({ proposal, initialAssets = [], onClose }: { pro
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not load the merge preview.'); }
     finally { setBusy(false); }
   }
+  // The recommendation's preview is requested on open, once: the reviewer
+  // should land on the comparison, not on a button that fetches it. The
+  // selection state starts AS the recommendation (and busy/stale start true),
+  // so this only sends the request.
+  useEffect(() => {
+    if (recommended) void requestPreview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount only; the selection is state from here on
+  }, []);
   async function merge() {
-    if (!preview || !current || unresolved || reason.trim().length < 3) return;
+    if (!preview || !current || unresolved) return;
     setBusy(true); setError('');
     try {
+      // The reason is optional. Who merged, from which revision and with which
+      // field choices is recorded regardless; this is the reviewer's note.
       const body = { ...selection, revision: preview.revision, reason: reason.trim() };
       const { error: failure, response } = proposal ? await clients.inventory.POST('/approvals/merge-proposals/{id}/merge', {
         params: { path: { id: proposal.id } }, body,
@@ -118,9 +160,11 @@ export function AssetMergeModal({ proposal, initialAssets = [], onClose }: { pro
     <Modal open onClose={onClose} dismissible={!busy} size="lg" icon="git-merge" eyebrow="Identity decision" title="Review asset merge"
       description="Choose exactly which records represent the same asset. The surviving asset keeps its identity."
       footerNote="Merged records remain in audit history with a link to the survivor. Merge undo is not available."
-      primary={<button className="ui-btn accent" disabled={busy || !current || !!unresolved || reason.trim().length < 3} onClick={() => { void merge(); }}>Merge selected assets</button>}
+      primary={<button className="ui-btn accent" disabled={busy || !current || !!unresolved} onClick={() => { void merge(); }}>Merge selected assets</button>}
       secondary={<button className="ui-btn" disabled={busy} onClick={onClose}>Cancel</button>}>
       <fieldset disabled={busy} style={{ border: 0, padding: 0, margin: 0 }}>
+        {note && <p role="status" data-testid="merge-review-note" style={{ marginTop: 0, color: 'var(--warn-strong)' }}>{note}</p>}
+        {recommended && <p style={{ marginTop: 0, fontSize: 12, color: 'var(--app-t2)' }}>The recommended merge is selected: the highest-scoring record survives and the others fold into it. Adjust anything below; the preview refreshes before you merge.</p>}
         {!proposal && <div style={{ marginBottom: 14 }}>
           <ModalField label="Find another asset"><input className="ui-input" aria-label="Find another asset" value={search} onChange={(e) => { setSearch(e.target.value); setSearchPage(1); setAddID(''); }} /></ModalField>
           {matches.isError && <p role="alert">Could not load assets. <button onClick={() => { void matches.refetch(); }}>Retry</button></p>}
@@ -153,7 +197,7 @@ export function AssetMergeModal({ proposal, initialAssets = [], onClose }: { pro
             </label>
           ))}
         </fieldset>
-        <button className="ui-btn" disabled={!selectionValid || busy} onClick={() => { void loadPreview(); }}>{preview ? 'Refresh preview' : 'Preview selected merge'}</button>
+        <button className="ui-btn" disabled={!selectionValid || busy} onClick={loadPreview}>{preview ? 'Refresh preview' : 'Preview selected merge'}</button>
         {error && <p role="alert" style={{ color: 'var(--danger-text)' }}>{error}</p>}
         {busy && <p role="status">Checking the selected assets…</p>}
         {preview && <div style={{ marginTop: 14 }}>
@@ -174,8 +218,8 @@ export function AssetMergeModal({ proposal, initialAssets = [], onClose }: { pro
           <details><summary>Affected records</summary><ul>{preview.children.filter((c) => c.count > 0).map((c) => <li key={c.table}>{childLabels[c.table] ?? fieldLabel(c.table)}: {c.count}</li>)}</ul></details>
           <details><summary>Current identity evidence</summary><EvidenceSummary evidence={preview.evidence} /></details>
         </div>}
-        <ModalField label="Reason for merging" hint="Recorded with your identity and field choices in the merge history.">
-          <textarea className="ui-input" aria-label="Reason for merging" maxLength={2000} value={reason} onChange={(e) => setReason(e.target.value)} rows={3} style={{ width: '100%' }} />
+        <ModalField label="Reason (optional)" hint="Your identity, the preview revision and your field choices are recorded in the merge history either way; add a note if it will help whoever reads it later.">
+          <textarea className="ui-input" aria-label="Reason (optional)" maxLength={2000} value={reason} onChange={(e) => setReason(e.target.value)} rows={2} style={{ width: '100%' }} />
         </ModalField>
       </fieldset>
     </Modal>

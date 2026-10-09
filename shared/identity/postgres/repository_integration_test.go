@@ -84,6 +84,19 @@ func TestIntegration_PostgresIdentityRepository_PinnedAddress(t *testing.T) {
 	})
 }
 
+// TestIntegration_PostgresIdentityRepository_LeaseFreshAddress runs the
+// lease-fresh address contract (leasefresh.go) against real SQL: the
+// confirmation goes through the attach upsert's GREATEST and comes back
+// through LoadSummaries' device_confirmed_at.
+func TestIntegration_PostgresIdentityRepository_LeaseFreshAddress(t *testing.T) {
+	admin := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, admin)
+
+	identitytest.RunLeaseFreshAddressContract(t, func() identity.Repository {
+		return newContractRepo(t, admin)
+	})
+}
+
 // TestIntegration_PostgresIdentityRepository_ClaimedAddress runs's
 // claimed-address rule against real SQL: the move goes through the store's
 // ReassignIdentifier under the unique index, the pin through the upsert's

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { readEnumerateCompute, ENUMERATE_COMPUTE_KEY } from './cloud-modals';
-import { enumerationSummary } from './logs-page';
+import { enumerationSummary } from './job-outcome';
 
 // The per-integration compute/network enumeration switch (BUILD_PLAN 2.4).
 //

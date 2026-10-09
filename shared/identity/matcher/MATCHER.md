@@ -91,7 +91,7 @@ as a one-value list, so a v1 fixtures or decisions file still parses.
 | `segment_match` / `segment_conflict` | same network segment / two different known ones |
 | `recency` | graded: `exp(-days / 30)` between the two sightings, 0 when either time is unknown |
 | `source_same` / `source_cross` | the two sides' ADR-0005 source kinds are equal / differ |
-| `vendor_oui_match` / `vendor_oui_conflict` | the manufacturers behind each side's MACs (`hostobs.VendorForMAC`; falling back to the `vendor` attribute when no MAC has a registered prefix), compared by first word, share one / are both known and share none |
+| `vendor_oui_match` / `vendor_oui_conflict` | the manufacturers behind each side's MACs (`ouiregistry.VendorForMAC`; falling back to the `vendor` attribute when no MAC has a registered prefix), compared by first word, share one / are both known and share none |
 | `name_generic` | every best-matching name pair involves a GENERIC name (`hostnamequality.IsGeneric`, or one the intake marked) |
 | `name_synthetic` | every best-matching name pair involves a SYNTHETIC name (`hostnamequality.IsIdentityName` false: UUID-form, an address written as a name, `none-N`) |
 | `id_match_derived` | a kind agreed ONLY through a value one side derived rather than observed |

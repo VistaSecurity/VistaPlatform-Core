@@ -115,8 +115,22 @@ sudo ./install-sensor.sh --url https://<your-platform-host> --key <registration-
 .\install-sensor.ps1 -Url https://<your-platform-host> -Key <registration-code> -IP 10.0.0.50 -Name sensor-dc01
 ```
 
-The installer places the binary, drives the certificate enrollment described
-below, and registers it as a service.
+The installer checks the packet-capture runtime (libpcap on Linux, Npcap on
+Windows), installs the binary as a service, and starts it. The sensor then
+enrolls itself with the registration code — the certificate enrollment
+described below — and the installer waits until it has, printing the sensor's
+ID and version. If the platform rejects the code (expired, invalid or already
+used), the installer stops the service and says so. Re-running the same command
+on a host that code already enrolled keeps the sensor's identity and replaces
+only the binary, which is how to upgrade it in place.
+
+On Windows the sensor runs as the `VistaSensor` service. It writes its log to
+`data\logs\sensor.log` under the install directory (by default
+`C:\Program Files\VistaSensor\data\logs\sensor.log`, rotated to `sensor.log.1`
+at 10 MB), and records start and stop events in the Application event log under
+the source `VistaSensor`. Follow the log with
+`Get-Content -Tail 50 -Wait "$env:ProgramFiles\VistaSensor\data\logs\sensor.log"`.
+On Linux the sensor logs to the systemd journal (`journalctl -u crypto-sensor`).
 
 **Verifying what you downloaded.** Every release publishes a `SHA256SUMS` file
 alongside the binaries, signed with cosign (keyless — there is no key to trust):

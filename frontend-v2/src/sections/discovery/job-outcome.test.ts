@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { hostInventorySummary, cloudIdentitySummary } from './logs-page';
+import { hostInventorySummary, cloudIdentitySummary } from './job-outcome';
 
-// The Job Logs line for a host-inventory run (asset-inventory 2.11b).
+// The outcome line for a host-inventory run (asset-inventory 2.11b).
 //
 // Through 2.11a these runs appeared in the stream with an honest but useless
 // headline: the result was HELD, so the line said 0 assets and carried a `fatal`

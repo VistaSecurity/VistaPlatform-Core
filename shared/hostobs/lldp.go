@@ -212,7 +212,8 @@ func DecodeLLDP(f Frame) (*HostObservation, error) {
 					obs.Model = m
 				}
 			case lldpMEDSubtypeManufacturer:
-				// Kept as evidence only. hw.vendor stays OUI-derived: a
+				// Kept as evidence only. hw.vendor stays OUI-derived (the
+				// platform resolves it from the MAC at ingestion): a
 				// MED manufacturer string is whatever the firmware author
 				// typed, and two sources for one fact is how a device ends
 				// up filed under two vendors.

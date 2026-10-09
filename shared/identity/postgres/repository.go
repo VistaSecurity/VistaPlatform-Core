@@ -336,7 +336,8 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 		// candidate with no evidence can only be rubber-stamped.
 		idRows, err := tx.QueryContext(ctx, `
 			SELECT asset_id, kind, value, coalesce(scope, ''), confidence, source_kind,
-			       coalesce(source_ref, ''), last_seen_at, coalesce(address_assignment, ''), coalesce(key_algorithm, '')
+			       coalesce(source_ref, ''), last_seen_at, coalesce(address_assignment, ''), coalesce(key_algorithm, ''),
+			       device_confirmed_at
 			FROM public.asset_identifiers
 			WHERE tenant_id = $1 AND asset_id = ANY($2::uuid[])
 			ORDER BY asset_id, kind, value`,
@@ -354,15 +355,16 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 				seenAt                time.Time
 				assignment            string
 				keyAlgorithm          string
+				deviceConfirmed       sql.NullTime
 			)
-			if err := idRows.Scan(&assetID, &kind, &value, &scope, &confidence, &sourceKind, &sourceRef, &seenAt, &assignment, &keyAlgorithm); err != nil {
+			if err := idRows.Scan(&assetID, &kind, &value, &scope, &confidence, &sourceKind, &sourceRef, &seenAt, &assignment, &keyAlgorithm, &deviceConfirmed); err != nil {
 				return fmt.Errorf("identity/postgres: scan candidate identifier: %w", err)
 			}
 			s, ok := byID[assetID.String()]
 			if !ok {
 				continue
 			}
-			s.Identifiers = append(s.Identifiers, identity.Identifier{
+			held := identity.Identifier{
 				Kind:         identity.Kind(kind),
 				Value:        value,
 				Scope:        scope,
@@ -371,7 +373,11 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 				Source:       identity.Source{Kind: identity.SourceKind(sourceKind), Ref: sourceRef},
 				SeenAt:       seenAt,
 				KeyAlgorithm: keyAlgorithm,
-			})
+			}
+			if deviceConfirmed.Valid {
+				held.DeviceConfirmedAt = deviceConfirmed.Time.UTC()
+			}
+			s.Identifiers = append(s.Identifiers, held)
 		}
 		return idRows.Err()
 	})
@@ -600,10 +606,14 @@ func (r *Repository) attach(ctx context.Context, tx *sql.Tx, asset identity.Asse
 		err := tx.QueryRowContext(ctx, `
 			INSERT INTO public.asset_identifiers (
 				tenant_id, asset_id, kind, value, scope, source_kind, source_ref,
-				confidence, first_seen_at, last_seen_at, address_assignment, key_algorithm
-			) VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''), $8, $9, $9, NULLIF($10, ''), NULLIF($11, ''))
+				confidence, first_seen_at, last_seen_at, address_assignment, key_algorithm, device_confirmed_at
+			) VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, NULLIF($7, ''), $8, $9, $9, NULLIF($10, ''), NULLIF($11, ''), $12)
 			ON CONFLICT (tenant_id, kind, value, coalesce(scope, '')) DO UPDATE
 			SET last_seen_at = GREATEST(public.asset_identifiers.last_seen_at, EXCLUDED.last_seen_at),
+			    -- A device confirmation never moves backwards (leasefresh.go);
+			    -- GREATEST skips NULLs, so a sighting that confirmed nothing
+			    -- leaves one that did in place.
+			    device_confirmed_at = GREATEST(public.asset_identifiers.device_confirmed_at, EXCLUDED.device_confirmed_at),
 			    confidence   = GREATEST(public.asset_identifiers.confidence, EXCLUDED.confidence),
 			    source_kind  = CASE
 			        WHEN `+sourceRankSQL("EXCLUDED.source_kind")+` > `+sourceRankSQL("public.asset_identifiers.source_kind")+`
@@ -629,7 +639,8 @@ func (r *Repository) attach(ctx context.Context, tx *sql.Tx, asset identity.Asse
 			RETURNING (xmax = 0)`,
 			asset.TenantID, assetID, string(id.Kind), id.Value, id.Scope,
 			sourceKindOr(id.Source.Kind), id.Source.Ref, clampConfidence(id.Confidence),
-			timeOrNow(id.SeenAt), string(id.StoredAssignment()), id.KeyAlgorithm).Scan(&wasInserted)
+			timeOrNow(id.SeenAt), string(id.StoredAssignment()), id.KeyAlgorithm,
+			sql.NullTime{Time: id.DeviceConfirmedAt.UTC(), Valid: !id.DeviceConfirmedAt.IsZero()}).Scan(&wasInserted)
 		if errors.Is(err, sql.ErrNoRows) {
 			// No row back is the WHERE clause refusing another asset's row.
 			return 0, fmt.Errorf("%w: %s=%q", identity.ErrIdentifierConflict, id.Kind, id.Value)

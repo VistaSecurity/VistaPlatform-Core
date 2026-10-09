@@ -30,11 +30,11 @@ const seededRuleSigningKey = "seeded-rule-accept-integration-not-a-real-key"
 func TestIntegration_ClassificationRuleAccept_RealRouter(t *testing.T) {
 	db := testdb.ScratchDatabase(t)
 
-	// The admin tunes Cisco's shipped OUI rule; a later release ships a new
+	// The admin tunes Cisco's shipped oui_vendor rule; a later release ships a new
 	// confidence for it (the seed's upsert, in a seed pass).
 	var ruleID string
 	if err := db.QueryRow(`UPDATE classification_rules SET confidence = 0.55
-		WHERE rule_kind = 'oui' AND pattern = '00000C' RETURNING id`).Scan(&ruleID); err != nil {
+		WHERE rule_kind = 'oui_vendor' AND pattern = 'Cisco Systems' RETURNING id`).Scan(&ruleID); err != nil {
 		t.Fatalf("admin edit: %v", err)
 	}
 	conn, err := db.Conn(t.Context())

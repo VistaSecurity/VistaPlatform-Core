@@ -143,7 +143,7 @@ describe('Register sensor or agent (Discovery → Sensors & Agents)', () => {
   });
 });
 
-describe('Discovery job retry / cancel (Discovery → Job Logs)', () => {
+describe('Discovery job retry / cancel (Discovery → Discovery Jobs)', () => {
   it('gates on discovery.update, not discovery.manage', () => {
     const go = 'services/device-interrogation-service/internal/api/router.go';
     routeRequires(go, 'jobs.POST("/:id/retry"', 'PermissionDiscoveryUpdate');

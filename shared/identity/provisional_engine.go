@@ -588,7 +588,10 @@ func (e *Engine) leaseOnlyLink(obs Observation, ids, linking []Identifier) bool 
 		if id.Kind != KindIPAddress {
 			return false
 		}
-		if !e.dynamicAddress(obs, id) {
+		if e.addressDecides(obs, id) {
+			// Not a lease to the vote: static, pinned, or lease-fresh
+			// (leasefresh.go — the owner was device-confirmed there within
+			// the window, so this link is a real one).
 			allDynamic = false
 		}
 	}
