@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-10-09T11:36:16Z",
-  "generated_date": "2026-10-09",
+  "generated_at": "2026-10-10T10:54:11Z",
+  "generated_date": "2026-10-10",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/37924575741",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/38046428544",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -17,7 +17,7 @@
     "images_scanned": 18,
     "images_not_scanned": 0,
     "critical": 0,
-    "high": 36
+    "high": 72
   },
   "not_scanned": [],
   "images": [
@@ -25,7 +25,7 @@
       "image": "admin-service",
       "ref": "ghcr.io/vistasecurity/admin-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -34,6 +34,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -51,7 +69,7 @@
       "image": "admin-ui",
       "ref": "ghcr.io/vistasecurity/admin-ui:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -60,6 +78,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "usr/bin/caddy"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "usr/bin/caddy"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "usr/bin/caddy"
         },
         {
@@ -77,7 +113,7 @@
       "image": "audit-service",
       "ref": "ghcr.io/vistasecurity/audit-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -86,6 +122,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -103,7 +157,7 @@
       "image": "auth-service",
       "ref": "ghcr.io/vistasecurity/auth-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -112,6 +166,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -129,7 +201,7 @@
       "image": "cbom-service",
       "ref": "ghcr.io/vistasecurity/cbom-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -138,6 +210,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -155,7 +245,7 @@
       "image": "cluster-sensor-service",
       "ref": "ghcr.io/vistasecurity/cluster-sensor-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -164,6 +254,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -181,7 +289,7 @@
       "image": "compliance-engine",
       "ref": "ghcr.io/vistasecurity/compliance-engine:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -190,6 +298,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -207,7 +333,7 @@
       "image": "device-interrogation-service",
       "ref": "ghcr.io/vistasecurity/device-interrogation-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -216,6 +342,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -233,7 +377,7 @@
       "image": "discovery-processor-service",
       "ref": "ghcr.io/vistasecurity/discovery-processor-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -242,6 +386,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -259,7 +421,7 @@
       "image": "inventory-service",
       "ref": "ghcr.io/vistasecurity/inventory-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -268,6 +430,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -285,7 +465,7 @@
       "image": "mcp-service",
       "ref": "ghcr.io/vistasecurity/mcp-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -294,6 +474,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -311,7 +509,7 @@
       "image": "monitoring-service",
       "ref": "ghcr.io/vistasecurity/monitoring-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -320,6 +518,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -337,7 +553,7 @@
       "image": "notification-service",
       "ref": "ghcr.io/vistasecurity/notification-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -346,6 +562,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -363,7 +597,7 @@
       "image": "pcap-processor",
       "ref": "ghcr.io/vistasecurity/pcap-processor:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -372,6 +606,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -389,7 +641,7 @@
       "image": "resource-tracker-service",
       "ref": "ghcr.io/vistasecurity/resource-tracker-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -398,6 +650,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -415,7 +685,7 @@
       "image": "sensor-manager",
       "ref": "ghcr.io/vistasecurity/sensor-manager:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -424,6 +694,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -441,7 +729,7 @@
       "image": "tenant-health-service",
       "ref": "ghcr.io/vistasecurity/tenant-health-service:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -450,6 +738,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "app/main"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "app/main"
         },
         {
@@ -467,7 +773,7 @@
       "image": "web-ui",
       "ref": "ghcr.io/vistasecurity/web-ui:latest",
       "critical": 0,
-      "high": 2,
+      "high": 4,
       "findings": [
         {
           "severity": "HIGH",
@@ -476,6 +782,24 @@
           "installed": "v1.26.6",
           "fixed": "1.26.9, 1.27.2",
           "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "usr/bin/caddy"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.59.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "usr/bin/caddy"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.6",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
           "target": "usr/bin/caddy"
         },
         {
