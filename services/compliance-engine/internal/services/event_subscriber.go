@@ -19,9 +19,17 @@ type EventSubscriberService struct {
 	subscriber     *events.Subscriber
 	findingService *FindingsService
 	metricsService *MetricsService
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
+	// assetEvals coalesces per-asset evaluations ( F7): one ingest
+	// announces an asset on compliance.asset.changed AND once per new crypto
+	// configuration, and every one of those messages used to evaluate it.
+	assetEvals *assetEvalCoalescer
+	// evaluate is the per-asset evaluation. FindingsService.OnAssetChanged in
+	// production; a test replaces it to count evaluations through the real
+	// handlers.
+	evaluate func(context.Context, events.AssetChangedEvent) error
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 }
 
 // NewEventSubscriberService creates a new event subscriber service.
@@ -34,9 +42,47 @@ func NewEventSubscriberService(client *events.NATSClient, findingService *Findin
 		subscriber:     events.NewSubscriber(client),
 		findingService: findingService,
 		metricsService: metricsService,
+		assetEvals:     newAssetEvalCoalescer(assetEvalWindow),
+		evaluate:       findingService.OnAssetChanged,
 		ctx:            ctx,
 		cancel:         cancel,
 	}
+}
+
+// evaluateAsset is the ONE way this subscriber evaluates an asset: every
+// handler that re-evaluates an asset goes through the coalescer, so the
+// asset.changed message and the crypto.configuration_added messages of one
+// ingest produce one evaluation, not one each ( F7). See
+// assetEvalCoalescer for why a joined request is still covered.
+func (s *EventSubscriberService) evaluateAsset(ctx context.Context, event events.AssetChangedEvent) error {
+	return s.evaluateAssetGated(ctx, event, nil)
+}
+
+// evaluateAssetGated is evaluateAsset with an optional concurrency gate that is
+// held only while an evaluation RUNS, not while a request waits out the
+// coalescing window — so a bulk message's assets wait the window together
+// instead of ten at a time.
+func (s *EventSubscriberService) evaluateAssetGated(ctx context.Context, event events.AssetChangedEvent, gate chan struct{}) error {
+	evaluate := s.evaluate
+	if evaluate == nil {
+		evaluate = s.findingService.OnAssetChanged
+	}
+	coalesced, err := s.assetEvals.Do(ctx, event.TenantID, event.AssetID, func(ctx context.Context) error {
+		if gate != nil {
+			select {
+			case gate <- struct{}{}:
+				defer func() { <-gate }()
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return evaluate(ctx, event)
+	})
+	if coalesced && err == nil {
+		log.Printf("[EventSubscriber] Asset evaluation coalesced: event_id=%s, tenant_id=%s, asset_id=%s, source=%s",
+			event.EventID, event.TenantID, event.AssetID, event.Source)
+	}
+	return err
 }
 
 // Start starts the event subscriber with JetStream durable subscriptions
@@ -174,7 +220,7 @@ func (s *EventSubscriberService) handleAssetChanged(ctx context.Context, msg *na
 	log.Printf("[EventSubscriber] Received asset changed: event_id=%s, tenant_id=%s, asset_id=%s, change_type=%s",
 		event.EventID, event.TenantID, event.AssetID, event.ChangeType)
 
-	err := s.findingService.OnAssetChanged(ctx, event)
+	err := s.evaluateAsset(ctx, event)
 	latency := time.Since(startTime)
 
 	if err != nil {
@@ -340,7 +386,7 @@ func (s *EventSubscriberService) handleAssetMerged(ctx context.Context, msg *nat
 	// replays both — OnAssetDeleted and OnAssetChanged are both reconciles
 	// against current state, not deltas — so doing the half that can succeed
 	// leaves the tenant closer to correct in the meantime, not further away.
-	if cErr := s.findingService.OnAssetChanged(ctx, changed); cErr != nil {
+	if cErr := s.evaluateAsset(ctx, changed); cErr != nil {
 		log.Printf("[EventSubscriber] ERROR: re-evaluating the merge survivor %s: %v",
 			changed.AssetID, cErr)
 		if err == nil {
@@ -482,11 +528,12 @@ outer:
 		}
 
 		processWg.Add(1)
-		semaphore <- struct{}{}
 
+		// The semaphore bounds concurrent evaluations, and is taken inside the
+		// coalescer (evaluateAssetGated) so every asset waits out the
+		// coalescing window at once rather than ten at a time.
 		go func(aid uuid.UUID) {
 			defer processWg.Done()
-			defer func() { <-semaphore }()
 			// A panic in this child goroutine cannot be recovered by the NATS
 			// dispatch wrapper (recover only catches its own goroutine), so
 			// without this it would crash the whole process. Recover, log the
@@ -512,7 +559,7 @@ outer:
 				Metadata:   event.Metadata,
 			}
 
-			if err := s.findingService.OnAssetChanged(ctx, assetEvent); err != nil {
+			if err := s.evaluateAssetGated(ctx, assetEvent, semaphore); err != nil {
 				log.Printf("[EventSubscriber] Failed to process bulk asset %s: %v", aid, err)
 				countMu.Lock()
 				errorCount++
@@ -578,7 +625,7 @@ func (s *EventSubscriberService) handleCryptoConfigAdded(ctx context.Context, ms
 		},
 	}
 
-	err := s.findingService.OnAssetChanged(ctx, assetEvent)
+	err := s.evaluateAsset(ctx, assetEvent)
 	latency := time.Since(startTime)
 
 	if err != nil {

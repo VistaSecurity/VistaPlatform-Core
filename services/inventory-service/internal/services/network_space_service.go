@@ -11,6 +11,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/network/addrscope"
 
 	"github.com/google/uuid"
 )
@@ -345,17 +346,11 @@ func (s *NetworkSpaceService) ClassifyAsset(tenantID uuid.UUID, ipAddress *strin
 		}
 	}
 
-	// If no match found, check if IP is in private ranges (RFC 1918)
-	// If it's a private IP and no explicit rules, we might want to classify as customer
-	// But for now, we'll return 'unknown' to be safe
-	if ipAddress != nil && *ipAddress != "" {
-		// Check for private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-		if network.IsIPInCIDR(*ipAddress, "10.0.0.0/8") ||
-			network.IsIPInCIDR(*ipAddress, "172.16.0.0/12") ||
-			network.IsIPInCIDR(*ipAddress, "192.168.0.0/16") {
-			// Private IP but no explicit rule - return unknown for manual review
-			return "unknown", nil
-		}
+	// No space matched: an internal candidate by address class (private or
+	// carrier-grade NAT — addrscope's one definition, F3) is "unknown"
+	// for manual review, never "third_party".
+	if ipAddress != nil && addrscope.IsTenantAddressable(netipAddrOrZero(*ipAddress)) {
+		return "unknown", nil
 	}
 
 	// No match found - classify as third_party

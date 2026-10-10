@@ -3,7 +3,9 @@ package identity_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -168,6 +170,54 @@ func TestIntake_LoadsOneSnapshotPerCall(t *testing.T) {
 	}
 	if got := r.lookups.Load(); got != 0 {
 		t.Errorf("ScopeForAddress called %d times; Intake must scope against the snapshot it loaded", got)
+	}
+}
+
+// AssessWithSnapshot reads nothing: a caller assessing a batch reads the
+// snapshot once (Intake.Snapshot) and every sighting in it is scoped against
+// that one read ( F4) — with the same answer Assess gives.
+func TestIntake_AssessWithSnapshotReadsNothingAndAgreesWithAssess(t *testing.T) {
+	r := &countingSegments{Repository: memory.New()}
+	must(t, r.AddSegment(intakeTenant, "192.0.2.0/24", "seg-a", true))
+	in := newIntake(t, r)
+	ctx := context.Background()
+	snap, err := in.Snapshot(ctx, intakeTenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 50; i++ {
+		s := measuredSighting(identity.ChannelL2Frame,
+			sid(identity.KindIPAddress, fmt.Sprintf("192.0.2.%d", i+1)),
+			sid(identity.KindIPAddress, "198.51.100.3"))
+		got, err := in.AssessWithSnapshot(ctx, s, snap)
+		if err != nil {
+			t.Fatalf("AssessWithSnapshot: %v", err)
+		}
+		if i == 0 {
+			want := assess(t, r.Repository, s)
+			if !reflect.DeepEqual(got.Observation, want.Observation) {
+				t.Fatalf("AssessWithSnapshot and Assess disagree:\n got %+v\nwant %+v", got.Observation, want.Observation)
+			}
+		}
+	}
+	if n := r.snapshots.Load(); n != 1 {
+		t.Errorf("SegmentSnapshot read %d times for 50 sightings over one snapshot, want 1", n)
+	}
+}
+
+func TestIntake_AssessWithSnapshotRefusesAnotherTenantsSnapshot(t *testing.T) {
+	in := newIntake(t, memory.New())
+	_, err := in.AssessWithSnapshot(context.Background(),
+		measuredSighting(identity.ChannelL2Frame, sid(identity.KindIPAddress, "192.0.2.1")),
+		identity.SegmentSnapshot{TenantID: "another-tenant"})
+	if !errors.Is(err, identity.ErrInvalidSighting) {
+		t.Fatalf("err = %v, want ErrInvalidSighting for a snapshot of another tenant", err)
+	}
+	// Validation still runs first: an invalid sighting is invalid whatever
+	// snapshot comes with it.
+	bad := measuredSighting("not-a-channel", sid(identity.KindIPAddress, "192.0.2.1"))
+	if _, err := in.AssessWithSnapshot(context.Background(), bad, identity.SegmentSnapshot{TenantID: intakeTenant}); !errors.Is(err, identity.ErrInvalidSighting) {
+		t.Fatalf("err = %v, want ErrInvalidSighting for an unknown channel", err)
 	}
 }
 

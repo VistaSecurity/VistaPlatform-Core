@@ -272,6 +272,7 @@ func readMergeSnapshot(ctx context.Context, tx *sqlx.Tx, tenant uuid.UUID, ids [
 		specs[table] = "observation_id IN (SELECT id FROM identity_observations WHERE tenant_id=$1 AND asset_id=ANY($2))"
 	}
 	specs["identity_observation_peer_contexts"] += " OR origin_asset_id=ANY($2)"
+	specs["deferred_crypto_findings"] += " OR observation_id IN (SELECT id FROM identity_observations WHERE tenant_id=$1 AND asset_id=ANY($2))"
 	for table, predicate := range specs {
 		scope := "tenant_id=$1 AND "
 		if table == "implementation_keys" || table == "implementation_libraries" || table == "crypto_implementation_algorithms" || table == "crypto_implementation_certificates" {

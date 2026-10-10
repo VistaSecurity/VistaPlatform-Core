@@ -7,10 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
-	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -19,19 +16,18 @@ import (
 // measured size: with the size missing the connection stays unrated however
 // much else is known about it. This drives stored sensor discoveries — in the
 // envelope sensor-manager writes — through the real batch processor and reads
-// what crossed the inventory HTTP boundary.
+// what crossed the inventory HTTP boundary: since WP3 the import, whose
+// third-party findings inventory's one writer turns into the connection
+// (KeyExchangeAlgorithm from the finding, the size from raw_data's
+// key_exchange_key_size — externalDiscoveryEvidence).
 func TestIntegration_PassiveKeyExchangeGroupReachesExternalConnectionUpsert(t *testing.T) {
 	raw := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, raw)
 	db := sqlx.NewDb(raw, "postgres")
 	tenant := testdb.NewTenant(t, raw)
 
-	recorder := newHostConnectionInventoryRecorder(t, uuid.New())
-	inventory, err := client.NewInventoryClient(&config.Config{InventoryServiceURL: recorder.srv.URL})
-	if err != nil {
-		t.Fatal(err)
-	}
-	processor := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), approval.NewService(raw), inventory, nil)
+	inv := newRouteInventoryStandIn(t)
+	processor := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), inv.client(t), nil)
 
 	// What the sensor's passive TLS assembler emits, per port:
 	//   443  TLS 1.3 — group from the ServerHello key_share
@@ -68,28 +64,36 @@ func TestIntegration_PassiveKeyExchangeGroupReachesExternalConnectionUpsert(t *t
 		t.Fatalf("ProcessBatch: %v", err)
 	}
 
-	recorder.mu.Lock()
-	got := make(map[int]client.ExternalConnectionUpsert)
-	for _, u := range recorder.external {
-		got[u.DestPort] = u
+	inv.assertOnlyImports(t)
+	got := make(map[int]converter.IngestFinding)
+	for _, f := range inv.routedFindings() {
+		if f.Port != nil {
+			got[*f.Port] = f
+		}
 	}
-	recorder.mu.Unlock()
 	if len(got) != len(envelopes) {
-		t.Fatalf("external upserts for ports %v, want one per discovery", got)
+		t.Fatalf("routed findings for ports %v, want one per discovery", got)
+	}
+	exchangeSize := func(f converter.IngestFinding) (float64, bool) {
+		n, ok := routeWireRaw(t, f)["key_exchange_key_size"].(float64)
+		return n, ok
 	}
 	for port, want := range map[int]struct {
 		kex  string
-		bits int
+		bits float64
 	}{443: {"X25519", 256}, 8443: {"DH-ECP-256", 256}, 9443: {"DHE_RSA", 2048}} {
-		u := got[port]
-		if u.KeyExchangeAlgorithm == nil || *u.KeyExchangeAlgorithm != want.kex {
-			t.Errorf("port %d key_exchange_algorithm = %v, want %q", port, u.KeyExchangeAlgorithm, want.kex)
+		f := got[port]
+		if kex := routeWriterKEX(f.KeyExchangeAlgorithm, routeWireRaw(t, f)); kex == nil || *kex != want.kex {
+			t.Errorf("port %d key_exchange_algorithm = %v, want %q", port, kex, want.kex)
 		}
-		if u.KeySize == nil || *u.KeySize != want.bits {
-			t.Errorf("port %d key_size = %v, want %d", port, u.KeySize, want.bits)
+		if n, ok := exchangeSize(f); !ok || n != want.bits {
+			t.Errorf("port %d key_exchange_key_size = %v, want %v", port, n, want.bits)
 		}
 	}
-	if u := got[10443]; u.KeySize != nil || u.KeyExchangeAlgorithm != nil {
-		t.Errorf("no group was observed, yet key_exchange_algorithm=%v key_size=%v crossed the wire", u.KeyExchangeAlgorithm, u.KeySize)
+	if f := got[10443]; f.KeyExchangeAlgorithm != nil && *f.KeyExchangeAlgorithm != "" {
+		t.Errorf("no group was observed, yet key_exchange_algorithm=%v crossed the wire", *f.KeyExchangeAlgorithm)
+	}
+	if n, ok := exchangeSize(got[10443]); ok {
+		t.Errorf("no group was observed, yet key_exchange_key_size=%v crossed the wire", n)
 	}
 }

@@ -421,8 +421,8 @@ func TestIntegration_CloudAtRestFinding_ParkedObservationMaterializesOnRediscove
 		t.Fatalf("observations after rediscovery = %+v, want the SAME single row, now `linked` to %s", after, asset)
 	}
 
-	// Both runs' payloads are retained on that row; approval lets the sweep
-	// materialize them.
+	// Both runs' findings are held for that row (deferred_crypto_findings);
+	// approval replays them.
 	if err := svc.ApproveAssets(tenant, []uuid.UUID{asset}, uuid.New()); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -430,11 +430,11 @@ func TestIntegration_CloudAtRestFinding_ParkedObservationMaterializesOnRediscove
 		t.Fatalf("sweep: %v", err)
 	}
 	var pending, done int
-	if err := raw.QueryRow(`SELECT count(*) FILTER (WHERE materialized_at IS NULL), count(*) FILTER (WHERE materialized_at IS NOT NULL)
-		FROM identity_observation_payloads WHERE tenant_id=$1`, tenant).Scan(&pending, &done); err != nil {
+	if err := raw.QueryRow(`SELECT count(*) FILTER (WHERE replayed_at IS NULL), count(*) FILTER (WHERE replayed_at IS NOT NULL)
+		FROM deferred_crypto_findings WHERE tenant_id=$1`, tenant).Scan(&pending, &done); err != nil {
 		t.Fatal(err)
 	}
 	if pending != 0 || done != 2 {
-		t.Fatalf("retained payloads: %d pending, %d materialized — want 0 and 2 (the parked run's and the rediscovery's)", pending, done)
+		t.Fatalf("held findings: %d pending, %d replayed — want 0 and 2 (the parked run's and the rediscovery's)", pending, done)
 	}
 }

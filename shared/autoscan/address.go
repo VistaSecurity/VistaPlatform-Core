@@ -3,6 +3,8 @@ package autoscan
 import (
 	"net/netip"
 	"strings"
+
+	"github.com/vistasecurity/vistaplatform/shared/network/addrscope"
 )
 
 // Reason explains why an address was or was not accepted for an automatic
@@ -31,9 +33,6 @@ const (
 	// register it as a network segment.
 	ReasonCarrierGradeNAT Reason = "carrier_grade_nat"
 )
-
-// carrierGradeNAT is RFC 6598 shared address space.
-var carrierGradeNAT = netip.MustParsePrefix("100.64.0.0/10")
 
 // ParseTarget turns a stored address into a netip.Addr, or reports why it
 // cannot be one.
@@ -102,13 +101,15 @@ func Classify(addr netip.Addr, segments, excluded []netip.Prefix) (bool, Reason)
 		return false, ReasonMulticast
 	}
 
-	// netip.Addr.IsPrivate is RFC 1918 + RFC 4193 (fd00::/8) and nothing else.
-	// In particular it does NOT cover RFC 6598 shared address space
-	// (100.64.0.0/10), which is correct for us: that is carrier space, and a
-	// tenant behind it reaches other operators' customers through it. A tenant
-	// who genuinely runs their estate on it declares it as a network segment,
-	// which is the explicit statement of ownership this code requires.
-	if addr.IsPrivate() {
+	// addrscope.MayAutoProbe is the platform's one definition of what may be
+	// probed on address class alone; with loopback and link-local refused
+	// above, what reaches here is RFC 1918 + RFC 4193. It does NOT cover
+	// RFC 6598 shared address space (100.64.0.0/10), which is correct for us:
+	// that is carrier space, and a tenant behind it reaches other operators'
+	// customers through it. A tenant who genuinely runs their estate on it
+	// declares it as a network segment, which is the explicit statement of
+	// ownership this code requires ( D1).
+	if addrscope.MayAutoProbe(addr) {
 		return true, ReasonPrivate
 	}
 
@@ -118,7 +119,7 @@ func Classify(addr netip.Addr, segments, excluded []netip.Prefix) (bool, Reason)
 		}
 	}
 
-	if carrierGradeNAT.Contains(addr) {
+	if addrscope.Classify(addr) == addrscope.CGNAT {
 		return false, ReasonCarrierGradeNAT
 	}
 	return false, ReasonPublic

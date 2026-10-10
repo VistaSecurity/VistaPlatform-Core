@@ -1,108 +1,35 @@
 package processor
 
 // This drives host-inventory connection rows through the real batch processor
-// and a real approval-rule table. The inventory HTTP boundary is recorded so
-// the test can assert which door each ownership class used and which source
-// asset crossed that wire.
+// against inventory's import (routeInventoryStandIn, the real handler's
+// response shape). Since WP3 every row takes the one door — the import —
+// and inventory decides ownership, approval and external_connections; the test
+// asserts what crossed that wire and how each row was settled from the
+// answer.
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"sync"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
-	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
-
-type hostConnectionInventoryRecorder struct {
-	mu       sync.Mutex
-	segment  uuid.UUID
-	external []client.ExternalConnectionUpsert
-	imports  map[string][]converter.IngestFinding
-	srv      *httptest.Server
-}
-
-func newHostConnectionInventoryRecorder(t *testing.T, segment uuid.UUID) *hostConnectionInventoryRecorder {
-	t.Helper()
-	r := &hostConnectionInventoryRecorder{segment: segment, imports: make(map[string][]converter.IngestFinding)}
-	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch req.URL.Path {
-		case "/api/v2/inventory-service/network-segments/classify-asset":
-			var body struct {
-				IP string `json:"ip_address"`
-			}
-			_ = json.NewDecoder(req.Body).Decode(&body)
-			switch body.IP {
-			case "8.8.8.8":
-				_ = json.NewEncoder(w).Encode(map[string]any{"ownership": "third_party", "network_type": "public"})
-			case "10.40.0.15":
-				_ = json.NewEncoder(w).Encode(map[string]any{"ownership": "internal", "network_type": "private", "segment_id": r.segment.String()})
-			default:
-				_ = json.NewEncoder(w).Encode(map[string]any{"ownership": "unknown", "network_type": "private"})
-			}
-		case "/api/v2/inventory-service/external-connections":
-			var body client.ExternalConnectionUpsert
-			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			r.mu.Lock()
-			r.external = append(r.external, body)
-			r.mu.Unlock()
-			_ = json.NewEncoder(w).Encode(map[string]string{"id": uuid.New().String()})
-		default:
-			var body struct {
-				Findings    []converter.IngestFinding `json:"findings"`
-				AssetStatus *string                   `json:"asset_status"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			status := ""
-			if body.AssetStatus != nil {
-				status = *body.AssetStatus
-			}
-			r.mu.Lock()
-			r.imports[status] = append(r.imports[status], body.Findings...)
-			r.mu.Unlock()
-			statuses := make([]string, len(body.Findings))
-			for i := range statuses {
-				statuses[i] = status
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"imported": len(body.Findings), "asset_statuses": statuses})
-		}
-	}))
-	t.Cleanup(r.srv.Close)
-	return r
-}
 
 func TestIntegration_HostConnectionsUseOwnershipApprovalAndSourceAssetRouting(t *testing.T) {
 	raw := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, raw)
 	db := sqlx.NewDb(raw, "postgres")
 	tenant := testdb.NewTenant(t, raw)
-	segmentID, ruleID, sourceAssetID := uuid.New(), uuid.New(), uuid.New()
-	if _, err := raw.Exec(`INSERT INTO discovery_auto_approval_rules(id,tenant_id,name,query,is_active)
-		VALUES($1,$2,'approve measured segment',$3,true)`, ruleID, tenant, "network.segment_id="+segmentID.String()); err != nil {
-		t.Fatal(err)
-	}
+	ruleID, sourceAssetID := uuid.New(), uuid.New()
 
-	recorder := newHostConnectionInventoryRecorder(t, segmentID)
-	inventory, err := client.NewInventoryClient(&config.Config{InventoryServiceURL: recorder.srv.URL})
-	if err != nil {
-		t.Fatal(err)
-	}
-	processor := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), approval.NewService(raw), inventory, nil)
+	inv := newRouteInventoryStandIn(t)
+	// 10.40.0.15 is in a registered segment whose rule auto-approves it.
+	inv.ownership["10.40.0.15"] = "internal"
+	inv.rules["10.40.0.15"] = ruleID
+	processor := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), inv.client(t), nil)
 
 	batchID, sensorID := uuid.New().String(), uuid.New()
 	for _, peer := range []struct {
@@ -124,25 +51,23 @@ func TestIntegration_HostConnectionsUseOwnershipApprovalAndSourceAssetRouting(t 
 	if err := processor.ProcessBatch(batchID, tenant); err != nil {
 		t.Fatalf("ProcessBatch: %v", err)
 	}
+	inv.assertOnlyImports(t)
 
-	recorder.mu.Lock()
-	external := append([]client.ExternalConnectionUpsert(nil), recorder.external...)
-	monitoring := append([]converter.IngestFinding(nil), recorder.imports["monitoring"]...)
-	pending := append([]converter.IngestFinding(nil), recorder.imports["pending_approval"]...)
-	recorder.mu.Unlock()
-	if len(external) != 1 || external[0].DestIP != "8.8.8.8" || external[0].SourceAssetID == nil || *external[0].SourceAssetID != sourceAssetID {
-		t.Fatalf("public route = %#v, want one external upsert attributed to host %s", external, sourceAssetID)
+	imported := inv.allImported()
+	if len(imported) != 3 {
+		t.Fatalf("imported %d findings, want all 3 — the public one included", len(imported))
 	}
-	if len(monitoring) != 1 || monitoring[0].IPAddress == nil || *monitoring[0].IPAddress != "10.40.0.15" {
-		t.Fatalf("registered private route = %#v, want monitoring import", monitoring)
-	}
-	if len(pending) != 1 || pending[0].IPAddress == nil || *pending[0].IPAddress != "10.50.0.15" {
-		t.Fatalf("unregistered private route = %#v, want pending import", pending)
-	}
-	for _, finding := range append(monitoring, pending...) {
+	for _, finding := range imported {
 		if finding.RawData["source_asset_id"] != sourceAssetID.String() {
-			t.Errorf("managed fallback dropped source_asset_id: %#v", finding.RawData)
+			t.Errorf("source_asset_id lost on the way to inventory: %#v", finding.RawData)
 		}
+		if finding.RawData["source_ip"] != "10.1.2.3" {
+			t.Errorf("source_ip lost on the way to inventory: %#v", finding.RawData)
+		}
+	}
+	routed := inv.routedFindings()
+	if len(routed) != 1 || routed[0].IPAddress == nil || *routed[0].IPAddress != "8.8.8.8" {
+		t.Fatalf("routed = %#v, want the public connection alone", routed)
 	}
 
 	rows, err := raw.Query(`SELECT host(dest_ip),approval_status,auto_approval_rule_id FROM sensor_discoveries
@@ -155,7 +80,9 @@ func TestIntegration_HostConnectionsUseOwnershipApprovalAndSourceAssetRouting(t 
 		status string
 		rule   *uuid.UUID
 	}{
-		"8.8.8.8":    {"auto_approved", nil},
+		// routed: evidence recorded elsewhere, no approval decision will
+		// follow (applyIngestOutcome).
+		"8.8.8.8":    {"observed", nil},
 		"10.40.0.15": {"auto_approved", &ruleID},
 		"10.50.0.15": {"pending", nil},
 	}

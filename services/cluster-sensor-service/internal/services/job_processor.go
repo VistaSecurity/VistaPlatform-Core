@@ -33,6 +33,12 @@ type JobProcessor struct {
 	alertService     *AlertService
 	natsClient       *events.NATSClient
 	subscriber       *events.Subscriber
+	// queuePublisher wakes discovery-processor after a unit's findings are
+	// committed into sensor_discoveries (discovery.queue.ready, WP1).
+	// NewJobProcessor sets it to natsClient; a processor built as a literal
+	// (most tests) leaves it nil, which the publish helper turns into a
+	// once-per-process warning.
+	queuePublisher events.MessagePublisher
 	// ctx is the processor's lifetime. Every job's context derives from it
 	// (never from the NATS handler's context — see Start), and Stop cancels it
 	// with errProcessorStopping so a running job hands itself back.
@@ -119,6 +125,7 @@ func NewJobProcessor(db, bypassDB *sqlx.DB, discoveryService *DiscoveryService, 
 		alertService:     alertService,
 		natsClient:       natsClient,
 		subscriber:       events.NewSubscriber(natsClient),
+		queuePublisher:   natsClient,
 		ctx:              ctx,
 		cancel:           cancel,
 		detachPlanJobs:   true,

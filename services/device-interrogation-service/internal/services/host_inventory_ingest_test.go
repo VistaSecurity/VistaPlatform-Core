@@ -817,8 +817,9 @@ func TestHostInventoryObservationsFromResult_CarriesTheThreePiecesTheConsumerRea
 
 // TestHostAddresses_TwoInterfacesCarryTheirOwnAssignment: one ip_address per
 // real address, each with the assignment the collector read — static,
-// dynamic, or none when the OS said nothing. Loopback, link-local, a virtual
-// interface's address and a temporary IPv6 privacy address are not offered.
+// dynamic, or none when the OS said nothing. Loopback, link-local and a
+// temporary IPv6 privacy address are not offered; a virtual interface's
+// address is offered flagged, after the real ones.
 //
 // Mutation check: drop the attrlist.AddressAttribute filter → the temporary
 // address is offered and this fails.
@@ -835,9 +836,12 @@ func TestHostAddresses_TwoInterfacesCarryTheirOwnAssignment(t *testing.T) {
 	}}}
 	got := (hostInventoryMetadata{}).hostAddresses(obs)
 	want := []hostAddress{
-		{"192.0.2.1", identity.AssignmentStatic},
-		{"198.51.100.2", identity.AssignmentDynamic},
-		{"203.0.113.9", ""},
+		{"192.0.2.1", identity.AssignmentStatic, false},
+		{"198.51.100.2", identity.AssignmentDynamic, false},
+		{"203.0.113.9", "", false},
+		// Kept, flagged, and after every real interface ( WP7): Intake
+		// files it as attribute evidence, never as an identifier.
+		{"10.244.1.3", identity.AssignmentStatic, true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("host addresses = %+v, want %+v", got, want)

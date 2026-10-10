@@ -515,17 +515,20 @@ var invMatrixWant = map[string]string{
 	"ingest_scan/dyn_segment/ip":     "outcome=unresolved*3 obs=[3x{src=measured/sensor/passive scope=dyn dyn=[dyn] ip=[dyn] kinds=- adm=[direct] reasons=[dynamic_address_without_device_binding] state=unresolved asset=-}] ids=- resourced=- ports=- new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	"ingest_scan/dyn_segment/ip+mac": "outcome=matched*3 obs=[3x{src=measured/sensor/passive scope=dyn dyn=[dyn] ip=[dyn] kinds=[mac] adm=[direct] reasons=[direct_scoped_interface] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	// Issue item 1: a host key is not a device binding for admission and the engine answers supporting. Decision 2: no ports are written.
-	"ingest_scan/dyn_segment/ip+ssh":        "outcome=supporting*3 obs=[3x{src=measured/sensor/passive scope=dyn dyn=[dyn] ip=[dyn] kinds=[ssh] adm=[direct] reasons=[dynamic_address_without_device_binding] state=linked asset=fixture}] ids=- resourced=- ports=- new_assets=0 other_ids=0 other_ports=0 proposals=0",
+	// D4: a completed TLS/SSH exchange (l3_probe, direct) that is supporting
+	// evidence for ONE owner attaches its sockets to that owner, inside the engine;
+	// the identifiers stay held.
+	"ingest_scan/dyn_segment/ip+ssh":        "outcome=supporting*3 obs=[3x{src=measured/sensor/passive scope=dyn dyn=[dyn] ip=[dyn] kinds=[ssh] adm=[direct] reasons=[dynamic_address_without_device_binding] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	"ingest_scan/dyn_segment/ip+mac+ssh":    "outcome=matched*3 obs=[3x{src=measured/sensor/passive scope=dyn dyn=[dyn] ip=[dyn] kinds=[mac,ssh] adm=[direct] reasons=[direct_scoped_interface] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	"ingest_scan/static_segment/ip":         "outcome=matched*3 obs=[3x{src=measured/sensor/passive scope=static dyn=- ip=[static] kinds=- adm=[direct] reasons=[direct_scoped_address] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	"ingest_scan/static_segment/ip+mac":     "outcome=matched*3 obs=[3x{src=measured/sensor/passive scope=static dyn=- ip=[static] kinds=[mac] adm=[direct] reasons=[direct_scoped_interface] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	"ingest_scan/static_segment/ip+ssh":     "outcome=matched*3 obs=[3x{src=measured/sensor/passive scope=static dyn=- ip=[static] kinds=[ssh] adm=[direct] reasons=[direct_scoped_address] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	"ingest_scan/static_segment/ip+mac+ssh": "outcome=matched*3 obs=[3x{src=measured/sensor/passive scope=static dyn=- ip=[static] kinds=[mac,ssh] adm=[direct] reasons=[direct_scoped_interface] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	// Headline row 1 (issue items 1 and 2): the tenant-scope address is never dynamic; supporting, and (decision 2) the ports stay on the observations.
-	"ingest_scan/no_segment/ip":     "outcome=supporting*3 obs=[3x{src=measured/sensor/passive scope=tenant dyn=- ip=[tenant] kinds=- adm=[direct] reasons=[network_scope_unresolved] state=linked asset=fixture}] ids=- resourced=- ports=- new_assets=0 other_ids=0 other_ports=0 proposals=0",
+	"ingest_scan/no_segment/ip":     "outcome=supporting*3 obs=[3x{src=measured/sensor/passive scope=tenant dyn=- ip=[tenant] kinds=- adm=[direct] reasons=[network_scope_unresolved] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	"ingest_scan/no_segment/ip+mac": "outcome=matched*3 obs=[3x{src=measured/sensor/passive scope=tenant dyn=- ip=[tenant] kinds=[mac] adm=[direct] reasons=[network_scope_unresolved] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	// Issue item 1 and decision 2, as above.
-	"ingest_scan/no_segment/ip+ssh":     "outcome=supporting*3 obs=[3x{src=measured/sensor/passive scope=tenant dyn=- ip=[tenant] kinds=[ssh] adm=[direct] reasons=[network_scope_unresolved] state=linked asset=fixture}] ids=- resourced=- ports=- new_assets=0 other_ids=0 other_ports=0 proposals=0",
+	"ingest_scan/no_segment/ip+ssh":     "outcome=supporting*3 obs=[3x{src=measured/sensor/passive scope=tenant dyn=- ip=[tenant] kinds=[ssh] adm=[direct] reasons=[network_scope_unresolved] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	"ingest_scan/no_segment/ip+mac+ssh": "outcome=matched*3 obs=[3x{src=measured/sensor/passive scope=tenant dyn=- ip=[tenant] kinds=[mac,ssh] adm=[direct] reasons=[network_scope_unresolved] state=linked asset=fixture}] ids=- resourced=- ports=[443,8443,9443] new_assets=0 other_ids=0 other_ports=0 proposals=0",
 
 	// Host observations: mDNS for the address-only shape (not Direct), ARP
@@ -664,6 +667,11 @@ var invMatrixWant = map[string]string{
 // upsert and the enforce-mode retained-evidence worker — each on its own.
 // Owner decision 2 (platform ADR-0003 D2) closed both: each writer is switched
 // on alone, and then together, and none of them lands a port.
+//
+// Since D4 the ENGINE attaches a direct measurement's sockets to a
+// single owner, so the post-engine writers are tested on traffic-only
+// evidence (no completed exchange: not direct, held), and the D4 row checks
+// that the engine — not a writer after it — is what lands a direct scan's.
 func TestIntegration_IdentityIntakeMatrix_HeadlineRows(t *testing.T) {
 	raw := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, raw)
@@ -689,7 +697,13 @@ func TestIntegration_IdentityIntakeMatrix_HeadlineRows(t *testing.T) {
 					m.svc.SetEnrichmentServices(NewNetworkSegmentService(m.svc.db, NewLocationService(m.svc.db)), nil)
 				}
 				before := m.Take(t)
-				report, err := m.svc.IngestFindingsReport(m.Tenant, m.scanFindings(intakematrix.InNoSegment, intakematrix.Shape{}, nil), identity.StatusPendingApproval)
+				findings := m.scanFindings(intakematrix.InNoSegment, intakematrix.Shape{}, nil)
+				for i := range findings {
+					// Traffic only: no negotiated cipher, so the evidence is
+					// not direct and D4 does not attach it.
+					findings[i].CipherSuite = nil
+				}
+				report, err := m.svc.IngestFindingsReport(m.Tenant, findings, identity.StatusPendingApproval)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -716,6 +730,30 @@ func TestIntegration_IdentityIntakeMatrix_HeadlineRows(t *testing.T) {
 					t.Errorf("supporting evidence wrote identifiers %v / assets %d; the engine attaches nothing on supporting", got.IDs, got.NewAssets)
 				}
 			})
+		}
+	})
+
+	// D4, with every post-engine writer off: the direct scan's sockets
+	// are on the gateway, so the engine wrote them. Mutation: make
+	// identity's supportingEndpointsAttach return false → ports "-".
+	t.Run("no_segment_direct_scan_attaches_endpoints_in_the_engine", func(t *testing.T) {
+		m := newInvMatrix(t, raw)
+		m.svc.SetEnrichmentServices(NewNetworkSegmentService(m.svc.db, NewLocationService(m.svc.db)), nil)
+		before := m.Take(t)
+		report, err := m.svc.IngestFindingsReport(m.Tenant, m.scanFindings(intakematrix.InNoSegment, intakematrix.Shape{}, nil), identity.StatusPendingApproval)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outs := []string{}
+		for _, r := range report.Results {
+			outs = append(outs, r.Outcome)
+		}
+		got := m.Effect(t, before, foldOutcomes(outs))
+		if got.Outcome != "supporting*3" || listOrDash(got.Ports) != "[443,8443,9443]" {
+			t.Errorf("outcome %s ports %s, want supporting*3 with the gateway's [443,8443,9443] written by the engine", got.Outcome, listOrDash(got.Ports))
+		}
+		if len(got.IDs) != 0 || got.NewAssets != 0 {
+			t.Errorf("D4 wrote identifiers %v / assets %d; it attaches sockets only", got.IDs, got.NewAssets)
 		}
 	})
 

@@ -246,6 +246,99 @@
         ],
         "source_kind": "measured",
         "state": "unresolved"
+      },
+      {
+        "admission_reasons": "{network_scope_unresolved}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "00:23:e9:aa:bb:00"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "lb-01.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{network_scope_unresolved}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "00:23:e9:aa:bb:01"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "lb-01.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{network_scope_unresolved}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "00:23:e9:aa:bb:02"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "lb-01.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
       }
     ],
     "collection_warnings": [

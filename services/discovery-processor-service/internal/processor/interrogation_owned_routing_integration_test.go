@@ -6,79 +6,24 @@ package processor
 // dropped by the external-connections branch with a stdout warning while the
 // interrogation job reported success.
 //
-// Drives the REAL batch processor over real sensor_discoveries rows; the
-// inventory HTTP boundary is recorded, so the test asserts which door each row
-// used and what crossed it.
+// Drives the REAL batch processor over real sensor_discoveries rows against
+// inventory's import (routeInventoryStandIn, the real handler's response
+// shape), so the test asserts what crossed that wire and how each row was
+// settled. Since WP3 inventory decides ownership and routing for every
+// row; the processor imports them all.
 //
 // Skips without TEST_DATABASE_URL.
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"sync"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
-	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
-
-type ownedRoutingRecorder struct {
-	mu       sync.Mutex
-	device   uuid.UUID
-	external []client.ExternalConnectionUpsert
-	imported []converter.IngestFinding
-	srv      *httptest.Server
-}
-
-func newOwnedRoutingRecorder(t *testing.T, device uuid.UUID) *ownedRoutingRecorder {
-	t.Helper()
-	r := &ownedRoutingRecorder{device: device}
-	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch req.URL.Path {
-		case "/api/v2/inventory-service/network-segments/classify-asset":
-			// What inventory-service answers: neither 0.0.0.0 nor a
-			// documentation-range public address is in any segment.
-			_ = json.NewEncoder(w).Encode(map[string]any{"ownership": "third_party", "network_type": "public"})
-		case "/api/v2/inventory-service/external-connections":
-			var body client.ExternalConnectionUpsert
-			_ = json.NewDecoder(req.Body).Decode(&body)
-			r.mu.Lock()
-			r.external = append(r.external, body)
-			r.mu.Unlock()
-			_ = json.NewEncoder(w).Encode(map[string]string{"id": uuid.New().String()})
-		default:
-			var body struct {
-				Findings []converter.IngestFinding `json:"findings"`
-			}
-			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			r.mu.Lock()
-			r.imported = append(r.imported, body.Findings...)
-			r.mu.Unlock()
-			// What inventory-service answers for an owned finding: it landed
-			// on the device, which is monitoring.
-			statuses := make([]string, len(body.Findings))
-			results := make([]map[string]string, len(body.Findings))
-			for i := range body.Findings {
-				statuses[i] = "monitoring"
-				results[i] = map[string]string{"outcome": "matched", "asset_id": r.device.String()}
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"imported": len(body.Findings), "asset_statuses": statuses, "results": results})
-		}
-	}))
-	t.Cleanup(r.srv.Close)
-	return r
-}
 
 func TestIntegration_InterrogationFindings_PublicAndAddressLessReachInventoryOwned(t *testing.T) {
 	raw := testdb.Connect(t)
@@ -87,13 +32,11 @@ func TestIntegration_InterrogationFindings_PublicAndAddressLessReachInventoryOwn
 	tenant := testdb.NewTenant(t, raw)
 	device := uuid.New()
 
-	recorder := newOwnedRoutingRecorder(t, device)
-	inventory, err := client.NewInventoryClient(&config.Config{InventoryServiceURL: recorder.srv.URL})
-	if err != nil {
-		t.Fatal(err)
-	}
+	inv := newRouteInventoryStandIn(t)
+	// The claim verifies: the device exists and is monitoring.
+	inv.devices[device.String()] = "monitoring"
 	audit := &recordingSink{}
-	processor := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), approval.NewService(raw), inventory, audit)
+	processor := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), inv.client(t), audit)
 
 	batchID, sensorID := uuid.New().String(), uuid.New()
 	insert := func(destIP string, port int, hostname string, metadata map[string]any) uuid.UUID {
@@ -134,8 +77,9 @@ func TestIntegration_InterrogationFindings_PublicAndAddressLessReachInventoryOwn
 		"config_name": "/Common/shop_vs", "profile_name": "/Common/clientssl",
 	}))
 	// Control: a sensor's public third-party row with no source IP is still
-	// not something this service can record — the change is scoped to rows
-	// that name an interrogated device.
+	// not something anyone can record — inventory drops it with a counted
+	// reason ( D2); the change is scoped to rows that name an
+	// interrogated device.
 	sensorRow := insert("203.0.113.99", 443, "", map[string]any{"discovery_method": "passive"})
 
 	// No reverse DNS for an interrogation row: the public VIP's name is the
@@ -160,13 +104,10 @@ func TestIntegration_InterrogationFindings_PublicAndAddressLessReachInventoryOwn
 		t.Errorf("PTR lookups = %v, want exactly the sensor control row's 203.0.113.99", ptrAsked)
 	}
 
-	recorder.mu.Lock()
-	imported := append([]converter.IngestFinding(nil), recorder.imported...)
-	external := append([]client.ExternalConnectionUpsert(nil), recorder.external...)
-	recorder.mu.Unlock()
-
-	if len(external) != 0 {
-		t.Errorf("routed to external_connections: %+v — an interrogated device's own configuration is not a connection", external)
+	inv.assertOnlyImports(t)
+	imported := inv.allImported()
+	if routed := inv.routedFindings(); len(routed) != 0 {
+		t.Errorf("routed to external_connections: %+v — an interrogated device's own configuration is not a connection", routed)
 	}
 	byLabel := map[string]converter.IngestFinding{}
 	for _, f := range imported {
@@ -189,7 +130,7 @@ func TestIntegration_InterrogationFindings_PublicAndAddressLessReachInventoryOwn
 		t.Error("an invalid forwarded mac_address survived receipt sanitisation")
 	}
 	for _, f := range imported {
-		if f.IPAddress != nil && *f.IPAddress == "203.0.113.99" {
+		if f.IPAddress != nil && *f.IPAddress == "203.0.113.99" && f.RawData["source_asset_id"] != nil {
 			t.Error("the unclaimed sensor row was imported as if an interrogated device owned it")
 		}
 	}
@@ -209,9 +150,10 @@ func TestIntegration_InterrogationFindings_PublicAndAddressLessReachInventoryOwn
 			t.Errorf("row %s approval_status = %q, want auto_approved (it landed on a monitoring device)", id, status)
 		}
 	}
-	// The unclaimed row still takes the old branch: never imported, never an
-	// asset, left for the batch audit's third_party_dropped_no_source_ip count.
-	// …and the drop is counted on the batch's audit record, not only printed.
+	// The unclaimed row is imported, and inventory drops it (no source, no
+	// connection): never an asset, settled terminal, and counted on the
+	// batch's audit record as third_party_dropped_no_source_ip, not only
+	// printed.
 	events := audit.all()
 	if len(events) != 1 || events[0].Counts["third_party_dropped_no_source_ip"] != 1 {
 		t.Errorf("audit events = %+v, want one batch record counting 1 dropped third-party row", events)
@@ -222,5 +164,13 @@ func TestIntegration_InterrogationFindings_PublicAndAddressLessReachInventoryOwn
 	}
 	if sensorAsset != nil {
 		t.Errorf("the unclaimed sensor row was attached to asset %s", *sensorAsset)
+	}
+	var sensorStatus, sensorErr string
+	if err := raw.QueryRow(`SELECT approval_status, COALESCE(process_error,'') FROM sensor_discoveries
+		WHERE tenant_id=$1 AND id=$2 AND processed_at IS NOT NULL`, tenant, sensorRow).Scan(&sensorStatus, &sensorErr); err != nil {
+		t.Fatalf("the dropped row was not settled: %v", err)
+	}
+	if sensorStatus != "rejected" || sensorErr == "" {
+		t.Errorf("dropped row = %s / %q, want rejected with the reason", sensorStatus, sensorErr)
 	}
 }

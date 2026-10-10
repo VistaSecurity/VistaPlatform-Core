@@ -5,6 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
+	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 )
 
 // Fixture keys are ASSEMBLED, never written as literals — see the note at the
@@ -68,7 +73,7 @@ func canonicalCaptureMetadata(t *testing.T) map[string]interface{} {
 }
 
 // envelope wraps sensor RawMetadata the way sensor-manager's StoreDiscoveries
-// does before it reaches extractCryptoDetails.
+// does before the row reaches the processor.
 func envelope(t *testing.T, rawMetadata map[string]interface{}) []byte {
 	t.Helper()
 	body, err := json.Marshal(map[string]interface{}{
@@ -83,36 +88,55 @@ func envelope(t *testing.T, rawMetadata map[string]interface{}) []byte {
 	return body
 }
 
-func assertLeafMaterialized(t *testing.T, d *ExternalCryptoDetails) {
+// routeImportedLeaf runs one sensor_discoveries metadata blob through the
+// processor's real import conversion (importFinding) and returns the leaf
+// certificate entry inventory-service reads from the finding — through the
+// same shared reader its external-connections writer uses. Every row is
+// imported since WP3, so this is the one path a certificate travels.
+func routeImportedLeaf(t *testing.T, metadata []byte) map[string]interface{} {
 	t.Helper()
-	if d == nil {
-		t.Fatal("extractCryptoDetails returned nil")
+	f, err := (&BatchProcessor{}).importFinding(&models.SensorDiscovery{
+		ID: uuid.New(), SensorID: uuid.New(), DestIP: "203.0.113.9", Port: 443, Protocol: "TLS", Metadata: metadata,
+	})
+	if err != nil {
+		t.Fatalf("importFinding: %v", err)
 	}
-	if d.CertFingerprintSHA256 == nil || *d.CertFingerprintSHA256 != "9c4fbcccc5a005eb744c4b2da3d44614e1083753a707410eef68d2a30276b9aa" {
-		t.Errorf("fingerprint not materialized: %v", d.CertFingerprintSHA256)
+	// Round-trip through JSON: inventory-service reads the wire, not the map.
+	b, err := json.Marshal(f.RawData)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if d.CertSubject == nil || *d.CertSubject != "CN=passive.example.test,O=Vista Platform Test" {
-		t.Errorf("subject not materialized: %v", d.CertSubject)
+	var raw map[string]interface{}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
 	}
-	if d.CertIssuer == nil || *d.CertIssuer != "CN=passive.example.test,O=Vista Platform Test" {
-		t.Errorf("issuer not materialized: %v", d.CertIssuer)
+	return sharedcerts.LeafCertificateEntry(raw)
+}
+
+func assertLeafMaterialized(t *testing.T, leaf map[string]interface{}) {
+	t.Helper()
+	if leaf == nil {
+		t.Fatal("no certificate reached the imported finding")
 	}
-	if d.CertPublicKeyAlgorithm == nil || *d.CertPublicKeyAlgorithm != "RSA" {
-		t.Errorf("key algorithm not materialized: %v", d.CertPublicKeyAlgorithm)
+	for key, want := range map[string]interface{}{
+		"fingerprint_sha256": "9c4fbcccc5a005eb744c4b2da3d44614e1083753a707410eef68d2a30276b9aa",
+		"subject_dn":         "CN=passive.example.test,O=Vista Platform Test",
+		"issuer_dn":          "CN=passive.example.test,O=Vista Platform Test",
+		"key_algorithm":      "RSA",
+		"signature_alg":      "SHA256-RSA",
+		"key_size":           float64(2048),
+	} {
+		if leaf[key] != want {
+			t.Errorf("%s not materialized: %v, want %v", key, leaf[key], want)
+		}
 	}
-	if d.CertSignatureAlgorithm == nil || *d.CertSignatureAlgorithm != "SHA256-RSA" {
-		t.Errorf("signature algorithm not materialized: %v", d.CertSignatureAlgorithm)
+	if leaf["not_before"] == nil || leaf["not_after"] == nil {
+		t.Errorf("validity window not materialized: %v .. %v", leaf["not_before"], leaf["not_after"])
 	}
-	if d.CertPublicKeySize == nil || *d.CertPublicKeySize != 2048 {
-		t.Errorf("key size not materialized: %v", d.CertPublicKeySize)
-	}
-	if d.CertNotBefore == nil || d.CertNotAfter == nil {
-		t.Errorf("validity window not materialized: %v .. %v", d.CertNotBefore, d.CertNotAfter)
-	}
-	if len(d.CertSAN) == 0 {
+	if sans, _ := leaf["subject_alternative_names"].([]interface{}); len(sans) == 0 {
 		t.Error("SANs not materialized")
 	}
-	if d.CertPEM == nil || *d.CertPEM == "" {
+	if pem, _ := leaf["certificate_pem"].(string); pem == "" {
 		t.Error("PEM not materialized")
 	}
 }
@@ -121,13 +145,13 @@ func assertLeafMaterialized(t *testing.T, d *ExternalCryptoDetails) {
 // before it, this path produced flat keys and external_connections got a row
 // with a cipher suite and no certificate whatsoever.
 func TestCanonicalPassiveCaptureMaterializesCertificate(t *testing.T) {
-	assertLeafMaterialized(t, extractCryptoDetails(envelope(t, canonicalCaptureMetadata(t))))
+	assertLeafMaterialized(t, routeImportedLeaf(t, envelope(t, canonicalCaptureMetadata(t))))
 }
 
 // A sensor still in the field keeps sending the flat form after the platform
 // is upgraded. It must materialize identically.
 func TestLegacyFlatCertificateStillMaterializes(t *testing.T) {
-	assertLeafMaterialized(t, extractCryptoDetails(envelope(t, legacyFlatDiscovery())))
+	assertLeafMaterialized(t, routeImportedLeaf(t, envelope(t, legacyFlatDiscovery())))
 }
 
 // A canonical array always wins. A chain of three must not be replaced by one
@@ -142,11 +166,11 @@ func TestLegacyFlatCertificateNeverOverridesCanonicalArray(t *testing.T) {
 	}
 	raw[legacyKey("subject")] = "CN=should-not-win.example"
 
-	d := extractCryptoDetails(envelope(t, raw))
-	if d == nil || d.CertSubject == nil {
+	leaf := routeImportedLeaf(t, envelope(t, raw))
+	if leaf == nil || leaf["subject_dn"] == nil {
 		t.Fatal("no certificate materialized")
 	}
-	if *d.CertSubject == "CN=should-not-win.example" {
+	if leaf["subject_dn"] == "CN=should-not-win.example" {
 		t.Error("the flat form overrode the canonical certificates array")
 	}
 }

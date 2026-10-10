@@ -41,7 +41,10 @@ func TestIntegration_Ingest_PostResolutionEnrichmentFollowsMerge(t *testing.T) {
 					t.Fatal(err)
 				}
 				survivor := seedAsset(t, f.db, f.tenant, "survivor.example.test", "server", "hardware.computer.server", "production", 0, 0)
-				if _, err := f.db.Exec(`UPDATE assets SET asset_status=$2,metadata=metadata-'deferred_findings' WHERE tenant_id=$1`, f.tenant, status); err != nil {
+				if _, err := f.db.Exec(`UPDATE assets SET asset_status=$2 WHERE tenant_id=$1`, f.tenant, status); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.db.Exec(`DELETE FROM deferred_crypto_findings WHERE tenant_id=$1`, f.tenant); err != nil {
 					t.Fatal(err)
 				}
 				f.svc.serviceIdentificationSvc = NewServiceIdentificationService(f.db)
@@ -91,7 +94,7 @@ func TestIntegration_Ingest_PostResolutionEnrichmentFollowsMerge(t *testing.T) {
 				var oldEndpoints, newHints, oldDeferred int
 				if err := f.db.QueryRow(`SELECT (SELECT count(*) FROM asset_endpoints WHERE tenant_id=$1 AND asset_id=$2),
  (SELECT count(*) FROM asset_endpoints WHERE tenant_id=$1 AND asset_id=$3 AND service_name='OpenSSH'),
- (SELECT jsonb_array_length(COALESCE(metadata->'deferred_findings','[]')) FROM assets WHERE tenant_id=$1 AND id=$2)`, f.tenant, source, survivor).Scan(&oldEndpoints, &newHints, &oldDeferred); err != nil {
+ (SELECT count(*) FROM deferred_crypto_findings WHERE tenant_id=$1 AND asset_id=$2 AND replayed_at IS NULL)`, f.tenant, source, survivor).Scan(&oldEndpoints, &newHints, &oldDeferred); err != nil {
 					t.Fatal(err)
 				}
 				if oldEndpoints != 0 || newHints != 1 || oldDeferred != 0 {
@@ -99,7 +102,7 @@ func TestIntegration_Ingest_PostResolutionEnrichmentFollowsMerge(t *testing.T) {
 				}
 				if !durable && status == identity.StatusPendingApproval {
 					var deferred int
-					if err := f.db.QueryRow(`SELECT jsonb_array_length(metadata->'deferred_findings') FROM assets WHERE tenant_id=$1 AND id=$2`, f.tenant, survivor).Scan(&deferred); err != nil || deferred != 1 {
+					if err := f.db.QueryRow(`SELECT count(*) FROM deferred_crypto_findings WHERE tenant_id=$1 AND asset_id=$2 AND replayed_at IS NULL`, f.tenant, survivor).Scan(&deferred); err != nil || deferred != 1 {
 						t.Fatalf("survivor deferred=%d: %v", deferred, err)
 					}
 				}

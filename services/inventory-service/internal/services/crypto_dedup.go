@@ -17,12 +17,25 @@
 //     banding, which survives duplication — but the per-configuration lists,
 //     counts and drawers do not.
 //
-// The fix is at the application layer, deliberately: giving the table a unique
-// index would have to choose a survivor among the duplicates every existing
-// install already holds, and each of those rows carries junction dependents
-// (algorithms, certificates, keys) and compliance findings. That is a data
-// migration with its own spec, not a side effect of this change. Existing
-// duplicates therefore stay; this stops new ones.
+// The fix has two halves. This file is the application half: ingest looks a
+// configuration up by its natural key (cryptoImplementationKey) and refreshes,
+// enriches or re-observes the row it finds instead of inserting another. The
+// schema is the other half ( WP8): the unique index
+// uq_crypto_implementations_natural_key enforces the same key on every live
+// row, and the POST-MIGRATIONS block that builds it first folded the
+// duplicates written before the fix into their oldest twin (junctions moved,
+// tickets re-pointed, the losers soft-deleted). Duplicates of the natural key
+// can therefore no longer exist, and a write path that tried to create one —
+// here or anywhere else — fails loudly instead of quietly inflating the
+// inventory.
+//
+// The index is the backstop, not the mechanism. The subset rules below are
+// not expressible as an ON CONFLICT target, so the per-asset advisory lock
+// (lockAssetMaterializationSQL) still serializes the find-then-write, and
+// every statement here that CHANGES a row's key (enrichment, the key-exchange
+// refinement in crypto_kex_refine.go, the asset merge) first checks for a
+// live row already holding the target key and folds into it
+// (foldCryptoImplementation) rather than violating the index.
 package services
 
 import (
@@ -46,10 +59,11 @@ import (
 //
 // Shape: asset + protocol + the negotiated component fingerprint + provenance.
 //
-//   - The audit's suggested shape named a PORT. There is no port column on
-//     crypto_implementations, and there does not need to be: IngestFindings
-//     resolves a finding to an asset by (hostname OR ip_address) AND port, so
-//     two ports on one host are already two assets. asset_id subsumes port.
+//   - The port is carried by the ENDPOINT. Assets are no longer split by port
+//     (resolveDiscoveryObservation: one host on five ports is one asset with
+//     five endpoints), so asset_id alone would merge :443 and :8443; endpoint_id
+//     is in the key and keeps them apart. There is no port column on
+//     crypto_implementations and there does not need to be one.
 //   - certificate_id is deliberately NOT in the key. A certificate renewal does
 //     not change what the endpoint negotiates; it is the same configuration
 //     presenting a new leaf. Keying on it would make every renewal a duplicate
@@ -213,7 +227,7 @@ const cryptoComponentCountSQL = `(
 // already holds several partial rows for one endpoint, every enrichment
 // converges on the earliest, whose first_discovered_at is the true one.
 const findPartialCryptoImplementationSQL = `
-		SELECT id FROM crypto_implementations
+		SELECT id, discovery_method FROM crypto_implementations
 		 WHERE tenant_id = $1
 		   AND asset_id = $2
 		   AND deleted_at IS NULL
@@ -388,6 +402,53 @@ const enrichCryptoImplementationSQL = `
 		       updated_at             = NOW()
 		 WHERE id = $1`
 
+// findCryptoKeyTwinSQL locates the live row, other than $13, that already
+// holds exactly the natural key (tenant, asset, endpoint, protocol, the seven
+// components, PRIMARY method) — the row the unique index
+// uq_crypto_implementations_natural_key would report a write as colliding
+// with. It is the index's predicate, spelled as a lookup: null-safe on every
+// nullable column (the index is NULLS NOT DISTINCT) and equality on the
+// primary discovery_method only.
+//
+// $1 tenant, $2 asset, $3 protocol, $4–$10 the components, $11 method,
+// $12 endpoint, $13 the row that is about to take this key.
+const findCryptoKeyTwinSQL = `
+		SELECT id FROM crypto_implementations
+		 WHERE tenant_id = $1
+		   AND asset_id = $2
+		   AND deleted_at IS NULL
+		   AND endpoint_id IS NOT DISTINCT FROM $12::uuid
+		   AND protocol = $3::public.protocol_type
+		   AND protocol_version       IS NOT DISTINCT FROM $4::text
+		   AND cipher_suite           IS NOT DISTINCT FROM $5::text
+		   AND key_exchange_algorithm IS NOT DISTINCT FROM $6::text
+		   AND signature_algorithm    IS NOT DISTINCT FROM $7::text
+		   AND symmetric_encryption   IS NOT DISTINCT FROM $8::text
+		   AND hash_algorithm         IS NOT DISTINCT FROM $9::text
+		   AND key_size               IS NOT DISTINCT FROM $10::integer
+		   AND discovery_method = $11::public.discovery_method
+		   AND id <> $13::uuid
+		 ORDER BY first_discovered_at ASC, id ASC
+		 LIMIT 1`
+
+// foldCryptoImplementationSQL retires one configuration into another through
+// the schema's fold_crypto_implementations (scripts/database/schema.sql,
+// POST-MIGRATIONS): the loser's certificate, algorithm, key and library links
+// move to the keeper, its tickets are re-pointed, the keeper takes the union
+// of the two rows' provenance and time range, and the loser is soft-deleted.
+// The migration that built the unique index used the same function, so a
+// fold at ingest and a fold at upgrade cannot mean different things.
+const foldCryptoImplementationSQL = `SELECT public.fold_crypto_implementations(ARRAY[$1::uuid], ARRAY[$2::uuid], ARRAY[$3::uuid])`
+
+// foldCryptoImplementation folds loser into keeper (see
+// foldCryptoImplementationSQL). Both must be live rows of tenantID.
+func foldCryptoImplementation(tx *sqlx.Tx, tenantID, loser, keeper uuid.UUID) error {
+	if _, err := tx.Exec(foldCryptoImplementationSQL, tenantID, loser, keeper); err != nil {
+		return fmt.Errorf("fold crypto implementation %s into %s: %w", loser, keeper, err)
+	}
+	return nil
+}
+
 // setCryptoRiskScoreSQL writes a configuration's risk score.
 //
 // Note what refreshCryptoImplementationSQL above does NOT touch: risk_score.
@@ -499,10 +560,13 @@ const linkLeafCertificateSQL = `
 // lockAssetMaterializationSQL serializes concurrent materialization for one
 // asset.
 //
-// Without a unique constraint a SELECT-then-INSERT can race: two ingest
-// workers handling the same endpoint can both miss and both insert. There is no
-// DB-level arbiter to fall back on, so this takes a transaction-scoped advisory
-// lock keyed on (tenant, asset) instead. It is cluster-wide (so it holds across
+// A SELECT-then-INSERT can race: two ingest workers handling the same endpoint
+// can both miss and both insert. The unique index on the natural key now turns
+// the exact-duplicate half of that race into an error rather than a second
+// row, but an error is a failed ingest, and the subset rules (a partial row
+// and the complete observation of it are one configuration under different
+// keys) are beyond any index. So this still takes a transaction-scoped
+// advisory lock keyed on (tenant, asset). It is cluster-wide (so it holds across
 // service replicas, not just goroutines), it is released automatically on
 // commit OR rollback, and it costs one hash lookup. It serializes only per
 // asset, so unrelated findings in the same batch still proceed in parallel.
@@ -662,8 +726,41 @@ func upsertCryptoImplementation(
 	}
 
 	var partial uuid.UUID
-	err = tx.QueryRow(findPartialCryptoImplementationSQL, subsetArgs...).Scan(&partial)
+	var partialMethod string
+	err = tx.QueryRow(findPartialCryptoImplementationSQL, subsetArgs...).Scan(&partial, &partialMethod)
 	if err == nil {
+		// Enriching fills the partial row's NULLs from the observation, so the
+		// row ends with exactly the observation's components under its OWN
+		// primary method. When that method differs from the observation's, a
+		// live row may already hold that key: the exact lookup above matched
+		// on the observation's method and missed it. (A passive partial and a
+		// passive complete row of one endpoint, completed by an active probe.)
+		// Enriching would then violate the unique index; the partial row is
+		// the same configuration seen less completely, so it is folded into
+		// the row that already has the full key, and that row is re-observed.
+		var twin uuid.UUID
+		e := tx.QueryRow(findCryptoKeyTwinSQL,
+			tenantID, k.AssetID, k.Protocol,
+			k.ProtocolVersion, k.CipherSuite, k.KeyExchange, k.Signature,
+			k.Symmetric, k.Hash, k.KeySize, partialMethod,
+			endpoint, partial,
+		).Scan(&twin)
+		if e == nil {
+			if e := foldCryptoImplementation(tx, tenantID, partial, twin); e != nil {
+				return uuid.Nil, cryptoUpsertRefreshed, e
+			}
+			if _, e := tx.Exec(refreshCryptoImplementationSQL, twin, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod, observedAt); e != nil {
+				return uuid.Nil, cryptoUpsertRefreshed, fmt.Errorf("refresh crypto implementation %s: %w", twin, e)
+			}
+			if e := linkLeafCertificate(tx, twin, certificateID); e != nil {
+				return uuid.Nil, cryptoUpsertRefreshed, e
+			}
+			return twin, cryptoUpsertRefreshed, nil
+		}
+		if !errors.Is(e, sql.ErrNoRows) {
+			return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up crypto implementation key twin: %w", e)
+		}
+
 		if _, e := tx.Exec(
 			enrichCryptoImplementationSQL,
 			partial, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod,
@@ -685,6 +782,11 @@ func upsertCryptoImplementation(
 	// the superset lookup, which would otherwise keep the invented value
 	// forever: an observation without a version is a strict subset of the
 	// row that has one, and a subset re-observation changes nothing.
+	//
+	// Retracting rewrites the row's key to the observation's (version NULL)
+	// under the observation's own method — and a live row already holding
+	// that key would have been found by the exact lookup above, so this
+	// rewrite cannot collide with the unique index.
 	if k.VersionUnmeasured && k.ProtocolVersion == nil {
 		var retract uuid.UUID
 		err = tx.QueryRow(findVersionRetractionSQL,

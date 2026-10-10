@@ -125,8 +125,11 @@ func (e *Engine) resolveOperatorScan(ctx context.Context, obs Observation, at ti
 	if err != nil {
 		return Resolution{}, "", err
 	}
-	if drift.result.Verdict == matcher.DriftReplaced {
+	switch drift.result.Verdict {
+	case matcher.DriftReplaced:
 		return Resolution{}, "a different device now answers at the scanned address: " + drift.result.Explanation, nil
+	case matcher.DriftDistinct:
+		return Resolution{}, "a second device sharing a name answered: " + drift.result.Explanation, nil
 	}
 
 	attach, unattached := splitByOwner(ids, owners, target.ID)

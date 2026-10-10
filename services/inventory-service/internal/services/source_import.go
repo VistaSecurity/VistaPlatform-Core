@@ -40,6 +40,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
+	"github.com/vistasecurity/vistaplatform/shared/network/addrscope"
 	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 )
@@ -341,8 +342,13 @@ func (s *SourceImportService) onPremSegments(ctx context.Context, tenantID uuid.
 
 // sourceNetworkType is measured, not declared: whether a prefix is in private
 // address space is a property of the prefix.
+//
+// It reads addrscope.MayAutoProbe, not IsTenantAddressable: a segment's
+// network_type "private" is what the automatic-scan gates read as ownership
+// (autoscan.AutomaticSegmentTypes), so an imported CGNAT prefix stays
+// "public" and does not become an unattended-scan target ( D1).
 func sourceNetworkType(prefix netip.Prefix) string {
-	if prefix.Addr().IsPrivate() || prefix.Addr().IsLoopback() || prefix.Addr().IsLinkLocalUnicast() {
+	if addrscope.MayAutoProbe(prefix.Addr()) {
 		return "private"
 	}
 	return "public"

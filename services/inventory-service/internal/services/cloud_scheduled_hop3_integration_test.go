@@ -106,9 +106,11 @@ func TestIntegration_CloudScheduledPipeline_Hop3_EnforceAdmissionEstablishesAndM
 				}
 				findings = append(findings, csf.ToIngestFinding())
 			}
-			report, err := svc.IngestFindingsReport(tenant, findings, req.AssetStatus)
+			// The pipeline import: inventory classifies and evaluates the
+			// tenant's rules itself ( WP3).
+			report, err := svc.IngestPipelineFindingsReport(tenant, findings)
 			if err != nil {
-				t.Fatalf("run %d: IngestFindingsReport: %v", runIndex, err)
+				t.Fatalf("run %d: IngestPipelineFindingsReport: %v", runIndex, err)
 			}
 			for _, r := range report.Results {
 				outcomes = append(outcomes, string(r.Outcome))

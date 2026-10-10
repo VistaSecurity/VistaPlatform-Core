@@ -73,6 +73,18 @@ func buildDefaultStreams() []StreamConfig {
 			Replicas:   r,
 		},
 		{
+			// discovery.queue.ready wake-ups ( WP1). A wake is a hint, not
+			// work: the rows in sensor_discoveries are the queue, so an hour
+			// of retention is plenty — a message older than that describes
+			// rows the processor's fallback poll has long since taken.
+			Name:       "DISCOVERY_QUEUE",
+			Subjects:   []string{"discovery.queue.>"},
+			MaxAge:     time.Hour,
+			MaxMsgSize: 1 << 16,
+			Storage:    nats.FileStorage,
+			Replicas:   r,
+		},
+		{
 			Name:       "REPORT_JOBS",
 			Subjects:   []string{"report.jobs.>"},
 			MaxAge:     24 * time.Hour,

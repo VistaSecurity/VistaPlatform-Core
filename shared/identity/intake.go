@@ -264,6 +264,14 @@ type Sighting struct {
 	// ([EndpointObservation.Sanitized]).
 	Endpoints []EndpointObservation `json:"endpoints,omitempty"`
 
+	// EndpointsComplete marks Endpoints as the complete set of sockets one
+	// source found, carried to [Observation.EndpointsComplete]: the engine
+	// then closes that source's earlier endpoints the set no longer lists,
+	// when the sighting matches (see [CompleteEndpointSet]). Only a host's own
+	// socket table can say this; a sighting that sets it must satisfy
+	// [CompleteEndpointSet.Validate] or it is refused.
+	EndpointsComplete *CompleteEndpointSet `json:"endpoints_complete,omitempty"`
+
 	// Attributes are class attributes the collector observed, carried to
 	// [Observation.Attributes] unchanged (the engine reads only an allowlist).
 	Attributes map[string]any `json:"attributes,omitempty"`
@@ -383,6 +391,13 @@ type IdentifierProvenance struct {
 	// anything else is refused as [ErrInvalidSighting], because a claim
 	// nobody can make first-hand is a rule an adapter has misapplied.
 	Claimed bool `json:"claimed,omitempty"`
+	// VirtualInterface says the host reported this address on one of its
+	// VIRTUAL interfaces — a bridge, a veth, a tunnel. The address is kept,
+	// not omitted, but as attribute evidence
+	// (attrlist.KeyVirtualInterfaceAddresses), never as an identifier: the
+	// same bridge address sits on every host running the same software, and
+	// it says nothing about where the host is. Valid only on an ip_address.
+	VirtualInterface bool `json:"virtual_interface,omitempty"`
 }
 
 // ClaimsAddresses reports whether any identifier of the sighting is a claimed
@@ -431,6 +446,10 @@ const (
 	// (hostobs.VirtualMACProtocol): it belongs to the floating address's group
 	// and moves to the standby at failover.
 	WithheldVirtualRouterMAC = "virtual_router_mac"
+	// WithheldVirtualInterfaceAddress — an address the host reported on a
+	// virtual interface ([IdentifierProvenance.VirtualInterface]); kept as
+	// attrlist.KeyVirtualInterfaceAddresses.
+	WithheldVirtualInterfaceAddress = "virtual_interface_address"
 )
 
 // IntakeResult is everything [Intake.Assess] decided about a sighting.
@@ -479,47 +498,97 @@ func (in *Intake) Build(ctx context.Context, s Sighting) (Observation, error) {
 //     The result is still returned in full, so the adapter can record what was
 //     withheld and why.
 func (in *Intake) Assess(ctx context.Context, s Sighting) (IntakeResult, error) {
+	admission, err := validateSighting(s)
+	if err != nil {
+		return IntakeResult{}, err
+	}
+	snap, err := in.Snapshot(ctx, s.TenantID)
+	if err != nil {
+		return IntakeResult{}, err
+	}
+	return in.assess(ctx, s, admission, snap)
+}
+
+// Snapshot reads the tenant's segment snapshot through the intake's
+// repository — the read [Intake.Assess] makes per sighting. A caller that
+// assesses many sightings of one tenant in one request reads it once here and
+// passes it to [Intake.AssessWithSnapshot] for each ( F4).
+func (in *Intake) Snapshot(ctx context.Context, tenantID string) (SegmentSnapshot, error) {
+	snap, err := in.repo.SegmentSnapshot(ctx, tenantID)
+	if err != nil {
+		return SegmentSnapshot{}, fmt.Errorf("identity: intake: segment snapshot for tenant %s: %w", tenantID, err)
+	}
+	return snap, nil
+}
+
+// AssessWithSnapshot is [Intake.Assess] over a snapshot the caller already
+// read with [Intake.Snapshot] for the sighting's tenant. A snapshot of another
+// tenant is refused with [ErrInvalidSighting]: scoping one tenant's addresses
+// by another's segments would put its assets in the wrong place silently.
+func (in *Intake) AssessWithSnapshot(ctx context.Context, s Sighting, snap SegmentSnapshot) (IntakeResult, error) {
+	admission, err := validateSighting(s)
+	if err != nil {
+		return IntakeResult{}, err
+	}
+	if snap.TenantID != s.TenantID {
+		return IntakeResult{}, fmt.Errorf("%w: segment snapshot is for tenant %q, sighting for %q", ErrInvalidSighting, snap.TenantID, s.TenantID)
+	}
+	return in.assess(ctx, s, admission, snap)
+}
+
+// validateSighting is every check Assess makes before it reads anything,
+// returning the channel's admission.
+func validateSighting(s Sighting) (AdmissionEvidence, error) {
 	if strings.TrimSpace(s.TenantID) == "" {
-		return IntakeResult{}, fmt.Errorf("%w: no tenant", ErrInvalidSighting)
+		return AdmissionEvidence{}, fmt.Errorf("%w: no tenant", ErrInvalidSighting)
 	}
 	if !s.Source.Valid() {
-		return IntakeResult{}, fmt.Errorf("%w: source %+v is not a valid provenance", ErrInvalidSighting, s.Source)
+		return AdmissionEvidence{}, fmt.Errorf("%w: source %+v is not a valid provenance", ErrInvalidSighting, s.Source)
 	}
 	admission, ok := ChannelAdmission(s.Channel)
 	if !ok {
-		return IntakeResult{}, fmt.Errorf("%w: channel %q is not one of the intake channels", ErrInvalidSighting, s.Channel)
+		return AdmissionEvidence{}, fmt.Errorf("%w: channel %q is not one of the intake channels", ErrInvalidSighting, s.Channel)
 	}
 	for _, raw := range s.Identifiers {
 		if raw.Kind == KindDeclarationID {
-			return IntakeResult{}, fmt.Errorf("%w: declaration identifiers are issued only by an operator's confirmation", ErrInvalidSighting)
+			return AdmissionEvidence{}, fmt.Errorf("%w: declaration identifiers are issued only by an operator's confirmation", ErrInvalidSighting)
 		}
 		if k := raw.Provenance.Kind; k != "" && !k.Valid() {
-			return IntakeResult{}, fmt.Errorf("%w: identifier provenance kind %q", ErrInvalidSighting, k)
+			return AdmissionEvidence{}, fmt.Errorf("%w: identifier provenance kind %q", ErrInvalidSighting, k)
 		}
 		if !raw.Assignment.Valid() {
-			return IntakeResult{}, fmt.Errorf("%w: address assignment %q", ErrInvalidSighting, raw.Assignment)
+			return AdmissionEvidence{}, fmt.Errorf("%w: address assignment %q", ErrInvalidSighting, raw.Assignment)
+		}
+		if raw.Provenance.VirtualInterface && raw.Kind != KindIPAddress {
+			return AdmissionEvidence{}, fmt.Errorf("%w: only an ip_address sits on a virtual interface, not a %s", ErrInvalidSighting, raw.Kind)
 		}
 		if raw.Assignment != "" && raw.Kind != KindIPAddress {
-			return IntakeResult{}, fmt.Errorf("%w: an address assignment describes only an ip_address, not a %s", ErrInvalidSighting, raw.Kind)
+			return AdmissionEvidence{}, fmt.Errorf("%w: an address assignment describes only an ip_address, not a %s", ErrInvalidSighting, raw.Kind)
 		}
 		if raw.Provenance.Claimed {
 			switch {
 			case raw.Kind != KindIPAddress:
-				return IntakeResult{}, fmt.Errorf("%w: only an ip_address can be claimed, not a %s", ErrInvalidSighting, raw.Kind)
+				return AdmissionEvidence{}, fmt.Errorf("%w: only an ip_address can be claimed, not a %s", ErrInvalidSighting, raw.Kind)
 			case raw.Assignment == AssignmentDynamic:
-				return IntakeResult{}, fmt.Errorf("%w: a claimed address cannot be a DHCP lease", ErrInvalidSighting)
+				return AdmissionEvidence{}, fmt.Errorf("%w: a claimed address cannot be a DHCP lease", ErrInvalidSighting)
 			case !claimsFirstHand(s.Source, admission):
-				return IntakeResult{}, fmt.Errorf("%w: an address can be claimed only by a measured, first-hand sighting (channel %q, source %q)",
+				return AdmissionEvidence{}, fmt.Errorf("%w: an address can be claimed only by a measured, first-hand sighting (channel %q, source %q)",
 					ErrInvalidSighting, s.Channel, s.Source.Kind)
 			}
 		}
 	}
 
-	snap, err := in.repo.SegmentSnapshot(ctx, s.TenantID)
-	if err != nil {
-		return IntakeResult{}, fmt.Errorf("identity: intake: segment snapshot for tenant %s: %w", s.TenantID, err)
+	if s.EndpointsComplete != nil {
+		if err := s.EndpointsComplete.Validate(s.Source, s.Endpoints); err != nil {
+			return AdmissionEvidence{}, fmt.Errorf("%w: %w", ErrInvalidSighting, err)
+		}
 	}
 
+	return admission, nil
+}
+
+// assess applies the intake rules to a validated sighting over snap.
+func (in *Intake) assess(ctx context.Context, s Sighting, admission AdmissionEvidence, snap SegmentSnapshot) (IntakeResult, error) {
 	admission.ReceiptID = s.ReceiptID
 	admission.CollectorVersion = s.CollectorVersion
 	b := &intakeBuild{
@@ -596,6 +665,10 @@ func (b *intakeBuild) run(ctx context.Context) {
 		addr := netip.MustParseAddr(v)
 		scope, _ := b.snap.ScopeForAddress(addr, s.CloudNetworkRef)
 		addrs = append(addrs, sightedAddr{raw: raw, addr: addr, scope: scope})
+		if raw.Provenance.VirtualInterface {
+			// Not where the host lives: it never places the sighting.
+			continue
+		}
 		if b.primary == "" && scope != ScopeTenantDefault {
 			b.primary = scope
 		}
@@ -613,6 +686,10 @@ func (b *intakeBuild) run(ctx context.Context) {
 
 	// Pass 2: addresses — hygiene, then the identifier.
 	for _, a := range addrs {
+		if a.raw.Provenance.VirtualInterface {
+			b.withhold(a.raw.Kind, a.addr.WithZone("").String(), WithheldVirtualInterfaceAddress, attrlist.KeyVirtualInterfaceAddresses)
+			continue
+		}
 		if mac, ok := derive.MACFromEUI64(a.addr); ok && !statedMAC {
 			b.addDerivedMAC(mac, derive.RefEUI64(a.addr))
 		}
@@ -734,6 +811,10 @@ func (b *intakeBuild) run(ctx context.Context) {
 		for _, ep := range s.Endpoints {
 			b.obs.Endpoints = append(b.obs.Endpoints, ep.Sanitized())
 		}
+	}
+	if s.EndpointsComplete != nil {
+		set := *s.EndpointsComplete
+		b.obs.EndpointsComplete = &set
 	}
 
 	// Names are context, not identity. A synthetic name is still the best

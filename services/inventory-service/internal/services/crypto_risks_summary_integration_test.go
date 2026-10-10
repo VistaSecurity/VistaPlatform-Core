@@ -26,7 +26,7 @@ func TestIntegration_CryptoRisksSummary_CanonicalJudgments(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _, _ = db.Exec(`DELETE FROM algorithms WHERE id=$1`, alg) })
-		if _, err := db.Exec(`INSERT INTO crypto_implementations(id,tenant_id,asset_id,protocol,discovery_method,risk_score,created_at,updated_at) VALUES($1,$2,$3,'TLS','passive',0,NOW(),NOW())`, ci, tenant, asset); err != nil {
+		if _, err := db.Exec(`INSERT INTO crypto_implementations(id,tenant_id,asset_id,protocol,cipher_suite,discovery_method,risk_score,created_at,updated_at) VALUES($1,$2,$3,'TLS','fixture-'||$1::uuid::text,'passive',0,NOW(),NOW())`, ci, tenant, asset); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.Exec(`INSERT INTO crypto_implementation_algorithms(crypto_implementation_id,algorithm_id,algorithm_type) VALUES($1,$2,'symmetric')`, ci, alg); err != nil {
@@ -67,8 +67,8 @@ func TestIntegration_CryptoRisks_StreamedPageSelection(t *testing.T) {
 	must(`INSERT INTO algorithms(id,code,name,category,strength,risk_score) VALUES($1,$2,'stream','symmetric','weak',0)`, algorithm, "STREAM-"+algorithm.String())
 	t.Cleanup(func() { _, _ = raw.Exec(`DELETE FROM algorithms WHERE id=$1`, algorithm) })
 	must(`WITH inserted AS (
- INSERT INTO crypto_implementations(id,tenant_id,asset_id,protocol,discovery_method,risk_score)
- SELECT gen_random_uuid(),$1,$2,'TLS','passive',0 FROM generate_series(1,2000) RETURNING id)
+ INSERT INTO crypto_implementations(id,tenant_id,asset_id,protocol,cipher_suite,discovery_method,risk_score)
+ SELECT gen_random_uuid(),$1,$2,'TLS','fixture-'||n,'passive',0 FROM generate_series(1,2000) n RETURNING id)
  INSERT INTO crypto_implementation_algorithms(crypto_implementation_id,algorithm_id,algorithm_type)
  SELECT id,$3,'symmetric' FROM inserted`, tenant, asset, algorithm)
 	svc := NewCryptoRisksService(db)

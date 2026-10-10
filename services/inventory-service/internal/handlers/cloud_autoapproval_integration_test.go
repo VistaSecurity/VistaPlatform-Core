@@ -1,8 +1,10 @@
 package handlers
 
 // Pins auto-approval of CLOUD discoveries end to end, over a real Postgres:
-// segment configuration → generated rule row → classification of a
-// placeholder-addressed cloud resource → the shared evaluator's decision.
+// segment configuration → generated rule row → the real discovery import,
+// which classifies the placeholder-addressed cloud resource by its cloud
+// segment and evaluates the rules itself ( WP3) → the status the asset
+// lands as.
 //
 // Two things were broken and both are covered here, because fixing either
 // alone leaves cloud auto-approval half-working:
@@ -21,106 +23,69 @@ package handlers
 // test-integration-db).
 
 import (
-	"bytes"
-	"database/sql"
-	"encoding/json"
-	"net/http"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 
-	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
-	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/approval"
-	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
-// cloudFixture wires the REAL segment service and the REAL handler over a real
-// database, so the classify route under test is the one the
-// discovery-processor calls.
+// cloudFixture is the REAL discovery import (routePipelineFixture) — the
+// route discovery-processor posts every finding to, which now classifies the
+// finding and evaluates the rules itself ( WP3). It replaced a fixture
+// over the deleted network-segments/classify-asset route.
 type cloudFixture struct {
-	engine *gin.Engine
-	segSvc *services.NetworkSegmentService
+	*routePipelineFixture
 	approv *approval.Service
-	raw    *sql.DB
-	tenant uuid.UUID
 }
 
 func newCloudFixture(t *testing.T) *cloudFixture {
 	t.Helper()
-	raw := testdb.Connect(t)
-	testdb.ApplySchemaAndSeed(t, raw)
-	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
-	tenant := testdb.NewTenant(t, raw)
-
-	segSvc := services.NewNetworkSegmentService(db, services.NewLocationService(db))
-
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
-	grp := r.Group("/api/v2/inventory-service")
-	grp.Use(func(c *gin.Context) {
-		c.Set("tenantID", tenant)
-		c.Next()
-	})
-	h := NewNetworkSegmentHandler(segSvc)
-	grp.POST("/network-segments/classify-asset", h.ClassifyAsset)
-
-	return &cloudFixture{engine: r, segSvc: segSvc, approv: approval.NewService(raw), raw: raw, tenant: tenant}
+	f := newRoutePipelineFixture(t)
+	return &cloudFixture{routePipelineFixture: f, approv: approval.NewService(f.raw)}
 }
 
-// classifyCloud calls the real classify-asset route the way discovery-processor
-// does for a cloud discovery: the placeholder address plus the cloud
-// account/region the row carries.
-func (f *cloudFixture) classifyCloud(t *testing.T, provider, region, vpc string) *approval.Classification {
+// cloudSegment is the segment a cloud resource in aws/us-east-1 resolves to —
+// the same FindOrCreateCloudSegment the import's classification calls.
+func (f *cloudFixture) cloudSegment(t *testing.T) *models.NetworkSegment {
 	t.Helper()
-	body, err := json.Marshal(map[string]interface{}{
-		"ip_address":     "0.0.0.0",
-		"cloud_provider": provider,
-		"cloud_region":   region,
-		"vpc_id":         vpc,
-		"environment":    "production",
-	})
-	if err != nil {
-		t.Fatalf("marshal classify body: %v", err)
+	seg, err := f.segSvc.FindOrCreateCloudSegment(f.tenant, "aws", "us-east-1", "", "production")
+	if err != nil || seg == nil {
+		t.Fatalf("cloud segment: %v", err)
 	}
-	w := do(f.engine, http.MethodPost, "/api/v2/inventory-service/network-segments/classify-asset", bytes.NewReader(body))
-	if w.Code != http.StatusOK {
-		t.Fatalf("classify-asset returned %d: %s", w.Code, w.Body.String())
-	}
-	var resp struct {
-		Ownership   string  `json:"ownership"`
-		NetworkType string  `json:"network_type"`
-		SegmentID   *string `json:"segment_id"`
-		SegmentName *string `json:"segment_name"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode classify response: %v (%s)", err, w.Body.String())
-	}
-	c := &approval.Classification{Ownership: resp.Ownership, Type: resp.NetworkType}
-	if resp.SegmentID != nil {
-		if id, err := uuid.Parse(*resp.SegmentID); err == nil {
-			c.SegmentID = &id
-		}
-	}
-	c.SegmentName = resp.SegmentName
-	return c
+	return seg
 }
 
-// cloudDiscovery is what a cloud-API row projects onto for rule evaluation.
-func cloudDiscovery(t *testing.T, tenant uuid.UUID) approval.Discovery {
+// importCloud imports one placeholder-addressed cloud resource through the
+// real import route, the way discovery-processor forwards a cloud-API row,
+// and returns the status its new asset landed as and the rule credited.
+func (f *cloudFixture) importCloud(t *testing.T, name string) (string, string) {
 	t.Helper()
-	meta, err := json.Marshal(map[string]interface{}{
-		"discovery_method": "cloud_api",
-		"cloud_provider":   "aws",
-		"cloud_region":     "us-east-1",
+	resp := f.importFindings(t, map[string]interface{}{
+		"hostname":   name,
+		"ip_address": "0.0.0.0",
+		"asset_type": "key_store",
+		"protocol":   "",
+		"raw_data": map[string]interface{}{
+			"source":           "cloud_discovery",
+			"discovery_method": "cloud_api",
+			"cloud_provider":   "aws",
+			"cloud_region":     "us-east-1",
+			"environment":      "production",
+			"device_id":        "arn:aws:kms:us-east-1:123456789012:key/" + name,
+			"confidence":       0.95,
+			"at_rest":          true,
+		},
 	})
-	if err != nil {
-		t.Fatalf("marshal discovery metadata: %v", err)
-	}
-	return approval.Discovery{TenantID: tenant, Metadata: meta}.WithConfidence(0.95)
+	return resp.AssetStatuses[0], resp.Results[0].AutoApprovalRuleID
+}
+
+// classificationOf is the classification the import computes for a cloud
+// resource in seg: internal, on that segment.
+func classificationOf(seg *models.NetworkSegment) *approval.Classification {
+	id, name := seg.ID, seg.Name
+	return &approval.Classification{Ownership: "internal", Type: seg.NetworkType, SegmentID: &id, SegmentName: &name}
 }
 
 // setSegmentAutoApproval turns auto-approve on for the segment the cloud
@@ -153,23 +118,16 @@ func (f *cloudFixture) setSegmentAutoApproval(t *testing.T, segID uuid.UUID, sou
 func TestIntegration_CloudDiscovery_AutoApprovedWhenSegmentIncludesCloudSource(t *testing.T) {
 	f := newCloudFixture(t)
 
-	classification := f.classifyCloud(t, "aws", "us-east-1", "")
-	if classification.Ownership != "internal" {
-		t.Fatalf("a cloud resource classified ownership=%q, want internal — a placeholder address must not decide whose network a cloud resource is on", classification.Ownership)
-	}
-	if classification.SegmentID == nil {
-		t.Fatal("a cloud resource resolved to no segment — nothing a segment rule can match")
-	}
+	seg := f.cloudSegment(t)
+	f.setSegmentAutoApproval(t, seg.ID, []string{models.AutoApproveSourceCloud})
 
-	f.setSegmentAutoApproval(t, *classification.SegmentID, []string{models.AutoApproveSourceCloud})
-
-	auto, ruleID, err := f.approv.EvaluateAutoApprovalWithRules(
-		f.rules(t), cloudDiscovery(t, f.tenant), classification)
-	if err != nil {
-		t.Fatalf("evaluate: %v", err)
+	status, ruleID := f.importCloud(t, "key-approved")
+	if status != "monitoring" {
+		t.Fatalf("a cloud discovery on a segment that auto-approves cloud landed %q, want monitoring — "+
+			"a placeholder address must not decide whose network a cloud resource is on", status)
 	}
-	if !auto || ruleID == nil {
-		t.Fatal("a cloud discovery on a segment that auto-approves cloud was NOT auto-approved")
+	if ruleID == "" {
+		t.Fatal("the import approved the cloud resource but credited no rule")
 	}
 }
 
@@ -178,19 +136,11 @@ func TestIntegration_CloudDiscovery_AutoApprovedWhenSegmentIncludesCloudSource(t
 func TestIntegration_CloudDiscovery_NotAutoApprovedWhenSegmentIsSensorOnly(t *testing.T) {
 	f := newCloudFixture(t)
 
-	classification := f.classifyCloud(t, "aws", "us-east-1", "")
-	if classification.SegmentID == nil {
-		t.Fatal("a cloud resource resolved to no segment")
-	}
-	f.setSegmentAutoApproval(t, *classification.SegmentID, []string{models.AutoApproveSourceSensor})
+	seg := f.cloudSegment(t)
+	f.setSegmentAutoApproval(t, seg.ID, []string{models.AutoApproveSourceSensor})
 
-	auto, _, err := f.approv.EvaluateAutoApprovalWithRules(
-		f.rules(t), cloudDiscovery(t, f.tenant), classification)
-	if err != nil {
-		t.Fatalf("evaluate: %v", err)
-	}
-	if auto {
-		t.Fatal("a cloud discovery was auto-approved by a segment whose auto-approval covers sensor discoveries only")
+	if status, ruleID := f.importCloud(t, "key-sensor-only"); status != "pending_approval" || ruleID != "" {
+		t.Fatalf("a cloud discovery landed %q (rule %q) on a segment whose auto-approval covers sensor discoveries only", status, ruleID)
 	}
 }
 
@@ -201,11 +151,7 @@ func TestIntegration_CloudDiscovery_NotAutoApprovedWhenSegmentIsSensorOnly(t *te
 func TestIntegration_PreExistingSegment_DoesNotStartAutoApprovingCloud(t *testing.T) {
 	f := newCloudFixture(t)
 
-	classification := f.classifyCloud(t, "aws", "us-east-1", "")
-	if classification.SegmentID == nil {
-		t.Fatal("a cloud resource resolved to no segment")
-	}
-	segID := *classification.SegmentID
+	segID := f.cloudSegment(t).ID
 
 	// Turn auto-approve on, then strip the sources key straight out of the row
 	// to reproduce a segment written before the setting existed.
@@ -226,13 +172,8 @@ func TestIntegration_PreExistingSegment_DoesNotStartAutoApprovingCloud(t *testin
 		t.Fatalf("a segment with no stored sources read back as %v, want [sensor]", seg.AutoApproveSources)
 	}
 
-	auto, _, err := f.approv.EvaluateAutoApprovalWithRules(
-		f.rules(t), cloudDiscovery(t, f.tenant), classification)
-	if err != nil {
-		t.Fatalf("evaluate: %v", err)
-	}
-	if auto {
-		t.Fatal("a segment configured before the per-source setting existed started auto-approving cloud assets")
+	if status, _ := f.importCloud(t, "key-pre-existing"); status != "pending_approval" {
+		t.Fatalf("a segment configured before the per-source setting existed started auto-approving cloud assets (landed %q)", status)
 	}
 }
 
@@ -241,25 +182,17 @@ func TestIntegration_PreExistingSegment_DoesNotStartAutoApprovingCloud(t *testin
 func TestIntegration_SegmentWithBothSources_ApprovesSensorAndCloud(t *testing.T) {
 	f := newCloudFixture(t)
 
-	classification := f.classifyCloud(t, "aws", "us-east-1", "")
-	if classification.SegmentID == nil {
-		t.Fatal("a cloud resource resolved to no segment")
-	}
-	f.setSegmentAutoApproval(t, *classification.SegmentID,
+	seg := f.cloudSegment(t)
+	f.setSegmentAutoApproval(t, seg.ID,
 		[]string{models.AutoApproveSourceSensor, models.AutoApproveSourceCloud})
 
-	rules := f.rules(t)
-	cloudAuto, _, err := f.approv.EvaluateAutoApprovalWithRules(rules, cloudDiscovery(t, f.tenant), classification)
-	if err != nil {
-		t.Fatalf("evaluate cloud: %v", err)
-	}
-	if !cloudAuto {
-		t.Fatal("a cloud discovery was not auto-approved by a segment covering both sources")
+	if status, _ := f.importCloud(t, "key-both"); status != "monitoring" {
+		t.Fatalf("a cloud discovery landed %q on a segment covering both sources, want monitoring", status)
 	}
 
 	// A sensor discovery is one with no cloud_api marker in its metadata.
-	sensorAuto, _, err := f.approv.EvaluateAutoApprovalWithRules(rules,
-		approval.Discovery{TenantID: f.tenant}.WithConfidence(0.9), classification)
+	sensorAuto, _, err := f.approv.EvaluateAutoApprovalWithRules(f.rules(t),
+		approval.Discovery{TenantID: f.tenant}.WithConfidence(0.9), classificationOf(seg))
 	if err != nil {
 		t.Fatalf("evaluate sensor: %v", err)
 	}

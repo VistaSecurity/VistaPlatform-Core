@@ -14,8 +14,11 @@ package services
 // resolution of an algorithm against the catalogue — so this posts the
 // provider's own account of each key over the same HMAC-signed, mTLS-aware
 // transport the agent-host approval uses, and lets that service decide what it
-// means. `kms_keys` keeps being written as before; retiring it is a separate
-// decision.
+// means.
+//
+// This is now the key's ONLY path ( decision D3): `kms_keys` is no longer
+// written, and the key-store devices are no longer emitted into
+// sensor_discoveries (see keyInventoryDeviceTypes).
 
 import (
 	"bytes"
@@ -99,9 +102,9 @@ func NewInventoryCloudKeyPublisher(baseURL string, client *http.Client) *Invento
 // 8443 listener which demands one — a plain http.Client there fails the
 // handshake, and the discovery would report the peer down.
 //
-// A client that cannot be built (a missing cert under mTLS) returns nil, which
-// the caller tolerates: `kms_keys` is still written and the log says why,
-// rather than a discovery failing outright.
+// A client that cannot be built (a missing cert under mTLS) returns nil.
+// PublishKMSKeyFindings then reports every KMS collection as failed (the keys
+// have nowhere else to go), and this log line says why.
 func NewInventoryCloudKeyPublisherFromEnv() CloudKeyPublisher {
 	baseURL := sharedconfig.PeerServiceURLAuto("INVENTORY_SERVICE_URL", "inventory-service")
 	var client *http.Client

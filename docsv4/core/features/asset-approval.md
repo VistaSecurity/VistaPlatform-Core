@@ -79,10 +79,18 @@ endpoint, so the click is the approval and the asset is created as `monitoring`.
 
 While an asset is `pending_approval`, its discovered certificates and crypto
 configurations are **not** written to the inventory tables. The raw findings are
-held with the pending asset and **materialized when the asset is approved** —
+held for the pending asset and **materialized when the asset is approved** —
 only then do rows appear in the Certificate, Keys, and Configuration lenses and
 become visible to compliance evaluation and risk scoring. Denying the asset
 discards them.
+
+Every way an asset becomes `monitoring` materializes what was held: **Accept**
+in Approvals and an installed device agent do it at once; an auto-approval
+rule, an Active Scan's approval, or linking an observation in
+**Discovery → Observations** does it within about a minute. Up to 50 distinct
+findings are held per asset; if a pending asset produces more, the ones
+observed longest ago are dropped, since the newest describe its current
+configuration.
 
 This is deliberate: unapproved discoveries must not leak data into the
 tenant's inventory. The practical consequence is that on a fresh deployment

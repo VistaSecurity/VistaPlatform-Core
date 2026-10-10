@@ -192,6 +192,8 @@ func TestIntegration_InterrogationClaim_HostInventoryRowIsNotAnInterrogationClai
 	fin := f.interrogationFinding("203.0.113.50", "", 443, "tcp", "", "", map[string]interface{}{
 		"discovery_method": "host_inventory",
 		"discovery_type":   "host_connection",
+		// The host's own address, as host_inventory_ingest.go writes it.
+		"source_ip": "10.0.0.15",
 	})
 	if _, err := f.svc.IngestFindingsReport(f.tenant, []IngestFinding{fin}, "monitoring"); err != nil {
 		t.Fatal(err)

@@ -43,6 +43,7 @@ import (
 	"strings"
 
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/network/addrscope"
 )
 
 // OwnedNetworks is the platform's statement, delivered to a sensor on its
@@ -264,16 +265,17 @@ func parsePrefixes(raw []string) (out []netip.Prefix, rejected int) {
 }
 
 // OwnedByAddressClass is the part of ownership an address proves on its own:
-// RFC 1918 and RFC 4193 space ([netip.Addr.IsPrivate]), loopback, and
-// link-local unicast. Nobody else's service lives there as seen from inside
-// the tenant's network.
+// RFC 1918 and RFC 4193 space, loopback, and link-local unicast — the
+// platform's one definition, [addrscope.MayAutoProbe]. Nobody else's service
+// lives there as seen from inside the tenant's network.
 //
 // Deliberately NOT here: carrier-grade NAT, the documentation ranges, and
 // anything else merely "not globally routable". Not being routable does not
-// make an address the tenant's.
+// make an address the tenant's. CGNAT is an internal candidate for inventory
+// classification ([addrscope.IsTenantAddressable]) but is probed automatically
+// only inside a declared segment ( D1).
 func OwnedByAddressClass(addr netip.Addr) bool {
-	addr = addr.Unmap()
-	return addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast()
+	return addrscope.MayAutoProbe(addr)
 }
 
 // EndpointString is the wire spelling of an endpoint, shared by the platform

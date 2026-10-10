@@ -406,6 +406,19 @@ const (
 	SubjectWebhookJobsSubmit   = "webhooks.submit"
 	SubjectPcapJobsProcess     = "pcap.jobs.process"
 
+	// SubjectDiscoveryQueueReady is published by every writer of
+	// sensor_discoveries AFTER its transaction commits, and consumed by
+	// discovery-processor, which drains every claimable batch on each wake
+	// ( WP1). It carries no work — the rows are the source of truth, and a
+	// lost message only delays processing until the processor's fallback poll.
+	//
+	// Deliberately NOT discovery.jobs.submit: that subject is cluster-sensor's
+	// "run this scan job" queue, and using it as the processor's wake-up as
+	// well meant every stuck-job republish fired a processor poll and every
+	// pcap upload asked cluster-sensor to run a job that did not exist (F10).
+	// Captured by the DISCOVERY_QUEUE stream, not DISCOVERY_JOBS.
+	SubjectDiscoveryQueueReady = "discovery.queue.ready"
+
 	// Metrics subjects
 	SubjectMetricsSystem = "metrics.system"
 

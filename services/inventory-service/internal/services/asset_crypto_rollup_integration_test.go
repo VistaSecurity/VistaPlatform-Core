@@ -49,8 +49,8 @@ func insertRollupImpl(t *testing.T, db *database.DB, tenant, asset uuid.UUID, pr
 	t.Helper()
 	_, err := db.Exec(`
 		INSERT INTO crypto_implementations
-			(id, tenant_id, asset_id, protocol, discovery_method, risk_score, deleted_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, 'passive', $5, CASE WHEN $6 THEN NOW() ELSE NULL END, NOW(), NOW())`,
+			(id, tenant_id, asset_id, protocol, cipher_suite, discovery_method, risk_score, deleted_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'fixture-' || $1::uuid::text, 'passive', $5, CASE WHEN $6 THEN NOW() ELSE NULL END, NOW(), NOW())`,
 		uuid.New(), tenant, asset, protocol, risk, deleted)
 	if err != nil {
 		t.Fatalf("insert crypto implementation: %v", err)

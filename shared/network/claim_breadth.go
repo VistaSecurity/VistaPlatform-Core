@@ -1,6 +1,10 @@
 package network
 
-import "net/netip"
+import (
+	"net/netip"
+
+	"github.com/vistasecurity/vistaplatform/shared/network/addrscope"
+)
 
 // Minimum prefix lengths for a DECLARED network segment to count as a claim of
 // ownership. Nobody owns a /7 of the IPv4 internet or a /15 of IPv6, and a
@@ -50,10 +54,10 @@ func TooBroadToClaim(p netip.Prefix) bool {
 	return p.Bits() < MinClaimBitsIPv6
 }
 
-// ownedByAddressClass: RFC 1918 / RFC 4193, loopback, link-local unicast.
+// ownedByAddressClass: RFC 1918 / RFC 4193, loopback, link-local unicast —
+// addrscope's one definition (probeconsent.OwnedByAddressClass reads the same).
 func ownedByAddressClass(a netip.Addr) bool {
-	a = a.Unmap()
-	return a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast()
+	return addrscope.MayAutoProbe(a)
 }
 
 func lastAddrOf(p netip.Prefix) netip.Addr {

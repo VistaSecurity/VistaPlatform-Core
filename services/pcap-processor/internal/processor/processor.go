@@ -170,7 +170,11 @@ type Processor struct {
 	cfg        *config.Config
 	sem        chan struct{}
 	natsClient *events.NATSClient
-	audit      AuditSink
+	// queuePublisher wakes discovery-processor once a job's rows are committed
+	// to sensor_discoveries (discovery.queue.ready, WP1). New sets it to
+	// natsClient; a test substitutes a recorder.
+	queuePublisher events.MessagePublisher
+	audit          AuditSink
 	// httpClient carries the result callback to sensor-manager. Under the
 	// service mesh that is https://sensor-manager:8443, which demands a client
 	// certificate and is signed by the Platform CA — a plain http.Client
@@ -185,12 +189,13 @@ type Processor struct {
 // records nothing rather than failing the job.
 func New(db *sqlx.DB, cfg *config.Config, natsClient *events.NATSClient, auditSink AuditSink) *Processor {
 	return &Processor{
-		db:         db,
-		cfg:        cfg,
-		sem:        make(chan struct{}, cfg.MaxConcurrentJobs),
-		natsClient: natsClient,
-		audit:      auditSink,
-		httpClient: newPeerClient(cfg),
+		db:             db,
+		cfg:            cfg,
+		sem:            make(chan struct{}, cfg.MaxConcurrentJobs),
+		natsClient:     natsClient,
+		queuePublisher: natsClient,
+		audit:          auditSink,
+		httpClient:     newPeerClient(cfg),
 	}
 }
 
@@ -764,7 +769,7 @@ func (p *Processor) submitResults(ctx context.Context, jobID uuid.UUID, tenantID
 }
 
 // insertDiscoveriesIntoPipeline writes each CryptoDiscovery as a sensor_discoveries row
-// then publishes a discovery.jobs.submit event so discovery-processor-service picks them up.
+// then publishes discovery.queue.ready so discovery-processor-service picks them up.
 func (p *Processor) insertDiscoveriesIntoPipeline(ctx context.Context, jobID uuid.UUID, tenantID uuid.UUID, discoveries []CryptoDiscovery) error {
 	sensorID, err := p.resolvePlatformSensorID(ctx, tenantID)
 	if err != nil {
@@ -836,16 +841,12 @@ func (p *Processor) insertDiscoveriesIntoPipeline(ctx context.Context, jobID uui
 
 	log.Printf("[PCAP] Inserted %d/%d discoveries into sensor_discoveries pipeline (batch %s)", inserted, len(discoveries), batchID)
 
-	if inserted > 0 && p.natsClient != nil {
-		event := &events.DiscoveryJobEvent{
-			EventID:  uuid.New(),
-			TenantID: tenantID,
-			JobID:    batchID,
-			JobType:  "pcap_upload",
-		}
-		if err := events.PublishJSON(p.natsClient, events.SubjectDiscoveryJobsSubmit, event); err != nil {
-			log.Printf("[PCAP] Warning: failed to publish discovery job event for batch %s: %v", batchID, err)
-		}
+	// Committed: wake discovery-processor. This used to publish
+	// discovery.jobs.submit — cluster-sensor's "run this scan job" subject —
+	// which also asked cluster-sensor to run a job that did not exist (
+	// F10). discovery.queue.ready is the processor's own wake-up.
+	if inserted > 0 {
+		_ = events.PublishDiscoveryQueueReady(ctx, p.queuePublisher, tenantID, batchID, "pcap-processor.insert_discoveries")
 	}
 
 	return nil

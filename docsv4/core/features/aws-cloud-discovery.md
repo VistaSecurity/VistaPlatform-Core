@@ -7,7 +7,8 @@ Automated discovery and interrogation of AWS cloud resources for cryptographic c
 AWS Cloud Resource Discovery reads your AWS account through the AWS management APIs with read-only credentials and lands the results in the same inventory as sensor-discovered assets. It covers two families of resource:
 
 - **TLS-terminating front ends** — load balancers, API Gateway custom domains, CloudFront distributions. For these the platform reads the configured TLS policy *and* performs a live TLS handshake against publicly reachable endpoints to capture the served certificate chain.
-- **At-rest cryptographic posture** — KMS keys, S3 bucket default encryption, RDS storage encryption. These are configuration records, not reachable TLS endpoints.
+- **At-rest cryptographic posture** — S3 bucket default encryption, RDS storage encryption. These are configuration records, not reachable TLS endpoints.
+- **KMS keys** — recorded in the key inventory (Inventory → Keys), and each one as a **Key Store** Infrastructure Asset with no endpoint.
 
 Nothing is deployed inside your VPC. No traffic is mirrored. The platform only reads what the AWS control plane already exposes.
 
@@ -275,7 +276,7 @@ If the integration has account-wide compute enumeration switched off, or enumera
 
 Cloud-discovered assets appear alongside sensor-discovered ones with hostname, port, protocol, protocol version, cipher suite and certificate detail. They carry `discovery_method = 'cloud_api'` and arrive as `pending_approval` — unless the cloud segment they belong to (the per-region segment created from their `cloud_provider`/`cloud_region`) has auto-approve enabled **with cloud discoveries among its sources**, in which case they go straight to `monitoring`. Cloud coverage is off on every pre-existing segment and is enabled per segment in Settings → Infrastructure; see [Asset Approval](asset-approval.md#which-discoveries-a-segment-auto-approves).
 
-Approved resources appear as Infrastructure Assets with their Crypto Configurations. Cloud resource types render with readable names ("AWS S3 bucket", "AWS KMS key") on Discovery → Devices and in the job drawer, and each one is given the **class** that says what it is: an ELB becomes a **Cloud Load Balancer**, an S3 bucket **Object Storage**, a KMS key a **Key Store**, an API Gateway domain an **API Gateway**, a CloudFront distribution a **CDN Distribution**, an RDS instance a **Managed Database** and an EC2 instance a **Compute Instance**. All of them sit under **Cloud Resource** in the class tree, so filtering the Inventory list by that one class shows every cloud thing this integration found, and a resource type the platform has not seen before is filed as a plain Cloud Resource rather than guessed into the wrong family.
+Approved resources appear as Infrastructure Assets with their Crypto Configurations. Cloud resource types render with readable names ("AWS S3 bucket", "AWS KMS key") on Discovery → Devices and in the job drawer, and each asset is given the **class** that says what it is: an ELB becomes a **Cloud Load Balancer**, an S3 bucket **Object Storage**, a KMS key a **Key Store**, an API Gateway domain an **API Gateway**, a CloudFront distribution a **CDN Distribution**, an RDS instance a **Managed Database** and an EC2 instance a **Compute Instance**. All of them sit under **Cloud Resource** in the class tree, so filtering the Inventory list by that one class shows every cloud thing this integration found, and a resource type the platform has not seen before is filed as a plain Cloud Resource rather than guessed into the wrong family.
 
 ## Crypto Configuration Details
 
@@ -470,9 +471,9 @@ All of these are read-only. Nothing in the policy can modify a load balancer, cr
 
 Read this section before drawing conclusions from a run.
 
-### KMS results are not yet browsable as a key inventory
+### KMS keys appear in two places
 
-**You can run KMS discovery, but you cannot yet browse the results as a key inventory in the tenant UI.** Discovered KMS keys are written to a separate `kms_keys` table that no page in the tenant UI reads. The keys do appear as devices on Discovery → Devices and as `service`-type Infrastructure Assets, but Inventory → Keys is a different inventory and does not show them; there is no view today that lists key spec, rotation status or rotation age for your KMS estate. Do not plan a KMS rotation review around this feature yet.
+Discovered KMS keys are listed in **Inventory → Keys**, with their spec, state, rotation setting and who manages them (you or AWS). Each key is also a **Key Store** Infrastructure Asset with no endpoint. The key inventory creates and refreshes that asset directly, without passing it through the discovery queue; it is approved or held in Discovery → Approvals by the same segment rules as any other cloud discovery, and a Key Store asset from an earlier release is the same asset, not a duplicate. A run's job detail still counts the keys it found under `kms`, and a run whose keys could not be recorded reports the KMS type as failed rather than complete.
 
 ### S3 and RDS records are not reachable endpoints
 

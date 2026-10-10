@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/version"
@@ -67,6 +68,22 @@ func main() {
 		log.Fatalf("Failed to build the inventory-service sightings client: %v", err)
 	}
 	services.SetSightingPoster(sightings)
+
+	// Every sensor_discoveries writer in this process wakes discovery-processor
+	// after it commits (discovery.queue.ready, WP1). Installed before any
+	// writer can run — the retained-replay loops below start immediately. A
+	// nil client (NATS_URL unset or unreachable) is installed too: the first
+	// write then logs a WARNING instead of silently falling back to the poll.
+	var queueNATS *events.NATSClient
+	if cfg.NATSURL != "" {
+		if nc, natsErr := events.NewNATSClient(cfg.NATSURL); natsErr != nil {
+			log.Printf("WARNING: NATS unavailable for discovery.queue.ready; discovery-processor will reach this service's rows on its fallback poll: %v", natsErr)
+		} else {
+			queueNATS = nc
+			defer queueNATS.Close()
+		}
+	}
+	services.SetDiscoveryQueuePublisher(queueNATS)
 
 	// Initialize services for platform agent worker
 	cloudService := services.NewCloudDiscoveryService(db, bypassDB, cfg.EncryptionMasterKey)

@@ -193,7 +193,10 @@ func TestIntegration_ObservedThirdParty_StillRoutesToExternalConnections(t *test
 			// Same public address shape, no cloud credential behind it.
 			"source":           "sensor_discovery",
 			"discovery_method": "passive",
-			"certificates":     []interface{}{acmCertificateEntry()},
+			// The tenant host the sensor saw open it ( D2: a connection
+			// with no source is dropped, not routed).
+			"source_ip":    "10.0.0.5",
+			"certificates": []interface{}{acmCertificateEntry()},
 		},
 	}
 
@@ -231,6 +234,7 @@ func TestIntegration_CloudAPIFindingWithoutCredential_IsNotOwned(t *testing.T) {
 		RawData: map[string]interface{}{
 			"discovery_method": "cloud_api",
 			// no integration_id
+			"source_ip": "10.0.0.5", // #2374 D2: routed connections have a source
 		},
 	}
 

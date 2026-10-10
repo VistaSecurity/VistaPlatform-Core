@@ -1,9 +1,8 @@
 {
   "vendor": "f5",
-  "input_sha256": "b0e9074fbf3e03e97561b5321ce1065682f8ac021bf35dc8a546f3a144fa2cf6",
+  "input_sha256": "4236bdf82f399dcdbd66c52bb34cb8b4047136b1ba35475b1b5aa47444f247e3",
   "imports": [
     {
-      "asset_status": "pending_approval",
       "findings": [
         {
           "asset_type": "server",
@@ -53,8 +52,6 @@
             "hash_algorithm": "SHA384",
             "key_exchange_algorithm": "ECDHE",
             "key_size": 256,
-            "network_ownership": "internal",
-            "network_type": "public",
             "pqc_kex_detected": false,
             "profile_name": "clientssl-secure",
             "sensor_id": "{{SENSOR_ID}}",
@@ -94,8 +91,6 @@
             "device_job_id": "{{DEVICE_JOB_ID}}",
             "discovery_id": "{{DISCOVERY_ID:1}}",
             "discovery_method": "device_interrogation",
-            "network_ownership": "internal",
-            "network_type": "public",
             "pqc_kex_detected": false,
             "profile_name": "clientssl-hardened",
             "sensor_id": "{{SENSOR_ID}}",
@@ -113,7 +108,6 @@
       ]
     }
   ],
-  "external_connections": [],
   "rows": [
     {
       "row": 0,
@@ -182,6 +176,24 @@
           "kind": "ip_address",
           "value": "198.51.100.5",
           "scope": "segment:198.51.100.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:23:e9:aa:bb:00",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:23:e9:aa:bb:01",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:23:e9:aa:bb:02",
+          "scope": null,
           "source_kind": "measured"
         }
       ]

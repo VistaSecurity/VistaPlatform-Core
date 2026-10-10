@@ -72,13 +72,19 @@ type SightingItem struct {
 // SightingResult is one sighting's answer, mirroring identity.IngestResult
 // plus the admission decision's reasons. Outcome is an engine outcome
 // (matched, created, provisional, supporting, unresolved, conflict) or
-// `rejected`; an absent id is absent, never a zero UUID.
+// `rejected`; an absent id is absent, never a zero UUID. EvidenceHeld is
+// supporting evidence linked to the asset with nothing written there (platform
+// ADR-0003 D2): a caller must not treat the run as materialized on it.
 type SightingResult struct {
-	Outcome       string   `json:"outcome"`
-	AssetID       string   `json:"asset_id,omitempty"`
-	ObservationID string   `json:"observation_id,omitempty"`
-	ProposalID    string   `json:"proposal_id,omitempty"`
-	Reasons       []string `json:"reasons,omitempty"`
+	Outcome       string `json:"outcome"`
+	AssetID       string `json:"asset_id,omitempty"`
+	ObservationID string `json:"observation_id,omitempty"`
+	ProposalID    string `json:"proposal_id,omitempty"`
+	EvidenceHeld  bool   `json:"evidence_held,omitempty"`
+	// EndpointsClosed is how many endpoints the engine closed because the
+	// sighting's complete endpoint set no longer listed them ( WP7).
+	EndpointsClosed int      `json:"endpoints_closed,omitempty"`
+	Reasons         []string `json:"reasons,omitempty"`
 }
 
 // IngestSightings resolves each sighting for tenantID, index-aligned.
@@ -93,6 +99,8 @@ type SightingResult struct {
 // the decision: last-seen moves and nothing else does.
 func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, items []SightingItem) ([]SightingResult, error) {
 	out := make([]SightingResult, len(items))
+	// One read of the tenant's segments for the whole batch ( F4).
+	segs := s.newImportSegments(tenantID)
 	for i, item := range items {
 		sg := item.Sighting
 		if sg.TenantID != "" && sg.TenantID != tenantID.String() {
@@ -109,7 +117,7 @@ func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, 
 			out[i] = r
 			continue
 		}
-		intake, err := s.assessSighting(ctx, label, sg)
+		intake, err := s.assessSightingIn(ctx, segs, label, sg)
 		switch {
 		case errors.Is(err, identity.ErrInvalidSighting):
 			log.Printf("[AssetService] internal sightings: rejecting %s: %v", label, err)
@@ -138,7 +146,7 @@ func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, 
 		// The segment's auto-approval, decided before the engine's transaction
 		// opens (it reads the segment and the tenant's rules on their own
 		// connections), applied inside it.
-		approved := s.interrogationSightingApproved(tenantID, sg, obs)
+		approved := s.interrogationSightingApproved(segs, tenantID, sg, obs)
 
 		var reasons []string
 		res, err := s.resolveObservationWithRepo(ctx, obs, func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
@@ -168,7 +176,7 @@ func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, 
 		}
 		logIdentityDecisions(label, res)
 		r := res.IngestResult()
-		out[i] = SightingResult{Outcome: r.Outcome, AssetID: r.AssetID, ObservationID: r.ObservationID, ProposalID: r.ProposalID, Reasons: reasons}
+		out[i] = SightingResult{Outcome: r.Outcome, AssetID: r.AssetID, ObservationID: r.ObservationID, ProposalID: r.ProposalID, EvidenceHeld: r.EvidenceHeld, EndpointsClosed: r.EndpointsClosed, Reasons: reasons}
 	}
 	return out, nil
 }
@@ -179,7 +187,8 @@ func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, 
 //
 //
 //   - the values Intake withheld as identifiers but that have an attribute
-//     home (synthetic names, temporary and unscoped link-local IPv6), via
+//     home (synthetic names, temporary and unscoped link-local IPv6, a host's
+//     virtual-interface addresses), via
 //     attrlist.Record, as host-observation ingest records its own;
 //   - a FIRST-HAND sighting's (authenticated_session: the host's own agent, a
 //     session reading its own configuration) segment projected onto the
@@ -194,7 +203,7 @@ func applySightingContext(ctx context.Context, repo *pgidentity.Repository, tx *
 	if res.Asset.Zero() {
 		return nil
 	}
-	for _, key := range []string{attrlist.KeySyntheticNames, attrlist.KeyIPv6Temporary, attrlist.KeyLinkLocal} {
+	for _, key := range []string{attrlist.KeySyntheticNames, attrlist.KeyIPv6Temporary, attrlist.KeyLinkLocal, attrlist.KeyVirtualInterfaceAddresses} {
 		values := intake.AttributeEvidence[key]
 		if len(values) == 0 {
 			continue
@@ -279,7 +288,7 @@ const interrogationSourcePrefix = "interrogation:"
 //
 // The address evaluated is the sighting's own first address in a real segment
 // (Intake's sighting segment), else its first address, else its first name.
-func (s *AssetService) interrogationSightingApproved(tenantID uuid.UUID, sg identity.Sighting, obs identity.Observation) bool {
+func (s *AssetService) interrogationSightingApproved(segs *importSegments, tenantID uuid.UUID, sg identity.Sighting, obs identity.Observation) bool {
 	if sg.Source.Kind != identity.SourceMeasured || !strings.HasPrefix(sg.Source.Ref, interrogationSourcePrefix) {
 		return false
 	}
@@ -308,7 +317,7 @@ func (s *AssetService) interrogationSightingApproved(tenantID uuid.UUID, sg iden
 	if addr == nil && name == nil {
 		return false
 	}
-	return s.evaluateAssetApproval(tenantID, addr, name) == identity.StatusMonitoring
+	return s.evaluateAssetApprovalIn(segs, tenantID, addr, name) == identity.StatusMonitoring
 }
 
 // autoApproveInterrogated applies an auto-approval decided by

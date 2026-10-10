@@ -27,7 +27,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
-	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/pipelinetest"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -65,12 +64,12 @@ func TestIntegration_CloudScheduledPipeline_Hop2_SensorDiscoveriesToIngestPayloa
 
 	out := pipelinetest.CloudHop2Handoff{Scenario: hop1.Scenario, InputSHA256: pipelinetest.Hash(t, inputPath)}
 	for runIndex, run := range hop1.Runs {
-		inventory := newPipelineInventory(t, pipelinetest.Scenario{}, nil)
+		inventory := newPipelineInventory(t)
 		inventoryClient, err := client.NewInventoryClient(&config.Config{InventoryServiceURL: inventory.srv.URL})
 		if err != nil {
 			t.Fatalf("NewInventoryClient: %v", err)
 		}
-		p := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), approval.NewService(db.DB), inventoryClient, nil)
+		p := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), inventoryClient, nil)
 
 		rows := pipelinetest.Walk(pipelinetest.Canonical(t, run), pipelinetest.Replacer(pipelinetest.PlaceholderIntegrationID, integration.String()))
 		var input []pipelinetest.SensorDiscoveryRow

@@ -26,6 +26,18 @@
           "source_kind": "measured"
         },
         {
+          "kind": "mac_address",
+          "value": "00:09:0f:aa:bb:01",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:09:0f:aa:bb:02",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
           "kind": "serial_number",
           "value": "FGT60F0000000001",
           "scope": null,

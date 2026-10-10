@@ -337,8 +337,8 @@ func (s *ResultProcessor) ProcessJobResults(ctx context.Context, jobID uuid.UUID
 
 		// Also publish into the unified sensor_discoveries pipeline so the
 		// discovery-processor applies network classification + tenant
-		// auto-approval rules and auto-imports the asset. discovery-processor's
-		// DB poller picks up the batch; no explicit trigger is required.
+		// auto-approval rules and auto-imports the asset. writeSensorDiscovery
+		// wakes the processor (discovery.queue.ready) once the row commits.
 		//
 		// systemSensorID cannot be uuid.Nil here — a missing platform sensor
 		// fails the job before this loop runs.
@@ -752,6 +752,10 @@ func (s *ResultProcessor) writeSensorDiscovery(
 	if err != nil {
 		return fmt.Errorf("failed to insert sensor_discovery: %w", err)
 	}
+	// Committed: wake discovery-processor (discovery.queue.ready). Both
+	// runtimes — agent results and in-cluster interrogation — write through
+	// here, so both wake it.
+	notifyDiscoveryQueue(ctx, tenantID, batchID, "device-interrogation.write_sensor_discovery")
 	return nil
 }
 

@@ -4,6 +4,8 @@ import (
 	"net"
 	"net/netip"
 	"sort"
+
+	"github.com/vistasecurity/vistaplatform/shared/network/addrscope"
 )
 
 // Which tenant network segment does this address belong to?
@@ -120,7 +122,7 @@ func cidrPrefixLen(cidr string) int {
 
 // PrefixNetworkType answers a LEARNED segment's `network_type` from the prefix
 // alone: "private" when every address in it is RFC 1918 or RFC 4193 (ULA)
-// space — exactly [netip.Addr.IsPrivate] — and "public" otherwise.
+// space — exactly [addrscope.IsPrivateRange] — and "public" otherwise.
 //
 // RFC 6598 carrier-grade NAT (100.64.0.0/10) is deliberately PUBLIC here. It
 // is carrier space: a FortiGate's ISP-facing VLAN sits in it, and on the far
@@ -142,7 +144,7 @@ func PrefixNetworkType(p netip.Prefix) string {
 	if !ok {
 		return "public"
 	}
-	if p.Addr().IsPrivate() && lastAddr(p).IsPrivate() {
+	if addrscope.IsPrivateRange(p.Addr()) && addrscope.IsPrivateRange(lastAddr(p)) {
 		return "private"
 	}
 	return "public"

@@ -113,7 +113,14 @@ func TestIntegration_CryptoProducer_IncompleteStoredEvidenceRetained(t *testing.
 		t.Fatalf("%s %s %d %s", state, summary, score, evidence)
 	}
 	// No prior finding: the same opaque score is not proof of weakness.
-	cfg2 := f.configuration(t, "TLS 1.3", 90)
+	// A second configuration, so not on the first one's endpoint: the natural
+	// key is unique among live rows, and two identical rows on one endpoint
+	// would be one configuration. At rest (no endpoint) keeps it distinct
+	// without changing anything the judgment reads.
+	cfg2 := uuid.New()
+	exec(t, f.owner, `
+		INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, protocol_version, discovery_method, risk_score)
+		VALUES ($1, $2, $3, 'TLS', 'TLS 1.3', 'active', 90)`, cfg2, f.tenant, f.assetID)
 	alg2 := f.linkAlgorithm(t, cfg2, "protocol_version", "GAP2-"+uuid.NewString(), 10, "other", false)
 	exec(t, f.owner, `UPDATE algorithms SET strength='recommended' WHERE id=$1`, alg2)
 	f.mustRun(t, ctx)

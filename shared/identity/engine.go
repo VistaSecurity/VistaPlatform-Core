@@ -146,6 +146,20 @@ type Resolution struct {
 	// is what materialises them.
 	EvidenceHeld bool `json:"evidence_held,omitempty"`
 
+	// SupportingEndpoints is set on a supporting outcome that attached the
+	// observation's endpoints to its single owner (D4 of, see
+	// [Engine.resolveSupporting]): the identifiers are still held, the sockets
+	// are the asset's. EvidenceHeld is false then, because something was
+	// written, so a caller may hang service identification and crypto off
+	// those sockets.
+	SupportingEndpoints bool `json:"supporting_endpoints,omitempty"`
+
+	// EndpointsClosed is how many of the asset's endpoints this observation
+	// closed because they were absent from the complete set it carried
+	// ([Observation.EndpointsComplete]). Only a match reconciles; zero
+	// otherwise.
+	EndpointsClosed int `json:"endpoints_closed,omitempty"`
+
 	// OperatorScanJob is set on a match a person's scan request decided
 	// ([Engine.WithOperatorScanRequest]): the job that carried it. DecidedBy
 	// is empty then, because no identifier decided.
@@ -269,6 +283,11 @@ type Engine struct {
 	// ([Engine.WithOperatorScanRequest]). Like observationID it rides only on a
 	// per-observation copy, never on the shared engine.
 	operatorScan *OperatorScanRequest
+
+	// ownerSnapshot is the identifier owners the caller already read on this
+	// resolution's transaction ([Engine.WithOwnerSnapshot]). Per-observation
+	// copy only, like operatorScan, and consulted only before the first write.
+	ownerSnapshot *OwnerSnapshot
 }
 
 // New builds an engine. It fails only on a missing repository: every other
@@ -414,6 +433,11 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 	if strings.TrimSpace(obs.TenantID) == "" {
 		return Resolution{}, fmt.Errorf("%w: no tenant", ErrInvalidObservation)
 	}
+	if obs.EndpointsComplete != nil {
+		if err := obs.EndpointsComplete.Validate(obs.Source, obs.Endpoints); err != nil {
+			return Resolution{}, fmt.Errorf("%w: %w", ErrInvalidObservation, err)
+		}
+	}
 	at := obs.ObservedAt
 	if at.IsZero() {
 		at = e.now().UTC()
@@ -436,7 +460,7 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 	// Step 2: ownership of every identifier present, keyed by identifier key.
 	owners := make(map[string][]AssetRef, len(ids))
 	for _, id := range ids {
-		refs, err := e.repo.FindByIdentifier(ctx, obs.TenantID, id.Kind, id.Value, id.Scope)
+		refs, err := e.ownersOf(ctx, obs.TenantID, id)
 		if err != nil {
 			return Resolution{}, fmt.Errorf("identity: looking up %s=%q: %w", id.Kind, id.Value, err)
 		}
@@ -453,6 +477,9 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		}
 		plain := *e
 		plain.operatorScan = nil
+		// The refused attempt may have read past the snapshot's moment; the
+		// re-run reads the owners afresh.
+		plain.ownerSnapshot = nil
 		res, err = plain.resolve(ctx, obs)
 		res.OperatorScanRefused = refused
 		return res, err
@@ -521,6 +548,24 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 				// where it was for lease.go to judge — not a cross-kind
 				// conflict, and not a floating address.
 				continue
+			}
+			if len(refs) == 1 && refs[0].ID != decided {
+				shared, err := e.sharedNameDoesNotVote(ctx, AssetRef{TenantID: obs.TenantID, ID: decided}, decidedBy, decider, id)
+				if err != nil {
+					return Resolution{}, err
+				}
+				if shared {
+					// A device-binding identifier (MAC, serial, host key, agent
+					// id) decided, and the asset it decided was CREATED beside
+					// this name's holder precisely because they only share the
+					// name (distinct_device.go). The name resolving to the
+					// other asset is then a shared name, not evidence of a
+					// different device: without this, replaying the second
+					// plug's report reopens the proposal the distinct-device
+					// row exists to avoid. Strong kinds are untouched: two
+					// serials remain two devices.
+					continue
+				}
 			}
 			for _, r := range refs {
 				note(r.ID, id)
@@ -599,6 +644,17 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		drift, err := e.classifyDrift(ctx, obs, at, ids, ref)
 		if err != nil {
 			return Resolution{}, err
+		}
+		if drift.result.Verdict == matcher.DriftDistinct {
+			if e.distinctDeviceCreates(obs, decidedBy, decider, installation) {
+				res, handled, err := e.resolveDistinctDevice(ctx, obs, at, ids, owners)
+				if err != nil || handled {
+					return res, err
+				}
+			}
+			// The table's opinion needs a direct measurement to act on; any
+			// other source gets what it got before the row existed.
+			drift = driftCheck{}
 		}
 		switch {
 		case drift.result.Verdict == matcher.DriftReplaced:
@@ -717,6 +773,7 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 			DecidedByInferred: decider.Inferred(),
 			Unattached:        unattached,
 			Drift:             applied,
+			EndpointsClosed:   closedEndpointCount(changes),
 		}
 		if installation {
 			p, err := e.proposeSameInstallation(ctx, obs, at, ref, decidedBy, ids, owners, evidence, candidateSeq, unattached)
@@ -1112,7 +1169,7 @@ func (e *Engine) precedenceFor(ctx context.Context, tenantID, classKey string) [
 	return defaultPrecedence
 }
 
-func (e *Engine) resolveCreate(ctx context.Context, obs Observation, at time.Time, attach, unattached []Identifier) (Resolution, error) {
+func (e *Engine) resolveCreate(ctx context.Context, obs Observation, at time.Time, attach, unattached []Identifier, extra ...map[string]any) (Resolution, error) {
 	if e.admissionDecision != nil {
 		guard, ok := e.repo.(interface {
 			CheckAdmissionAllowance(context.Context, string) (bool, error)
@@ -1173,12 +1230,18 @@ func (e *Engine) resolveCreate(ctx context.Context, obs Observation, at time.Tim
 	if err != nil {
 		return Resolution{}, fmt.Errorf("identity: creating asset: %w", err)
 	}
-	if err := e.history(ctx, ref, obs, at, ActionCreated, map[string]any{
+	created := map[string]any{
 		"class_key":   classKey,
 		"identifiers": identifierKeys(attach),
 		"endpoints":   endpointKeys(newAsset.Endpoints),
 		"unattached":  identifierKeys(unattached),
-	}); err != nil {
+	}
+	for _, x := range extra {
+		for k, v := range x {
+			created[k] = v
+		}
+	}
+	if err := e.history(ctx, ref, obs, at, ActionCreated, created); err != nil {
 		return Resolution{}, err
 	}
 	return Resolution{
@@ -1385,12 +1448,13 @@ func (e *Engine) acceptMerge(
 	// merge.
 	attach, unattached := splitByOwner(ids, owners, top.Ref.ID)
 
-	if err := e.applyToAsset(ctx, top.Ref, obs, at, attach, unattached, ActionMergedFrom, map[string]any{
+	merged := map[string]any{
 		"merged_candidates": candidateIDs(candidates),
 		"score":             top.Score,
 		"reason":            top.Reason,
 		"conflict":          why,
-	}); err != nil {
+	}
+	if err := e.applyToAsset(ctx, top.Ref, obs, at, attach, unattached, ActionMergedFrom, merged); err != nil {
 		return Resolution{}, err
 	}
 
@@ -1443,6 +1507,7 @@ func (e *Engine) acceptMerge(
 		TopScore:         top.Score,
 		Unattached:       unattached,
 		MergeRecommended: r.mergeRecommended(),
+		EndpointsClosed:  closedEndpointCount(merged),
 	}, nil
 }
 
@@ -1470,6 +1535,22 @@ func (e *Engine) applyToAsset(ctx context.Context, ref AssetRef, obs Observation
 		}
 		epsChanged = n
 	}
+	if changes == nil {
+		changes = map[string]any{}
+	}
+	// A COMPLETE set (a host's own socket table) closes this source's
+	// endpoints it no longer lists, in the same transaction that wrote the
+	// ones it does ( WP7 F12). Supporting evidence never gets here with
+	// a set: resolveSupporting drops it.
+	if set := obs.EndpointsComplete; set != nil {
+		closed, err := e.repo.ReconcileSourceEndpoints(ctx, ref, set.SourcePrefix, eps, at)
+		if err != nil {
+			return fmt.Errorf("identity: reconciling %s's endpoints on %s: %w", set.SourcePrefix, ref.ID, err)
+		}
+		if len(closed) > 0 {
+			changes[endpointsClosedKey] = closed
+		}
+	}
 	if err := e.repo.Touch(ctx, ref, at); err != nil {
 		return fmt.Errorf("identity: touching %s: %w", ref.ID, err)
 	}
@@ -1491,9 +1572,6 @@ func (e *Engine) applyToAsset(ctx context.Context, ref AssetRef, obs Observation
 	}
 	if err := e.repo.PromoteNames(ctx, ref, hostnameFor(obs, attach), hostnamequality.Best(nameCandidates(obs, attach)...), obs.Source.NameKind()); err != nil {
 		return fmt.Errorf("identity: promoting names on %s: %w", ref.ID, err)
-	}
-	if changes == nil {
-		changes = map[string]any{}
 	}
 	// What the caller already says about the outcome (a lease move, a
 	// corroborated provisional, a floating address ...) is read BEFORE this
@@ -1571,6 +1649,17 @@ func hasOutcomeKey(changes map[string]any) bool {
 		return true
 	}
 	return false
+}
+
+// endpointsClosedKey is the history key under which applyToAsset records the
+// endpoints a complete set closed. It is an outcome, so it always earns a row.
+const endpointsClosedKey = "endpoints_closed"
+
+// closedEndpointCount reads back how many endpoints applyToAsset closed into
+// changes, for the Resolution.
+func closedEndpointCount(changes map[string]any) int {
+	closed, _ := changes[endpointsClosedKey].([]string)
+	return len(closed)
 }
 
 func isConditionKey(k string) bool {

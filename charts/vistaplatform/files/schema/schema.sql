@@ -3334,6 +3334,11 @@ CREATE TABLE IF NOT EXISTS public.keys (
 
 
 -- TABLE: kms_keys
+-- RETIRED, pending a drop ( WP6 F13, decision D3): nothing writes this
+-- table any more. A discovered cloud KMS key's one home is the `keys` table,
+-- reached through inventory-service's POST /keys/cloud. The only readers left
+-- are device-interrogation-service's /experimental/kms-keys and
+-- /experimental/stats endpoints, which no UI calls; drop them with the table.
 CREATE TABLE IF NOT EXISTS public.kms_keys (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     tenant_id uuid NOT NULL,
@@ -4916,7 +4921,15 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_partitioned (
     -- triggers import the same batch twice. NULL means unclaimed; a claim older
     -- than the worker's stale-claim timeout is ignored, so a worker that dies
     -- mid-batch cannot strand a batch.
-    claimed_at timestamp with time zone
+    claimed_at timestamp with time zone,
+    -- Per-row failure ( F14). A row that did not land counts the failed
+    -- attempt here and keeps the reason in process_error; it is retried with
+    -- a backoff (its claim is released early) until it lands, or — when the
+    -- failure is permanent or the attempts are spent — it is settled
+    -- processed with approval_status 'rejected' and the reason kept. Rows that
+    -- land are unaffected, so one bad row no longer rejects its whole batch.
+    process_attempts integer DEFAULT 0 NOT NULL,
+    process_error text
 )
 PARTITION BY HASH (tenant_id);
 
@@ -4926,6 +4939,15 @@ PARTITION BY HASH (tenant_id);
 -- upgrade-safely before recreating the compatibility view that reads it.
 ALTER TABLE IF EXISTS public.sensor_discoveries_partitioned
     ADD COLUMN IF NOT EXISTS claimed_at timestamp with time zone;
+-- The per-row failure columns ( F14), added the same way and for the
+-- same reason: the view below reads them, so on an existing database they
+-- must exist before it is recreated (POST-MIGRATIONS runs too late for that).
+-- Added to the partitioned parent, they propagate to every attached
+-- partition; the DEFAULT is a catalogue-only fast default, no table rewrite.
+ALTER TABLE IF EXISTS public.sensor_discoveries_partitioned
+    ADD COLUMN IF NOT EXISTS process_attempts integer DEFAULT 0 NOT NULL;
+ALTER TABLE IF EXISTS public.sensor_discoveries_partitioned
+    ADD COLUMN IF NOT EXISTS process_error text;
 DROP VIEW IF EXISTS public.sensor_discoveries;
 CREATE OR REPLACE VIEW public.sensor_discoveries AS
  SELECT sensor_discoveries_partitioned.id,
@@ -4945,7 +4967,9 @@ CREATE OR REPLACE VIEW public.sensor_discoveries AS
     sensor_discoveries_partitioned.asset_id,
     sensor_discoveries_partitioned.hostname,
     sensor_discoveries_partitioned.source_ip,
-    sensor_discoveries_partitioned.claimed_at
+    sensor_discoveries_partitioned.claimed_at,
+    sensor_discoveries_partitioned.process_attempts,
+    sensor_discoveries_partitioned.process_error
    FROM public.sensor_discoveries_partitioned;
 
 
@@ -4968,7 +4992,9 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_part_0 (
     asset_id uuid,
     hostname character varying(255),
     source_ip inet,
-    claimed_at timestamp with time zone
+    claimed_at timestamp with time zone,
+    process_attempts integer DEFAULT 0 NOT NULL,
+    process_error text
 );
 
 
@@ -4991,7 +5017,9 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_part_1 (
     asset_id uuid,
     hostname character varying(255),
     source_ip inet,
-    claimed_at timestamp with time zone
+    claimed_at timestamp with time zone,
+    process_attempts integer DEFAULT 0 NOT NULL,
+    process_error text
 );
 
 
@@ -5014,7 +5042,9 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_part_2 (
     asset_id uuid,
     hostname character varying(255),
     source_ip inet,
-    claimed_at timestamp with time zone
+    claimed_at timestamp with time zone,
+    process_attempts integer DEFAULT 0 NOT NULL,
+    process_error text
 );
 
 
@@ -5037,7 +5067,9 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_part_3 (
     asset_id uuid,
     hostname character varying(255),
     source_ip inet,
-    claimed_at timestamp with time zone
+    claimed_at timestamp with time zone,
+    process_attempts integer DEFAULT 0 NOT NULL,
+    process_error text
 );
 
 
@@ -5060,7 +5092,9 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_part_4 (
     asset_id uuid,
     hostname character varying(255),
     source_ip inet,
-    claimed_at timestamp with time zone
+    claimed_at timestamp with time zone,
+    process_attempts integer DEFAULT 0 NOT NULL,
+    process_error text
 );
 
 
@@ -5083,7 +5117,9 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_part_5 (
     asset_id uuid,
     hostname character varying(255),
     source_ip inet,
-    claimed_at timestamp with time zone
+    claimed_at timestamp with time zone,
+    process_attempts integer DEFAULT 0 NOT NULL,
+    process_error text
 );
 
 
@@ -5106,7 +5142,9 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_part_6 (
     asset_id uuid,
     hostname character varying(255),
     source_ip inet,
-    claimed_at timestamp with time zone
+    claimed_at timestamp with time zone,
+    process_attempts integer DEFAULT 0 NOT NULL,
+    process_error text
 );
 
 
@@ -5129,7 +5167,9 @@ CREATE TABLE IF NOT EXISTS public.sensor_discoveries_part_7 (
     asset_id uuid,
     hostname character varying(255),
     source_ip inet,
-    claimed_at timestamp with time zone
+    claimed_at timestamp with time zone,
+    process_attempts integer DEFAULT 0 NOT NULL,
+    process_error text
 );
 
 
@@ -21255,6 +21295,209 @@ END $$;
 
 
 -- ============================================================================
+-- POST-MIGRATIONS: fold_crypto_implementations — retire one crypto
+-- configuration into another
+-- ============================================================================
+-- A crypto configuration is unique by its natural key ( WP8: the
+-- uq_crypto_implementations_natural_key index further down). Every write that
+-- would CHANGE a row's key — re-pointing it at a merged endpoint or a merged
+-- asset, refining its key exchange, enriching a partial row — therefore has to
+-- handle the case where a live row already holds the key it is moving to. The
+-- answer is always the same: the moving row is the same configuration as the
+-- one already there, so it is FOLDED into it, and this function is the one
+-- place that says what folding means. It is called by the POST-MIGRATIONS
+-- blocks below and by inventory-service (crypto_dedup.go, crypto_kex_refine.go,
+-- the asset merge), so the migration and the live paths cannot disagree.
+--
+-- For each (tenant, loser, keeper) triple, with both rows live:
+--   * the loser's junction rows move to the keeper — certificates, algorithms,
+--     keys, libraries — each ON CONFLICT DO NOTHING against the junction's own
+--     natural key, so a link both rows held is not duplicated;
+--   * tickets naming the loser are re-pointed at the keeper;
+--   * the keeper takes the earlier first_discovered_at, the later
+--     last_verified_at and the union of both rows' provenance (its own order
+--     first, so its primary method stays at position 1); when a loser was
+--     verified more recently than the keeper, the keeper takes that loser's
+--     evidence (raw_data, risk_score, selected certificate, sensor) — the
+--     current reading of the configuration wins, wherever it was stored;
+--   * the loser is SOFT-deleted (never hard-deleted: findings and tickets a
+--     user has looked at may name it; the crypto finding producer scopes to
+--     deleted_at IS NULL, so its findings resolve on the next pass) with
+--     certificate_id cleared, because the leaf-link backfill earlier in this
+--     file re-creates a junction row for every row that names a certificate
+--     and would put the moved link straight back.
+--
+-- One statement of chained data-modifying CTEs, so every step works from one
+-- snapshot of the pairs. A loser may appear once; a row may not be both a
+-- loser and a keeper (a chain would modify one row twice in one statement,
+-- which Postgres leaves undefined) — callers resolve chains to their final
+-- keeper first, and the function refuses rather than guessing. Pairs whose
+-- loser or keeper is not live are skipped, which makes a repeated call a
+-- no-op. Returns the number of rows retired.
+--
+-- SECURITY INVOKER (the default): called from a service it runs under the
+-- caller's tenant context and row-level security like any other statement.
+CREATE OR REPLACE FUNCTION public.fold_crypto_implementations(
+    p_tenant_ids uuid[], p_loser_ids uuid[], p_keeper_ids uuid[])
+RETURNS integer
+LANGUAGE plpgsql
+AS $fold$
+DECLARE
+  retired_count integer;
+BEGIN
+  IF p_loser_ids IS NULL OR cardinality(p_loser_ids) = 0 THEN
+    RETURN 0;
+  END IF;
+  IF cardinality(p_tenant_ids) IS DISTINCT FROM cardinality(p_loser_ids)
+     OR cardinality(p_keeper_ids) IS DISTINCT FROM cardinality(p_loser_ids) THEN
+    RAISE EXCEPTION 'fold_crypto_implementations: argument arrays differ in length';
+  END IF;
+  IF EXISTS (SELECT 1 FROM unnest(p_loser_ids) l(id) WHERE l.id = ANY(p_keeper_ids))
+     OR (SELECT count(*) FROM unnest(p_loser_ids)) <> (SELECT count(DISTINCT x) FROM unnest(p_loser_ids) u(x)) THEN
+    RAISE EXCEPTION 'fold_crypto_implementations: a row is folded twice or is both a loser and a keeper';
+  END IF;
+
+  WITH pairs AS (
+    SELECT p.tenant_id, p.loser_id, p.keeper_id
+      FROM unnest(p_tenant_ids, p_loser_ids, p_keeper_ids) AS p(tenant_id, loser_id, keeper_id)
+      JOIN public.crypto_implementations_partitioned l
+        ON l.tenant_id = p.tenant_id AND l.id = p.loser_id AND l.deleted_at IS NULL
+      JOIN public.crypto_implementations_partitioned k
+        ON k.tenant_id = p.tenant_id AND k.id = p.keeper_id AND k.deleted_at IS NULL
+     WHERE p.loser_id <> p.keeper_id
+  ),
+  moved_certificates AS (
+    INSERT INTO public.crypto_implementation_certificates
+           (crypto_implementation_id, certificate_id, certificate_role, certificate_order)
+    SELECT pr.keeper_id, c.certificate_id, c.certificate_role, c.certificate_order
+      FROM public.crypto_implementation_certificates c
+      JOIN pairs pr ON pr.loser_id = c.crypto_implementation_id
+    ON CONFLICT (crypto_implementation_id, certificate_id) DO NOTHING
+    RETURNING 1
+  ),
+  dropped_certificates AS (
+    DELETE FROM public.crypto_implementation_certificates c
+     USING pairs pr
+     WHERE c.crypto_implementation_id = pr.loser_id
+    RETURNING 1
+  ),
+  moved_algorithms AS (
+    INSERT INTO public.crypto_implementation_algorithms
+           (crypto_implementation_id, algorithm_id, algorithm_type, is_inferred)
+    SELECT pr.keeper_id, a.algorithm_id, a.algorithm_type, a.is_inferred
+      FROM public.crypto_implementation_algorithms a
+      JOIN pairs pr ON pr.loser_id = a.crypto_implementation_id
+    ON CONFLICT (crypto_implementation_id, algorithm_id, algorithm_type) DO NOTHING
+    RETURNING 1
+  ),
+  dropped_algorithms AS (
+    DELETE FROM public.crypto_implementation_algorithms a
+     USING pairs pr
+     WHERE a.crypto_implementation_id = pr.loser_id
+    RETURNING 1
+  ),
+  moved_keys AS (
+    INSERT INTO public.implementation_keys (implementation_id, key_id)
+    SELECT pr.keeper_id, ik.key_id
+      FROM public.implementation_keys ik
+      JOIN pairs pr ON pr.loser_id = ik.implementation_id
+    ON CONFLICT (implementation_id, key_id) DO NOTHING
+    RETURNING 1
+  ),
+  dropped_keys AS (
+    DELETE FROM public.implementation_keys ik
+     USING pairs pr
+     WHERE ik.implementation_id = pr.loser_id
+    RETURNING 1
+  ),
+  moved_libraries AS (
+    INSERT INTO public.implementation_libraries (implementation_id, library_id)
+    SELECT pr.keeper_id, il.library_id
+      FROM public.implementation_libraries il
+      JOIN pairs pr ON pr.loser_id = il.implementation_id
+    ON CONFLICT (implementation_id, library_id) DO NOTHING
+    RETURNING 1
+  ),
+  dropped_libraries AS (
+    DELETE FROM public.implementation_libraries il
+     USING pairs pr
+     WHERE il.implementation_id = pr.loser_id
+    RETURNING 1
+  ),
+  repointed_tickets AS (
+    UPDATE public.tickets t
+       SET crypto_implementation_id = pr.keeper_id
+      FROM pairs pr
+     WHERE t.tenant_id = pr.tenant_id AND t.crypto_implementation_id = pr.loser_id
+    RETURNING 1
+  ),
+  folded AS (
+    SELECT pr.tenant_id, pr.keeper_id,
+           min(l.first_discovered_at) AS earliest,
+           max(l.last_verified_at)    AS latest,
+           (SELECT array_agg(DISTINCT m ORDER BY m)
+              FROM public.crypto_implementations_partitioned l2
+              JOIN pairs p2 ON p2.tenant_id = l2.tenant_id AND p2.loser_id = l2.id
+              CROSS JOIN LATERAL unnest(l2.discovery_methods || l2.discovery_method) AS m
+             WHERE p2.tenant_id = pr.tenant_id AND p2.keeper_id = pr.keeper_id) AS methods,
+           (array_agg(l.id ORDER BY l.last_verified_at DESC NULLS LAST, l.id))[1] AS newest_id,
+           (array_agg(l.certificate_id ORDER BY l.last_verified_at DESC NULLS LAST, l.id)
+              FILTER (WHERE l.certificate_id IS NOT NULL))[1] AS any_certificate_id,
+           (array_agg(l.source_sensor_id ORDER BY l.last_verified_at DESC NULLS LAST, l.id)
+              FILTER (WHERE l.source_sensor_id IS NOT NULL))[1] AS any_sensor_id
+      FROM pairs pr
+      JOIN public.crypto_implementations_partitioned l
+        ON l.tenant_id = pr.tenant_id AND l.id = pr.loser_id
+     GROUP BY pr.tenant_id, pr.keeper_id
+  ),
+  completed AS (
+    UPDATE public.crypto_implementations_partitioned k
+       SET first_discovered_at = LEAST(k.first_discovered_at, f.earliest),
+           last_verified_at    = GREATEST(k.last_verified_at, f.latest),
+           raw_data            = CASE WHEN n.last_verified_at > k.last_verified_at
+                                      THEN COALESCE(n.raw_data, k.raw_data) ELSE k.raw_data END,
+           risk_score          = CASE WHEN n.last_verified_at > k.last_verified_at
+                                      THEN n.risk_score ELSE k.risk_score END,
+           certificate_id      = CASE WHEN n.last_verified_at > k.last_verified_at AND n.certificate_id IS NOT NULL
+                                      THEN n.certificate_id
+                                      ELSE COALESCE(k.certificate_id, f.any_certificate_id) END,
+           certificate_observed_at = CASE WHEN n.last_verified_at > k.last_verified_at AND n.certificate_id IS NOT NULL
+                                      THEN n.certificate_observed_at ELSE k.certificate_observed_at END,
+           source_sensor_id    = CASE WHEN n.last_verified_at > k.last_verified_at AND n.source_sensor_id IS NOT NULL
+                                      THEN n.source_sensor_id
+                                      ELSE COALESCE(k.source_sensor_id, f.any_sensor_id) END,
+           -- An install older than the provenance column holds '{}' here
+           -- until the backfill in the subset-absorption block below runs;
+           -- the row's own primary method stands in for it.
+           discovery_methods   = CASE WHEN cardinality(k.discovery_methods) = 0
+                                      THEN ARRAY[k.discovery_method] ELSE k.discovery_methods END
+             || COALESCE((SELECT array_agg(m ORDER BY m)
+                            FROM unnest(f.methods) AS m
+                           WHERE NOT (m = ANY(CASE WHEN cardinality(k.discovery_methods) = 0
+                                                   THEN ARRAY[k.discovery_method] ELSE k.discovery_methods END))),
+                         '{}'::public.discovery_method[]),
+           updated_at          = now()
+      FROM folded f
+      JOIN public.crypto_implementations_partitioned n
+        ON n.tenant_id = f.tenant_id AND n.id = f.newest_id
+     WHERE k.tenant_id = f.tenant_id AND k.id = f.keeper_id
+    RETURNING 1
+  ),
+  retired AS (
+    UPDATE public.crypto_implementations_partitioned l
+       SET deleted_at = now(), certificate_id = NULL, updated_at = now()
+      FROM pairs pr
+     WHERE l.tenant_id = pr.tenant_id AND l.id = pr.loser_id
+    RETURNING 1
+  )
+  SELECT count(*) INTO retired_count FROM retired;
+
+  RETURN retired_count;
+END
+$fold$;
+
+
+-- ============================================================================
 -- POST-MIGRATIONS: merge asset_endpoints rows the IP-literal-fqdn defect wrote
 -- ============================================================================
 -- Before this release, an intake path that did not know a listener's name
@@ -21323,13 +21566,60 @@ END $$;
 -- between the two passes
 -- (TestIntegration_Schema_MergesDuplicateAssetEndpoints).
 DO $$
+DECLARE
+  folded_on_merge integer;
 BEGIN
   IF to_regclass('public.asset_endpoints') IS NULL THEN
     RETURN;
   END IF;
 
   -- 1. Re-point crypto_implementations.endpoint_id at the survivor.
+  --
+  -- A configuration is unique by (tenant, asset, endpoint, protocol, its seven
+  -- components, method) among live rows (uq_crypto_implementations_natural_key,
+  -- further down), so a loser endpoint's configuration that the survivor — or
+  -- another loser of the same group — already holds cannot simply be
+  -- re-pointed: the UPDATE would violate the index and abort the whole apply
+  -- under ON_ERROR_STOP. Those are the same configuration observed on what is
+  -- now one endpoint, so 1a folds them into one (the oldest, the same survivor
+  -- rule the index's own cleanup uses) and 1b re-points what is left. On the
+  -- first apply after the upgrade the index does not exist yet and 1a merely
+  -- does early what that cleanup would do anyway.
   IF to_regclass('public.crypto_implementations_partitioned') IS NOT NULL THEN
+    WITH dupes AS (
+      SELECT tenant_id, asset_id, address, port, transport,
+             (array_agg(id ORDER BY first_seen_at, id))[1] AS survivor_id
+        FROM public.asset_endpoints
+       WHERE address IS NOT NULL
+       GROUP BY tenant_id, asset_id, address, port, transport
+      HAVING count(*) > 1
+    ),
+    members AS (
+      SELECT e.tenant_id, e.id AS endpoint_id, d.survivor_id
+        FROM public.asset_endpoints e
+        JOIN dupes d
+          ON d.tenant_id = e.tenant_id AND d.asset_id = e.asset_id
+         AND d.address IS NOT DISTINCT FROM e.address
+         AND d.port IS NOT DISTINCT FROM e.port
+         AND d.transport = e.transport
+    ),
+    ranked AS (
+      SELECT ci.tenant_id, ci.id,
+             first_value(ci.id) OVER (
+               PARTITION BY ci.tenant_id, ci.asset_id, m.survivor_id, ci.protocol,
+                            ci.protocol_version, ci.cipher_suite, ci.key_exchange_algorithm,
+                            ci.signature_algorithm, ci.symmetric_encryption, ci.hash_algorithm,
+                            ci.key_size, ci.discovery_method
+               ORDER BY ci.first_discovered_at, ci.id) AS keeper_id
+        FROM public.crypto_implementations_partitioned ci
+        JOIN members m ON m.tenant_id = ci.tenant_id AND m.endpoint_id = ci.endpoint_id
+       WHERE ci.deleted_at IS NULL
+    )
+    SELECT public.fold_crypto_implementations(array_agg(tenant_id), array_agg(id), array_agg(keeper_id))
+      INTO folded_on_merge
+      FROM ranked
+     WHERE id <> keeper_id;
+
     WITH dupes AS (
       SELECT tenant_id, asset_id, address, port, transport,
              (array_agg(id ORDER BY first_seen_at, id))[1] AS survivor_id
@@ -21678,6 +21968,107 @@ BEGIN
   IF absorbed > 0 THEN
     RAISE NOTICE 'crypto configuration subset absorption: retired % partial row(s)', absorbed;
   END IF;
+END $$;
+
+
+-- ============================================================================
+-- POST-MIGRATIONS: crypto configurations are unique by their natural key
+-- ( WP8)
+-- ============================================================================
+-- Ingest has deduplicated crypto configurations in the application since the
+-- materialization fix (crypto_dedup.go): under a per-asset advisory lock it
+-- looks a configuration up by its natural key and refreshes it rather than
+-- inserting a second row. The table itself never enforced that key, so the
+-- duplicates written BEFORE the fix — on a sensor-observed endpoint, one per
+-- observation, ~168 a week per asset — stayed, inflating every per-
+-- configuration list, count and PQC-readiness denominator, and nothing stopped
+-- a future write path from adding more.
+--
+-- The key, exactly as findCryptoImplementationSQL compares it (crypto_dedup.go,
+-- cryptoImplementationKey):
+--
+--   (tenant_id, asset_id, endpoint_id, protocol, protocol_version,
+--    cipher_suite, key_exchange_algorithm, signature_algorithm,
+--    symmetric_encryption, hash_algorithm, key_size, discovery_method)
+--
+-- over LIVE rows (deleted_at IS NULL — every lookup ignores retired rows, and
+-- the soft-deleted history must not be able to block a new row). Values are
+-- compared exactly as stored: the Go key binds the columns verbatim, without
+-- trimming or case-folding, so the index uses the plain columns, not
+-- expressions. Seven of the key columns are nullable (endpoint_id for an
+-- at-rest configuration; every component a passive glimpse could not
+-- measure), and the lookup compares them null-safely (IS NOT DISTINCT FROM),
+-- so the index is NULLS NOT DISTINCT (Postgres 15+): two rows that both lack
+-- a cipher suite are the same on that column, exactly as the lookup treats
+-- them. A plain unique index would let the commonest duplicate — the partial
+-- passive row — through untouched.
+--
+-- discovery_method is the PRIMARY method. The lookup also accepts a row whose
+-- discovery_methods provenance contains the observation's method, which is
+-- stricter than the index, never looser: an INSERT happens only when no live
+-- row has the key under either reading, so it cannot collide.
+--
+-- The table is hash-partitioned on tenant_id, which is the key's first column,
+-- so this is ONE unique index on the parent, enforced across all partitions,
+-- not a per-partition fallback.
+--
+-- Cleanup first, in the same transaction as the index build and under a lock
+-- that holds writers off between the two, so a duplicate written by a still-
+-- running older pod mid-upgrade cannot make the CREATE fail: every live row
+-- is grouped by the key (window PARTITION BY treats NULLs as equal, matching
+-- NULLS NOT DISTINCT) and every row but the OLDEST (first_discovered_at, then
+-- id — the row ingest's lookup has been converging on, so the one with the
+-- true first-seen time and, in practice, the freshest evidence and most links)
+-- is folded into it by fold_crypto_implementations above: junctions moved,
+-- tickets re-pointed, provenance and time range unioned, loser soft-deleted.
+--
+-- Cost: the first apply after the upgrade reads the whole table once and
+-- builds the index; on an install with a large inventory the migration Job
+-- takes correspondingly longer, and ingest writes to this table wait for it.
+-- Every later apply finds the index and returns at once.
+--
+-- Idempotent: a re-apply returns at the to_regclass check. Tested by applying
+-- schema.sql twice with exact duplicates (and their junctions and tickets)
+-- seeded across partitions between the passes
+-- (TestIntegration_Schema_CollapsesDuplicateCryptoConfigurations).
+DO $$
+DECLARE
+  folded integer;
+BEGIN
+  IF to_regclass('public.crypto_implementations_partitioned') IS NULL
+     OR to_regclass('public.uq_crypto_implementations_natural_key') IS NOT NULL THEN
+    RETURN;
+  END IF;
+
+  LOCK TABLE public.crypto_implementations_partitioned IN SHARE ROW EXCLUSIVE MODE;
+
+  WITH ranked AS (
+    SELECT tenant_id, id,
+           first_value(id) OVER (
+             PARTITION BY tenant_id, asset_id, endpoint_id, protocol,
+                          protocol_version, cipher_suite, key_exchange_algorithm,
+                          signature_algorithm, symmetric_encryption, hash_algorithm,
+                          key_size, discovery_method
+             ORDER BY first_discovered_at, id) AS keeper_id
+      FROM public.crypto_implementations_partitioned
+     WHERE deleted_at IS NULL
+  )
+  SELECT public.fold_crypto_implementations(array_agg(tenant_id), array_agg(id), array_agg(keeper_id))
+    INTO folded
+    FROM ranked
+   WHERE id <> keeper_id;
+
+  IF folded > 0 THEN
+    RAISE NOTICE 'crypto configuration natural key: folded % duplicate row(s) into their oldest twin', folded;
+  END IF;
+
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_crypto_implementations_natural_key
+      ON public.crypto_implementations_partitioned USING btree (
+          tenant_id, asset_id, endpoint_id, protocol, protocol_version,
+          cipher_suite, key_exchange_algorithm, signature_algorithm,
+          symmetric_encryption, hash_algorithm, key_size, discovery_method)
+      NULLS NOT DISTINCT
+      WHERE deleted_at IS NULL;
 END $$;
 
 
@@ -22784,6 +23175,67 @@ CREATE TABLE IF NOT EXISTS public.class_floor_sweep_state (
 ALTER TABLE public.class_floor_sweep_state ENABLE ROW LEVEL SECURITY;
 DO $$ BEGIN
   CREATE POLICY class_floor_sweep_state_tenant_isolation ON public.class_floor_sweep_state
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- ----------------------------------------------------------------------------
+-- deferred_crypto_findings: crypto evidence waiting on a decision ( F8)
+-- ----------------------------------------------------------------------------
+-- A discovery finding's certificates and crypto configuration are written into
+-- the inventory only for an asset that is `monitoring`. Until then the finding
+-- waits here, in ONE store, and ONE replay (inventory-service
+-- replayDeferredCrypto) materializes it on the pending -> monitoring
+-- transition. It replaces three stores that used to hold the same evidence:
+-- an array in assets.metadata, unmaterialized discovery payloads in
+-- identity_observation_payloads, and the identity sweep's own replay of those.
+--
+-- A row waits on exactly one of two things:
+--   * an ASSET (observation_id NULL): a finding for an asset still pending
+--     approval. Replayed when the asset is approved. Deduplicated per asset by
+--     dedup_key (the finding's materialization fingerprint), newest body wins.
+--   * an OBSERVATION (observation_id set, asset_id NULL until replayed): a
+--     finding ingested under identity admission `enforce` / `paused`. Replayed
+--     once the observation is linked, not as supporting evidence, to an asset
+--     that is monitoring. dedup_key is the observation receipt key, so a
+--     transport replay of the same receipt is a no-op.
+-- At most 50 unreplayed rows are kept per asset (or per observation, before it
+-- has an asset); the ones observed longest ago go first. A replayed row keeps
+-- replayed_at and the asset it landed on.
+--
+-- The foreign keys are added in POST-MIGRATIONS ("one store for deferred crypto
+-- evidence"), where the move of the old stores' data into this table also is.
+CREATE TABLE IF NOT EXISTS public.deferred_crypto_findings (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    asset_id uuid,
+    observation_id uuid,
+    source_ref text DEFAULT ''::text NOT NULL,
+    dedup_key text NOT NULL,
+    finding jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    replayed_at timestamp with time zone,
+    attempt_count integer DEFAULT 0 NOT NULL,
+    next_attempt_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_error text DEFAULT ''::text NOT NULL,
+    CONSTRAINT deferred_crypto_findings_pkey PRIMARY KEY (id),
+    CONSTRAINT deferred_crypto_findings_waits_on CHECK ((asset_id IS NOT NULL) OR (observation_id IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_deferred_crypto_findings_asset_pending
+    ON public.deferred_crypto_findings USING btree (tenant_id, asset_id) WHERE replayed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_deferred_crypto_findings_observation_pending
+    ON public.deferred_crypto_findings USING btree (tenant_id, observation_id) WHERE replayed_at IS NULL;
+-- An observation receipt is held once, replayed or not (what the payload
+-- table's primary key guaranteed).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_deferred_crypto_findings_observation_receipt
+    ON public.deferred_crypto_findings USING btree (tenant_id, observation_id, dedup_key) WHERE observation_id IS NOT NULL;
+
+ALTER TABLE public.deferred_crypto_findings ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  CREATE POLICY deferred_crypto_findings_tenant_isolation ON public.deferred_crypto_findings
     USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 EXCEPTION WHEN duplicate_object THEN NULL;
@@ -24827,6 +25279,26 @@ DO $$ BEGIN
   END IF;
 END $$;
 
+DO $$ BEGIN
+  IF to_regclass('public.class_floor_sweep_state') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'class_floor_sweep_state_tenant_id_fkey' AND conrelid = to_regclass('public.class_floor_sweep_state')) THEN
+    LOCK TABLE public.tenants, public.class_floor_sweep_state IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.class_floor_sweep_state c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.class_floor_sweep_state ADD CONSTRAINT class_floor_sweep_state_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.oui_vendor_backfill_state') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'oui_vendor_backfill_state_tenant_id_fkey' AND conrelid = to_regclass('public.oui_vendor_backfill_state')) THEN
+    LOCK TABLE public.tenants, public.oui_vendor_backfill_state IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.oui_vendor_backfill_state c WHERE c.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.oui_vendor_backfill_state ADD CONSTRAINT oui_vendor_backfill_state_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE NOT VALID;
+  END IF;
+END $$;
+
 -- 3. VALIDATE whatever steps 1-2 added NOT VALID. The rows are already clean,
 --    so this only scans; a constraint that is already valid (every re-apply)
 --    is not touched.
@@ -24841,7 +25313,8 @@ BEGIN
              'alerts', 'agent_config_audit', 'alert_framework_score_snapshots',
              'cbom_artifacts', 'cbom_subscriptions', 'invitations', 'legal_acceptances',
              'notification_digest_queue', 'saved_views', 'scopes', 'scopes_audit',
-             'tenant_alert_settings', 'tenant_entitlements', 'tenant_geographic_data')
+             'tenant_alert_settings', 'tenant_entitlements', 'tenant_geographic_data',
+             'class_floor_sweep_state', 'oui_vendor_backfill_state')
        AND conname IN (
              'alerts_tenant_ref_id_fkey', 'agent_config_audit_tenant_id_fkey',
              'alert_framework_score_snapshots_tenant_id_fkey', 'cbom_artifacts_tenant_id_fkey',
@@ -24850,7 +25323,8 @@ BEGIN
              'notification_digest_queue_tenant_id_fkey', 'saved_views_tenant_id_fkey',
              'scopes_tenant_id_fkey', 'scopes_audit_tenant_id_fkey',
              'tenant_alert_settings_tenant_id_fkey', 'tenant_entitlements_tenant_id_fkey',
-             'tenant_geographic_data_tenant_id_fkey')
+             'tenant_geographic_data_tenant_id_fkey',
+             'class_floor_sweep_state_tenant_id_fkey', 'oui_vendor_backfill_state_tenant_id_fkey')
   LOOP
     EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT %I', r.tbl, r.conname);
   END LOOP;
@@ -24993,6 +25467,120 @@ ALTER TABLE IF EXISTS public.identity_observation_peer_contexts
 CREATE INDEX IF NOT EXISTS idx_identity_peer_contexts_origin_open
     ON public.identity_observation_peer_contexts USING btree (tenant_id, origin_asset_id, observed_at)
     WHERE materialized_at IS NULL AND retired_at IS NULL;
+
+-- ----------------------------------------------------------------------------
+-- POST-MIGRATIONS: one store for deferred crypto evidence ( F8)
+-- ----------------------------------------------------------------------------
+-- deferred_crypto_findings (created above the ROLE GRANTS) cascades from its
+-- tenant, its asset and its observation. The table is new, so the constraints
+-- go on an empty or already-constrained table and need no orphan cleanup.
+DO $$ BEGIN
+  IF to_regclass('public.deferred_crypto_findings') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'deferred_crypto_findings_tenant_id_fkey' AND conrelid = to_regclass('public.deferred_crypto_findings')) THEN
+    ALTER TABLE public.deferred_crypto_findings ADD CONSTRAINT deferred_crypto_findings_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.deferred_crypto_findings') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'deferred_crypto_findings_tenant_asset_fkey' AND conrelid = to_regclass('public.deferred_crypto_findings')) THEN
+    ALTER TABLE public.deferred_crypto_findings
+        ADD CONSTRAINT deferred_crypto_findings_tenant_asset_fkey FOREIGN KEY (tenant_id, asset_id) REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.deferred_crypto_findings') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'deferred_crypto_findings_tenant_observation_fkey' AND conrelid = to_regclass('public.deferred_crypto_findings')) THEN
+    ALTER TABLE public.deferred_crypto_findings
+        ADD CONSTRAINT deferred_crypto_findings_tenant_observation_fkey FOREIGN KEY (tenant_id, observation_id)
+        REFERENCES public.identity_observations(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+-- Moving the old stores' evidence in. Two sources:
+--
+--   1. assets.metadata->'deferred_findings', the array a pending asset's crypto
+--      findings were parked in. Each element becomes one asset-gated row, in
+--      array order, and the key is stripped from metadata.
+--   2. identity_observation_payloads rows that are discovery findings (not a
+--      `host_observation`, which that table still holds) and were never
+--      materialized. Each becomes one observation-gated row keyed by its
+--      receipt, with the receipt's time as the finding's observed_at (replaying
+--      evidence is not a new sighting), and the payload row is deleted.
+--
+-- A function, not a bare DO block, because the same move is wanted twice: here,
+-- once per apply over every tenant, and by inventory-service's identity
+-- evidence sweep every minute for one tenant (p_tenant), which adopts anything
+-- an old pod parked during the rolling upgrade after this ran. Both sources
+-- select nothing once moved, so a re-apply moves nothing and a row is moved
+-- exactly once. The advisory lock keeps two callers from moving the same rows
+-- concurrently. The partial index keeps the per-minute call an index probe.
+CREATE INDEX IF NOT EXISTS idx_assets_legacy_crypto_deferrals
+    ON public.assets USING btree (tenant_id) WHERE metadata ? 'deferred_findings';
+
+CREATE OR REPLACE FUNCTION public.adopt_legacy_crypto_deferrals(p_tenant uuid DEFAULT NULL) RETURNS integer
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  moved integer := 0;
+  n integer;
+  a record;
+  p record;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('vistaplatform:adopt_legacy_crypto_deferrals', 0));
+
+  FOR a IN SELECT tenant_id, id, metadata->'deferred_findings' AS arr
+             FROM public.assets
+            WHERE metadata ? 'deferred_findings' AND (p_tenant IS NULL OR tenant_id = p_tenant)
+              FOR UPDATE
+  LOOP
+    IF jsonb_typeof(a.arr) = 'array' THEN
+      INSERT INTO public.deferred_crypto_findings (tenant_id, asset_id, source_ref, dedup_key, finding, created_at, last_seen_at)
+      SELECT a.tenant_id, a.id, COALESCE(e.value->'raw_data'->>'source', ''), 'legacy:' || md5(e.value::text), e.value,
+             now() - (jsonb_array_length(a.arr) - e.pos) * interval '1 millisecond',
+             now() - (jsonb_array_length(a.arr) - e.pos) * interval '1 millisecond'
+        FROM jsonb_array_elements(a.arr) WITH ORDINALITY AS e(value, pos)
+       WHERE jsonb_typeof(e.value) = 'object';
+      GET DIAGNOSTICS n = ROW_COUNT;
+      moved := moved + n;
+    END IF;
+    UPDATE public.assets SET metadata = metadata - 'deferred_findings' WHERE tenant_id = a.tenant_id AND id = a.id;
+  END LOOP;
+
+  FOR p IN SELECT pl.tenant_id, pl.observation_id, pl.receipt_key, pl.payload, o.source_ref, r.observed_at
+             FROM public.identity_observation_payloads pl
+             JOIN public.identity_observations o ON o.tenant_id = pl.tenant_id AND o.id = pl.observation_id
+             LEFT JOIN public.identity_observation_receipts r
+               ON r.tenant_id = pl.tenant_id AND r.observation_id = pl.observation_id AND r.receipt_key = pl.receipt_key
+            WHERE pl.materialized_at IS NULL AND COALESCE(pl.payload->>'kind', '') <> 'host_observation'
+              AND (p_tenant IS NULL OR pl.tenant_id = p_tenant)
+            FOR UPDATE OF pl
+  LOOP
+    INSERT INTO public.deferred_crypto_findings (tenant_id, observation_id, source_ref, dedup_key, finding, created_at, last_seen_at)
+    VALUES (p.tenant_id, p.observation_id, COALESCE(p.source_ref, ''), p.receipt_key,
+            CASE
+              WHEN p.observed_at IS NULL THEN p.payload
+              WHEN jsonb_typeof(p.payload->'raw_data') = 'object' THEN
+                jsonb_set(p.payload, '{raw_data,observed_at}',
+                          to_jsonb(to_char(p.observed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')))
+              ELSE jsonb_set(p.payload, '{raw_data}',
+                             jsonb_build_object('observed_at', to_char(p.observed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')))
+            END,
+            COALESCE(p.observed_at, now()), COALESCE(p.observed_at, now()))
+    ON CONFLICT (tenant_id, observation_id, dedup_key) WHERE observation_id IS NOT NULL DO NOTHING;
+    GET DIAGNOSTICS n = ROW_COUNT;
+    moved := moved + n;
+    DELETE FROM public.identity_observation_payloads
+     WHERE tenant_id = p.tenant_id AND observation_id = p.observation_id AND receipt_key = p.receipt_key;
+  END LOOP;
+
+  RETURN moved;
+END;
+$$;
+
+SELECT public.adopt_legacy_crypto_deferrals();
 
 -- ----------------------------------------------------------------------------
 -- asset_endpoints.tls_handshake_outcome ( item 8): a TLS port that refused

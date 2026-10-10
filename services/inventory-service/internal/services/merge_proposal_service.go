@@ -875,6 +875,11 @@ var (
 		{"device_jobs", "asset_id"},
 		{"database_encryption_states", "asset_id"},
 		{"crypto_applications", "asset_id"},
+		// Crypto evidence held for the duplicate while it was pending
+		// (deferred_crypto.go) is the survivor's to replay. The FK is ON
+		// DELETE CASCADE, and the unique key is per observation, not per
+		// asset, so a plain UPDATE cannot collide.
+		{"deferred_crypto_findings", "asset_id"},
 		// The network a merged-away device was the gateway of is routed by
 		// the survivor. Its candidacies on other networks follow it
 		// too, after this list runs (pgidentity.RepointGatewayCandidates).
@@ -986,6 +991,33 @@ func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid
 		what string
 		sql  string
 	}{
+		// A configuration both assets were observed with is ONE configuration
+		// once they are one asset, and the unique index on the natural key
+		// (uq_crypto_implementations_natural_key) refuses a second live row
+		// under the survivor. So a source row whose key the survivor already
+		// holds — same endpoint (re-pointed in step 1 above), protocol,
+		// components and primary method — is folded into the survivor's row
+		// first (fold_crypto_implementations: links, tickets and provenance
+		// move, the source row is soft-deleted), and only the rest moves.
+		// Merging two duplicate assets is exactly when this happens: they were
+		// usually created by two observations of the same endpoints.
+		{"crypto configuration duplicates", `SELECT public.fold_crypto_implementations(
+		                    array_agg(s.tenant_id), array_agg(s.id), array_agg(t.id))
+		                  FROM crypto_implementations s
+		                  JOIN crypto_implementations t
+		                    ON t.tenant_id = s.tenant_id AND t.asset_id = $3
+		                   AND t.deleted_at IS NULL
+		                   AND t.endpoint_id IS NOT DISTINCT FROM s.endpoint_id
+		                   AND t.protocol = s.protocol
+		                   AND t.protocol_version       IS NOT DISTINCT FROM s.protocol_version
+		                   AND t.cipher_suite           IS NOT DISTINCT FROM s.cipher_suite
+		                   AND t.key_exchange_algorithm IS NOT DISTINCT FROM s.key_exchange_algorithm
+		                   AND t.signature_algorithm    IS NOT DISTINCT FROM s.signature_algorithm
+		                   AND t.symmetric_encryption   IS NOT DISTINCT FROM s.symmetric_encryption
+		                   AND t.hash_algorithm         IS NOT DISTINCT FROM s.hash_algorithm
+		                   AND t.key_size               IS NOT DISTINCT FROM s.key_size
+		                   AND t.discovery_method = s.discovery_method
+		                 WHERE s.tenant_id = $1 AND s.asset_id = $2 AND s.deleted_at IS NULL`},
 		{"crypto configurations", `UPDATE crypto_implementations SET asset_id = $3, updated_at = now()
 		                WHERE tenant_id = $1 AND asset_id = $2`},
 		{"management", `UPDATE asset_management SET asset_id = $3, updated_at = now()

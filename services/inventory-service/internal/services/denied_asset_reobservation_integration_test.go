@@ -139,12 +139,12 @@ func TestIntegration_Ingest_DeniedAssetIsTouchedNotResurrected(t *testing.T) {
 		}
 	})
 
-	t.Run("nothing was parked in deferred_findings", func(t *testing.T) {
+	t.Run("nothing was deferred", func(t *testing.T) {
 		var deferred int
 		if err := db.QueryRow(`
-			SELECT COALESCE(jsonb_array_length(metadata->'deferred_findings'), 0)
-			  FROM assets WHERE tenant_id = $1 AND id = $2`, tenant, assetID).Scan(&deferred); err != nil {
-			t.Fatalf("read deferred_findings: %v", err)
+			SELECT count(*) FROM deferred_crypto_findings
+			  WHERE tenant_id = $1 AND asset_id = $2 AND replayed_at IS NULL`, tenant, assetID).Scan(&deferred); err != nil {
+			t.Fatalf("read deferred findings: %v", err)
 		}
 		if deferred != 0 {
 			t.Errorf("%d finding(s) were deferred onto a denied asset, where no approval will ever replay them",

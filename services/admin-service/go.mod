@@ -1,6 +1,6 @@
 module github.com/vistasecurity/vistaplatform/admin-service
 
-go 1.26.8
+go 1.26.9
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
@@ -20,7 +20,7 @@ require (
 	github.com/stripe/stripe-go/v85 v85.2.0
 	github.com/vistasecurity/vistaplatform/shared v0.0.0
 	github.com/vistasecurity/vistaplatform/shared/rbac v0.0.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

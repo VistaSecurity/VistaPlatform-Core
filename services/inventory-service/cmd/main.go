@@ -821,7 +821,6 @@ func main() {
 		// Network segments (operational context) — tenant config.
 		apiv2.GET("/inventory-service/network-segments", networkSegmentHandler.GetNetworkSegments)
 		apiv2.POST("/inventory-service/network-segments", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.CreateNetworkSegment)
-		apiv2.POST("/inventory-service/network-segments/classify-asset", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), networkSegmentHandler.ClassifyAsset)
 		apiv2.POST("/inventory-service/network-segments/bulk", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.CreateNetworkSegmentsBulk)
 		apiv2.POST("/inventory-service/network-segments/reclassify-all", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), networkSegmentHandler.ReclassifyAllAssets)
 		apiv2.POST("/inventory-service/network-segments/migrate-from-spaces", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.MigrateFromNetworkSpaces)

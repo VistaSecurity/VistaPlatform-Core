@@ -5,20 +5,18 @@ package processor
 // Input: hop 1's golden (shared/deviceinterrogation/testdata/pipeline/<vendor>/
 // hop1_handoff.golden.json) — the exact sensor_discoveries rows the in-cluster
 // interrogation wrote. They are inserted into a real sensor_discoveries table
-// and the REAL ProcessBatch runs over them: the real converter, the real
-// auto-approval service, and the real InventoryClient posting to a stand-in
-// inventory-service that records the wire bytes.
+// and the REAL ProcessBatch runs over them: the real converter and the real
+// InventoryClient posting to a stand-in of inventory-service's import that
+// records the wire bytes.
 //
-// Output: hop2_handoff.golden.json — every import request and external-
-// connection upsert exactly as posted, plus what became of each hop-1 row.
-// That golden is hop 3's INPUT (inventory-service).
+// Output: hop2_handoff.golden.json — every import request exactly as posted,
+// plus what became of each hop-1 row. That golden is hop 3's INPUT
+// (inventory-service).
 //
-// The one stand-in is network classification, which is inventory-service's
-// decision: the fake answers from the scenario's registered segments plus the
-// segments hop 1 learned, the way NetworkSegmentService.ClassifyAsset does
-// (internal inside a segment, unknown for RFC 1918 outside one, third party
-// otherwise). Hop 3 runs the REAL classifier over the same segments and fails
-// if it disagrees with what this stand-in said, so the stand-in cannot drift.
+// There is no classification stand-in any more: since WP3
+// discovery-processor neither classifies nor evaluates auto-approval rules nor
+// writes external_connections. Every row is imported, and hop 3 runs the real
+// classifier and rules over the same segments.
 //
 // Reverse DNS is stubbed to answer nothing: the rows carry documentation
 // addresses, and what public DNS says about them today is not a property of
@@ -32,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -48,99 +45,51 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
-	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/pipelinetest"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
 const vendorPipelineDir = "../../../../shared/deviceinterrogation/testdata/pipeline"
 
-// pipelineInventory stands in for inventory-service at hop 2.
+// pipelineInventory stands in for inventory-service's import at hop 2 and
+// records the wire bytes. It is the only call discovery-processor makes
+// ( WP3): classification, auto-approval and external_connections are
+// inventory's, and hop 3 runs the real ones over these requests.
 type pipelineInventory struct {
-	mu       sync.Mutex
-	srv      *httptest.Server
-	segments []pipelineSegment
-	imports  []pipelinetest.ImportRequest
-	upserts  []map[string]any
+	mu      sync.Mutex
+	srv     *httptest.Server
+	imports []pipelinetest.ImportRequest
+	other   []string
 }
 
-type pipelineSegment struct {
-	net         *net.IPNet
-	networkType string
-}
-
-func newPipelineInventory(t *testing.T, s pipelinetest.Scenario, learned []pipelinetest.LearnedSegment) *pipelineInventory {
+func newPipelineInventory(t *testing.T) *pipelineInventory {
 	t.Helper()
 	f := &pipelineInventory{}
-	add := func(cidr, networkType string) {
-		_, n, err := net.ParseCIDR(cidr)
-		if err != nil {
-			t.Fatalf("segment %q: %v", cidr, err)
-		}
-		f.segments = append(f.segments, pipelineSegment{net: n, networkType: networkType})
-	}
-	for _, seg := range s.TenantSegments {
-		add(seg.CIDR, "private") // the column default a registered segment takes
-	}
-	for _, seg := range learned {
-		add(seg.Value, seg.NetworkType)
-	}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		body, _ := io.ReadAll(r.Body)
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/network-segments/classify-asset"):
-			var req struct {
-				IPAddress string `json:"ip_address"`
-			}
-			_ = json.Unmarshal(body, &req)
-			_ = json.NewEncoder(w).Encode(f.classify(req.IPAddress))
-		case strings.HasSuffix(r.URL.Path, "/external-connections"):
-			var got map[string]any
-			if err := decodeNumbers(body, &got); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
+		if !strings.HasSuffix(r.URL.Path, "/import") {
 			f.mu.Lock()
-			f.upserts = append(f.upserts, got)
+			f.other = append(f.other, r.URL.Path)
 			f.mu.Unlock()
-			_ = json.NewEncoder(w).Encode(map[string]string{"id": uuid.New().String()})
-		case strings.HasSuffix(r.URL.Path, "/import"):
-			var got pipelinetest.ImportRequest
-			if err := decodeNumbers(body, &got); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			f.mu.Lock()
-			f.imports = append(f.imports, got)
-			f.mu.Unlock()
-			// No per-finding outcomes: the effective status is inventory's to
-			// decide, and hop 3 is where that happens. The rows keep the
-			// status the rules gave them.
-			_ = json.NewEncoder(w).Encode(map[string]any{"imported": len(got.Findings)})
-		default:
 			w.WriteHeader(http.StatusNotFound)
+			return
 		}
+		var got pipelinetest.ImportRequest
+		if err := decodeNumbers(body, &got); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.imports = append(f.imports, got)
+		f.mu.Unlock()
+		// No per-finding outcomes: what each finding becomes is inventory's
+		// to decide, and hop 3 is where that happens. The rows keep the
+		// state the processor gives them before an answer.
+		_ = json.NewEncoder(w).Encode(map[string]any{"imported": len(got.Findings)})
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
-}
-
-// classify mirrors NetworkSegmentService.ClassifyAsset for CIDR segments.
-func (f *pipelineInventory) classify(ip string) map[string]any {
-	addr := net.ParseIP(ip)
-	for _, s := range f.segments {
-		if addr != nil && s.net.Contains(addr) {
-			return map[string]any{"ownership": "internal", "network_type": s.networkType}
-		}
-	}
-	for _, private := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
-		_, n, _ := net.ParseCIDR(private)
-		if addr != nil && n.Contains(addr) {
-			return map[string]any{"ownership": "unknown"}
-		}
-	}
-	return map[string]any{"ownership": "third_party"}
 }
 
 func decodeNumbers(raw []byte, into any) error {
@@ -207,12 +156,12 @@ func processVendorBatch(t *testing.T, db *sqlx.DB, s pipelinetest.Scenario, hop1
 		t.Fatalf("the tenant has no platform device-interrogation sensor: %v", err)
 	}
 
-	inventory := newPipelineInventory(t, s, hop1.LearnedSegments)
+	inventory := newPipelineInventory(t)
 	inventoryClient, err := client.NewInventoryClient(&config.Config{InventoryServiceURL: inventory.srv.URL})
 	if err != nil {
 		t.Fatalf("NewInventoryClient: %v", err)
 	}
-	p := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), approval.NewService(db.DB), inventoryClient, nil)
+	p := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), inventoryClient, nil)
 
 	// Hop 1's placeholders become this run's values.
 	rows := pipelinetest.Substitute(pipelinetest.Canonical(t, hop1.SensorDiscoveries), s.ManagementPort,
@@ -248,11 +197,10 @@ func processVendorBatch(t *testing.T, db *sqlx.DB, s pipelinetest.Scenario, hop1
 	processErr := p.ProcessBatch(batch, tenant)
 
 	out := pipelinetest.Hop2Handoff{
-		Vendor:              s.Vendor,
-		Imports:             inventory.imports,
-		ExternalConnections: inventory.upserts,
-		LearnedSegments:     hop1.LearnedSegments,
-		Assets:              hop1.Assets,
+		Vendor:          s.Vendor,
+		Imports:         inventory.imports,
+		LearnedSegments: hop1.LearnedSegments,
+		Assets:          hop1.Assets,
 	}
 	if processErr != nil {
 		out.ProcessError = processErr.Error()
@@ -260,8 +208,8 @@ func processVendorBatch(t *testing.T, db *sqlx.DB, s pipelinetest.Scenario, hop1
 	if out.Imports == nil {
 		out.Imports = []pipelinetest.ImportRequest{}
 	}
-	if out.ExternalConnections == nil {
-		out.ExternalConnections = []map[string]any{}
+	if len(inventory.other) != 0 {
+		t.Errorf("the processor called %v besides the import", inventory.other)
 	}
 
 	// What became of every row.
@@ -275,10 +223,6 @@ func processVendorBatch(t *testing.T, db *sqlx.DB, s pipelinetest.Scenario, hop1
 			}
 		}
 	}
-	upserted := map[string]bool{}
-	for _, u := range inventory.upserts {
-		upserted[fmt.Sprintf("%v:%v", u["dest_ip"], u["dest_port"])] = true
-	}
 	for i, id := range ids {
 		var status string
 		var processed bool
@@ -287,11 +231,8 @@ func processVendorBatch(t *testing.T, db *sqlx.DB, s pipelinetest.Scenario, hop1
 			t.Fatalf("read back row %d: %v", i, err)
 		}
 		forwarded := ""
-		switch {
-		case imported[id.String()]:
+		if imported[id.String()] {
 			forwarded = "import"
-		case upserted[fmt.Sprintf("%s:%v", input[i].DestIP, input[i].Port)]:
-			forwarded = "external_connection"
 		}
 		out.Rows = append(out.Rows, pipelinetest.RowOutcome{Row: i, ApprovalStatus: status, Processed: processed, Forwarded: forwarded})
 	}

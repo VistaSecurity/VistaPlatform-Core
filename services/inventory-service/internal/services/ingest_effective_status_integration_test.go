@@ -8,7 +8,7 @@ package services
 // DISCOVERY ROW and sends the answer along with the batch. That answer decides
 // what a NEW asset lands as — and ingest was using it for a second, different
 // question: whether to materialize this finding's certificates and crypto
-// configuration or park them in `assets.metadata->'deferred_findings'`.
+// configuration or defer them into `deferred_crypto_findings`.
 //
 // For a finding that MATCHED an existing, already-approved asset the two
 // questions have different answers. The same access point seen on an address in
@@ -150,16 +150,16 @@ func TestIntegration_Ingest_MonitoringAssetMaterializesUnderAPendingBatch(t *tes
 		}
 	})
 
-	t.Run("nothing was parked in deferred_findings", func(t *testing.T) {
+	t.Run("nothing was deferred", func(t *testing.T) {
 		var deferred int
 		if err := db.QueryRow(`
-			SELECT COALESCE(jsonb_array_length(metadata->'deferred_findings'), 0)
-			  FROM assets WHERE tenant_id = $1 AND id = $2`, tenant, assetID).Scan(&deferred); err != nil {
-			t.Fatalf("read deferred_findings: %v", err)
+			SELECT count(*) FROM deferred_crypto_findings
+			  WHERE tenant_id = $1 AND asset_id = $2 AND replayed_at IS NULL`, tenant, assetID).Scan(&deferred); err != nil {
+			t.Fatalf("read deferred findings: %v", err)
 		}
 		if deferred != 0 {
-			t.Fatalf("%d finding(s) sit in deferred_findings on a monitoring asset; ApproveAssets is the "+
-				"only thing that replays them and it runs only for a PENDING asset", deferred)
+			t.Fatalf("%d finding(s) are deferred on a monitoring asset; nothing approves a monitoring "+
+				"asset again, so only the sweep would ever replay them", deferred)
 		}
 	})
 
@@ -213,12 +213,12 @@ func TestIntegration_Ingest_MonitoringAssetMaterializesUnderAPendingBatch(t *tes
 
 		var deferred int
 		if err := db.QueryRow(`
-			SELECT COALESCE(jsonb_array_length(metadata->'deferred_findings'), 0)
-			  FROM assets WHERE tenant_id = $1 AND id = $2`, tenant, freshID).Scan(&deferred); err != nil {
-			t.Fatalf("read deferred_findings: %v", err)
+			SELECT count(*) FROM deferred_crypto_findings
+			  WHERE tenant_id = $1 AND asset_id = $2 AND replayed_at IS NULL`, tenant, freshID).Scan(&deferred); err != nil {
+			t.Fatalf("read deferred findings: %v", err)
 		}
 		if deferred != 1 {
-			t.Errorf("deferred_findings holds %d finding(s) for the pending asset, want 1", deferred)
+			t.Errorf("%d finding(s) deferred for the pending asset, want 1", deferred)
 		}
 
 		if len(newReport.EffectiveStatus) != 1 || newReport.EffectiveStatus[0] != identity.StatusPendingApproval {
@@ -304,9 +304,9 @@ func TestIntegration_Ingest_ArchivedAssetIsNotResurrectedByAnApprovingBatch(t *t
 
 		var deferred int
 		if err := db.QueryRow(`
-			SELECT COALESCE(jsonb_array_length(metadata->'deferred_findings'), 0)
-			  FROM assets WHERE tenant_id = $1 AND id = $2`, tenant, assetID).Scan(&deferred); err != nil {
-			t.Fatalf("read deferred_findings: %v", err)
+			SELECT count(*) FROM deferred_crypto_findings
+			  WHERE tenant_id = $1 AND asset_id = $2 AND replayed_at IS NULL`, tenant, assetID).Scan(&deferred); err != nil {
+			t.Fatalf("read deferred findings: %v", err)
 		}
 		if deferred != 0 {
 			t.Errorf("%d finding(s) were deferred onto an archived asset, where no approval will ever "+

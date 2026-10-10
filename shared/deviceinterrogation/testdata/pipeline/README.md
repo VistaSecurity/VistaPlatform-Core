@@ -149,7 +149,8 @@ own PR was open.
 - **Real:** every collector, the Registry and its sanitiser, both sinks of the
   in-cluster path, the identity engine, the job's processing block,
   `ProcessBatch` and the converter, the `InventoryClient` wire format, the
-  import handler's decode, `IngestFindingsReport` with the weak-crypto detector
+  import handler's decode, `IngestPipelineFindingsReport` — inventory's one
+  classifier and the tenant's auto-approval rules — with the weak-crypto detector
   and the seeded catalogue, `ApproveAssets`, `GetCryptoImplementations`, the
   PQC classifier, Postgres.
 - **The appliance's address.** The fakes listen on loopback (opened for one
@@ -158,15 +159,17 @@ own PR was open.
   `{{APPLIANCE_PORT}}`; hops 2 and 3 put the scenario's `management_ip` /
   `management_port` back, and hop 3 scopes the device's address to the segment
   that contains it, as `CreateDevice` would have.
-- **Network classification at hop 2** is inventory-service's decision, so hop 2
-  answers `classify-asset` from the scenario's and hop 1's segments the way
-  `NetworkSegmentService.ClassifyAsset` does. Hop 3 runs the real classifier on
-  every finding and fails if it disagrees with what hop 2 was told.
+- **Network classification** is inventory-service's alone (#2374 WP3):
+  discovery-processor imports every row and neither classifies, evaluates
+  auto-approval rules nor writes external connections, so hop 2 has no
+  classification stand-in. Hop 3 runs the real classifier, over the scenario's
+  and hop 1's segments, inside the import.
 - **Reverse DNS at hop 2** answers nothing: the rows carry documentation
   addresses, and what public DNS says about them is not a property of the
   pipeline.
 - **Inventory's per-finding outcomes at hop 2**: the stand-in answers with a
-  count only, so hop 2's row statuses are what the auto-approval rules set.
+  count only, so hop 2's row statuses are the processor's pre-answer state
+  (`pending`, or `observed` for a host observation).
   Hop 3 is where the real outcomes are recorded (`ingest_outcomes`).
 - **Approval at hop 3**: every pending asset is approved, as a tenant does in
   Discovery → Approvals, because that is what materializes deferred crypto.

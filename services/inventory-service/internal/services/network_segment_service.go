@@ -20,20 +20,27 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/network/addrscope"
 	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 )
 
 type NetworkSegmentService struct {
 	db              *database.DB
 	locationService *LocationService
+	// onLoadSegmentSet, when set, is called on every LoadSegmentSet — the
+	// test seam that counts segment reads per import ( F4).
+	onLoadSegmentSet func(tenantID uuid.UUID)
 }
 
 func NewNetworkSegmentService(db *database.DB, locationService *LocationService) *NetworkSegmentService {
 	return &NetworkSegmentService{db: db, locationService: locationService}
 }
 
-// GetSegmentForIP returns the matching active network segment for the given
-// IP/hostname, or nil.
+// SegmentSet is one read of a tenant's active network segments, matched in
+// memory. An import request reads it once and asks it every segment question
+// the request has — ownership classification, segment tags, segment
+// enrichment — instead of re-reading every segment of the tenant for each
+// question about each finding ( F4).
 //
 // The ordering and matching rule lives in shared/network.MatchSegment rather
 // than here: device-interrogation-service asks the same question of the same
@@ -41,7 +48,20 @@ func NewNetworkSegmentService(db *database.DB, locationService *LocationService)
 // identify within (ADR-0002 D3), and two implementations of "which segment is
 // this in" would put one host in two segments and therefore under two
 // identities — the duplication the identification engine exists to end.
-func (s *NetworkSegmentService) GetSegmentForIP(tenantID uuid.UUID, ipAddress *string, hostname *string) (*models.NetworkSegment, error) {
+//
+// A nil *SegmentSet is usable and matches nothing.
+type SegmentSet struct {
+	tenantID   uuid.UUID
+	byID       map[string]*models.NetworkSegment
+	candidates []network.Segment
+}
+
+// LoadSegmentSet reads the tenant's active segments — the one query every
+// segment lookup in this file is answered from.
+func (s *NetworkSegmentService) LoadSegmentSet(tenantID uuid.UUID) (*SegmentSet, error) {
+	if s.onLoadSegmentSet != nil {
+		s.onLoadSegmentSet(tenantID)
+	}
 	var segments []models.NetworkSegment
 	// LEFT JOIN: a segment's location is optional, so an INNER JOIN would silently
 	// drop location-less (WAN/VPN/multi-region) segments from matching entirely.
@@ -56,31 +76,70 @@ func (s *NetworkSegmentService) GetSegmentForIP(tenantID uuid.UUID, ipAddress *s
 	if err != nil {
 		return nil, err
 	}
-	if len(segments) == 0 {
-		return nil, nil
+	set := &SegmentSet{
+		tenantID:   tenantID,
+		byID:       make(map[string]*models.NetworkSegment, len(segments)),
+		candidates: make([]network.Segment, 0, len(segments)),
 	}
 	for i := range segments {
 		segments[i].HydrateAutoApproveSources()
 		segments[i].HydratePosture()
-	}
-
-	byID := make(map[string]*models.NetworkSegment, len(segments))
-	candidates := make([]network.Segment, 0, len(segments))
-	for i := range segments {
 		id := segments[i].ID.String()
-		byID[id] = &segments[i]
-		candidates = append(candidates, network.Segment{
+		set.byID[id] = &segments[i]
+		set.candidates = append(set.candidates, network.Segment{
 			ID:    id,
 			Type:  segments[i].SegmentType,
 			Value: segments[i].Value,
 		})
 	}
+	return set, nil
+}
 
-	match, ok := network.MatchSegment(candidates, derefString(ipAddress), derefString(hostname))
-	if !ok {
-		return nil, nil
+// Match returns the segment the IP/hostname belongs to, or nil.
+func (set *SegmentSet) Match(ipAddress, hostname *string) *models.NetworkSegment {
+	if set == nil || len(set.candidates) == 0 {
+		return nil
 	}
-	return byID[match.ID], nil
+	match, ok := network.MatchSegment(set.candidates, derefString(ipAddress), derefString(hostname))
+	if !ok {
+		return nil
+	}
+	return set.byID[match.ID]
+}
+
+// Classify is ownership over the set: "internal" when a segment matches,
+// "unknown" for an internal candidate by address class (addrscope: private or
+// carrier-grade NAT), "third_party" otherwise.
+func (set *SegmentSet) Classify(ipAddress, hostname *string) string {
+	if set.Match(ipAddress, hostname) != nil {
+		return "internal"
+	}
+	if ipAddress != nil && NetworkTypeForAddress(*ipAddress) == "private" {
+		return "unknown"
+	}
+	return "third_party"
+}
+
+// Tags returns a copy of the matching segment's tags; empty, never nil.
+func (set *SegmentSet) Tags(ipAddress, hostname *string) map[string]interface{} {
+	out := make(map[string]interface{})
+	if seg := set.Match(ipAddress, hostname); seg != nil {
+		for k, v := range seg.Tags {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// GetSegmentForIP returns the matching active network segment for the given
+// IP/hostname, or nil. One read per call: a caller with more than one question
+// loads a [SegmentSet] instead.
+func (s *NetworkSegmentService) GetSegmentForIP(tenantID uuid.UUID, ipAddress *string, hostname *string) (*models.NetworkSegment, error) {
+	set, err := s.LoadSegmentSet(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return set.Match(ipAddress, hostname), nil
 }
 
 // EnrichAssetFromSegment applies segment context to an asset (environment, location_id, etc.).
@@ -127,12 +186,24 @@ func mergeSegmentTags(existing, newTags map[string]interface{}) map[string]inter
 // address — the address it is interrogated at (homeAddress) — whichever
 // address the finding was on.
 func (s *NetworkSegmentService) EnrichAssetByID(tenantID, assetID uuid.UUID, ipAddress, hostname *string) error {
+	return s.EnrichAssetByIDIn(nil, tenantID, assetID, ipAddress, hostname)
+}
+
+// EnrichAssetByIDIn is EnrichAssetByID over a segment set the caller already
+// loaded; a nil set is read here.
+func (s *NetworkSegmentService) EnrichAssetByIDIn(set *SegmentSet, tenantID, assetID uuid.UUID, ipAddress, hostname *string) error {
 	if home, ok := s.homeAddress(tenantID, assetID); ok {
 		ipAddress, hostname = &home, nil
 	}
-	seg, err := s.GetSegmentForIP(tenantID, ipAddress, hostname)
-	if err != nil || seg == nil {
-		return err
+	if set == nil {
+		var err error
+		if set, err = s.LoadSegmentSet(tenantID); err != nil {
+			return err
+		}
+	}
+	seg := set.Match(ipAddress, hostname)
+	if seg == nil {
+		return nil
 	}
 	// location_id and site are optional defaults: when the segment has no location,
 	// pass NULL and COALESCE so the asset keeps whatever location it already had.
@@ -519,39 +590,52 @@ func (s *NetworkSegmentService) Delete(tenantID, id uuid.UUID) error {
 	return nil
 }
 
+// NetworkTypeForAddress derives "private" or "public" from the address alone,
+// for an address that matched no registered segment. It is "private" exactly
+// when the address is an internal candidate by address class
+// ([addrscope.IsTenantAddressable]): RFC 1918, IPv6 unique local, link-local,
+// loopback, and RFC 6598 carrier-grade NAT. Everything else, including an
+// unparseable value, is public.
+//
+// CGNAT reports "private", not a value of its own ( D1). network_type is
+// a closed vocabulary — private/public/vpn/cloud, pinned by the
+// network_segments CHECK constraint, the query catalogue's network.type enum
+// (approval rules) and the segment editor — and the question it answers here
+// is "inside the tenant or out", which for an unmatched CGNAT address is
+// "inside, pending review". This does NOT make CGNAT probeable: automatic
+// scanning and probe consent read addrscope.MayAutoProbe, which excludes it
+// unless a declared segment covers it.
+func NetworkTypeForAddress(addr string) string {
+	if addrscope.IsTenantAddressable(netipAddrOrZero(addr)) {
+		return "private"
+	}
+	return "public"
+}
+
+// netipAddrOrZero parses addr through addrscope's normalization (trimmed,
+// zone stripped, unmapped); the zero Addr, which classifies Invalid, when it
+// does not parse.
+func netipAddrOrZero(addr string) netip.Addr {
+	a, _ := addrscope.Parse(addr)
+	return a
+}
+
 // ClassifyAsset returns ownership classification (internal, third_party, unknown) based on segment match.
 func (s *NetworkSegmentService) ClassifyAsset(tenantID uuid.UUID, ipAddress *string, hostname *string, fqdns []string) (string, error) {
-	seg, err := s.GetSegmentForIP(tenantID, ipAddress, hostname)
+	set, err := s.LoadSegmentSet(tenantID)
 	if err != nil {
 		return "unknown", err
 	}
-	if seg != nil {
-		return "internal", nil
-	}
-	if ipAddress != nil && *ipAddress != "" {
-		if network.IsIPInCIDR(*ipAddress, "10.0.0.0/8") ||
-			network.IsIPInCIDR(*ipAddress, "172.16.0.0/12") ||
-			network.IsIPInCIDR(*ipAddress, "192.168.0.0/16") {
-			return "unknown", nil
-		}
-	}
-	return "third_party", nil
+	return set.Classify(ipAddress, hostname), nil
 }
 
 // GetTagsForAsset returns merged tags from the matching segment, if any.
 func (s *NetworkSegmentService) GetTagsForAsset(tenantID uuid.UUID, ipAddress *string, hostname *string, fqdns []string) (map[string]interface{}, error) {
-	seg, err := s.GetSegmentForIP(tenantID, ipAddress, hostname)
-	if err != nil || seg == nil {
+	set, err := s.LoadSegmentSet(tenantID)
+	if err != nil {
 		return make(map[string]interface{}), err
 	}
-	if seg.Tags == nil {
-		return make(map[string]interface{}), nil
-	}
-	out := make(map[string]interface{})
-	for k, v := range seg.Tags {
-		out[k] = v
-	}
-	return out, nil
+	return set.Tags(ipAddress, hostname), nil
 }
 
 // ReclassifyAllAssets re-enriches all assets for a tenant using current network segments.
@@ -573,6 +657,11 @@ func (s *NetworkSegmentService) ReclassifyAllAssets(tenantID uuid.UUID) (int, er
 	if err != nil {
 		return 0, err
 	}
+	// One read of the segments for the whole pass, not one per asset.
+	set, err := s.LoadSegmentSet(tenantID)
+	if err != nil {
+		return 0, err
+	}
 	updated := 0
 	for _, a := range assets {
 		var ip, host *string
@@ -587,10 +676,7 @@ func (s *NetworkSegmentService) ReclassifyAllAssets(tenantID uuid.UUID) (int, er
 		if home, ok := s.homeAddress(tenantID, a.ID); ok {
 			ip, host = &home, nil
 		}
-		seg, err := s.GetSegmentForIP(tenantID, ip, host)
-		if err != nil {
-			continue
-		}
+		seg := set.Match(ip, host)
 		if seg != nil {
 			// Location/site are optional segment defaults: when the matched segment
 			// has no location, COALESCE leaves the asset's existing location intact

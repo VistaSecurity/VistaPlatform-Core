@@ -149,6 +149,7 @@ func (r *Resolver) Resolve(ctx context.Context, s identity.Sighting) sightingcli
 	}
 	out := sightingclient.Result{
 		Outcome: res.Outcome, AssetID: res.Asset.ID, ObservationID: res.ObservationID, ProposalID: res.Proposal.ID,
+		EvidenceHeld: res.EvidenceHeld, EndpointsClosed: res.EndpointsClosed,
 	}
 	if res.AdmissionReason != "" {
 		out.Reasons = []string{res.AdmissionReason}

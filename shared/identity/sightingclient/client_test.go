@@ -67,7 +67,7 @@ func TestPost_SignedTenantAndResults(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(Response{Results: []Result{
-			{Outcome: identity.OutcomeMatched, AssetID: "a1", ObservationID: "o1", Reasons: []string{"direct_scoped_interface"}},
+			{Outcome: identity.OutcomeMatched, AssetID: "a1", ObservationID: "o1", EvidenceHeld: true, Reasons: []string{"direct_scoped_interface"}},
 			{Outcome: identity.OutcomeConflict, ProposalID: "p1"},
 		}})
 	})
@@ -79,7 +79,7 @@ func TestPost_SignedTenantAndResults(t *testing.T) {
 		t.Fatalf("results %+v", got)
 	}
 	res := got[0].Resolution(tenant)
-	if res.Asset.ID != "a1" || res.Asset.TenantID != tenant || res.AdmissionReason != "direct_scoped_interface" || res.ObservationID != "o1" {
+	if res.Asset.ID != "a1" || res.Asset.TenantID != tenant || res.AdmissionReason != "direct_scoped_interface" || res.ObservationID != "o1" || !res.EvidenceHeld {
 		t.Errorf("resolution %+v", res)
 	}
 	if r := got[1].Resolution(tenant); !r.Asset.Zero() || r.Proposal.ID != "p1" {

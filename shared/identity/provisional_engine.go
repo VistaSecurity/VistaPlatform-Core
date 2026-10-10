@@ -127,6 +127,9 @@ func (e *Engine) yieldToDirectEvidence(
 		return Resolution{}, false, nil
 	}
 	cp := *e
+	// The yield re-runs the walk after the outer resolution's reads; it
+	// reads the owners afresh rather than trusting a snapshot taken earlier.
+	cp.ownerSnapshot = nil
 	cp.muted = make(map[string]bool, len(addresses))
 	for _, id := range addresses {
 		cp.muted[id.Key()] = true
@@ -294,6 +297,10 @@ func (e *Engine) resolveSupporting(
 		return Resolution{Outcome: OutcomeUnresolved, Unattached: ids}, nil
 	}
 	attach, unattached := splitByOwner(ids, owners, ref.ID)
+	// Supporting evidence never reconciles an asset's sockets: a complete set
+	// licenses closing endpoints only on a match (CompleteEndpointSet). Dropped
+	// here, before any branch below can hand the observation to applyToAsset.
+	obs.EndpointsComplete = nil
 	sighting := isSighting(obs)
 	changes := map[string]any{"supporting": true, "sighting": sighting}
 	if e.observationID != "" {
@@ -386,7 +393,26 @@ func (e *Engine) resolveSupporting(
 	if len(unattached) > 0 {
 		changes["unattached"] = identifierKeys(unattached)
 	}
-	if eps := stampEndpoints(obs.Endpoints, obs.Source, at); len(eps) > 0 {
+	eps := stampEndpoints(obs.Endpoints, obs.Source, at)
+	if len(eps) > 0 && supportingEndpointsAttach(obs, summaries[0]) {
+		// D4 of: the ONE owner gets the sockets of a measurement that
+		// reached the device itself — measured, direct, not relayed, the
+		// shape that lets evidence count in AssessAdmission. The identifiers
+		// stay held: a socket proves where something listened, not that the
+		// names this evidence carries belong to the asset's identity.
+		// Written here, inside the engine's transaction, so no intake path
+		// writes an endpoint after the engine declined to (F17).
+		n, err := e.repo.UpsertEndpoints(ctx, ref, eps)
+		if err != nil {
+			return Resolution{}, fmt.Errorf("identity: attaching supporting endpoints to %s: %w", ref.ID, err)
+		}
+		changes["endpoints"] = endpointKeys(eps)
+		if err := e.recordIfChanged(ctx, ref, obs, at, ActionUpdated, changes, n > 0); err != nil {
+			return Resolution{}, err
+		}
+		return Resolution{Outcome: OutcomeSupporting, Asset: ref, Unattached: unattached, SupportingEndpoints: true}, nil
+	}
+	if len(eps) > 0 {
 		changes["held_endpoints"] = endpointKeys(eps)
 	}
 	// Last-seen moved and nothing else did, so the timeline hears of it only
@@ -395,6 +421,22 @@ func (e *Engine) resolveSupporting(
 		return Resolution{}, err
 	}
 	return Resolution{Outcome: OutcomeSupporting, Asset: ref, Unattached: unattached, EvidenceHeld: true}, nil
+}
+
+// supportingEndpointsAttach is D4 of: whether supporting evidence for
+// an ESTABLISHED single owner may attach its endpoints to that owner.
+//
+// The measurement must have reached the device itself — Source measured,
+// Admission direct and not relayed, the same shape AssessAdmission requires
+// before evidence may count — and the owner must still be in play: never an
+// archived asset (archiving is a decision a re-discovery does not undo) and
+// never a denied one. Contested and unresolved outcomes never get here; they
+// have no single owner.
+func supportingEndpointsAttach(obs Observation, owner AssetSummary) bool {
+	if obs.Source.Kind != SourceMeasured || !obs.Admission.Direct || obs.Admission.Relayed {
+		return false
+	}
+	return owner.Status != StatusArchived && owner.Status != StatusDenied
 }
 
 // provisionalPlacement is the segment a provisional asset would be created in,

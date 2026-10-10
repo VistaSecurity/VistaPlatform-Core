@@ -5,7 +5,6 @@
     {
       "imports": [
         {
-          "asset_status": "pending_approval",
           "findings": [
             {
               "asset_type": "service",
@@ -33,8 +32,6 @@
                 "encrypted": true,
                 "encryption_type": "aws-kms",
                 "integration_id": "{{INTEGRATION_ID}}",
-                "network_ownership": "unknown",
-                "network_type": "private",
                 "pqc_kex_detected": false,
                 "region": "us-east-1",
                 "resource_type": "s3_bucket",
@@ -70,8 +67,6 @@
                 "encrypted": true,
                 "encryption_type": "aws-kms",
                 "integration_id": "{{INTEGRATION_ID}}",
-                "network_ownership": "unknown",
-                "network_type": "private",
                 "pqc_kex_detected": false,
                 "region": "us-east-1",
                 "resource_type": "rds_instance",
@@ -103,7 +98,6 @@
     {
       "imports": [
         {
-          "asset_status": "pending_approval",
           "findings": [
             {
               "asset_type": "service",
@@ -131,8 +125,6 @@
                 "encrypted": true,
                 "encryption_type": "aws-kms",
                 "integration_id": "{{INTEGRATION_ID}}",
-                "network_ownership": "unknown",
-                "network_type": "private",
                 "pqc_kex_detected": false,
                 "region": "us-east-1",
                 "resource_type": "s3_bucket",
@@ -168,8 +160,6 @@
                 "encrypted": true,
                 "encryption_type": "aws-kms",
                 "integration_id": "{{INTEGRATION_ID}}",
-                "network_ownership": "unknown",
-                "network_type": "private",
                 "pqc_kex_detected": false,
                 "region": "us-east-1",
                 "resource_type": "rds_instance",

@@ -3,8 +3,10 @@ package services
 // Endpoints follow the identity decision (owner decision 2 on, platform
 // ADR-0003 D2). Matched / Created attach a sighting's sockets inside the
 // engine's transaction; Supporting leaves them on the observation until an
-// operator's Link or Confirm materialises them; existing endpoint rows are not
-// deleted, they just stop being refreshed by supporting evidence.
+// operator's Link or Confirm materialises them — unless ( D4) the
+// evidence is a direct measurement of a single live owner, when the engine
+// attaches the sockets and holds only the identifiers; existing endpoint rows
+// are not deleted, they just stop being refreshed by held evidence.
 //
 // These tests drive the REAL intake (IngestFindingsReport + the retained-
 // evidence worker + DecideIdentityObservation) over the intake matrix's
@@ -25,6 +27,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identitytest/intakematrix"
+	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -123,21 +126,90 @@ func TestIntegration_EndpointsFollowIdentity(t *testing.T) {
 		}
 	})
 
-	// Supporting evidence attaches no socket and refreshes none the asset
+	// D4: a supporting finding that is a direct measurement (a completed
+	// TLS exchange, l3_probe) for ONE owner attaches its sockets to that owner,
+	// inside the engine's transaction — the engine is the only writer, so this
+	// holds with service identification unwired and the worker never run. The
+	// identifiers stay held. Mutation: make identity's
+	// supportingEndpointsAttach return false → 0 endpoints.
+	t.Run("supporting_direct_finding_attaches_its_endpoints_to_the_single_owner", func(t *testing.T) {
+		m := newInvMatrix(t, raw)
+		m.svc.SetEnrichmentServices(NewNetworkSegmentService(m.svc.db, NewLocationService(m.svc.db)), nil)
+		report, err := m.svc.IngestFindingsReport(m.Tenant, m.scanAt(intakematrix.TenantAddr), identity.StatusPendingApproval)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range report.Results {
+			if r.Outcome != string(identity.OutcomeSupporting) || r.AssetID != m.Asset.String() {
+				t.Fatalf("result %+v, want supporting on the gateway", r)
+			}
+		}
+		if n := m.countRows(t, `SELECT count(*) FROM asset_endpoints WHERE tenant_id=$1 AND asset_id=$2`, m.Tenant, m.Asset); n != 3 {
+			t.Errorf("%d endpoints on the gateway, want the 3 the engine attached", n)
+		}
+		if n := m.countRows(t, `SELECT count(*) FROM asset_history WHERE tenant_id=$1 AND asset_id=$2 AND changes_json->>'supporting'='true' AND jsonb_array_length(changes_json->'endpoints')=1`, m.Tenant, m.Asset); n == 0 {
+			t.Error("no supporting history row names the attached endpoints")
+		}
+		if n := m.countRows(t, `SELECT count(*) FROM identity_observations WHERE tenant_id=$1 AND state='linked' AND resolution_outcome='supporting'`, m.Tenant); n != 3 {
+			t.Errorf("%d observations recorded as linked supporting evidence, want 3", n)
+		}
+	})
+
+	// The other polarity: the same scan whose identifiers name TWO owners — the
+	// gateway's address and another asset's SSH host key — is contested, and
+	// contested evidence attaches no socket to either.
+	t.Run("contested_finding_attaches_no_endpoint", func(t *testing.T) {
+		m := newInvMatrix(t, raw)
+		const otherKey = "SHA256:hostinvOtherAssetKeyAAAAAAAAAAAAAAAAAAAAAAAA"
+		other, err := pgidentity.New(raw).CreateAsset(ctx, m.Tenant.String(), identity.NewAsset{
+			ClassKey: "server", ClassSourceKind: identity.ClassSourceDeclared, ClassConfidence: 1,
+			DisplayName: "other-host", Status: identity.StatusMonitoring, IdentityStatus: string(identity.IdentityEstablished),
+			FirstSeenAt: m.Now, LastSeenAt: m.Now,
+			Identifiers: []identity.Identifier{{Kind: identity.KindSSHHostKeyFingerprint, Value: otherKey, Confidence: 1,
+				Source: identity.Source{Kind: identity.SourceMeasured, Ref: "scan"}, SeenAt: m.Now}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		findings := m.scanAt(intakematrix.TenantAddr)
+		for i := range findings {
+			findings[i].RawData["ssh_host_key_fingerprint"] = otherKey
+		}
+		report, err := m.svc.IngestFindingsReport(m.Tenant, findings, identity.StatusPendingApproval)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range report.Results {
+			if r.Outcome == string(identity.OutcomeSupporting) || r.Outcome == string(identity.OutcomeMatched) {
+				t.Fatalf("outcome %s, want contested evidence for two owners", r.Outcome)
+			}
+		}
+		for _, asset := range []string{m.Asset.String(), other.ID} {
+			if n := m.countRows(t, `SELECT count(*) FROM asset_endpoints WHERE tenant_id=$1 AND asset_id=$2`, m.Tenant, asset); n != 0 {
+				t.Errorf("contested evidence wrote %d endpoints on %s", n, asset)
+			}
+		}
+	})
+
+	// Supporting evidence that is NOT a direct measurement (traffic only, no
+	// completed exchange) attaches no socket and refreshes none the asset
 	// already has: the gateway's existing :443 keeps its service name and gets
-	// no crypto configuration; :8443 and :9443 do not appear; the payloads stay
-	// unmaterialised. Mutations, each red on its own: drop the `evidenceHeld`
-	// skip in IngestFindings (service name refreshed); drop the
-	// resolution_outcome gate in SweepIdentityEvidence (crypto on :443,
-	// payloads marked done).
-	t.Run("supporting_attaches_nothing_and_refreshes_nothing", func(t *testing.T) {
+	// no crypto configuration; :8443 and :9443 do not appear. Mutations, each
+	// red on its own: drop the `evidenceHeld` skip in IngestFindings (service
+	// name refreshed); drop the Direct check in identity's
+	// supportingEndpointsAttach (three endpoints).
+	t.Run("supporting_indirect_finding_attaches_nothing_and_refreshes_nothing", func(t *testing.T) {
 		m := newInvMatrix(t, raw)
 		existing := uuid.New()
 		if _, err := m.DB.Exec(`INSERT INTO asset_endpoints(id,tenant_id,asset_id,address,port,transport,service_name,service_confidence,first_seen_at,last_seen_at)
 			VALUES($1,$2,$3,$4::inet,443,'tcp','legacy-name','reported',now()-interval '10 days',now()-interval '10 days')`, existing, m.Tenant, m.Asset, intakematrix.TenantAddr); err != nil {
 			t.Fatal(err)
 		}
-		report, err := m.svc.IngestFindingsReport(m.Tenant, m.scanAt(intakematrix.TenantAddr), identity.StatusPendingApproval)
+		findings := m.scanAt(intakematrix.TenantAddr)
+		for i := range findings {
+			findings[i].CipherSuite = nil
+		}
+		report, err := m.svc.IngestFindingsReport(m.Tenant, findings, identity.StatusPendingApproval)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -166,8 +238,8 @@ func TestIntegration_EndpointsFollowIdentity(t *testing.T) {
 		if n := m.countRows(t, `SELECT count(*) FROM identity_observations WHERE tenant_id=$1 AND state='linked' AND resolution_outcome='supporting'`, m.Tenant); n != 3 {
 			t.Errorf("%d observations recorded as linked supporting evidence, want 3", n)
 		}
-		if n := m.countRows(t, `SELECT count(*) FROM identity_observation_payloads WHERE tenant_id=$1 AND materialized_at IS NULL`, m.Tenant); n != 3 {
-			t.Errorf("%d unmaterialised payloads, want the 3 held ones", n)
+		if n := m.countRows(t, `SELECT count(*) FROM deferred_crypto_findings WHERE tenant_id=$1 AND observation_id IS NOT NULL AND replayed_at IS NULL`, m.Tenant); n != 3 {
+			t.Errorf("%d unreplayed held findings, want the 3 held ones", n)
 		}
 	})
 
@@ -177,6 +249,12 @@ func TestIntegration_EndpointsFollowIdentity(t *testing.T) {
 	t.Run("link_materialises_held_supporting_evidence", func(t *testing.T) {
 		m := newInvMatrix(t, raw)
 		if _, err := m.svc.IngestFindingsReport(m.Tenant, m.scanAt(intakematrix.TenantAddr), identity.StatusPendingApproval); err != nil {
+			t.Fatal(err)
+		}
+		// Since D4 this direct scan's sockets are attached at ingest.
+		// Supporting observations HELD before D4 shipped have none: remove
+		// them, so the Link below is what has to write them.
+		if _, err := m.DB.Exec(`DELETE FROM asset_endpoints WHERE tenant_id=$1 AND asset_id=$2`, m.Tenant, m.Asset); err != nil {
 			t.Fatal(err)
 		}
 		actor := m.actor(t)
@@ -204,8 +282,8 @@ func TestIntegration_EndpointsFollowIdentity(t *testing.T) {
 		if n := m.countRows(t, `SELECT count(*) FROM crypto_implementations_partitioned WHERE tenant_id=$1 AND asset_id=$2 AND endpoint_id IS NOT NULL`, m.Tenant, m.Asset); n != 3 {
 			t.Errorf("%d crypto configurations on endpoints after Link, want 3", n)
 		}
-		if n := m.countRows(t, `SELECT count(*) FROM identity_observation_payloads WHERE tenant_id=$1 AND materialized_at IS NULL`, m.Tenant); n != 0 {
-			t.Errorf("%d payloads still unmaterialised after Link", n)
+		if n := m.countRows(t, `SELECT count(*) FROM deferred_crypto_findings WHERE tenant_id=$1 AND replayed_at IS NULL`, m.Tenant); n != 0 {
+			t.Errorf("%d held findings still unreplayed after Link", n)
 		}
 	})
 

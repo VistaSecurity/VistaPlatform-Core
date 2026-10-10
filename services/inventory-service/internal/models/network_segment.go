@@ -284,20 +284,3 @@ type NetworkSegmentFilters struct {
 	Page        int        `json:"page" form:"page"`
 	PageSize    int        `json:"page_size" form:"page_size"`
 }
-
-// ClassifyAssetRequest is the body for POST network-segments/classify-asset.
-//
-// The cloud_* fields describe a resource discovered through a cloud provider
-// API, which frequently has no routable address of its own (a KMS key, a
-// bucket, a managed database). For those the IP is a placeholder and cannot
-// answer "whose network is this on"; the cloud account/region/VPC can, and it
-// is the same key inventory-service already uses to attribute the imported
-// asset to a segment (FindOrCreateCloudSegment).
-type ClassifyAssetRequest struct {
-	IPAddress     *string `json:"ip_address"`
-	Hostname      *string `json:"hostname"`
-	CloudProvider string  `json:"cloud_provider"`
-	CloudRegion   string  `json:"cloud_region"`
-	VPCID         string  `json:"vpc_id"`
-	Environment   string  `json:"environment"`
-}

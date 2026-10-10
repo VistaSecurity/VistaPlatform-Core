@@ -49,8 +49,8 @@ func (f pqcFixture) addImpl(t *testing.T, components map[string]string) uuid.UUI
 	t.Helper()
 	implID := uuid.New()
 	if _, err := f.db.Exec(`
-		INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, discovery_method, created_at, updated_at)
-		VALUES ($1,$2,$3,'TLS','passive',NOW(),NOW())`, implID, f.tenant, f.asset); err != nil {
+		INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, cipher_suite, discovery_method, created_at, updated_at)
+		VALUES ($1,$2,$3,'TLS','fixture-' || $1::uuid::text,'passive',NOW(),NOW())`, implID, f.tenant, f.asset); err != nil {
 		t.Fatalf("insert implementation: %v", err)
 	}
 	for role, code := range components {

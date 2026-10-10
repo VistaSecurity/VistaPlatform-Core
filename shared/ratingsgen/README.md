@@ -9,9 +9,9 @@ Workflow priority, log levels and percentage colour policies are separate domain
 From the repository root, run:
 
 ```sh
-GOTOOLCHAIN=go1.26.8 go run ./shared/ratingsgen/cmd/gen-ratings
-GOTOOLCHAIN=go1.26.8 go run ./shared/ratingsgen/cmd/gen-ratings --check
-GOTOOLCHAIN=go1.26.8 go test ./shared/ratingsgen ./shared/severity ./shared/healthbands ./shared/riskbands
+GOTOOLCHAIN=go1.26.9 go run ./shared/ratingsgen/cmd/gen-ratings
+GOTOOLCHAIN=go1.26.9 go run ./shared/ratingsgen/cmd/gen-ratings --check
+GOTOOLCHAIN=go1.26.9 go test ./shared/ratingsgen ./shared/severity ./shared/healthbands ./shared/riskbands
 ```
 
 `make generate` regenerates, and `make audit` checks, the React-free TypeScript

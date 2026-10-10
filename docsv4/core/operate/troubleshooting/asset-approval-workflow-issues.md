@@ -53,21 +53,31 @@ To see what is being held with each pending asset — the certificates and crypt
 configurations that will appear the moment it is approved:
 
 ```sql
-SELECT id,
-       display_name,
-       class_key,
-       jsonb_array_length(COALESCE(metadata -> 'deferred_findings', '[]'::jsonb)) AS deferred
-FROM assets
-WHERE tenant_id = '<tenant>'
-  AND asset_status = 'pending_approval'
-  AND deleted_at IS NULL
+SELECT a.id,
+       a.display_name,
+       a.class_key,
+       count(d.id) AS deferred
+FROM assets a
+LEFT JOIN deferred_crypto_findings d
+       ON d.tenant_id = a.tenant_id AND d.asset_id = a.id AND d.replayed_at IS NULL
+WHERE a.tenant_id = '<tenant>'
+  AND a.asset_status = 'pending_approval'
+  AND a.deleted_at IS NULL
+GROUP BY a.id, a.display_name, a.class_key
 ORDER BY deferred DESC
 LIMIT 20;
 ```
 
-`deferred_findings` is a holding pen, not an attribute of the thing: it is
-drained on approval and the key disappears. A pending asset with `0` deferred
-findings is normal — it means nothing cryptographic was observed on it yet.
+`deferred_crypto_findings` is a holding pen, not an attribute of the thing: a
+row is replayed (`replayed_at` set) when its asset becomes `monitoring`, by
+whatever route. A pending asset with `0` deferred findings is normal — it means
+nothing cryptographic was observed on it yet. Under identity admission
+`enforce`, a finding waits on its observation instead (`observation_id` set,
+`asset_id` empty until it is replayed).
+
+If an asset is `monitoring` and rows for it still show `replayed_at` empty with
+a `last_error`, the replay failed and is retried every five minutes; the
+inventory-service log names the asset.
 
 Two things exist to make this self-evident before anyone reaches for SQL: the
 discovery-processor batch log reports internal findings split by
@@ -189,7 +199,9 @@ Cloud discoveries go through the **same** pipeline as sensor discoveries:
 1. `device-interrogation-service` discovers the cloud resources (AWS, Azure, GCP).
 2. They are written to `sensor_discoveries` with
    `metadata->>'discovery_method' = 'cloud_api'`.
-3. `discovery-processor-service` polls that table and processes batches.
+3. `discovery-processor-service` is woken as soon as they are written and
+   processes the batches (a 60-second poll catches anything it was not woken
+   for).
 4. A cloud discovery is classified by its `cloud_provider`/`cloud_region` — the
    per-region cloud segment — not by its address. Most cloud resources have no
    address at all, and an asset with no endpoint is a real answer rather than a

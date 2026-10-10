@@ -7,263 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.5.0-rc.3] - 2026-10-07
+## [4.5.0-rc.4] - 2026-10-07
 
 **Version 4.5.0 is a security-hardening and dependency release, and it also improves
-classification, DHCP matching and the agent installers.** The edge, sign-in and
-sessions, authorization and tenant isolation, outbound requests, request sizes and the
-chart's defaults were reviewed, and every confirmed, bounded finding is fixed: a signed-in
-session can no longer rewrite the account's sign-in email, a viewer can no longer read
-sensors' registration keys, sign-in no longer reveals which addresses are registered,
-platform scans no longer reach the cluster's own network, and a second round closes the
-agent port, the edge's service-to-service routes and the legacy token window, enforces
-row-level security under Docker Compose, and refuses to start in production on weak
-platform secrets. The bundled NATS server moves off a release its project no longer
-patches, and Go, npm and container dependencies are current.
+classification, DHCP matching, the agent installers and the discovery pipeline.** The edge,
+sign-in and sessions, authorization and tenant isolation, outbound requests, request sizes
+and the chart's defaults were reviewed, and every confirmed, bounded finding is fixed. The
+bundled NATS server moves off a release its project no longer patches, and Go (now 1.26.9,
+which fixes nine standard-library advisories), npm and container dependencies are current.
 
-It also classifies far more of the inventory, matches probes to a device just seen at a
-DHCP address, ships sensor and device-agent installers that actually enroll, and sets up
-scheduled scans in plain language.
+It classifies far more of the inventory, matches probes to a device just seen at a DHCP
+address, ships sensor and device-agent installers that actually enroll, and sets up
+scheduled scans in plain language. Discoveries now reach inventory the moment they are
+written, through one classifier and one writer, and a failed row costs only itself.
 
 Both product lines are cut from the same commit: `v4.5.0` (commercial) and `core-v4.5.0`
 (Core). Upgrade from 4.4.0.
 
-**Read Breaking / Upgrading first** — in production a service now refuses to start on a
-missing or short platform secret, the bundled NATS upgrade has no clean rollback, scans run
-by the platform now need your cluster's real network ranges, the edge's auth rate limit is
-lower, the legacy HS256 session secret is now removed from verifiers by default, the
-schema upgrade retires the per-prefix MAC classification rules Vista shipped, and a sensor
-installed with an earlier installer needs a new registration key.
+**Read Breaking / Upgrading first.** In production a service refuses to start on a weak
+platform secret, scans need your cluster's real network ranges, a rollback is a restore, the
+first schema upgrade can take longer on a large inventory, and a sensor installed with an
+earlier installer needs a new registration key.
 
 ### Highlights
 
-- **Account takeover through the profile closed.** `PUT /auth/me` let any valid access
-  token change the account's sign-in email, and the forgot-password flow then delivered
-  to the new address. It now answers `403`.
-
-- **Sign-in tells an attacker nothing.** Before the password was checked, the sign-in
-  routes disclosed whether an address was unknown, deactivated, single-sign-on only or a
-  platform administrator, and answered unknown addresses faster. They no longer do.
-  Platform-admin sign-in is rate limited per address and per account, and the edge's
-  auth-tier limit is lower and configurable.
-
-- **Platform-administrator sessions end when they should.** Resetting a password,
-  deactivating or deleting a platform user ends that user's sessions, and signing out
-  revokes the access token it was given.
-
-- **Authorization tightened where it was loose.** Pending sensor registration keys need
-  `sensors.create`; tenant administrators cannot change platform-wide alert rules; the
-  admin console API refuses tenant tokens; the sensor registration settings no tenant
-  member should have been able to change are gone; usage metering ignores a caller-chosen
-  tenant. Row-level security is now tested against the application's database role.
-
-- **Outbound requests and scans stay out of the cluster.** Scans run by the Platform
-  Sensor refuse the cluster's own pod and Service ranges; webhooks and staff sign-in
-  refuse loopback, metadata and private addresses; and tenant single sign-on and the AI
-  assistant's private-endpoint setting (Enterprise) refuse loopback, metadata and cluster
-  addresses.
-
-- **Bounded requests and a stricter edge.** Anonymous sign-in routes, agent intakes and
-  bulk evaluation cap their request bodies; the edge Content-Security-Policy is
-  same-origin for connections; OAuth consent and the MSP dashboard socket reject
-  cross-site requests; sensor registration keys and OAuth codes are no longer logged;
-  packet-capture jobs open only the tenant's own upload directory.
-
-- **Weak platform secrets stop a production install, and legacy tokens stop on their
-  own.** In production every service refuses to start when `INTERNAL_AUTH_SECRET` or
-  `ENCRYPTION_MASTER_KEY` is missing or under 32 bytes, and credential encryption can no
-  longer be silently off. `jwtSigning.acceptLegacyHmac` defaults to `auto`, so the chart
-  removes the legacy HS256 shared secret from token-verifying services by itself.
-
-- **Row-level security reaches Docker Compose, score history and audit partitions.**
-  Compose services connect as the application role instead of the table owner, and the
-  compliance score history and the audit-log partitions are tenant-isolated.
-
-- **The agent port and the edge expose less.** The sensor and device-agent mTLS port
-  serves only agent routes, and seven service-to-service routes are no longer published at
-  the edge.
-
-- **Single sign-on is bound to the browser and uses PKCE.** Staff sign-in to the admin
-  console, and tenant and platform sign-in (Enterprise), close a login-CSRF path.
-
-- **Verification commands are anchored.** The documented `cosign verify` identity regexps
-  accept only the release workflow run from a release tag (the commercial line also from
-  `main`).
-
-- **Far more of the inventory is classified.** MACs resolve against the full IEEE registry
-  (about 53,000 prefixes) on the platform; a new **Smart device** class covers consumer
-  devices; a host's DHCP vendor class (option 60) classifies Windows, Android, access points
-  and printers; and unknown hosts are reclassified as evidence accumulates. A class a person
-  declared or a reviewer rejected is never touched.
-
-- **Installers that actually enroll.** The sensor installers used to spend the single-use
-  registration code themselves, so a sensor installed with the install command never sent a
-  heartbeat. The Linux and Windows installers now let the sensor enroll itself, wait until
-  it has and print its ID and version; the Linux device-agent installer does the same and
-  never spends a key it cannot save; and the sensor now runs as a Windows service.
-
-- **Scheduled scans in plain language.** Pick every few hours, daily, weekly on chosen days
-  or monthly, at a time in your own time zone, and a sentence confirms when it will run.
-  Existing schedules keep running as before; a custom cron expression remains available.
-
-- **DHCP addresses a device was just seen at decide a match.** An SSH, TLS or QUIC probe of
-  an address whose owner a sensor confirmed by MAC within the last day attaches to that
-  owner instead of waiting in Discovery → Observations as "Matches an asset".
-
-- **Clearer screens.** A posture donut on the dashboard, run outcomes on Discovery Jobs
-  (Job Logs links redirect there), and **Merge as is** / **Review merge** / **Keep
-  separate** on merge proposals.
-
-- **Operational fixes.** Passive QUIC is reported once per flow
-  instead of about sixteen times; **Scan anyway** scans the whole selection; a device
-  interrogation that uses its full time limit completes with its results; the bundled NATS
-  server's probes no longer log a TLS error every ten seconds; scan jobs are still picked
-  up after an upgrade or restart, and a queued scan no longer counts as its own concurrent
-  job; uploaded packet captures report truncation and keep more of what they observed; and
-  a sensor's own host report can reconcile its physical NICs without treating container
-  bridges as host identity.
-
-- **The bundled NATS server is 2.14,** replacing 2.10, which the NATS project no longer
-  patches.
-
-- **Dependencies are current.** The user-interface images' web server (Caddy 2.11.7) is
-  rebuilt and clears every finding the image scanner reported against 4.4.0. Go 1.26.8 and
-  alpine 3.24.2 are bug-fix patch releases and fix no security advisories; Go modules and
-  npm packages are refreshed, with no called Go vulnerability and one accepted,
-  build-time-only npm advisory.
-
-- **The asset timeline no longer grows with each sighting's own description,** the
-  remainder of what 4.4.0 began.
+- **Security review fixes.** Account takeover through the profile closed; sign-in reveals
+  nothing about which addresses exist and platform-admin sign-in is rate limited; sessions
+  end when a password is reset or a user removed; permissions tightened on sensor keys,
+  alert rules, the admin API and tenant settings; request bodies capped; single sign-on bound
+  to the browser with PKCE; verification commands anchored to the release workflow.
+- **Outbound requests and scans stay out of the cluster.** Platform scans refuse the
+  cluster's own ranges; webhooks, staff sign-in, tenant single sign-on and the AI
+  assistant's private-endpoint setting refuse loopback, metadata and cluster addresses.
+- **Production refuses weak platform secrets,** the legacy HS256 token secret removes itself
+  from verifiers by default, and row-level security now covers Docker Compose, compliance
+  score history and audit partitions.
+- **Far more of the inventory is classified.** MACs resolve against the full IEEE registry,
+  a new **Smart device** class covers consumer devices, a host's DHCP vendor class classifies
+  Windows, Android, access points and printers, and unknown hosts are reclassified as evidence
+  accumulates. A class a person declared or rejected is never touched.
+- **Installers that actually enroll** (Linux and Windows sensors, Linux device agent; the
+  sensor runs as a Windows service), **scheduled scans in plain language**, and **DHCP
+  addresses a device was just seen at decide a match** for SSH, TLS and QUIC probes.
+- **Discoveries reach inventory on write.** Every writer announces new discoveries and the
+  processor drains them at once instead of polling every 15 seconds; a failed row is retried
+  and settled on its own instead of rejecting its batch.
+- **One classifier, one writer.** Inventory classifies each discovery once, decides approval
+  and writes 3rd Party Connections with the full certificate assessment (Certificate
+  Transparency, known-bad CA, EV, OCSP); a passive sighting and the probe of the same TLS
+  endpoint become one finding; hosts on carrier-grade NAT addresses (100.64.0.0/10) and IPv6
+  unique-local addresses are internal candidates.
+- **Crypto on unapproved assets is held in one place** and replayed on every route to
+  monitoring; duplicate crypto configurations are collapsed on upgrade and can no longer
+  recur; compliance evaluates an asset once per import; cloud KMS keys create their Key Store
+  asset directly.
+- **Cleaner identity.** A host inventory's endpoints and addresses go through the single
+  identity engine, interrogated interface MACs become identifiers, two devices sharing a
+  hostname but not hardware become two assets, and class proposals closed by Promote leave
+  Approvals.
+- **Operational fixes and screens.** Posture donut on the dashboard, run outcomes on Discovery
+  Jobs, **Merge as is** / **Review merge** on proposals, one QUIC report per flow, scan jobs
+  picked up after a restart, packet captures that report truncation, and a quieter asset
+  timeline and NATS log.
+- **Bundled NATS 2.14,** Caddy 2.11.7 in the user-interface images, Go 1.26.9, refreshed Go
+  and npm modules (no called vulnerability; one accepted build-time npm advisory).
 
 ### Breaking / Upgrading
 
-Back up your database (`pg_dump`) first, as always. Upgrade from 4.4.0. The schema upgrade
-is additive except for one deletion, described below: it turns on row-level security for the
-compliance score history table and every audit-log partition, adds two bookkeeping tables
-(`oui_vendor_backfill_state`, `class_floor_sweep_state`), one nullable column on
-`asset_identifiers` (`device_confirmed_at`) and two on `pcap_upload_jobs`, and widens the rule
-kinds `classification_rules` accepts. As in earlier releases, pass a `helm upgrade --timeout`
-that covers the migration plus the rollout.
+Back up your database (`pg_dump`) first. Upgrade from 4.4.0 and pass a `helm upgrade
+--timeout` that covers the migration plus the rollout. The schema upgrade is additive except
+for retiring the shipped per-prefix MAC rules; it also turns on row-level security for two
+more table sets and adds bookkeeping tables, columns and a unique index. The full per-change
+list, with every note below in detail, is in the release notes linked at the end.
 
-- **In production a service refuses to start on a missing or weak platform secret.** With
-  `ENV=production` (the chart default), `INTERNAL_AUTH_SECRET` and `ENCRYPTION_MASTER_KEY`
-  must be present and at least 32 bytes, and `JWT_SECRET`, if set, at least 32 bytes (a
-  token-verifying service may omit it once ES256 verification keys are configured). Secrets
-  the chart generates, and `openssl rand -hex 32`, pass. **If your platform Secret holds a
-  short custom value, replace it before upgrading:** the new pods exit naming the variable,
-  and a rolling upgrade stalls with the old pods still serving. Changing
-  `ENCRYPTION_MASTER_KEY` has no in-place re-key, so stored credentials (integrations,
-  devices, connectors) must be entered again afterwards. The Compose production files set
-  `ENV=production` and follow the same rule. See
-  [`docsv4/core/operate/security/secrets-management.md`](docsv4/core/operate/security/secrets-management.md).
-- **`jwtSigning.acceptLegacyHmac` now defaults to `auto`.** A fresh install never accepts
-  legacy HS256 tokens; an upgrade stops injecting `JWT_SECRET` into every service except
-  `auth-service` and `admin-service` once the signing Secret is older than
-  `jwtSigning.legacyHmacWindowHours` (192). Set `true` to keep the old behaviour. With
-  `--reuse-values` the old default (`true`) is carried forward; use
-  `--reset-then-reuse-values` to take `auto`. `helm template` and Argo CD cannot read the
-  cluster and keep the secret until you pin `acceptLegacyHmac: false`. The notes `helm
-  upgrade` prints say which mode was chosen.
-- **Docker Compose installs now connect as `crypto_app`,** with `crypto_bypass` for the
-  cross-tenant paths, through a one-shot `db-roles` service. Run `docker compose up -d`
-  (with `--build` as usual); no new secret is needed. If `db-roles` exits non-zero because
-  the volume's schema predates the roles, re-apply the schema as its log describes (the
-  command is in the full list of changes).
-- **Rolling back to 4.4.0 after this upgrade needs your backup, not `helm rollback`.** The
-  4.4.0 schema re-adds the narrower rule-kind constraint on `classification_rules`, which the
-  new `oui_vendor` and `dhcp_vendor_class` rules violate, so its schema job would stop.
-  Together with the NATS note below, plan a rollback as a restore.
-- **The shipped per-prefix MAC classification rules are retired.** The upgrade deletes the
-  496 `oui` rules Vista shipped and nobody edited, and the seed supplies one `oui_vendor`
-  rule per manufacturer in their place. An `oui` rule an administrator edited or added is
-  kept, and, being the more specific statement about its MAC, still applies before a vendor
-  rule. Catalog ▸ Classification rules shows what remains.
-- **Vendors and classes fill in after the upgrade, in the background.** A backfill resolves
-  every existing asset's vendor from its MAC identifiers, and a sweep (after start-up, then
-  every six hours) reclassifies assets still shown as unknown hosts; each move is recorded in
-  the asset's class history. A vendor a device agent, interrogation, connector or import
-  reported is kept. Sensors need no upgrade for this.
-- **The lease-fresh DHCP rule starts empty.** Nothing is backfilled: an address becomes
-  eligible after the platform next sees its device's MAC there (minutes on a sensored
-  network), and a probe is matched this way only within 24 hours of that sighting. Until
-  then probes behave as in 4.4.0, and a row already waiting in Observations stays until you
-  link or dismiss it.
-- **A sensor or device agent installed by an earlier installer must be installed again,
-  with a new registration key.** Earlier installers spent the single-use code themselves, so
-  such a sensor shows at v1.0.0 with no heartbeat. Generate a new key (Discovery → Sensors &
-  Agents → Register), run the new installer and delete the old row; re-running it with the key
-  that enrolled a host upgrades in place. A device agent that logged `Failed to save
-  certificates to disk` must be deleted and installed again with a new key. Windows sensors
-  need Npcap installed first.
-- **During the rolling upgrade a queued scan can wait briefly.** The 4.4.0 pods delete the
-  scan-job consumer as they drain; the new pods own it, and the stuck-job sweep re-creates
-  it before republishing queued work. Nothing is lost, and the next upgrade does not repeat
-  this.
-- **Single-sign-on sign-ins in progress during the upgrade must be started again once,** for
-  staff sign-in to the admin console and, on Enterprise, tenant and platform sign-in. An
-  external Redis must be 6.2 or later.
-
-- **The bundled NATS server upgrades from 2.10 to 2.14, and rolling back is not clean.**
-  JetStream data is read in place. A later rollback to a release on NATS 2.10 rebuilds
-  the stream index on first start and logs `corrupt state file`; messages and consumer
-  state were intact in testing. **Snapshot the NATS volume (`nats-data-nats-0`) before
-  upgrading** if you need a clean rollback. A values file that pins
-  `datastores.nats.image.tag` keeps the old server until you remove the pin; use
-  `--reset-then-reuse-values`. An external NATS is unaffected. The NATS pod also restarts
-  once for its new health probes. See the "Bundled NATS
-  server" note in [`docsv4/core/operate/releases.md`](docsv4/core/operate/releases.md).
-- **Set `networkPolicy.clusterInternalCIDRs` to your cluster's real pod and Service
-  ranges.** The Platform Sensor now refuses scan targets inside them, whatever networks a
-  tenant has registered. The default is RKE2's (`10.42.0.0/16`, `10.43.0.0/16`); on
-  another network plugin the default protects the wrong ranges and may block scans of
-  addresses that are the customer's own. Scans run by a tenant's own sensor are
-  unchanged.
-- **The edge's auth rate limit drops from 200 to 50 requests a second (burst 100) per
-  source address.** If a load balancer or proxy sits in front of Traefik, set
-  `edgeRateLimit.ipStrategy.depth` to the number of trusted proxies (`1` behind a single
-  ALB); otherwise every client shares one bucket and a busy office can throttle everyone.
-  A wrong non-zero depth, longer than the `X-Forwarded-For` list, makes Traefik answer
-  `500` on rate-limited routes, so check that two clients do not share a bucket.
-  `edgeRateLimit.api` and `edgeRateLimit.auth` set the ceilings.
-- **Platform-admin sign-in is rate limited:** five attempts a minute per account, twice
-  that per address (`ADMIN_LOGIN_RATE_LIMIT`). A throttled attempt answers `429` with
-  `Retry-After`.
-- **Sign-in answers differently.** A wrong password gets the same invalid-credentials
-  answer for an unknown, deactivated or single-sign-on-only account, and `POST
-  /auth/methods` no longer returns the organization's id except where single sign-on
-  needs it. Integrations that read those distinctions from a failed sign-in stop seeing
-  them.
-- **`PUT /auth/me` with a different `email` answers `403 email_change_not_supported`.**
-  No screen used it.
-- **Pending sensor registration keys need `sensors.create`.** `GET
-  /sensor-manager/sensors/pending` refuses viewers and any role without it.
-- **Tenant administrators can no longer edit or delete platform-wide alert rules,** the
-  admin console API (`/admin-service/admin/**`) refuses tenant tokens, and a tenant role
-  can no longer be named `platform_admin`.
-- **Tenant single sign-on endpoints must be `https://` when saved** (Enterprise). A
-  provider saved with an `http://` URL keeps working until its URL is edited; embedded
-  credentials in a URL are refused.
-- **`ai.allowPrivateEndpoints: true` no longer allows a model on the pod's own loopback**
-  (Enterprise), and `CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false` now also disables private AI
-  endpoints. Private-network and in-cluster addresses are unchanged.
-- **`GET` and `PUT /sensor-manager/admin/settings` are removed** and answer `404`. They
-  let a tenant member read, and a holder of `settings.update` overwrite, registration
-  limits shared by every tenant, and no screen or client used them. The limits are fixed
-  at their previous defaults (50 pending sensors, a 60-minute key lifetime, address
-  validation off).
-- **`PUT /tenant/ui-config` needs a platform identity and `platform.settings`.** A tenant
-  token gets `403` whatever its role is called; it used to trust the token's role string.
-  The admin console's per-tenant `ui-config` route is unchanged.
-- **The user list's and external connections' search treat `%` and `_` literally.**
-- **Request bodies are capped:** 1 MiB on anonymous sign-in routes and `evaluate/multiple`
-  (at most 100 frameworks), 32 MiB on agent submissions with at most 10,000 discoveries
-  per batch. A request over a limit is refused.
-- **The edge Content-Security-Policy is `connect-src 'self'` in production.** A
-  deployment whose user interface calls another origin is blocked from doing so.
-- **Platform-admin sessions:** resetting a password, deactivating or deleting a platform
-  user ends their refresh sessions; an access token already issued keeps working until it
-  expires (up to one hour). The OAuth consent decision and the MSP dashboard WebSocket
-  now reject cross-site requests, and the WebSocket requires an `Origin`.
+- **Weak platform secrets stop a production start.** `INTERNAL_AUTH_SECRET` and
+  `ENCRYPTION_MASTER_KEY` must be at least 32 bytes (`JWT_SECRET`, if set, too). Replace a
+  short custom value before upgrading; changing `ENCRYPTION_MASTER_KEY` means re-entering
+  stored credentials.
+- **`jwtSigning.acceptLegacyHmac` defaults to `auto`.** Fresh installs never accept legacy
+  HS256 tokens; upgrades stop injecting `JWT_SECRET` once the signing Secret is 192 hours
+  old. Use `--reset-then-reuse-values` to take it, or set `true` to keep the old behaviour.
+- **Docker Compose connects as `crypto_app`** through a one-shot `db-roles` service; run
+  `docker compose up -d --build`.
+- **Rolling back to 4.4.0 needs your backup, not `helm rollback`,** and the bundled NATS
+  upgrade from 2.10 to 2.14 is not cleanly reversible (snapshot `nats-data-nats-0` first).
+  Pinned `datastores.nats.image.tag` values keep the old server.
+- **First upgrade can take longer.** The schema Job collapses duplicate crypto
+  configurations and builds a unique index (discovery writes to them wait meanwhile) and
+  moves held crypto evidence into its new table. Allow for it in `--wait`'s timeout.
+- **Shipped per-prefix MAC rules are retired;** vendor rules replace them, an edited or added
+  rule is kept, and vendors and classes fill in the background after the upgrade. The
+  lease-fresh DHCP rule starts empty and fills as devices are seen.
+- **A sensor or device agent installed by an earlier installer must be installed again with
+  a new registration key** (Windows sensors need Npcap first).
+- **Set `networkPolicy.clusterInternalCIDRs`** to your cluster's real pod and Service ranges;
+  the default is RKE2's.
+- **The edge's auth rate limit is 50 requests a second (burst 100) per address;** behind a
+  proxy set `edgeRateLimit.ipStrategy.depth`. Platform-admin sign-in is limited to five
+  attempts a minute per account.
+- **API behaviour changes:** a failed sign-in no longer distinguishes unknown, deactivated or
+  single-sign-on-only accounts; `PUT /auth/me` with a new email answers `403`; pending sensor
+  keys need `sensors.create`; tenant administrators cannot edit platform alert rules;
+  `/sensor-manager/admin/settings` is removed; `PUT /tenant/ui-config` needs a platform
+  identity; request bodies are capped (1 MiB anonymous routes, 32 MiB agent submissions).
+- **Third-party discoveries now settle `observed`, a source-less one is dropped,** and the
+  internal `network-segments/classify-asset` route is removed. Hosts on 100.64.0.0/10 now
+  appear as Unknown assets for review rather than 3rd Party Connections.
+- **During the rolling upgrade** a queued scan can wait briefly, producers on the old version
+  rely on the 60-second fallback poll, and single-sign-on sign-ins in progress must be
+  started again once. An external Redis must be 6.2 or later; edge Content-Security-Policy is
+  `connect-src 'self'`; Enterprise tenant single sign-on URLs must be `https://`.
 
 ### Editions
 

@@ -27,7 +27,7 @@ func TestIntegration_OperationalQueueRatingParity(t *testing.T) {
 		for score := 0; score <= 100; score++ {
 			id := uuid.New()
 			scores[id] = score
-			if _, err := owner.Exec(`INSERT INTO crypto_implementations(id,tenant_id,asset_id,protocol,discovery_method,risk_score,created_at) VALUES($1,$2,$3,'TLS','passive',$4,NOW()+$5::interval)`, id, tenant, asset, score, fmt.Sprintf("%d seconds", 100-score)); err != nil {
+			if _, err := owner.Exec(`INSERT INTO crypto_implementations(id,tenant_id,asset_id,protocol,cipher_suite,discovery_method,risk_score,created_at) VALUES($1,$2,$3,'TLS','fixture-'||$1::uuid::text,'passive',$4,NOW()+$5::interval)`, id, tenant, asset, score, fmt.Sprintf("%d seconds", 100-score)); err != nil {
 				t.Fatal(err)
 			}
 		}

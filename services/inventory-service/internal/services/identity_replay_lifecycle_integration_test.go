@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -40,15 +39,10 @@ func TestIntegration_IdentityReplay_LifecycleChangesWaitForAttachments(t *testin
 			if err := repo.LinkObservation(ctx, f.tenant.String(), observation, source.String(), identity.IdentityEstablished); err != nil {
 				t.Fatal(err)
 			}
-			// Deliberately omit observed_at: the durable receipt must supply it.
+			// Deliberately omit observed_at: the receipt's time, stamped when
+			// the finding is held, must supply it.
 			finding := leafCertFinding("source.example.test", "198.51.100.90", 443, strings.Repeat("d", 64))
-			payload, err := json.Marshal(finding)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := f.db.Exec(`INSERT INTO identity_observation_payloads(tenant_id,observation_id,receipt_key,payload) VALUES($1,$2,$3,$4)`, f.tenant, observation, identity.ObservationReceiptKey(obs), string(payload)); err != nil {
-				t.Fatal(err)
-			}
+			deferralHoldForObservation(t, f, observation, obs, finding)
 			// Pause replay at its inner crypto transaction, after the outer
 			// lifecycle lock has been acquired and endpoint creation started.
 			blocker, err := f.db.BeginTx(ctx, nil)
@@ -108,12 +102,38 @@ func TestIntegration_IdentityReplay_LifecycleChangesWaitForAttachments(t *testin
 			if attachments != 1 || receiptTime != seen.Format(time.RFC3339Nano) {
 				t.Fatalf("attachments=%d observed_at=%q, want one attachment at %s", attachments, receiptTime, seen)
 			}
-			var materialized bool
-			if err := f.db.QueryRow(`SELECT materialized_at IS NOT NULL FROM identity_observation_payloads WHERE tenant_id=$1 AND observation_id=$2`, f.tenant, observation).Scan(&materialized); err != nil || !materialized {
-				t.Fatalf("receipt acknowledgement=%v err=%v", materialized, err)
+			if replayed := deferralReplayed(t, f, observation); !replayed {
+				t.Fatalf("the held finding was not marked replayed")
 			}
 		})
 	}
+}
+
+// deferralHoldForObservation holds finding for observation the way ingest does
+// under identity admission enforce: on a transaction, keyed by the receipt,
+// with the receipt's time.
+func deferralHoldForObservation(t *testing.T, f leafLinkFixture, observation string, obs identity.Observation, finding IngestFinding) {
+	t.Helper()
+	if err := database.WithTenantTx(context.Background(), f.db, f.tenant, func(tx *sqlx.Tx) error {
+		return deferCryptoForObservation(context.Background(), tx, f.tenant, observation, identity.ObservationReceiptKey(obs), obs.Source.Ref, finding, "", obs.ObservedAt)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// deferralReplayed reports whether every finding held for observation has
+// been replayed.
+func deferralReplayed(t *testing.T, f leafLinkFixture, observation string) bool {
+	t.Helper()
+	var held, replayed int
+	if err := f.db.QueryRow(`SELECT count(*),count(replayed_at) FROM deferred_crypto_findings WHERE tenant_id=$1 AND observation_id=$2`,
+		f.tenant, observation).Scan(&held, &replayed); err != nil {
+		t.Fatal(err)
+	}
+	if held == 0 {
+		t.Fatalf("no finding is held for observation %s", observation)
+	}
+	return held == replayed
 }
 
 func waitForIdentityReplayLock(t *testing.T, ctx context.Context, f leafLinkFixture, key, mode string, granted bool) {
@@ -294,13 +314,7 @@ func TestIntegration_IdentityReplay_RechecksClaimedAssetAfterLifecycleChange(t *
 			if err := repo.LinkObservation(ctx, f.tenant.String(), id, source.String(), identity.IdentityEstablished); err != nil {
 				t.Fatal(err)
 			}
-			payload, err := json.Marshal(leafCertFinding("claimed.example.test", "198.51.100.91", 443, strings.Repeat("e", 64)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := f.db.Exec(`INSERT INTO identity_observation_payloads(tenant_id,observation_id,receipt_key,payload) VALUES($1,$2,$3,$4)`, f.tenant, id, identity.ObservationReceiptKey(obs), string(payload)); err != nil {
-				t.Fatal(err)
-			}
+			deferralHoldForObservation(t, f, id, obs, leafCertFinding("claimed.example.test", "198.51.100.91", 443, strings.Repeat("e", 64)))
 			changing, err := f.db.Beginx()
 			if err != nil {
 				t.Fatal(err)
@@ -350,9 +364,8 @@ func TestIntegration_IdentityReplay_RechecksClaimedAssetAfterLifecycleChange(t *
 			if oldCount != 0 || currentCount != want {
 				t.Fatalf("stale claim materialized wrong owner: source=%d survivor=%d want=%d", oldCount, currentCount, want)
 			}
-			var materialized bool
-			if err := f.db.QueryRow(`SELECT materialized_at IS NOT NULL FROM identity_observation_payloads WHERE tenant_id=$1 AND observation_id=$2`, f.tenant, id).Scan(&materialized); err != nil || materialized != (action == "redirect") {
-				t.Fatalf("incorrect receipt completion=%v err=%v", materialized, err)
+			if materialized := deferralReplayed(t, f, id); materialized != (action == "redirect") {
+				t.Fatalf("incorrect receipt completion=%v", materialized)
 			}
 		})
 	}
@@ -448,14 +461,10 @@ func TestIntegration_IdentityReplay_SaturatedDataPoolStillCompletesReplayAndMerg
 			finding := leafCertFinding("small-pool.example.test", "198.51.100.92", 443, strings.Repeat("f", 64))
 			// A deferred finding exists only after an identity decision attached
 			// its endpoint (platform ADR-0003 D2); the fixture makes that decision.
-			if err := f.svc.attachFindingEndpoint(context.Background(), f.tenant, source, finding); err != nil {
+			if err := f.svc.attachDecidedFindingEndpoint(context.Background(), f.tenant, source, finding, identity.DecidedByLinkedObservation); err != nil {
 				t.Fatal(err)
 			}
-			metadata, err := json.Marshal(map[string]any{"deferred_findings": []IngestFinding{finding}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := f.db.Exec(`UPDATE assets SET metadata=$3 WHERE tenant_id=$1 AND id=$2`, f.tenant, source, string(metadata)); err != nil {
+			if err := f.svc.deferCryptoForAsset(context.Background(), f.tenant, source, finding); err != nil {
 				t.Fatal(err)
 			}
 			f.db.SetMaxOpenConns(capacity)
@@ -467,7 +476,8 @@ func TestIntegration_IdentityReplay_SaturatedDataPoolStillCompletesReplayAndMerg
 					close(entered)
 					select {
 					case <-resume:
-						return f.svc.processDeferredFindingsLocked(f.tenant, source)
+						_, _, err := f.svc.replayDeferredCryptoRound(ctx, f.tenant, source)
+						return err
 					case <-ctx.Done():
 						return ctx.Err()
 					}

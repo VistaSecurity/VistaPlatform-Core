@@ -471,6 +471,44 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 	})
 
+	t.Run("ReconcileSourceEndpoints closes only the source's absent, older endpoints", func(t *testing.T) {
+		r := newRepo()
+		ref, err := r.CreateAsset(ctx, tenant, newAsset("host-1"))
+		if err != nil {
+			t.Fatalf("CreateAsset: %v", err)
+		}
+		src := func(ref string) identity.Source {
+			return identity.Source{Kind: identity.SourceMeasured, Ref: ref, Mode: identity.ModeActive}
+		}
+		kept := identity.EndpointObservation{Address: "192.0.2.10", Port: 22, Transport: "tcp", Source: src("agent:a:run1"), SeenAt: now}
+		dropped := identity.EndpointObservation{Address: "192.0.2.10", Port: 443, Transport: "tcp", Source: src("agent:a:run1"), SeenAt: now}
+		other := identity.EndpointObservation{Address: "192.0.2.10", Port: 9443, Transport: "tcp", Source: src("sensor:scan"), SeenAt: now}
+		newer := identity.EndpointObservation{Address: "192.0.2.10", Port: 8080, Transport: "tcp", Source: src("agent:a:run9"), SeenAt: now.Add(2 * time.Hour)}
+		if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{kept, dropped, other, newer}); err != nil {
+			t.Fatalf("UpsertEndpoints: %v", err)
+		}
+		at := now.Add(time.Hour)
+		closed, err := r.ReconcileSourceEndpoints(ctx, ref, "agent:a:", []identity.EndpointObservation{kept}, at)
+		if err != nil {
+			t.Fatalf("ReconcileSourceEndpoints: %v", err)
+		}
+		if len(closed) != 1 || closed[0] != dropped.Key() {
+			t.Errorf("closed = %v, want only %s (another source's :9443 and a socket seen after the set stay open)", closed, dropped.Key())
+		}
+		if again, err := r.ReconcileSourceEndpoints(ctx, ref, "agent:a:", []identity.EndpointObservation{kept}, at); err != nil || len(again) != 0 {
+			t.Errorf("second reconcile = %v, %v; a closed endpoint is not closed twice", again, err)
+		}
+		if _, err := r.UpsertEndpoints(ctx, ref, []identity.EndpointObservation{dropped}); err != nil {
+			t.Fatalf("UpsertEndpoints (reopen): %v", err)
+		}
+		if reopened, err := r.ReconcileSourceEndpoints(ctx, ref, "agent:a:", []identity.EndpointObservation{kept}, at); err != nil || len(reopened) != 1 {
+			t.Errorf("after the socket came back, reconcile = %v, %v; want it closable again (an upsert reopens)", reopened, err)
+		}
+		if _, err := r.ReconcileSourceEndpoints(ctx, ref, "", nil, at); err == nil {
+			t.Error("an empty source prefix was accepted; it would close every source's endpoints")
+		}
+	})
+
 	t.Run("UpsertEndpoints deduplicates on the endpoint key", func(t *testing.T) {
 		r := newRepo()
 		ref, err := r.CreateAsset(ctx, tenant, newAsset("host-1"))

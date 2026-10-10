@@ -56,8 +56,10 @@ const SENSOR_COLS = [
   { label: 'Sensor', w: '1.4fr' },
   { label: 'Type', w: '1fr' },
   { label: 'Segment', w: '1fr' },
-  { label: 'Assets found', w: '120px', align: 'right' as const },
-  { label: 'Version', w: '90px' },
+  { label: 'Assets found', w: '96px', align: 'right' as const },
+  // Wide enough for the scan-engine upgrade notice, which wraps beneath the
+  // version rather than running into Status.
+  { label: 'Version', w: '170px' },
   { label: 'Status', w: '110px', align: 'right' as const },
   { label: '', w: '44px', align: 'right' as const },
 ];
@@ -169,11 +171,11 @@ export function SensorsPage() {
                 <CellTxt v={s.sensor_type || s.profile} />
                 <CellTxt v={(s.network_interfaces ?? []).join(', ')} />
                 <CellMono right v={counts[s.id] ?? '—'} />
-                <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4, minWidth: 0, padding: '6px 0' }}>
                   <CellMono v={s.version ? 'v' + s.version : '—'} c="var(--app-t3)" />
                   {needsScanEngineUpgrade(s) && (
-                    <span title="This sensor runs scans on the older engine, which is slower and will be retired. Install the current sensor build to upgrade it.">
-                      <Pill color="var(--warn)" style={{ fontSize: 10 }}>Needs upgrading to run scans on the current engine</Pill>
+                    <span style={{ maxWidth: '100%' }} title="This sensor runs scans on the older engine, which is slower and will be retired. Install the current sensor build to upgrade it.">
+                      <Pill color="var(--warn)" style={{ fontSize: 10, lineHeight: 1.3, padding: '3px 8px', borderRadius: 8, whiteSpace: 'normal', maxWidth: '100%' }}>Needs upgrading to run scans on the current engine</Pill>
                     </span>
                   )}
                 </span>

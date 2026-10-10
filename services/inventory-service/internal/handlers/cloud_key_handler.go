@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +14,10 @@ import (
 // *services.AssetService satisfies it; tests pass a recorder.
 type cloudKeyStore interface {
 	UpsertCloudKeys(tenantID uuid.UUID, records []services.CloudKeyRecord) (int, error)
+	// RecordCloudKeyStores creates or refreshes each key's Key Store asset
+	// ( WP6 F13, decision D3 as amended): this intake, not the discovery
+	// queue, is how a cloud key becomes an asset.
+	RecordCloudKeyStores(tenantID uuid.UUID, records []services.CloudKeyRecord) (int, error)
 }
 
 // CloudKeyHandler ingests cloud KMS keys into the first-class key inventory.
@@ -43,8 +48,12 @@ type cloudKeyIngestRequest struct {
 // gates it because an internal call carries no user. The tenant comes from the
 // X-Tenant-ID header the auth middleware honours for verified internal calls.
 //
+// It is also what creates or refreshes each key's Key Store asset ( WP6,
+// decision D3 as amended): the discovery queue carries no KMS rows any more,
+// so this one call lands the key in both places a person sees it.
+//
 // Not in the OpenAPI contract; no browser calls it. A tenant user sees the
-// result at Inventory → Keys.
+// result at Inventory → Keys and, as Key Store assets, in Inventory.
 func (h *CloudKeyHandler) IngestCloudKeys(c *gin.Context) {
 	if !sharedmw.IsInternalCall(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "cloud key ingest is an internal service call"})
@@ -80,5 +89,14 @@ func (h *CloudKeyHandler) IngestCloudKeys(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to ingest cloud keys", "written": written})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"written": written})
+	// The keys landed; their assets are the second half of the same call. A
+	// failure here is a failed call — the collector records it and the next
+	// run, which re-sends the same keys, converges both halves.
+	assets, err := h.store.RecordCloudKeyStores(tenantID, req.Keys)
+	if err != nil {
+		log.Printf("[CloudKeyHandler] key store assets for %d keys: %v", len(req.Keys), err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record key store assets", "written": written, "key_stores": assets})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"written": written, "key_stores": assets})
 }

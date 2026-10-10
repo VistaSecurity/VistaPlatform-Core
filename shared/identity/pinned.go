@@ -64,7 +64,7 @@ func (e *Engine) pinnedAddresses(ctx context.Context, obs Observation) (map[stri
 		if !e.dynamic[id.Scope] && !obs.DynamicScopes[id.Scope] {
 			continue
 		}
-		owners, err := e.repo.FindByIdentifier(ctx, obs.TenantID, id.Kind, id.Value, id.Scope)
+		owners, err := e.ownersOf(ctx, obs.TenantID, id)
 		if err != nil {
 			return nil, fmt.Errorf("identity: looking up the owner of %s=%q: %w", id.Kind, id.Value, err)
 		}

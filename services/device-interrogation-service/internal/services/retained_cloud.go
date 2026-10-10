@@ -179,6 +179,8 @@ func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, 
 		if parent != uuid.Nil {
 			locks = append(locks, shareddatabase.SessionAdvisoryLock{Key: pgidentity.AssetLifecycleLockKey(tenant, parent), Shared: true})
 		}
+		// Rows the replay queued, read only once its transaction committed.
+		replayQueued := 0
 		err = shareddatabase.WithSessionAdvisoryLocks(ctx, s.db, locks, func() error {
 			return repo.RunInTx(ctx, tenant.String(), func(r *pgidentity.Repository) error {
 				mode, err := r.AdmissionMode(ctx, tenant.String())
@@ -251,9 +253,11 @@ func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, 
 					integration = *payload.Device.CredentialID
 				}
 				provider := cloudProviderForDevice(payload.Device)
-				if _, err := s.writeSensorDiscoveriesTx(ctx, r.Tx(), tenant, observation.String()+":"+receipt, integration, provider, []models.Device{payload.Device}, observedAt, false); err != nil {
+				written, err := s.writeSensorDiscoveriesTx(ctx, r.Tx(), tenant, observation.String()+":"+receipt, integration, provider, []models.Device{payload.Device}, observedAt, false)
+				if err != nil {
 					return err
 				}
+				replayQueued = written
 				if _, err := r.Tx().ExecContext(ctx, `INSERT INTO asset_history(tenant_id,asset_id,source,action,changes_json)
      VALUES($1,$2,'measured','updated',jsonb_build_object('kind','cloud_context_materialized','observation_id',$3::text,'receipt_key',$4::text))`, tenant, asset, observation.String(), receipt); err != nil {
 					return err
@@ -268,6 +272,10 @@ func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, 
 				return e
 			})
 			return err
+		}
+		if replayQueued > 0 {
+			// Committed: wake discovery-processor (discovery.queue.ready).
+			notifyDiscoveryQueue(ctx, tenant, observation.String()+":"+receipt, "device-interrogation.cloud_context_replay")
 		}
 	}
 	return nil

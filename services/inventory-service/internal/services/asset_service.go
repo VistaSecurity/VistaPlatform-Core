@@ -32,6 +32,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/assetclasshistory"
+	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 	"github.com/vistasecurity/vistaplatform/shared/classify"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddb "github.com/vistasecurity/vistaplatform/shared/database"
@@ -188,14 +189,6 @@ func (s *AssetService) SetExternalConnectionsService(svc *ExternalConnectionsSer
 	s.externalConnectionsSvc = svc
 }
 
-// classifyAsset returns ownership (internal, third_party, unknown) via NetworkSegmentService when set; otherwise "unknown".
-func (s *AssetService) classifyAsset(tenantID uuid.UUID, ipAddress *string, hostname *string) (string, error) {
-	if s.networkSegmentService != nil {
-		return s.networkSegmentService.ClassifyAsset(tenantID, ipAddress, hostname, []string{})
-	}
-	return "unknown", nil
-}
-
 // getTagsForAsset returns tags from the matching network segment when NetworkSegmentService is set; otherwise nil map.
 func (s *AssetService) getTagsForAsset(tenantID uuid.UUID, ipAddress *string, hostname *string) (map[string]interface{}, error) {
 	if s.networkSegmentService != nil {
@@ -231,13 +224,34 @@ func buildSuppressionKey(hostname *string, ipAddress *string, port *int) string 
 // suppressed"; anything else is returned so a caller can tell a genuine miss
 // from a broken query.
 func (s *AssetService) isSuppressed(tenantID uuid.UUID, hostname *string, ipAddress *string, port *int) (bool, error) {
+	return s.isSuppressedOn(nil, tenantID, hostname, ipAddress, port)
+}
+
+// isSuppressedOn is isSuppressed on the caller's transaction when tx is
+// non-nil (the ingest gate reads it on the identity engine's). The read runs
+// under a savepoint there, so a failure — reported, never fatal — does not
+// leave the engine holding an aborted transaction.
+func (s *AssetService) isSuppressedOn(tx *sqlx.Tx, tenantID uuid.UUID, hostname *string, ipAddress *string, port *int) (bool, error) {
 	key := buildSuppressionKey(hostname, ipAddress, port)
 	var exists bool
 	// RLS-scoped read over asset_suppressions (tenant_isolation policy).
 	query := `SELECT TRUE FROM asset_suppressions WHERE tenant_id = $1 AND suppression_key = $2 LIMIT 1`
-	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+	read := func(tx *sqlx.Tx) error {
 		return tx.QueryRow(query, tenantID, key).Scan(&exists)
-	})
+	}
+	var err error
+	if tx != nil {
+		err = withSavepoint(tx, "asset_suppression_lookup", func() error {
+			rErr := read(tx)
+			if errors.Is(rErr, sql.ErrNoRows) {
+				// Not found is an answer, not a failure: keep the savepoint.
+				return nil
+			}
+			return rErr
+		})
+	} else {
+		err = database.WithTenantTx(context.Background(), s.db, tenantID, read)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -325,31 +339,33 @@ func nullStringToPtr(n sql.NullString) *string {
 	return nil
 }
 
-// applyCertQualityFlags extracts certificate quality flags (SCT, known-bad CA,
-// OCSP, EV) from discovery RawData and applies them to the CertificateData.
-// These flags are computed by the sensor's active prober/enricher and stored
-// at the top level of the discovery metadata alongside the certificates array.
+// applyCertQualityFlags applies the certificate quality flags (SCT, known-bad
+// CA, OCSP, EV) carried in discovery RawData to the CertificateData. They are
+// read by shared certificates.CertificateQualityFromMetadata — the same reader
+// the external-connections writer uses, so the two tables cannot disagree
+// about what a discovery said ( F16).
 func (s *AssetService) applyCertQualityFlags(certData *models.CertificateData, rawData map[string]interface{}) {
 	if rawData == nil {
 		return
 	}
-	if v, ok := rawData["cert_has_sct"].(bool); ok {
-		certData.HasSCT = &v
+	q := sharedcerts.CertificateQualityFromMetadata(rawData)
+	if q.HasSCT != nil {
+		certData.HasSCT = q.HasSCT
 	}
-	if v, ok := rawData["cert_sct_source"].(string); ok && v != "" {
-		certData.SCTSource = v
+	if q.SCTSource != nil {
+		certData.SCTSource = *q.SCTSource
 	}
-	if v, ok := rawData["cert_known_bad_ca"].(string); ok && v != "" {
-		certData.KnownBadCA = v
+	if q.KnownBadCA != nil {
+		certData.KnownBadCA = *q.KnownBadCA
 	}
-	if v, ok := rawData["cert_is_ev"].(bool); ok {
-		certData.IsEV = v
+	if _, stated := rawData["cert_is_ev"].(bool); stated {
+		certData.IsEV = q.IsEV
 	}
-	if v, ok := rawData["ocsp_status"].(string); ok && v != "" {
-		certData.OCSPStatus = v
+	if q.OCSPStatus != nil {
+		certData.OCSPStatus = *q.OCSPStatus
 	}
-	if v, ok := rawData["ocsp_detail"].(string); ok && v != "" {
-		certData.OCSPDetail = v
+	if q.OCSPDetail != nil {
+		certData.OCSPDetail = *q.OCSPDetail
 	}
 }
 
@@ -882,16 +898,47 @@ func (s *AssetService) IngestFindings(tenantID uuid.UUID, findings []IngestFindi
 }
 
 // IngestFindingsReport is IngestFindings with the per-finding outcome the
-// transport needs. See [IngestReport].
+// transport needs. See [IngestReport]. Every finding's new asset lands as
+// assetStatus (default pending_approval): the caller decided it.
 func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []IngestFinding, assetStatus ...string) (IngestReport, error) {
-	if len(findings) == 0 {
-		return IngestReport{}, nil
-	}
-
 	// Determine asset_status: use provided value or default to "pending_approval"
 	status := "pending_approval"
 	if len(assetStatus) > 0 && assetStatus[0] != "" {
 		status = assetStatus[0]
+	}
+	return s.ingestFindings(tenantID, findings, fixedApproval(status), status)
+}
+
+// IngestPipelineFindingsReport is the discovery pipeline's import ( WP3):
+// the status each finding's new asset lands as is decided HERE, per finding,
+// by the tenant's auto-approval rules over this service's own classification
+// (pipelineApproval). The rule that matched is reported per finding in
+// IngestResult.AutoApprovalRuleID so the caller can credit it on the
+// discovery row.
+func (s *AssetService) IngestPipelineFindingsReport(tenantID uuid.UUID, findings []IngestFinding) (IngestReport, error) {
+	return s.ingestFindings(tenantID, findings, s.pipelineApproval(tenantID), "per finding")
+}
+
+// Outcomes inventory-service stamps itself, beside the identity.Outcome set.
+const (
+	// ingestOutcomeRouted: the finding was written to external_connections.
+	ingestOutcomeRouted = "routed"
+	// ingestOutcomeDropped: the finding was recorded nowhere, for a property
+	// of its own (IngestResult.Reason says which).
+	ingestOutcomeDropped = "dropped"
+	// dropReasonThirdPartyNoSourceIP: a third-party connection with no source
+	// address ( D2). A connection record needs both ends; the upsert key
+	// (tenant, source_ip, dest_ip, dest_port, protocol) used to be filled with
+	// 0.0.0.0, which merged every such finding for one destination into a row
+	// claiming a source nothing measured.
+	dropReasonThirdPartyNoSourceIP = "third_party_no_source_ip"
+)
+
+// ingestFindings is the one ingest loop; decide says what each finding's new
+// asset lands as, and statusLabel names that decision in the summary log.
+func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFinding, decide approvalDecider, statusLabel string) (IngestReport, error) {
+	if len(findings) == 0 {
+		return IngestReport{}, nil
 	}
 
 	inserted := 0
@@ -903,13 +950,31 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 	for i := range outcomes {
 		outcomes[i].Outcome = "rejected"
 	}
+	// The rule that decided each finding's status, folded into its result
+	// when the report is returned: the branches below overwrite outcomes[i]
+	// wholesale with the engine's answer.
+	ruleIDs := make([]string, len(findings))
 	result := func() IngestReport {
+		for i, id := range ruleIDs {
+			if id != "" {
+				outcomes[i].AutoApprovalRuleID = id
+			}
+		}
 		return IngestReport{Imported: inserted, EffectiveStatus: effective, Results: outcomes}
+	}
+	// decideFor records the approval decision for finding i and returns the
+	// status its new asset lands as.
+	decideFor := func(i int, f IngestFinding, cls approval.Classification) string {
+		d := decide(f, cls)
+		if d.ruleID != nil {
+			ruleIDs[i] = d.ruleID.String()
+		}
+		return d.status
 	}
 	// Observability counters for the end-of-run import summary ().
 	// Without these, a third-party route that persists nothing looks identical to a
 	// successful import — which is exactly how a vendor discovery silently vanished.
-	var createdManaged, updatedManaged, routedExternal, failedRoute int
+	var createdManaged, updatedManaged, routedExternal, failedRoute, droppedNoSource int
 	// heldByProposal counts findings the identity floor refused to write: every
 	// identifier belonged to somebody else, so a merge proposal is waiting and
 	// no asset was created. Counted separately from `inserted` because nothing
@@ -927,6 +992,9 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 	var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
 	var lifecycleCertExpiring []*events.CertificateExpiringPayload
 	ctx := context.Background()
+	// One read of the tenant's segments for the whole request, shared by
+	// classification, tags, enrichment and the identity intake ( F4).
+	segs := s.newImportSegments(tenantID)
 	source := "discovery"
 	if len(findings) > 0 && findings[0].RawData != nil {
 		if v, ok := findings[0].RawData["source"].(string); ok {
@@ -954,7 +1022,22 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			if ho, ok := hostObservationPayload(f); ok {
 				label = hostObservationLabel(ho)
 			}
-			res, hErr := s.ingestHostObservation(ctx, tenantID, f, status)
+			// A passively observed host is never a third party, whatever its
+			// address classifies as: `third_party` is a statement about a
+			// FLOW out of the tenant, and an observation has no flow — it says
+			// a device exists on a segment we watch. `unknown` keeps it
+			// managed; a segment rule still has to match for it to
+			// auto-approve, so this widens nothing.
+			hoIP := f.IPAddress
+			if hoIP != nil && (*hoIP == "" || isUnspecifiedIP(*hoIP)) {
+				hoIP = nil
+			}
+			hoClass := s.classifyFindingIn(segs, tenantID, f, hoIP)
+			if hoClass.Ownership == "third_party" {
+				hoClass.Ownership = "unknown"
+			}
+			status := decideFor(i, f, hoClass)
+			res, hErr := s.ingestHostObservationIn(ctx, segs, tenantID, f, status)
 			if hErr != nil {
 				// One unusable observation must not lose the rest of the batch.
 				// A segment with fifty hosts on it produces fifty of these, and
@@ -1015,8 +1098,10 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			}
 			effective[i] = effectiveStatus
 			switch res.Outcome {
-			case identity.OutcomeCreated, identity.OutcomeConflict:
+			case identity.OutcomeCreated, identity.OutcomeConflict, identity.OutcomeProvisional:
 				createdManaged++
+				// Provisional is a new asset too ( F9): it must mark the
+				// tenant dirty for the auto-scan sweep like Created does.
 				log.Printf("[AssetService] IngestFindings: created asset %s from host observation %s (status=%s, outcome=%s)",
 					assetID, label, effectiveStatus, res.Outcome)
 				if s.eventPublisher != nil {
@@ -1056,7 +1141,8 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 		// Ownership decides whether this is ours to manage at all, and it has
 		// to be known before the engine runs: a third-party endpoint belongs in
 		// external_connections, not in the inventory.
-		ownership, _ := s.classifyAsset(tenantID, effectiveIP, f.Hostname)
+		classification := s.classifyFindingIn(segs, tenantID, f, effectiveIP)
+		ownership := classification.Ownership
 		// A cloud-managed placeholder has no routable IP, so ClassifyAsset falls
 		// through to "third_party" (0.0.0.0 is not RFC-1918). Override: these
 		// are managed cloud resources, not external endpoints, and must stay on
@@ -1073,7 +1159,19 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 		// the tenant's own cloud credentials is the tenant's.
 		if (cloudManaged || isTenantOwnedCloudResource(f)) && ownership == "third_party" {
 			ownership = "unknown"
+			classification.Ownership = ownership
+			if cloudManaged {
+				classification.Type = "private"
+			}
 		}
+		// Recorded on the finding's raw data, as the processor used to stamp
+		// it, so the evidence retained for this finding says how it was
+		// classified.
+		if f.RawData != nil {
+			f.RawData["network_ownership"] = classification.Ownership
+			f.RawData["network_type"] = classification.Type
+		}
+		status := decideFor(i, f, classification)
 
 		// An interrogation finding with no address, a public one, or one at
 		// the device's OWN address belongs to the device that was
@@ -1139,7 +1237,7 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			}
 		}
 
-		obs, obsErr := s.discoveryObservation(tenantID, f, effectiveIP, ownership)
+		obs, obsErr := s.discoveryObservationIn(segs, tenantID, f, effectiveIP, ownership)
 		if obsErr != nil {
 			// An observation with no identifier could never be matched again, so
 			// every re-observation of the same thing would create another asset.
@@ -1148,84 +1246,114 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			log.Printf("[AssetService] IngestFindings: skipping %s: %v", findingLabel(f), obsErr)
 			continue
 		}
-		existingID, existingStatus, found, lookupErr := s.lookupExistingAsset(ctx, tenantID, obs)
-		if lookupErr != nil {
-			return result(), fmt.Errorf("failed to find existing asset: %w", lookupErr)
-		}
-		if found && existingStatus == "denied" {
-			// A denied asset stays denied; a re-discovery does not undo the
-			// tenant's decision, and its crypto is never (re-)materialized —
-			// same as `archived` below. But the re-observation model applies
-			// here too: the device is still being seen, so last-seen still
-			// moves even though nothing is enriched.
-			//
-			// Deliberately NOT routed through the full identity-engine resolve
-			// (resolveDiscoveryObservation) the way `archived` is: that path
-			// can ATTACH new identifiers (a fresh MAC, a new hostname alias) to
-			// a denied asset, and — since ownership here is reclassified fresh
-			// from the current observation, not read off the asset's stored
-			// column — can reroute the observation to external_connections
-			// when the fresh classification says third_party. Both are new
-			// evidence accruing to a decision the tenant already made; a
-			// denied asset should grow none. A minimal Touch (advance
-			// last_seen_at only, never identifiers/endpoints) is the honest
-			// amount of work for a decision that is not being reopened.
-			if touchErr := s.identityRepo.Touch(ctx, identity.AssetRef{TenantID: tenantID.String(), ID: existingID.String()}, findingObservedAt(f)); touchErr != nil {
-				log.Printf("[AssetService] IngestFindings: touching denied asset %s failed (batch continues): %v", existingID, touchErr)
+		// What this finding's identifiers already belong to decides, before
+		// anything is written, whether it is resolved at all: a denied asset
+		// is only touched, a third-party endpoint that is not an elevated
+		// asset goes to external_connections, and a suppressed fingerprint is
+		// not re-created. The gate takes that decision on the engine's
+		// transaction, from the SAME owner read the engine then resolves on
+		// ( F5) — not from a separate lookup of every identifier ahead
+		// of the engine's own.
+		var decline discoveryDecline
+		gate := func(ctx context.Context, tx *sqlx.Tx, existing existingAsset) (bool, error) {
+			decline = discoveryProceed
+			if existing.Found && existing.Status == identity.StatusDenied {
+				// A denied asset stays denied; a re-discovery does not undo the
+				// tenant's decision, and its crypto is never (re-)materialized —
+				// same as `archived` below. But the re-observation model applies
+				// here too: the device is still being seen, so last-seen still
+				// moves even though nothing is enriched.
+				//
+				// Deliberately NOT resolved through the full identity engine the
+				// way `archived` is: resolving can ATTACH new identifiers (a
+				// fresh MAC, a new hostname alias) to a denied asset, and — since
+				// ownership here is reclassified fresh from the current
+				// observation, not read off the asset's stored column — can
+				// reroute the observation to external_connections when the
+				// fresh classification says third_party. Both are new evidence
+				// accruing to a decision the tenant already made; a denied asset
+				// should grow none. A minimal Touch (advance last_seen_at only,
+				// never identifiers/endpoints), made by the caller once this
+				// transaction has rolled back, is the honest amount of work for a
+				// decision that is not being reopened.
+				decline = discoveryDeniedAsset
+				return false, nil
 			}
-			// Same as the matched-path assignment below: the caller (discovery-
-			// processor's BatchProcessor) reads EffectiveStatus per finding to
-			// decide the discovery row's approval_status, and needs to know this
-			// landed on a denied asset rather than whatever the batch asked for.
-			effective[i] = identity.StatusDenied
-			continue
+			// Third-party routing. An ELEVATED (monitoring) vendor asset is
+			// refreshed in place so re-discovery keeps the promoted asset
+			// current; everything else third-party goes to
+			// external_connections.
+			elevated := existing.Found && existing.Status == "monitoring"
+			if ownership == "third_party" && !elevated && s.externalConnectionsSvc != nil {
+				decline = discoveryRouteExternal
+				return false, nil
+			}
+			if ownership == "third_party" && elevated {
+				log.Printf("[AssetService] IngestFindings: refreshing elevated third-party asset %s (%s) in place", existing.ID, findingLabel(f))
+			}
+			if !existing.Found {
+				// Suppression blocks CREATION only: the fingerprint exists so a
+				// denied host that was subsequently deleted does not come back as
+				// a fresh pending asset. An asset that still exists is updated —
+				// denied or not, and the branch above already handled denied.
+				//
+				// A suppression-lookup failure is not a reason to abort the whole
+				// ingest batch, but it must not be discarded silently either
+				// (B-42) — log it and fall through to creating the asset, which is
+				// the safe direction: a re-created asset lands in Approvals for a
+				// human, whereas wrongly suppressing one hides a real discovery.
+				suppressed, suppErr := s.isSuppressedOn(tx, tenantID, f.Hostname, effectiveIP, f.Port)
+				if suppErr != nil {
+					log.Printf("[AssetService] Warning: suppression lookup failed for tenant %s: %v", tenantID, suppErr)
+				}
+				if suppressed {
+					decline = discoverySuppressed
+					return false, nil
+				}
+			}
+			return true, nil
 		}
 
-		// Third-party routing. An ELEVATED (monitoring) vendor asset is refreshed
-		// in place so re-discovery keeps the promoted asset current;
-		// everything else third-party goes to external_connections.
-		elevated := found && existingStatus == "monitoring"
-		if ownership == "third_party" && !elevated && s.externalConnectionsSvc != nil {
-			if err := s.routeToExternalConnection(tenantID, f); err != nil {
-				// Do NOT swallow: a failed route means the finding is dropped.
-				// Surface it loudly so a vendor discovery can't vanish silently.
-				failedRoute++
-				log.Printf("[AssetService] IngestFindings: ERROR routing third-party %s to external_connections: %v", findingLabel(f), err)
-			} else {
-				routedExternal++
-				outcomes[i].Outcome = "routed"
-				inserted++
-				log.Printf("[AssetService] IngestFindings: routed third-party %s to external_connections", findingLabel(f))
-			}
-			continue
-		}
-		if ownership == "third_party" && elevated {
-			log.Printf("[AssetService] IngestFindings: refreshing elevated third-party asset %s (%s) in place", existingID, findingLabel(f))
-		}
-
-		if !found {
-			// Suppression blocks CREATION only: the fingerprint exists so a
-			// denied host that was subsequently deleted does not come back as a
-			// fresh pending asset. An asset that still exists is updated —
-			// denied or not, and the branch above already handled denied.
-			//
-			// A suppression-lookup failure is not a reason to abort the whole
-			// ingest batch, but it must not be discarded silently either (B-42) —
-			// log it and fall through to creating the asset, which is the safe
-			// direction: a re-created asset lands in Approvals for a human,
-			// whereas wrongly suppressing one hides a real discovery.
-			suppressed, suppErr := s.isSuppressed(tenantID, f.Hostname, effectiveIP, f.Port)
-			if suppErr != nil {
-				log.Printf("[AssetService] Warning: suppression lookup failed for tenant %s: %v", tenantID, suppErr)
-			}
-			if suppressed {
-				continue
-			}
-		}
-
-		res, durableMaterialization, resErr := s.resolveDiscoveryObservation(tenantID, f, effectiveIP, ownership, status)
+		res, existing, resolved, durableMaterialization, resErr := s.resolveDiscoveryObservation(segs, tenantID, f, obs, effectiveIP, ownership, status, gate)
 		if resErr != nil {
 			return result(), fmt.Errorf("failed to upsert asset: %w", resErr)
+		}
+		if !resolved {
+			switch decline {
+			case discoveryDeniedAsset:
+				if touchErr := s.identityRepo.Touch(ctx, identity.AssetRef{TenantID: tenantID.String(), ID: existing.ID.String()}, findingObservedAt(f)); touchErr != nil {
+					log.Printf("[AssetService] IngestFindings: touching denied asset %s failed (batch continues): %v", existing.ID, touchErr)
+				}
+				// Same as the matched-path assignment below: the caller
+				// (discovery-processor's BatchProcessor) reads EffectiveStatus
+				// per finding to decide the discovery row's approval_status, and
+				// needs to know this landed on a denied asset rather than
+				// whatever the batch asked for.
+				effective[i] = identity.StatusDenied
+			case discoveryRouteExternal:
+				if err := s.routeToExternalConnection(tenantID, f); errors.Is(err, errThirdPartyNoSourceIP) {
+					// A decision about this finding, not a failure: counted, and
+					// reported per finding so the caller settles its row with
+					// the reason ( D2).
+					droppedNoSource++
+					outcomes[i] = identity.IngestResult{Outcome: ingestOutcomeDropped, Reason: dropReasonThirdPartyNoSourceIP}
+					log.Printf("[AssetService] IngestFindings: dropped third-party %s: no source address", findingLabel(f))
+				} else if err != nil {
+					// Do NOT swallow: a failed route means the finding is dropped.
+					// Surface it loudly so a vendor discovery can't vanish silently.
+					failedRoute++
+					log.Printf("[AssetService] IngestFindings: ERROR routing third-party %s to external_connections: %v", findingLabel(f), err)
+				} else {
+					routedExternal++
+					outcomes[i].Outcome = ingestOutcomeRouted
+					inserted++
+					log.Printf("[AssetService] IngestFindings: routed third-party %s to external_connections", findingLabel(f))
+				}
+			case discoverySuppressed:
+				// Skipped: nothing owns it and the tenant suppressed its
+				// fingerprint.
+			}
+			continue
 		}
 		outcomes[i] = res.IngestResult()
 		if res.Asset.Zero() {
@@ -1259,8 +1387,9 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			changedAssetIDs = append(changedAssetIDs, assetID)
 			inserted++
 			switch res.Outcome {
-			case identity.OutcomeCreated, identity.OutcomeConflict:
+			case identity.OutcomeCreated, identity.OutcomeConflict, identity.OutcomeProvisional:
 				createdManaged++
+				// Provisional is a new asset too ( F9); the outcome is in the log.
 				log.Printf("[AssetService] IngestFindings: created managed asset %s for %s (status=%s, outcome=%s)",
 					assetID, findingLabel(f), assetStatus, res.Outcome)
 				if s.eventPublisher != nil {
@@ -1287,8 +1416,8 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			// here either: no identified service, no crypto configuration, no
 			// deferred finding. An endpoint the asset already has is not refreshed
 			// by this sighting. The sockets wait in the observation's evidence (and,
-			// in enforce admission, its retained payload) for an operator's Link or
-			// Confirm.
+			// in enforce admission, its held row in deferred_crypto_findings) for an
+			// operator's Link or Confirm.
 			evidenceHeld := res.EvidenceHeld
 			if evidenceHeld {
 				log.Printf("[AssetService] IngestFindings: %s is supporting evidence for asset %s; its endpoint stays on observation %s until it is linked or confirmed",
@@ -1308,7 +1437,7 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 					if env == "" {
 						env = "production"
 					}
-					seg, err := s.networkSegmentService.FindOrCreateCloudSegment(tenantID, cloudProvider, cloudRegion, vpcID, env)
+					seg, err := segs.cloudSegment(cloudProvider, cloudRegion, vpcID, env)
 					if err == nil && seg != nil {
 						// RLS-scoped write over assets.
 						_ = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
@@ -1318,7 +1447,7 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 						})
 					}
 				} else {
-					_ = s.networkSegmentService.EnrichAssetByID(tenantID, assetID, effectiveIP, f.Hostname)
+					_ = s.enrichAssetIn(segs, tenantID, assetID, effectiveIP, f.Hostname)
 				}
 			}
 			var didSegment, didService bool
@@ -1388,13 +1517,11 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			}
 
 			if durableMaterialization || evidenceHeld {
-				// Held evidence: see above. In enforce admission the retained
-				// payload below waits for the decision that attaches it.
-				//
-				// The same transaction as identity resolution retained this receipt.
-				// The restart-safe worker materializes it after identity and approval
-				// are both settled; ingestion success never depends on best-effort
-				// metadata buffering or synchronous crypto writes.
+				// Held evidence: see above. In enforce admission the finding was
+				// held in deferred_crypto_findings on the same transaction as
+				// identity resolution, waiting on its observation; the replay
+				// (deferred_crypto.go) materializes it once identity and approval
+				// are both settled. Ingestion success never depends on it.
 				return nil
 			}
 
@@ -1403,8 +1530,8 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 			// batch requested.
 			//
 			//   monitoring       materialize now, whatever the batch asked for
-			//   pending_approval defer into the asset's metadata, to be replayed
-			//                    when a human approves it — this is what keeps
+			//   pending_approval defer into deferred_crypto_findings, replayed when
+			//                    the asset is approved — this is what keeps
 			//                    unapproved discoveries out of the certificates and
 			//                    crypto_implementations tables
 			//   archived         neither
@@ -1430,7 +1557,7 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 				if deferralMaterializesNothing(f) {
 					return nil
 				}
-				s.storeDeferredFinding(tenantID, assetID, f)
+				s.deferCryptoFinding(tenantID, assetID, f)
 				return nil
 			}
 
@@ -1510,8 +1637,8 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 	if failedRoute > 0 {
 		failureNote = " (WITH FAILURES)"
 	}
-	log.Printf("[AssetService] IngestFindings summary%s: %d findings → managed created=%d, managed updated=%d, routed to external_connections=%d, held by merge proposal=%d, route failures=%d (status=%s)",
-		failureNote, len(findings), createdManaged, updatedManaged, routedExternal, heldByProposal, failedRoute, status)
+	log.Printf("[AssetService] IngestFindings summary%s: %d findings → managed created=%d, managed updated=%d, routed to external_connections=%d, dropped third-party without source address=%d, held by merge proposal=%d, route failures=%d (status=%s)",
+		failureNote, len(findings), createdManaged, updatedManaged, routedExternal, droppedNoSource, heldByProposal, failedRoute, statusLabel)
 
 	return result(), nil
 }
@@ -1592,9 +1719,35 @@ var lookupHost = func(ctx context.Context, host string) ([]string, error) {
 	return net.DefaultResolver.LookupHost(ctx, host)
 }
 
+// errThirdPartyNoSourceIP is routeToExternalConnection's refusal of a finding
+// with no source address ( D2): a connection record needs both ends, and
+// no retry supplies the missing one.
+var errThirdPartyNoSourceIP = errors.New("third-party finding has no source_ip; a connection needs both ends")
+
 // routeToExternalConnection converts an IngestFinding to an ExternalConnectionUpsert
 // and writes it to the external_connections table. Used for third-party discoveries.
+//
+// It is the ONE writer of external_connections on the discovery path (
+// WP3, F16). discovery-processor used to write third-party rows itself, with
+// the certificate quality flags, while this writer — reached for the same
+// findings when inventory's own classification said third_party — wrote the
+// same table without them and with a 0.0.0.0 source. One writer now carries
+// everything: the measured crypto, the leaf certificate, its validation
+// verdict and quality flags (shared certificates.CertificateQualityFromMetadata,
+// the same reader the certificates table uses), the destination hostname with
+// its provenance, and no source it did not measure.
 func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFinding) error {
+	upsert, err := s.externalConnectionUpsert(f)
+	if err != nil {
+		return err
+	}
+	_, err = s.externalConnectionsSvc.Upsert(tenantID, upsert)
+	return err
+}
+
+// externalConnectionUpsert builds the one external_connections write for a
+// third-party finding. See routeToExternalConnection.
+func (s *AssetService) externalConnectionUpsert(f IngestFinding) (models.ExternalConnectionUpsert, error) {
 	// A host observation must never reach this function, for two reasons that
 	// are both about this one routine: `external_connections` records a
 	// CONNECTION between two endpoints with a protocol and a cipher, and a
@@ -1626,7 +1779,16 @@ func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFin
 	//
 	// So the suite catches either removal; this comment says which test does.
 	if isHostObservation(f) {
-		return fmt.Errorf("refusing to route a %s to external_connections: it records no connection, and resolving its LAN-only hostname would put it on the wire", KindHostObservation)
+		return models.ExternalConnectionUpsert{}, fmt.Errorf("refusing to route a %s to external_connections: it records no connection, and resolving its LAN-only hostname would put it on the wire", KindHostObservation)
+	}
+
+	// No source, no connection ( D2). This used to fill the gap with
+	// "0.0.0.0", which is part of the upsert key, so every source-less finding
+	// for one destination collapsed into a row claiming a source nobody
+	// measured. Refused instead; the caller counts it and reports it.
+	sourceIP := strings.TrimSpace(rawDataString(f.RawData, "source_ip"))
+	if sourceIP == "" {
+		return models.ExternalConnectionUpsert{}, errThirdPartyNoSourceIP
 	}
 
 	destIP := ""
@@ -1678,15 +1840,6 @@ func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFin
 		}
 	}
 
-	// For manual discoveries, there is no source IP (it originates from the platform).
-	// Use "0.0.0.0" as a sentinel indicating a platform-initiated discovery.
-	sourceIP := "0.0.0.0"
-	if f.RawData != nil {
-		if src, ok := f.RawData["source_ip"].(string); ok && src != "" {
-			sourceIP = src
-		}
-	}
-
 	upsert := models.ExternalConnectionUpsert{
 		SourceIP: sourceIP,
 		DestIP:   destIP,
@@ -1713,9 +1866,19 @@ func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFin
 			}
 		}
 	}
-	upsert.ProtocolVersion = f.ProtocolVersion
-	upsert.CipherSuite = f.CipherSuite
-	upsert.KeyExchangeAlgorithm = f.KeyExchangeAlgorithm
+	upsert.ProtocolVersion = nonEmptyPtr(f.ProtocolVersion)
+	upsert.CipherSuite = nonEmptyPtr(f.CipherSuite)
+	upsert.KeyExchangeAlgorithm = nonEmptyPtr(f.KeyExchangeAlgorithm)
+	if upsert.KeyExchangeAlgorithm == nil {
+		// A passive capture names the exchange only as the suite's label
+		// ("ECDHE", "DHE_RSA") under key_exchange_algorithm, with no group
+		// id, and the converter rightly does not promote a label to a
+		// measured exchange for the managed path (tls_kex_group.go). An
+		// external connection has always stored that label — the processor's
+		// deleted writer did, and assessCrypto parses it — so the one writer
+		// keeps it ( WP3).
+		upsert.KeyExchangeAlgorithm = nonEmptyPtr(stringPtrOf(rawDataString(f.RawData, "key_exchange_algorithm")))
+	}
 	// Generic discovery KeySize can be cipher or certificate bits. Preserve
 	// only explicitly attributed exchange measurements and offered versions.
 	upsert.KeySize, upsert.SupportedTLSVersions = externalDiscoveryEvidence(f.RawData)
@@ -1724,7 +1887,7 @@ func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFin
 	if f.RawData != nil {
 		certs := s.extractCertificatesFromFinding(f)
 		if len(certs) > 0 {
-			leaf := certs[0]
+			leaf := certs[externalLeafIndex(f.RawData, certs)]
 			if leaf.SubjectDN != "" {
 				upsert.CertSubject = &leaf.SubjectDN
 			}
@@ -1758,14 +1921,58 @@ func (s *AssetService) routeToExternalConnection(tenantID uuid.UUID, f IngestFin
 		}
 	}
 
+	// The certificate's validation verdict and quality flags (CLAUDE.md:
+	// "must be persisted for both internal assets and external connections").
+	// An explicit cert_has_sct=false arrives as false, not as absent.
+	quality := sharedcerts.CertificateQualityFromMetadata(f.RawData)
+	upsert.CertValidationStatus = quality.ValidationStatus
+	upsert.CertHasSCT = quality.HasSCT
+	upsert.CertSCTSource = quality.SCTSource
+	upsert.CertKnownBadCA = quality.KnownBadCA
+	upsert.CertNoSubject = quality.NoSubject
+	upsert.CertNoCommonName = quality.NoCommonName
+	upsert.CertIsEV = quality.IsEV
+	upsert.CertLargeSANCount = quality.LargeSANCount
+	upsert.OCSPStatus = quality.OCSPStatus
+
 	if f.SourceSensorID != nil {
 		if u, err := uuid.Parse(*f.SourceSensorID); err == nil {
 			upsert.SensorID = &u
 		}
 	}
 
-	_, err := s.externalConnectionsSvc.Upsert(tenantID, upsert)
-	return err
+	return upsert, nil
+}
+
+// externalLeafIndex is the index in certs of the leaf the metadata names: the
+// certificates-array entry with the lowest chain_order, matched by
+// fingerprint; the first certificate when it cannot be matched.
+func externalLeafIndex(raw map[string]interface{}, certs []models.CertificateData) int {
+	entry := sharedcerts.LeafCertificateEntry(raw)
+	if entry == nil {
+		return 0
+	}
+	fp, _ := entry["fingerprint_sha256"].(string)
+	if fp == "" {
+		return 0
+	}
+	for i := range certs {
+		if strings.EqualFold(certs[i].FingerprintSHA256, fp) {
+			return i
+		}
+	}
+	return 0
+}
+
+func stringPtrOf(v string) *string { return &v }
+
+// nonEmptyPtr is p, or nil when it points at an empty string: an empty
+// measurement is no measurement, and the column should say NULL.
+func nonEmptyPtr(p *string) *string {
+	if p == nil || strings.TrimSpace(*p) == "" {
+		return nil
+	}
+	return p
 }
 
 // hostConnectionSourceAssetID accepts an explicit source only from the host
@@ -2051,15 +2258,6 @@ func findingDiscoveryMethod(f IngestFinding) string {
 	return defaultDiscoveryMethod
 }
 
-// maxDeferredFindings caps assets.metadata->'deferred_findings'.
-//
-// With dedup in place an asset reaches this only by producing that many
-// genuinely distinct observations while pending, which is pathological — the
-// cap is a backstop against unbounded JSONB growth, not a routine trim. Oldest
-// entries are dropped first: the newest observations are the ones that describe
-// the asset's current posture.
-const maxDeferredFindings = 50
-
 // deferralMaterializesNothing reports whether replaying f on approval would
 // write nothing — the early returns of processDiscoveryCryptoData, in its
 // order: an at-rest resource with a posture DOES materialize (an application
@@ -2075,105 +2273,6 @@ func deferralMaterializesNothing(f IngestFinding) bool {
 	}
 	_, verdict := resolveProtocol(f.Protocol)
 	return verdict != protocolEnum
-}
-
-// storeDeferredFinding saves the raw finding data in the asset's metadata under
-// the "deferred_findings" key. When the asset is later approved, ApproveAssets
-// processes these deferred findings to create certificates and crypto configurations.
-//
-// Deduplicated and capped. This used to be a blind `||` append that rewrote the
-// whole JSONB document on every ingest, so an asset left in Discovery →
-// Approvals accumulated one complete copy of every re-observation — full
-// certificate PEM chains included — for as long as nobody clicked Approve, and
-// then fired all of them in a single burst on approval. Findings that
-// materialize to the same thing now REPLACE their predecessor in place rather
-// than stacking, so the newest observation wins and the array stays the size of
-// the asset's distinct posture.
-//
-// Note the fingerprint deliberately does not compare whole findings: several
-// producers stamp per-observation timestamps into RawData, so a blob comparison
-// never matches and would dedup nothing. See deferredFindingFingerprint.
-func (s *AssetService) storeDeferredFinding(tenantID, assetID uuid.UUID, f IngestFinding) {
-	findingJSON, err := json.Marshal(f)
-	if err != nil {
-		log.Printf("Warning: failed to marshal deferred finding for asset %s: %v", assetID, err)
-		return
-	}
-	fingerprint := s.deferredFindingFingerprint(f)
-
-	// Read-modify-write, so it must be serialized: two concurrent ingests of the
-	// same asset would otherwise each read the array, each append, and the second
-	// write would drop the first. The same per-asset advisory lock the crypto
-	// upsert uses does that, cluster-wide.
-	// RLS-scoped write over assets.
-	err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		if _, e := tx.Exec(lockAssetMaterializationSQL, assetMaterializationLockKey(tenantID, assetID)); e != nil {
-			return fmt.Errorf("lock asset materialization: %w", e)
-		}
-
-		var existingJSON []byte
-		if e := tx.QueryRow(
-			`SELECT COALESCE(metadata->'deferred_findings', '[]'::jsonb) FROM assets WHERE id = $1 AND tenant_id = $2`,
-			assetID, tenantID,
-		).Scan(&existingJSON); e != nil {
-			return fmt.Errorf("read deferred findings: %w", e)
-		}
-
-		var existing []json.RawMessage
-		if len(existingJSON) > 0 {
-			if e := json.Unmarshal(existingJSON, &existing); e != nil {
-				// A malformed array is not a reason to lose the new observation,
-				// but it IS a reason to say so rather than silently reset.
-				log.Printf("Warning: deferred findings for asset %s are unreadable (%v); starting a fresh array", assetID, e)
-				existing = nil
-			}
-		}
-
-		replaced := false
-		for i, entry := range existing {
-			var prev IngestFinding
-			if e := json.Unmarshal(entry, &prev); e != nil {
-				continue
-			}
-			if s.deferredFindingFingerprint(prev) != fingerprint {
-				continue
-			}
-			// Same finding, seen again: keep its position (so ordering stays
-			// first-seen) and take the newer body.
-			existing[i] = json.RawMessage(findingJSON)
-			replaced = true
-			break
-		}
-		if !replaced {
-			existing = append(existing, json.RawMessage(findingJSON))
-		}
-		if len(existing) > maxDeferredFindings {
-			dropped := len(existing) - maxDeferredFindings
-			log.Printf("Warning: asset %s holds more than %d distinct deferred findings; dropping the %d oldest",
-				assetID, maxDeferredFindings, dropped)
-			existing = existing[dropped:]
-		}
-
-		merged, e := json.Marshal(existing)
-		if e != nil {
-			return fmt.Errorf("marshal deferred findings: %w", e)
-		}
-		_, e = tx.Exec(`
-			UPDATE assets
-			SET metadata = jsonb_set(
-				COALESCE(metadata, '{}'::jsonb),
-				'{deferred_findings}',
-				$1::jsonb,
-				true
-			),
-			updated_at = NOW()
-			WHERE id = $2`,
-			string(merged), assetID)
-		return e
-	})
-	if err != nil {
-		log.Printf("Warning: failed to store deferred finding for asset %s: %v", assetID, err)
-	}
 }
 
 // processDiscoveryCryptoData extracts certificates and crypto configurations from
@@ -2390,10 +2489,11 @@ func (s *AssetService) processDiscoveryCryptoData(
 	var cryptoID uuid.UUID
 	var cryptoOutcome cryptoUpsertOutcome
 	var keyExchangeAdopted bool
-	// RLS-scoped write over crypto_implementations. The advisory lock is what
-	// stands in for the unique constraint this table deliberately does not have:
-	// it serializes the find-then-write for this asset across every replica, so
-	// two workers ingesting the same endpoint cannot both miss and both insert.
+	// RLS-scoped write over crypto_implementations. The advisory lock
+	// serializes the find-then-write for this asset across every replica, so
+	// two workers ingesting the same endpoint cannot both miss and both insert;
+	// the unique index on the natural key (uq_crypto_implementations_natural_key)
+	// is the backstop that turns a missed case into an error, not a duplicate.
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		if _, e := tx.Exec(lockAssetMaterializationSQL, assetMaterializationLockKey(tenantID, assetID)); e != nil {
 			return fmt.Errorf("lock asset materialization: %w", e)
@@ -2679,7 +2779,7 @@ func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, a
 	}
 
 	// Commit approval before materializing deferred crypto data so a failed status
-	// update cannot leave certificates/crypto rows without clearing deferred_findings.
+	// update cannot leave certificates/crypto rows behind for an unapproved asset.
 	// Approval is an administrative decision, not a new observation. Preserve
 	// both observation freshness and its stale classification.
 	query := `UPDATE assets SET asset_status = 'monitoring', updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL`
@@ -2716,11 +2816,11 @@ func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, a
 	// decision. Settle them; see settleDiscoveryQueueRows.
 	s.settleDiscoveryQueueRows(tenantID, assetIDs, "auto_approved")
 
-	// Process deferred findings for each asset being approved.
-	// These were stored during IngestFindings when the asset was pending_approval.
+	// Replay the crypto evidence held while each asset waited
+	// (deferred_crypto.go).
 	var materializationErrs []error
 	for _, assetID := range assetIDs {
-		if err := s.processDeferredFindings(tenantID, assetID); err != nil {
+		if _, err := s.replayDeferredCrypto(context.Background(), tenantID, assetID); err != nil {
 			materializationErrs = append(materializationErrs, fmt.Errorf("asset %s: %w", assetID, err))
 		}
 	}
@@ -2821,142 +2921,10 @@ func (s *AssetService) AutoApproveAgentHost(tenantID, assetID, agentID uuid.UUID
 	// host waited are what make an approved host's certificates and crypto
 	// configurations appear. An agent-approved host with none of them would be
 	// approved and still not in the lenses.
-	if err := s.processDeferredFindings(tenantID, assetID); err != nil {
+	if _, err := s.replayDeferredCrypto(context.Background(), tenantID, assetID); err != nil {
 		return true, fmt.Errorf("asset %s approved but its deferred findings did not replay: %w", assetID, err)
 	}
 	return true, nil
-}
-
-// processDeferredFindings reads the deferred_findings array from asset metadata,
-// processes each finding to create certificates and crypto configurations, then
-// clears the deferred_findings from metadata only after every finding succeeds.
-func (s *AssetService) processDeferredFindings(tenantID uuid.UUID, assetID uuid.UUID) error {
-	return withAssetLifecycleReadLock(context.Background(), s.db.DB.DB, tenantID, assetID, func() error {
-		return s.processDeferredFindingsLocked(tenantID, assetID)
-	})
-}
-
-func (s *AssetService) processDeferredFindingsLocked(tenantID uuid.UUID, assetID uuid.UUID) error {
-	var metadataJSON []byte
-	// RLS-scoped read over assets.
-	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.QueryRow(`SELECT metadata FROM assets WHERE id = $1 AND tenant_id = $2 AND asset_status='monitoring' AND deleted_at IS NULL`, assetID, tenantID).Scan(&metadataJSON)
-	})
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil || len(metadataJSON) == 0 {
-		return err
-	}
-
-	var metadata map[string]interface{}
-	if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-		return fmt.Errorf("unmarshal metadata: %w", err)
-	}
-
-	deferredRaw, ok := metadata["deferred_findings"]
-	if !ok {
-		return nil
-	}
-
-	deferredJSON, err := json.Marshal(deferredRaw)
-	if err != nil {
-		return fmt.Errorf("marshal deferred findings: %w", err)
-	}
-
-	var findings []IngestFinding
-	if err := json.Unmarshal(deferredJSON, &findings); err != nil {
-		log.Printf("[AssetService] Warning: failed to unmarshal deferred findings for asset %s: %v", assetID, err)
-		return fmt.Errorf("unmarshal deferred findings: %w", err)
-	}
-
-	source := "discovery"
-	for _, f := range findings {
-		if f.RawData != nil {
-			if v, ok := f.RawData["source"].(string); ok && v != "" {
-				source = v
-				break
-			}
-		}
-	}
-
-	// Collapse duplicates before replaying. storeDeferredFinding now dedups on
-	// the way in, but an asset that has been sitting in Approvals since before
-	// that landed still carries one copy per re-observation — and approving it
-	// replayed every one of them, each doing the same certificate lookups and
-	// the same risk pass. The crypto upsert would converge them onto one row
-	// anyway; this stops the redundant work (and the redundant events) rather
-	// than undoing it afterwards.
-	findings = s.dedupDeferredFindings(findings)
-
-	var lifecycleRiskChanged []*events.AssetRiskChangedPayload
-	var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
-	var lifecycleCertExpiring []*events.CertificateExpiringPayload
-
-	var materializationErrs []error
-	for i, f := range findings {
-		if err := s.processDiscoveryCryptoData(tenantID, assetID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
-			materializationErrs = append(materializationErrs, fmt.Errorf("deferred finding %d: %w", i, err))
-		}
-	}
-
-	if s.eventPublisher != nil && (len(lifecycleRiskChanged) > 0 || len(lifecycleCryptoAdded) > 0 || len(lifecycleCertExpiring) > 0) {
-		ctx := context.Background()
-		go func() {
-			for _, p := range lifecycleRiskChanged {
-				_ = s.eventPublisher.PublishAssetRiskChanged(ctx, tenantID, p, source)
-			}
-			for _, p := range lifecycleCryptoAdded {
-				_ = s.eventPublisher.PublishCryptoConfigurationAdded(ctx, tenantID, p, source)
-			}
-			for _, p := range lifecycleCertExpiring {
-				_ = s.eventPublisher.PublishCertificateExpiring(ctx, tenantID, p, source)
-			}
-		}()
-	}
-
-	if err := errors.Join(materializationErrs...); err != nil {
-		log.Printf("[AssetService] Warning: preserving deferred findings for asset %s because materialization failed: %v", assetID, err)
-		return err
-	}
-
-	// Clear deferred_findings from metadata.
-	// RLS-scoped write over assets.
-	err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		_, e := tx.Exec(`
-			UPDATE assets
-			SET metadata = metadata - 'deferred_findings',
-			    updated_at = NOW()
-			WHERE id = $1 AND tenant_id = $2`,
-			assetID, tenantID)
-		return e
-	})
-	if err != nil {
-		log.Printf("[AssetService] Warning: failed to clear deferred findings for asset %s: %v", assetID, err)
-		return err
-	}
-	return nil
-}
-
-// dedupDeferredFindings collapses deferred findings that materialize to the
-// same thing, keeping the LAST occurrence of each (the most recent observation)
-// at the position of the first (so replay order stays first-seen).
-func (s *AssetService) dedupDeferredFindings(findings []IngestFinding) []IngestFinding {
-	if len(findings) < 2 {
-		return findings
-	}
-	pos := make(map[string]int, len(findings))
-	out := make([]IngestFinding, 0, len(findings))
-	for _, f := range findings {
-		fp := s.deferredFindingFingerprint(f)
-		if i, seen := pos[fp]; seen {
-			out[i] = f
-			continue
-		}
-		pos[fp] = len(out)
-		out = append(out, f)
-	}
-	return out
 }
 
 func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, userID uuid.UUID) error {
@@ -3198,14 +3166,22 @@ func (s *AssetService) evaluateAssetApproval(tenantID uuid.UUID, ipAddress, host
 	if s.networkSegmentService == nil {
 		return pending
 	}
-	seg, err := s.networkSegmentService.GetSegmentForIP(tenantID, ipAddress, hostname)
-	if err != nil || seg == nil {
-		return pending
-	}
-	ownership, err := s.networkSegmentService.ClassifyAsset(tenantID, ipAddress, hostname, nil)
+	set, err := s.networkSegmentService.LoadSegmentSet(tenantID)
 	if err != nil {
 		return pending
 	}
+	return s.evaluateAssetApprovalOver(tenantID, set, ipAddress, hostname)
+}
+
+// evaluateAssetApprovalOver is evaluateAssetApproval's decision over a segment
+// set already read — one read answers both the segment and the ownership.
+func (s *AssetService) evaluateAssetApprovalOver(tenantID uuid.UUID, set *SegmentSet, ipAddress, hostname *string) string {
+	const pending = "pending_approval"
+	seg := set.Match(ipAddress, hostname)
+	if seg == nil {
+		return pending
+	}
+	ownership := set.Classify(ipAddress, hostname)
 	segID := seg.ID
 	segName := seg.Name
 	classification := &approval.Classification{
@@ -3417,6 +3393,22 @@ func (s *AssetService) classKeyExists(tenantID uuid.UUID, key string) (bool, err
 	return exists, nil
 }
 
+// discoveryDecline is why the ingest gate declined to resolve a finding.
+type discoveryDecline int
+
+const (
+	// discoveryProceed: the finding was resolved.
+	discoveryProceed discoveryDecline = iota
+	// discoveryDeniedAsset: it belongs to an asset the tenant denied, whose
+	// last-seen alone moves.
+	discoveryDeniedAsset
+	// discoveryRouteExternal: a third-party endpoint that is no elevated asset,
+	// recorded in external_connections.
+	discoveryRouteExternal
+	// discoverySuppressed: nothing owns it and its fingerprint is suppressed.
+	discoverySuppressed
+)
+
 // resolveDiscoveryObservation is the ingest path's call into the identification
 // engine: one observation per finding, one transaction, one of three outcomes.
 //
@@ -3430,53 +3422,80 @@ func (s *AssetService) classKeyExists(tenantID uuid.UUID, key string) (bool, err
 // discovery. It is applied here rather than re-derived, so the two cannot
 // disagree — EXCEPT over a conflict, where the observation waits for the human
 // who has to settle the merge whatever the rule said.
-func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestFinding, effectiveIP *string, ownership, assetStatus string) (identity.Resolution, bool, error) {
-	obs, err := s.discoveryObservation(tenantID, f, effectiveIP, ownership)
-	if err != nil {
-		return identity.Resolution{}, false, err
-	}
-
-	// The rules (ADR-0004 D6, workstream 2.10b). A class they decide becomes a
-	// NEW asset's class with `rule` provenance; on an asset that already exists
-	// it becomes a proposal in Approvals instead, because a class is never
-	// overwritten. A class the finding itself carried — a cloud resource type
-	// read through shared/assetclass — is left alone: the collector's answer
-	// beats an inference.
+func (s *AssetService) resolveDiscoveryObservation(segs *importSegments, tenantID uuid.UUID, f IngestFinding, obs identity.Observation, effectiveIP *string, ownership, assetStatus string, gate func(ctx context.Context, tx *sqlx.Tx, existing existingAsset) (bool, error)) (identity.Resolution, existingAsset, bool, bool, error) {
 	ctxBG := context.Background()
-	classProp := s.applyClassProposal(ctxBG, &obs, findingClassEvidence(f))
 
 	// Tags from the matching network segment, and the discovery-source
 	// attribution the Approvals filter buttons read. Neither is identity, so
 	// neither belongs in the observation — but both are part of the SAME fact,
 	// so they are written on the engine's transaction.
-	networkTags, _ := s.getTagsForAsset(tenantID, effectiveIP, f.Hostname)
-	ctxInput := models.AssetInput{
-		Tags:     mergeTags(models.JSONB{}, networkTags),
-		Metadata: discoverySourceMetadata(f),
+	//
+	// Read before the transaction opens (the segment read is on its own
+	// connection) — except for a third-party finding, which the gate usually
+	// routes to external_connections without resolving; reading segments for
+	// every one of those would be work nothing uses. The rare third-party
+	// finding that IS resolved (an elevated vendor asset) reads them in the
+	// gate instead.
+	networkTagsRead := ownership != "third_party"
+	var networkTags map[string]interface{}
+	if networkTagsRead {
+		networkTags, _ = s.getTagsForAssetIn(segs, tenantID, effectiveIP, f.Hostname)
 	}
-	if ownership != "" {
-		ctxInput.AssetOwnership = &ownership
+
+	var classProp classify.ClassProposal
+	// The observation as the engine will read it, class hint included.
+	amended := obs
+	discoveryGate := func(ctx context.Context, tx *sqlx.Tx, existing existingAsset, obs *identity.Observation) (bool, error) {
+		if gate != nil {
+			proceed, err := gate(ctx, tx, existing)
+			if err != nil || !proceed {
+				return proceed, err
+			}
+		}
+		// The rules (ADR-0004 D6, workstream 2.10b). A class they decide
+		// becomes a NEW asset's class with `rule` provenance; on an asset that
+		// already exists it becomes a proposal in Approvals instead, because a
+		// class is never overwritten. A class the finding itself carried — a
+		// cloud resource type read through shared/assetclass — is left alone:
+		// the collector's answer beats an inference. In memory: the rule
+		// engine is refreshed in the background.
+		classProp = s.applyClassProposal(ctx, obs, findingClassEvidence(f))
+		amended = *obs
+		if !networkTagsRead {
+			networkTags, _ = s.getTagsForAssetIn(segs, tenantID, effectiveIP, f.Hostname)
+			networkTagsRead = true
+		}
+		return true, nil
 	}
-	if os := strings.TrimSpace(derefString(f.OperatingSystem)); os != "" {
-		// The OS is a class attribute now (ADR-0002 D2), not a column.
-		ctxInput.Attributes = map[string]interface{}{"operating_system": os}
+	ctxInputFor := func() models.AssetInput {
+		in := models.AssetInput{
+			Tags:     mergeTags(models.JSONB{}, networkTags),
+			Metadata: discoverySourceMetadata(f),
+		}
+		if ownership != "" {
+			in.AssetOwnership = &ownership
+		}
+		if os := strings.TrimSpace(derefString(f.OperatingSystem)); os != "" {
+			// The OS is a class attribute now (ADR-0002 D2), not a column.
+			in.Attributes = map[string]interface{}{"operating_system": os}
+		}
+		return in
 	}
 
 	var assetID uuid.UUID
 	var durableMaterialization bool
-	res, err := s.resolveObservationAttributed(context.Background(), obs, operatorScanAttribution(tenantID, f, effectiveIP), func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
+	res, existing, resolved, err := s.resolveObservationGated(ctxBG, obs, discoveryGate, operatorScanAttribution(tenantID, f, effectiveIP), func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
 		mode, err := repo.AdmissionMode(ctxBG, tenantID.String())
 		if err != nil {
 			return err
 		}
 		durableMaterialization = res.ObservationID != "" && (mode == "enforce" || mode == "paused")
 		if durableMaterialization {
-			payload, err := operatorScanPayload(f, res.OperatorScanJob)
-			if err != nil {
-				return err
-			}
-			_, err = tx.Exec(`INSERT INTO identity_observation_payloads(tenant_id,observation_id,receipt_key,payload) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, tenantID, res.ObservationID, identity.ObservationReceiptKey(obs), string(payload))
-			if err != nil {
+			// Held on the engine's transaction, waiting on the observation
+			// (deferred_crypto.go): replayed once it is linked to a monitoring
+			// asset by a decision that attached its evidence.
+			if err := deferCryptoForObservation(ctxBG, tx, tenantID, res.ObservationID, identity.ObservationReceiptKey(amended),
+				amended.Source.Ref, f, res.OperatorScanJob, amended.ObservedAt); err != nil {
 				return err
 			}
 		}
@@ -3488,7 +3507,7 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 			return fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, perr)
 		}
 		assetID = id
-		if cerr := s.applyAssetContext(tx, tenantID, assetID, ctxInput, obs.Source, res.Outcome); cerr != nil {
+		if cerr := s.applyAssetContext(tx, tenantID, assetID, ctxInputFor(), obs.Source, res.Outcome); cerr != nil {
 			return cerr
 		}
 		// On a MATCH, over the asset's accumulated evidence, promoting a
@@ -3506,7 +3525,10 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 		return nil
 	})
 	if err != nil {
-		return identity.Resolution{}, false, err
+		return identity.Resolution{}, existing, false, false, err
+	}
+	if !resolved {
+		return identity.Resolution{}, existing, false, false, nil
 	}
 	if res.OperatorScanJob != "" {
 		log.Printf("[AssetService] IngestFindings: %s attached to asset %s, which a person scanned (Active Scan job %s)",
@@ -3523,7 +3545,7 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 		// unresolved observation (Discovery → Observations). Not an error
 		// either way, but the caller must not treat it as an ingested asset.
 		log.Print(noAssetIngestMessage(findingLabel(f), res))
-		return res, durableMaterialization, nil
+		return res, existing, true, durableMaterialization, nil
 	}
 
 	if res.Outcome == identity.OutcomeConflict {
@@ -3538,7 +3560,7 @@ func (s *AssetService) resolveDiscoveryObservation(tenantID uuid.UUID, f IngestF
 		log.Printf("[AssetService] IngestFindings: %s carried %s=%q, which belongs to another asset; it was not attached",
 			findingLabel(f), un.Kind, un.Value)
 	}
-	return res, durableMaterialization, nil
+	return res, existing, true, durableMaterialization, nil
 }
 
 // noAssetIngestMessage says what became of a finding that landed on no asset,

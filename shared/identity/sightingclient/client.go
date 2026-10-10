@@ -82,7 +82,12 @@ type Result struct {
 	AssetID       string           `json:"asset_id,omitempty"`
 	ObservationID string           `json:"observation_id,omitempty"`
 	ProposalID    string           `json:"proposal_id,omitempty"`
-	Reasons       []string         `json:"reasons,omitempty"`
+	EvidenceHeld  bool             `json:"evidence_held,omitempty"`
+	// EndpointsClosed is how many of the asset's endpoints the engine closed
+	// because a complete set ([identity.Sighting.EndpointsComplete]) no
+	// longer listed them, inside its own transaction.
+	EndpointsClosed int      `json:"endpoints_closed,omitempty"`
+	Reasons         []string `json:"reasons,omitempty"`
 }
 
 // OutcomeRejected is the outcome of a sighting inventory-service refused
@@ -112,6 +117,9 @@ func (r Result) Resolution(tenantID string) identity.Resolution {
 	res := identity.Resolution{
 		Outcome:       r.Outcome,
 		ObservationID: r.ObservationID,
+		EvidenceHeld:  r.EvidenceHeld,
+		// Carried so a caller reports what the engine closed for it.
+		EndpointsClosed: r.EndpointsClosed,
 	}
 	if r.ProposalID != "" {
 		res.Proposal = identity.ProposalRef{TenantID: tenantID, ID: r.ProposalID}

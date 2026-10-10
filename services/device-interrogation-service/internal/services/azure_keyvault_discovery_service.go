@@ -14,7 +14,7 @@ import (
 
 // DiscoverAzureKeyVaultKeys enumerates keys across every Key Vault in the
 // subscription and returns them as provider-neutral KMSKeyFinding records (the
-// AWS KMS shape), ready for StoreKMSKeyFindings with provider "azure".
+// AWS KMS shape), ready for PublishKMSKeyFindings with provider "azure".
 func (s *KMSDiscoveryService) DiscoverAzureKeyVaultKeys(
 	ctx context.Context,
 	tenantID uuid.UUID,

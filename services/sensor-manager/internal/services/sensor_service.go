@@ -18,6 +18,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/events"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
@@ -34,6 +35,19 @@ type SensorService struct {
 	// resolves to the same connection as db.
 	bypassDB            *sql.DB
 	enrichmentAvailable bool
+	// queuePublisher wakes discovery-processor once StoreDiscoveries has
+	// committed (discovery.queue.ready, WP1). nil is tolerated — the
+	// rows wait for the processor's fallback poll, and the first such write
+	// logs a WARNING — but production must set it: SetQueuePublisher in main.
+	queuePublisher events.MessagePublisher
+}
+
+// SetQueuePublisher wires the NATS client StoreDiscoveries publishes
+// discovery.queue.ready on. Pass the service's client even when it is nil:
+// PublishDiscoveryQueueReady turns a nil client into a once-per-process
+// warning instead of a silent fallback to the poll.
+func (s *SensorService) SetQueuePublisher(p events.MessagePublisher) {
+	s.queuePublisher = p
 }
 
 // GetDB returns the RLS-scoped (crypto_app) database connection (for handlers
@@ -693,7 +707,17 @@ func (s *SensorService) StoreDiscoveries(batch *models.DiscoveryBatch) error {
 		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// After the commit, never inside the transaction: a wake that lands
+	// before the rows are visible finds nothing to claim, and they would then
+	// wait for the fallback poll anyway.
+	if len(rows) > 0 {
+		_ = events.PublishDiscoveryQueueReady(context.Background(), s.queuePublisher, tenantID, batch.BatchID.String(), "sensor-manager.store_discoveries")
+	}
+	return nil
 }
 
 // sniHostnameFromRawMetadata returns the TLS SNI hostname captured for a

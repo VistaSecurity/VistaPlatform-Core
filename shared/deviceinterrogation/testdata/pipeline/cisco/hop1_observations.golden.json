@@ -366,6 +366,99 @@
             "confidence": 1,
             "kind": "ip_address",
             "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "4c:77:ab:cd:12:12"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "core-rtr-01.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{network_scope_unresolved}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "74:ad:ab:cd:dc:ba"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "core-rtr-01.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{network_scope_unresolved}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "kind": "mac_address",
+            "value": "c4:f7:d5:14:69:00"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "core-rtr-01.corp.example.test"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{network_scope_unresolved}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
             "value": "198.51.100.2"
           },
           {

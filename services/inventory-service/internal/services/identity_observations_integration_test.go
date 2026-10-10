@@ -2,13 +2,14 @@ package services
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgrepo "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
@@ -85,12 +86,9 @@ func TestIntegration_IdentityObservation_DeferredAttachmentsSurviveRestart(t *te
 		}
 		finding := leafCertFinding("verified.example.test", "198.51.100.70", port, strings.Repeat(string(rune('a'+index)), 64))
 		finding.RawData["observed_at"] = seen.Format(time.RFC3339Nano)
-		payload, err := json.Marshal(finding)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.db.Exec(`INSERT INTO identity_observation_payloads(tenant_id,observation_id,receipt_key,payload) VALUES($1,$2,$3,$4)`,
-			f.tenant, id, identity.ObservationReceiptKey(obs), string(payload)); err != nil {
+		if err := database.WithTenantTx(ctx, f.db, f.tenant, func(tx *sqlx.Tx) error {
+			return deferCryptoForObservation(ctx, tx, f.tenant, id, identity.ObservationReceiptKey(obs), obs.Source.Ref, finding, "", obs.ObservedAt)
+		}); err != nil {
 			t.Fatal(err)
 		}
 		if err := repo.LinkObservation(ctx, f.tenant.String(), id, asset.String(), identity.IdentityOperatorConfirmed); err != nil {
@@ -100,7 +98,10 @@ func TestIntegration_IdentityObservation_DeferredAttachmentsSurviveRestart(t *te
 	if n, err := f.svc.SweepIdentityEvidence(ctx, f.tenant); err != nil || n != 0 {
 		t.Fatalf("pending approval materialized evidence: n=%d err=%v", n, err)
 	}
-	if err := f.svc.ApproveAssets(f.tenant, []uuid.UUID{asset}, uuid.Nil); err != nil {
+	// Approved by a transition that does not call the replay itself (a
+	// segment rule during ingest, an Active Scan's approval): the sweep is
+	// what replays it. ApproveAssets would replay at once.
+	if _, err := f.db.Exec(`UPDATE assets SET asset_status='monitoring' WHERE tenant_id=$1 AND id=$2`, f.tenant, asset); err != nil {
 		t.Fatal(err)
 	}
 	// Rebuild the service to prove the queue has no in-memory prerequisite.

@@ -12,14 +12,14 @@ import (
 
 // inventoryStub records what would be handed to inventory-service.
 //
-// findingsWithStatus is split only by asset status before each half is passed
-// to InventoryClient.ImportFindings verbatim, so what this stub is loaded with
-// is, by construction, what inventory-service receives.
+// The batch's import entries are passed to InventoryClient.ImportFindings
+// verbatim, so what this stub is loaded with is, by construction, what
+// inventory-service receives.
 type inventoryStub struct {
 	received []converter.IngestFinding
 }
 
-func (s *inventoryStub) importFindings(findings []FindingWithStatus) {
+func (s *inventoryStub) importFindings(findings []importEntry) {
 	for _, fws := range findings {
 		s.received = append(s.received, fws.Finding)
 	}
@@ -33,12 +33,11 @@ func (s *inventoryStub) kinds() []string {
 	return out
 }
 
-func candidate(kind string, hostname string) FindingWithStatus {
+func candidate(kind string, hostname string) importEntry {
 	h := hostname
-	return FindingWithStatus{
-		Finding:     converter.IngestFinding{Kind: kind, Hostname: &h},
-		AssetStatus: "pending_approval",
-		Discovery:   &models.SensorDiscovery{ID: uuid.New()},
+	return importEntry{
+		Finding:   converter.IngestFinding{Kind: kind, Hostname: &h},
+		Discovery: &models.SensorDiscovery{ID: uuid.New()},
 	}
 }
 
@@ -68,7 +67,7 @@ func candidate(kind string, hostname string) FindingWithStatus {
 // for: ClusterSensorFinding had no `kind` field, so the marker reached the
 // service and was dropped one step later.
 func TestHostObservationsReachInventoryWithTheirKind(t *testing.T) {
-	candidates := []FindingWithStatus{
+	candidates := []importEntry{
 		candidate("", "tls-endpoint.corp.example"),
 		candidate(converter.KindHostObservation, "printer.corp.example"),
 		candidate("", "ssh-host.corp.example"),
@@ -103,16 +102,16 @@ func TestHostObservationsReachInventoryWithTheirKind(t *testing.T) {
 func TestCountHostObservations(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		in   []FindingWithStatus
+		in   []importEntry
 		want int
 	}{
-		{"mixed", []FindingWithStatus{
+		{"mixed", []importEntry{
 			candidate("", "a"),
 			candidate(converter.KindHostObservation, "b"),
 			candidate(converter.KindHostObservation, ""),
 		}, 2},
-		{"none", []FindingWithStatus{candidate("", "a"), candidate("", "b")}, 0},
-		{"all", []FindingWithStatus{
+		{"none", []importEntry{candidate("", "a"), candidate("", "b")}, 0},
+		{"all", []importEntry{
 			candidate(converter.KindHostObservation, "a"),
 			candidate(converter.KindHostObservation, "b"),
 		}, 2},
@@ -126,19 +125,11 @@ func TestCountHostObservations(t *testing.T) {
 	}
 }
 
-// The kind a rule sees is stated for BOTH sensor shapes, so `kind:crypto` means
-// something to a rule writer rather than being Unknown for the findings it
-// names.
-func TestApprovalKindOf(t *testing.T) {
-	if got := approvalKindOf(true); got != approval.KindHostObservation {
-		t.Errorf("approvalKindOf(true) = %q, want %q", got, approval.KindHostObservation)
-	}
-	if got := approvalKindOf(false); got != approval.KindCrypto {
-		t.Errorf("approvalKindOf(false) = %q, want %q", got, approval.KindCrypto)
-	}
-	// The converter's wire constant and the rule vocabulary's value have to be
-	// the same string: one is written onto the finding, the other is matched by
-	// a tenant's rule, and neither package imports the other.
+// The converter's wire constant and the rule vocabulary's value have to be the
+// same string: one is written onto the finding, the other is matched by a
+// tenant's rule in inventory-service (which evaluates the rules since
+// WP3), and neither package imports the other.
+func TestHostObservationKindMatchesTheRuleVocabulary(t *testing.T) {
 	if converter.KindHostObservation != approval.KindHostObservation {
 		t.Errorf("the wire kind %q and the rule vocabulary's %q have drifted apart",
 			converter.KindHostObservation, approval.KindHostObservation)

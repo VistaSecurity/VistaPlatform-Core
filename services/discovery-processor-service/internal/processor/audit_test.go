@@ -49,7 +49,7 @@ func newTestBatchProcessor(t *testing.T, sink AuditSink) *BatchProcessor {
 		t.Fatalf("open stub db: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return NewBatchProcessor(db, nil, nil, nil, sink)
+	return NewBatchProcessor(db, nil, nil, sink)
 }
 
 // TestProcessBatch_AuditsFailedBatch pins the consumer-path audit record.

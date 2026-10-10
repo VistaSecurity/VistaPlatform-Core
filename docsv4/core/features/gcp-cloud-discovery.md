@@ -40,7 +40,7 @@ SSL Proxy load balancers for non-HTTP TLS termination.
 
 - **Discovery**: Enumerates KMS locations → key rings → crypto keys across the project
 - **Interrogation**: Per key — algorithm normalized to a canonical key spec (e.g. `GOOGLE_SYMMETRIC_ENCRYPTION`→AES-256, `RSA_DECRYPT_OAEP_4096_*`→RSA-4096, `EC_SIGN_P256_*`→ECC P-256), key state, purpose, protection level (SOFTWARE / HSM / EXTERNAL), and **rotation period**
-- Keys are written to the `kms_keys` inventory (provider `gcp`) and surface as cryptographic-key assets
+- Keys are recorded in the key inventory (**Inventory → Keys**, provider `gcp`), which also creates each key's **Key Store** Infrastructure Asset
 - **Note:** key *metadata* only — Cloud KMS does not expose key material, and the platform does not retrieve it
 
 ### Cloud Storage (at-rest encryption)

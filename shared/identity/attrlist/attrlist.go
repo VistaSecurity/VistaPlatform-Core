@@ -7,6 +7,9 @@
 //	synthetic_names            UUID-form, IP-encoded and none-N names (D1)
 //	ipv6_temporary_addresses   rotating RFC 8981-shaped IPv6 addresses (D2)
 //	link_local_addresses       fe80::/10 addresses with no segment to scope to (D2)
+//	virtual_interface_addresses  a host's own addresses on its virtual
+//	                           interfaces (bridges, veths, tunnels), as its
+//	                           agent reported them ( WP7)
 //
 // Each is evidence that EXPLAINS an asset — what else it answered to — and
 // none of it identifies anything, which is why it is an attribute and not an
@@ -33,10 +36,15 @@ import (
 // The attribute keys, and the cap on the two address lists. (The name list's
 // cap is hostnamequality.MaxSyntheticNames.)
 const (
-	KeySyntheticNames  = "synthetic_names"
-	KeyIPv6Temporary   = "ipv6_temporary_addresses"
-	KeyLinkLocal       = "link_local_addresses"
-	MaxAddressEvidence = 10
+	KeySyntheticNames = "synthetic_names"
+	KeyIPv6Temporary  = "ipv6_temporary_addresses"
+	KeyLinkLocal      = "link_local_addresses"
+	// KeyVirtualInterfaceAddresses holds the addresses a host reported on its
+	// VIRTUAL interfaces. They are real and they are the host's, but they are
+	// not where it lives: a container bridge's 172.17.0.1 is on every Docker
+	// host, so as an identifier it would merge them all.
+	KeyVirtualInterfaceAddresses = "virtual_interface_addresses"
+	MaxAddressEvidence           = 10
 )
 
 // AddressAttribute is D2's rule for one address, in the one place both

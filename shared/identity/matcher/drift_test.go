@@ -74,6 +74,39 @@ func TestClassifyDriftTable(t *testing.T) {
 			verdict: DriftReplaced, rule: "address_kept_hardware_changed",
 		},
 		{
+			name: "same name, new MAC, new IP beside a live one: a distinct device",
+			in: DriftInput{
+				Observation: DriftSide{Identifiers: ids(KindHostname, "plug-model-x", KindMACAddress, macB, KindIPAddress, addrB)},
+				Candidate:   DriftSide{Identifiers: ids(KindHostname, "plug-model-x", KindMACAddress, macA, KindIPAddress, addrA)},
+			},
+			verdict: DriftDistinct, rule: "name_kept_hardware_and_address_changed",
+			evidence: map[DriftSignal]string{SignalMAC: "differ", SignalHostname: "agree", SignalAddress: "unknown"},
+		},
+		{
+			name: "same name, new MAC, same IP stays replaced, not distinct",
+			in: DriftInput{
+				Observation: DriftSide{Identifiers: ids(KindHostname, "plug-model-x", KindMACAddress, macB, KindIPAddress, addrA)},
+				Candidate:   DriftSide{Identifiers: ids(KindHostname, "plug-model-x", KindMACAddress, macA, KindIPAddress, addrA)},
+			},
+			verdict: DriftReplaced, rule: "address_kept_hardware_changed",
+		},
+		{
+			name: "same name, same MAC, new IP is not distinct",
+			in: DriftInput{
+				Observation: DriftSide{Identifiers: ids(KindHostname, "plug-model-x", KindMACAddress, macA, KindIPAddress, addrB)},
+				Candidate:   DriftSide{Identifiers: ids(KindHostname, "plug-model-x", KindMACAddress, macA, KindIPAddress, addrA)},
+			},
+			verdict: DriftNone,
+		},
+		{
+			name: "a serial that agrees outweighs a different MAC and IP: not distinct",
+			in: DriftInput{
+				Observation: DriftSide{Identifiers: ids(KindHostname, "plug-model-x", KindSerialNumber, "SN-1", KindMACAddress, macB, KindIPAddress, addrB)},
+				Candidate:   DriftSide{Identifiers: ids(KindHostname, "plug-model-x", KindSerialNumber, "SN-1", KindMACAddress, macA, KindIPAddress, addrA)},
+			},
+			verdict: DriftNone,
+		},
+		{
 			name: "same MAC, new host key, TLS key and hostname: reimaged",
 			in: DriftInput{
 				Observation: DriftSide{Identifiers: ids(KindMACAddress, macA, KindIPAddress, addrA, KindSSHHostKeyFingerprint, keyB, KindHostname, "build-07"), TLSCertFingerprints: []string{certB}},

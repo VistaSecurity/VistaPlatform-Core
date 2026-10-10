@@ -239,8 +239,8 @@ func TestIntegration_RecomputeAssetRisk_CanGoDown(t *testing.T) {
 
 	weak, strong := uuid.New(), uuid.New()
 	mustExec(t, db.DB.DB, `
-		INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, discovery_method, risk_score)
-		VALUES ($1,$2,$3,'TLS','passive',90), ($4,$2,$3,'TLS','passive',20)`,
+		INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, protocol_version, discovery_method, risk_score)
+		VALUES ($1,$2,$3,'TLS','TLS 1.0','passive',90), ($4,$2,$3,'TLS','TLS 1.3','passive',20)`,
 		weak, tenant, assetID, strong)
 	weakFinding := seedCryptoFinding(t, db, tenant, weak, 90)
 	strongFinding := seedCryptoFinding(t, db, tenant, strong, 20)

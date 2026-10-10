@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
 )
 
 // Marking discoveries processed used to be one transaction and one
@@ -59,78 +58,6 @@ func TestProcessedMarks_GroupsByOutcome(t *testing.T) {
 	}
 	if got, want := m.ids[wantOrder[1]][0], pendingID.String(); got != want {
 		t.Fatalf("pending group id = %s, want %s", got, want)
-	}
-}
-
-func TestShouldKeepCloudPlaceholderManaged(t *testing.T) {
-	sourceIP := "10.0.0.5"
-	cases := []struct {
-		name           string
-		discovery      *models.SensorDiscovery
-		classification *models.NetworkClassification
-		want           bool
-	}{
-		{
-			name: "cloud api placeholder without source stays managed",
-			discovery: &models.SensorDiscovery{
-				DestIP:   "0.0.0.0",
-				Metadata: []byte(`{"discovery_method":"cloud_api","device_type":"gcp_storage_bucket"}`),
-			},
-			classification: &models.NetworkClassification{Ownership: "third_party", Type: "public"},
-			want:           true,
-		},
-		{
-			name: "real public cloud connection still routes externally",
-			discovery: &models.SensorDiscovery{
-				DestIP:   "203.0.113.10",
-				Metadata: []byte(`{"discovery_method":"cloud_api","device_type":"aws_cloudfront"}`),
-			},
-			classification: &models.NetworkClassification{Ownership: "third_party", Type: "public"},
-			want:           false,
-		},
-		{
-			name: "source ip means observed connection remains external",
-			discovery: &models.SensorDiscovery{
-				DestIP:   "0.0.0.0",
-				SourceIP: &sourceIP,
-				Metadata: []byte(`{"discovery_method":"cloud_api","device_type":"gcp_storage_bucket"}`),
-			},
-			classification: &models.NetworkClassification{Ownership: "third_party", Type: "public"},
-			want:           false,
-		},
-		{
-			name: "sensor discovery placeholder is not special cased",
-			discovery: &models.SensorDiscovery{
-				DestIP:   "0.0.0.0",
-				Metadata: []byte(`{"discovery_method":"active_enrichment"}`),
-			},
-			classification: &models.NetworkClassification{Ownership: "third_party", Type: "public"},
-			want:           false,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldKeepCloudPlaceholderManaged(tc.discovery, tc.classification); got != tc.want {
-				t.Fatalf("shouldKeepCloudPlaceholderManaged() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestSourceAssetIDFromMetadata_UsesOnlyAValidExplicitUUID(t *testing.T) {
-	want := uuid.New()
-	got := sourceAssetIDFromMetadata([]byte(`{"discovery_type":"host_connection","discovery_method":"host_inventory","source_asset_id":"` + want.String() + `"}`))
-	if got == nil || *got != want {
-		t.Fatalf("source asset=%v, want %s", got, want)
-	}
-	for _, raw := range [][]byte{nil, []byte(`{}`), []byte(`{"source_asset_id":"not-a-uuid"}`)} {
-		if got := sourceAssetIDFromMetadata(raw); got != nil {
-			t.Errorf("%s produced %v", raw, got)
-		}
-	}
-	if got := sourceAssetIDFromMetadata([]byte(`{"discovery_type":"passive","discovery_method":"sensor","source_asset_id":"` + want.String() + `"}`)); got != nil {
-		t.Fatalf("non-host producer could assert source asset %v", got)
 	}
 }
 

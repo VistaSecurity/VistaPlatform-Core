@@ -20,6 +20,12 @@
           "source_kind": "declared"
         },
         {
+          "kind": "mac_address",
+          "value": "00:1b:17:00:00:01",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
           "kind": "serial_number",
           "value": "FOC2432L0AB",
           "scope": null,

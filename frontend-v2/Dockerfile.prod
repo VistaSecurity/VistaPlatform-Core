@@ -11,7 +11,7 @@
 # relative /api/* paths (see api/clients/typescript/client.ts), so the UI is
 # same-origin with the API behind Traefik in every environment — zero API config.
 ARG NODE_BUILDER=node:24-alpine
-ARG GO_BUILDER_IMAGE=golang:1.26.8-alpine
+ARG GO_BUILDER_IMAGE=golang:1.26.9-alpine
 FROM ${NODE_BUILDER} AS builder
 WORKDIR /repo
 
@@ -34,11 +34,11 @@ COPY frontend-v2/ ./frontend-v2/
 RUN npm ci
 RUN npm run build -w frontend-v2
 
-# ---- caddy build: compile Caddy on Go 1.26.8 with patched dependencies ----
+# ---- caddy build: compile Caddy on Go 1.26.9 with patched dependencies ----
 # The stock caddy:2-alpine binary (even at 2.11.4) is compiled with Go stdlib
 # 1.26.3, which Trivy still flags (CVE-2026-27145/-42504/-42507). Rebuild the
-# Caddy binary ourselves on the repo's Go 1.26.8 toolchain so the runtime carries
-# stdlib 1.26.8 (also clears GO-2026-5856/CVE-2026-42505). Pinned to Caddy v2.11.7
+# Caddy binary ourselves on the repo's Go 1.26.9 toolchain so the runtime carries
+# stdlib 1.26.9 (also clears GO-2026-5856/CVE-2026-42505). Pinned to Caddy v2.11.7
 # (2026-10; v2.11.4 was the CVE fix for CVE-2026-52844/52845).
 #
 # Why a wrapper module rather than `go install caddy@<newer>` (added 2026-08):
@@ -104,7 +104,7 @@ RUN npm run build -w frontend-v2
 # the backends pin and this stage did not. An exact pin provisions the exact go.work patch
 # regardless of which base CI substitutes, and still refuses 1.27.
 FROM ${GO_BUILDER_IMAGE} AS caddybuild
-ENV GOTOOLCHAIN=go1.26.8 CGO_ENABLED=0
+ENV GOTOOLCHAIN=go1.26.9 CGO_ENABLED=0
 WORKDIR /caddybuild
 RUN printf '%s\n' \
       'package main' \
@@ -147,7 +147,7 @@ RUN go build -o /go/bin/caddy .
 # caddy:2.11.7-alpine resolve to this same index digest, created 2026-10-05). The
 # 2.11.4 pin before it cleared Caddy CVE-2026-52844/52845 (fix 2.11.4) and the
 # Alpine OpenSSL CVE-2026-45447 (libssl3/libcrypto3 3.5.7-r0). The runtime Caddy
-# binary is then replaced with the Go-1.26.8 build above, so the stock binary's own
+# binary is then replaced with the Go-1.26.9 build above, so the stock binary's own
 # dependencies never ship. See
 # docsv4/internal/developer/security/2026-07-frontend-caddy-cve-remediation.md.
 #
@@ -176,7 +176,7 @@ FROM caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f
 # whole class instead of re-running the version race every quarter.
 RUN apk --no-cache upgrade && apk --no-cache del curl
 
-# Swap in the Go-1.26.8-compiled Caddy binary (stdlib 1.26.8, patched deps).
+# Swap in the Go-1.26.9-compiled Caddy binary (stdlib 1.26.9, patched deps).
 # Unlike the stock caddy:2-alpine binary, this one carries NO file capabilities,
 # so there is no cap_net_bind_service to strip (we bind 3001, never a privileged
 # port, and the chart's strict containerSecurityContext drops ALL caps anyway).

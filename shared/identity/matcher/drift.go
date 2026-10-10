@@ -62,6 +62,13 @@ const (
 	// different device now answers there: a new asset or a merge proposal, as
 	// before.
 	DriftReplaced DriftVerdict = "replaced"
+	// DriftDistinct — the name matches and the hardware does not, and the
+	// address is not the one the asset holds: not a device that changed but a
+	// second device that shares a weak identifier (two plugs of one model
+	// both announcing their DHCP default name). The engine creates a second
+	// asset when the evidence is a direct measurement, and otherwise behaves
+	// as if the table had no opinion.
+	DriftDistinct DriftVerdict = "distinct"
 	// DriftReimaged — the hardware is the same and everything the operating
 	// system generates (host key, TLS key, name) is new. Match on the MAC and
 	// say the identity material rotated.
@@ -200,6 +207,21 @@ var DriftTable = []DriftRule{
 		Name: "address_kept_hardware_changed", Verdict: DriftReplaced,
 		When:    map[DriftSignal]Agreement{SignalAddress: Agree, SignalMAC: Differ, SignalHostKey: NotAgree, SignalHardwareID: DifferOrUnknown},
 		Summary: "a device with a different hardware address now answers at this address",
+	},
+	{
+		// Below `address_kept_hardware_changed`, which owns the same-address
+		// case: here the address is NOT the asset's (a new one beside a live
+		// one, or no address at all), so nothing says the new hardware took
+		// the old one's place. Two devices that merely share a name — a
+		// product line's default DHCP hostname — look exactly like this, and
+		// a name is a weak identifier while a MAC a controller reports for a
+		// client is a binding to one device.
+		Name: "name_kept_hardware_and_address_changed", Verdict: DriftDistinct,
+		When: map[DriftSignal]Agreement{
+			SignalMAC: Differ, SignalAddress: Differ | Unknown, SignalHostKey: NotAgree,
+			SignalHardwareID: DifferOrUnknown, SignalHostname: Agree,
+		},
+		Summary: "a second device sharing a name: its hardware address differs and its IP address is not this asset's, and a shared name does not make it the same device",
 	},
 	{
 		// Above `mac_and_address_kept_key_changed`: a reimage at the same

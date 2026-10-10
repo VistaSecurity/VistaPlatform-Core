@@ -30,6 +30,24 @@
           "value": "198.51.100.5",
           "scope": "segment:198.51.100.0/24",
           "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:23:e9:aa:bb:00",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:23:e9:aa:bb:01",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:23:e9:aa:bb:02",
+          "scope": null,
+          "source_kind": "measured"
         }
       ]
     },

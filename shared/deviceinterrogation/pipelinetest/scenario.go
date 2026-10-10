@@ -117,10 +117,11 @@ type Hop1Handoff struct {
 }
 
 // ImportRequest is one POST discovery-processor made to inventory-service's
-// import endpoint, decoded from the wire bytes.
+// import endpoint, decoded from the wire bytes. It carries no status:
+// inventory-service evaluates the tenant's auto-approval rules itself
+// ( WP3).
 type ImportRequest struct {
-	AssetStatus string           `json:"asset_status"`
-	Findings    []map[string]any `json:"findings"`
+	Findings []map[string]any `json:"findings"`
 }
 
 // RowOutcome is what hop 2 did with one hop-1 row, by its index in
@@ -131,8 +132,9 @@ type RowOutcome struct {
 	// Processed is false for a row ProcessBatch left for the poller to pick up
 	// again — which for a row it skipped outright means forever.
 	Processed bool `json:"processed"`
-	// Forwarded is how the row left hop 2: "import" (to inventory),
-	// "external_connection", or "" when it went nowhere.
+	// Forwarded is how the row left hop 2: "import" (to inventory — every
+	// row, third-party ones included, since WP3), or "" when it went
+	// nowhere.
 	Forwarded string `json:"forwarded"`
 }
 
@@ -143,8 +145,6 @@ type Hop2Handoff struct {
 	InputSHA256 string `json:"input_sha256"`
 	// Imports are the import requests, exactly as posted.
 	Imports []ImportRequest `json:"imports"`
-	// ExternalConnections are the external-connection upserts posted.
-	ExternalConnections []map[string]any `json:"external_connections"`
 	// Rows is the outcome of every hop-1 row.
 	Rows []RowOutcome `json:"rows"`
 	// ProcessError is what ProcessBatch returned, "" for success.

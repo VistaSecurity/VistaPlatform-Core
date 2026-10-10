@@ -3,9 +3,9 @@ package services
 
 import (
 	"strings"
-	"time"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 )
 
 // extractCertificateData extracts certificate information from raw_data.
@@ -57,13 +57,16 @@ func (s *AssetService) extractCertificateData(rawData map[string]interface{}) *m
 			}
 		}
 	}
+	// Every layout a producer has written, older sensors' Go time.String()
+	// form included — the same parser discovery-processor's deleted
+	// external-connections extractor used ( WP3).
 	if notBefore, ok := certMap["not_before"].(string); ok {
-		if t, err := time.Parse(time.RFC3339, notBefore); err == nil {
+		if t, ok := sharedcerts.ParseMetadataTime(notBefore); ok {
 			certData.NotBefore = t
 		}
 	}
 	if notAfter, ok := certMap["not_after"].(string); ok {
-		if t, err := time.Parse(time.RFC3339, notAfter); err == nil {
+		if t, ok := sharedcerts.ParseMetadataTime(notAfter); ok {
 			certData.NotAfter = t
 		}
 	}

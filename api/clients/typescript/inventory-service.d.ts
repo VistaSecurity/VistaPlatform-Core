@@ -7017,6 +7017,8 @@ export interface components {
             observation_id?: string;
             /** Format: uuid */
             proposal_id?: string;
+            /** @description True when the sighting was linked to asset_id as supporting evidence but none of its identifiers or endpoints were written onto the asset, so the caller must not treat it as materialized there. */
+            evidence_held?: boolean;
             /** @description The admission decision's reasons, why a sighting was rejected (tenant_mismatch, invalid_sighting, no_usable_identifier, asset_denied, unknown_target), or why a declaration for a named asset was refused (declared_identifier_conflict, declared_singleton_conflict). */
             reasons?: string[];
         };

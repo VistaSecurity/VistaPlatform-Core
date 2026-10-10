@@ -113,7 +113,7 @@ func TestHostSighting(t *testing.T) {
 		{"name": "eth0", "addresses": []string{"10.9.0.2/24"}, "dynamic_addresses": []string{"10.9.0.2/24"}},
 		{"name": "eth1", "addresses": []string{"10.1.0.1/24"}, "static_addresses": []string{"10.1.0.1/24"}},
 	}}}}
-	s, err := hostSighting(uuid.New(), subject, hostInventoryMetadata{}, obs, hostInventorySource(uuid.New(), uuid.New()), "run")
+	s, err := hostSighting(uuid.New(), subject, hostInventoryMetadata{}, obs, hostInventorySource(uuid.New(), uuid.New()), "run", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,5 +207,84 @@ func TestDeviceSighting_ProbeReadIsMeasured(t *testing.T) {
 	(&DiscoveredDeviceInfo{SerialNumber: "SN-2", TargetHost: "10.0.0.1"}).ApplyTo(&req2, false)
 	if req2.ProbeRead.SerialNumber != "" {
 		t.Errorf("a typed serial was recorded as probe-read")
+	}
+}
+
+func TestAssetOwns_NormalisesAndMatchesKind(t *testing.T) {
+	known := []identity.SightedIdentifier{
+		{Kind: identity.KindMACAddress, Value: "00:00:5e:00:53:ab"},
+		{Kind: identity.KindSerialNumber, Value: "SN-1"},
+	}
+	for _, c := range []struct {
+		kind  identity.Kind
+		value string
+		want  bool
+	}{
+		{identity.KindMACAddress, "00:00:5e:00:53:ab", true},
+		{identity.KindMACAddress, "00-00-5E-00-53-AB", true},
+		{identity.KindMACAddress, "00:00:5e:00:53:ac", false},
+		{identity.KindSerialNumber, " SN-1 ", true},
+		{identity.KindSerialNumber, "00:00:5e:00:53:ab", false},
+		{identity.KindIPAddress, "SN-1", false},
+	} {
+		if got := assetOwns(known, c.kind, c.value); got != c.want {
+			t.Errorf("assetOwns(%s, %q) = %t, want %t", c.kind, c.value, got, c.want)
+		}
+	}
+}
+
+// WP7: a report with no net.interfaces section still carries the
+// address the platform knows the host by, and a virtual interface's address
+// travels flagged instead of being dropped.
+//
+// Mutation check: drop the managed-address append in hostSighting and the
+// first case fails with no ip_address identifier.
+func TestHostSighting_CarriesTheManagedAddressAndFlagsVirtualInterfaces(t *testing.T) {
+	subject := di.PeerRef{DisplayName: "app", Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierHostname, Value: "app"}}}
+
+	bare := &di.InterrogateResult{}
+	s, err := hostSighting(uuid.New(), subject, hostInventoryMetadata{}, bare, hostInventorySource(uuid.New(), uuid.New()), "run", "203.0.113.77")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Identifiers) == 0 || s.Identifiers[0].Kind != identity.KindIPAddress || s.Identifiers[0].Value != "203.0.113.77" {
+		t.Fatalf("identifiers %+v, want the managed address first", s.Identifiers)
+	}
+	for _, id := range s.Identifiers {
+		if id.Kind == identity.KindHostname && id.Address != "203.0.113.77" {
+			t.Errorf("hostname seen at %q, want the managed address as the primary", id.Address)
+		}
+	}
+
+	withVirtual := &di.InterrogateResult{Facts: []di.FactObservation{{Key: facts.KeyNetInterfaces, Value: []map[string]any{
+		{"name": "docker0", "addresses": []string{"172.17.0.1/16"}, "virtual": true},
+		{"name": "eth0", "addresses": []string{"10.9.0.2/24"}},
+	}}}}
+	s, err = hostSighting(uuid.New(), subject, hostInventoryMetadata{}, withVirtual, hostInventorySource(uuid.New(), uuid.New()), "run", "10.9.0.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var addrs []identity.SightedIdentifier
+	for _, id := range s.Identifiers {
+		if id.Kind == identity.KindIPAddress {
+			addrs = append(addrs, id)
+		}
+	}
+	if len(addrs) != 2 || addrs[0].Value != "10.9.0.2" || addrs[0].Provenance.VirtualInterface ||
+		addrs[1].Value != "172.17.0.1" || !addrs[1].Provenance.VirtualInterface {
+		t.Fatalf("addresses %+v, want 10.9.0.2 then 172.17.0.1 flagged virtual (the managed address is not repeated)", addrs)
+	}
+	in, _ := identity.NewIntake(memory.New())
+	res, err := in.Assess(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range res.Observation.Identifiers {
+		if id.Kind == identity.KindIPAddress && id.Value == "172.17.0.1" {
+			t.Error("a virtual interface's address became an identifier; every Docker host carries it")
+		}
+	}
+	if got := res.AttributeEvidence["virtual_interface_addresses"]; len(got) != 1 || got[0] != "172.17.0.1" {
+		t.Errorf("attribute evidence %v, want the bridge address kept", res.AttributeEvidence)
 	}
 }

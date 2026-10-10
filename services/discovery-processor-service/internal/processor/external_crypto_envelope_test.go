@@ -53,9 +53,9 @@ func TestExtractCryptoDetails_EmptyEnvelopeVersionDoesNotEraseEnrichedVersion(t 
 	}
 	metadata, _ := json.Marshal(raw)
 
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
-		t.Fatal("expected non-nil ExternalCryptoDetails")
+		t.Fatal("expected a writer view")
 	}
 	if d.ProtocolVersion == nil {
 		t.Fatal("protocol version is nil — the empty envelope value erased the enriched one")
@@ -83,9 +83,9 @@ func TestExtractCryptoDetails_PopulatedEnvelopeStillWins(t *testing.T) {
 	}
 	metadata, _ := json.Marshal(raw)
 
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
-		t.Fatal("expected non-nil ExternalCryptoDetails")
+		t.Fatal("expected a writer view")
 	}
 	assertStrPtr(t, "protocol version", d.ProtocolVersion, "TLS 1.2")
 	assertStrPtr(t, "cipher suite", d.CipherSuite, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256")
@@ -106,9 +106,9 @@ func TestExtractCryptoDetails_EmptyEnvelopeCipherAndKeySize(t *testing.T) {
 	}
 	metadata, _ := json.Marshal(raw)
 
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
-		t.Fatal("expected non-nil ExternalCryptoDetails")
+		t.Fatal("expected a writer view")
 	}
 	assertStrPtr(t, "cipher suite", d.CipherSuite, "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384")
 	assertIntPtr(t, "key size", d.KeySize, 256)
@@ -128,7 +128,7 @@ func TestExtractCryptoDetails_WeakTLSVersionSurvivesTheEnvelope(t *testing.T) {
 	}
 	metadata, _ := json.Marshal(raw)
 
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil || d.ProtocolVersion == nil {
 		t.Fatal("TLS 1.0 was dropped — it cannot be scored as a weak protocol")
 	}

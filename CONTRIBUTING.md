@@ -58,7 +58,7 @@ exists to stop that recurring.
 - **Go 1.26 only.** Not 1.27+. `go.mod`, `go.work`, and Dockerfiles all pin it.
   The `Makefile` pins `GOTOOLCHAIN` to the **exact** version `go.work` declares,
   so `make` targets are already correct. Running `go` directly outside `make`,
-  pin it yourself: `GOTOOLCHAIN=go1.26.8 go work sync` (match `go.work`). Not
+  pin it yourself: `GOTOOLCHAIN=go1.26.9 go work sync` (match `go.work`). Not
   `GOTOOLCHAIN=local`, which cannot fetch the pinned patch release, and never
   `auto`, which will silently download 1.27+.
 - **`standards/service-registry.yaml` is the source of truth** for services,

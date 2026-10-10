@@ -419,35 +419,26 @@ func (h *DiscoveryHandler) GetJobResults(c *gin.Context) {
 // "ip_address", crypto fields nested in "data"); the adapter normalises it in one
 // tested place (see services/discovery_ingest_adapter.go).
 //
-// There is deliberately NO auto_approve field. It used to exist and be honoured,
-// which is how a tenant-facing caller could promote its own assets.
+// There is deliberately NO auto_approve field and NO asset_status field. Both
+// used to exist: auto_approve was honoured for tenant callers, which is how a
+// tenant could promote its own assets, and asset_status carried the status
+// discovery-processor had decided from its own classification. This service
+// now classifies each finding and evaluates the tenant's auto-approval rules
+// itself ( WP3), so nothing a caller sends can choose a status — a body
+// that still carries either field binds cleanly and changes nothing.
 type ingestFindingsBody struct {
 	Findings []json.RawMessage `json:"findings"`
-	// AssetStatus carries discovery-processor's already-evaluated decision.
-	AssetStatus *string `json:"asset_status,omitempty"`
-}
-
-// resolveIngestedAssetStatus turns the transported status into the one this
-// service acts on.
-//
-// Default deny. Only "monitoring" — the outcome of an auto-approval rule
-// discovery-processor matched before this call — moves off pending_approval;
-// anything else falls back rather than being trusted verbatim, so the transport
-// cannot introduce a status of its own.
-func resolveIngestedAssetStatus(supplied *string) string {
-	if supplied != nil && *supplied == "monitoring" {
-		return "monitoring"
-	}
-	return "pending_approval"
 }
 
 // IngestPipelineFindings handles POST /api/v1/inventory-service/discovery/jobs/:id/import.
 //
 // INTERNAL ONLY. This is the transport discovery-processor-service uses to hand
-// inventory-service a batch of findings it has ALREADY classified and run the
-// tenant's segment auto-approval rules over (see batch_processor.go) — the
-// asset_status in the body is that server-side decision in flight between two
-// services, not a caller's request.
+// inventory-service every finding of a batch — third-party ones included. This
+// service classifies each finding once (cloud segment, then address over the
+// tenant's segments), evaluates the tenant's auto-approval rules against that
+// classification, and either resolves it to an asset or writes it to
+// external_connections ( WP3). The per-finding results say which, and
+// name the rule that auto-approved a finding when one did.
 //
 // It used to double as a tenant-facing endpoint: the Discover wizard fetched a
 // job's results into the browser and POSTed them back, and the body's
@@ -510,9 +501,7 @@ func (h *DiscoveryHandler) IngestPipelineFindings(c *gin.Context) {
 			findings[0].Protocol, findings[0].CipherSuite)
 	}
 
-	assetStatus := resolveIngestedAssetStatus(rawBody.AssetStatus)
-
-	report, err := h.assets.IngestFindingsReport(tenantUUID, findings, assetStatus)
+	report, err := h.assets.IngestPipelineFindingsReport(tenantUUID, findings)
 	if err != nil {
 		log.Printf("[DiscoveryHandler] IngestPipelineFindings failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ingest_failed"})
@@ -520,7 +509,7 @@ func (h *DiscoveryHandler) IngestPipelineFindings(c *gin.Context) {
 	}
 	imported := report.Imported
 
-	log.Printf("[DiscoveryHandler] IngestPipelineFindings: ingested %d findings (status=%s)", imported, assetStatus)
+	log.Printf("[DiscoveryHandler] IngestPipelineFindings: ingested %d findings", imported)
 
 	// Log audit event
 	jobIDStr := c.Param("id")

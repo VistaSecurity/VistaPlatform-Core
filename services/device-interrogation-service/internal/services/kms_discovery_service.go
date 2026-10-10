@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,21 +13,19 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/google/uuid"
 	awsclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/aws"
-	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
 // KMSDiscoveryService discovers encryption keys from cloud KMS providers
 type KMSDiscoveryService struct {
 	db *sql.DB
 	// bypassDB is the BYPASSRLS (crypto_bypass) connection used for the AWS
-	// integration lookup (by id, may be a shared platform integration). The
-	// kms_keys write runs under the known tenantID via WithTenantTx.
+	// integration lookup (by id, may be a shared platform integration).
 	bypassDB  *sql.DB
 	masterKey string
-	// keyPublisher lands discovered keys in the first-class key inventory
-	// (Inventory → Keys). nil disables that hop — `kms_keys` is still written,
-	// which is what happens when the mTLS client cannot be built. Tests
-	// substitute a recorder via SetCloudKeyPublisher.
+	// keyPublisher lands discovered keys in the key inventory (Inventory →
+	// Keys), their only destination. nil when the mTLS client cannot be built,
+	// which PublishKMSKeyFindings reports as an error. Tests substitute a
+	// recorder via SetCloudKeyPublisher.
 	keyPublisher CloudKeyPublisher
 }
 
@@ -324,110 +321,45 @@ func MapKeySpecToAlgorithm(keySpec string) string {
 	}
 }
 
-// StoreKMSKeyFindings stores discovered KMS keys into the database for the given
-// provider ("aws", "gcp", "azure"). The kms_keys table is keyed by
-// (tenant_id, provider, key_id), so providers coexist in one table.
-func (s *KMSDiscoveryService) StoreKMSKeyFindings(
+// PublishKMSKeyFindings lands discovered keys for the given provider ("aws",
+// "gcp", "azure") in the key inventory, through inventory-service's internal
+// cloud-key intake (POST /api/v1/inventory-service/keys/cloud). That `keys` row
+// — what Inventory → Keys shows — is the key's ONE home ( decision D3).
+//
+// It used to be one of three. The same keys were also written to the
+// `kms_keys` table, whose only readers are the /experimental/kms-keys and
+// /experimental/stats endpoints that no UI calls, and emitted into
+// sensor_discoveries as at-rest devices (see keyInventoryDeviceTypes). Neither
+// is written any more; `kms_keys` is left in place for a later drop.
+//
+// Because nothing else holds the keys now, a publish that does not land is an
+// ERROR, returned to the collector so the job's per-type outcome says so. It
+// used to be a log line, which was tolerable only while `kms_keys` kept a copy.
+// The next run re-publishes: the intake upserts on the provider's key identity.
+//
+// METADATA ONLY: cloudKeyRecordsFrom carries the provider's description of
+// each key, never key material, which a KMS key does not release anyway.
+func (s *KMSDiscoveryService) PublishKMSKeyFindings(
 	ctx context.Context,
 	tenantID uuid.UUID,
 	integrationID uuid.UUID,
 	provider string,
 	findings []KMSKeyFinding,
 ) error {
-	query := `
-		INSERT INTO kms_keys (
-			tenant_id, integration_id, provider, key_id, key_arn, key_name,
-			description, key_spec, key_usage, key_size, key_state,
-			creation_date, rotation_enabled, rotation_period_days,
-			origin, key_manager, multi_region,
-			region, account_id, metadata, discovery_method,
-			first_discovered_at, last_verified_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6,
-			$7, $8, $9, $10, $11,
-			$12, $13, $14,
-			$15, $16, $17,
-			$18, $19, $20, 'cloud_api',
-			NOW(), NOW()
-		)
-		ON CONFLICT (tenant_id, provider, key_id) WHERE deleted_at IS NULL
-		DO UPDATE SET
-			key_state = EXCLUDED.key_state,
-			rotation_enabled = EXCLUDED.rotation_enabled,
-			rotation_period_days = EXCLUDED.rotation_period_days,
-			metadata = EXCLUDED.metadata,
-			last_verified_at = NOW(),
-			updated_at = NOW()
-	`
-
-	for _, f := range findings {
-		keyName := f.KeyID
-		if len(f.AliasNames) > 0 {
-			keyName = f.AliasNames[0]
-		}
-
-		keySize := keySpecToSize(f.KeySpec)
-
-		meta := map[string]interface{}{
-			"signing_algorithms":    f.SigningAlgorithms,
-			"encryption_algorithms": f.EncryptionAlgorithms,
-			"aliases":               f.AliasNames,
-		}
-		metadataBytes, err := json.Marshal(meta)
-		if err != nil {
-			log.Printf("Warning: failed to marshal KMS metadata for key %s: %v", f.KeyID, err)
-			continue
-		}
-		metadata := string(metadataBytes)
-
-		// RLS-scoped write on `kms_keys` under the known tenantID.
-		err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-			_, e := tx.ExecContext(ctx, query,
-				tenantID, integrationID, provider, f.KeyID, f.KeyARN, keyName,
-				f.Description, f.KeySpec, f.KeyUsage, keySize, f.KeyState,
-				f.CreationDate, f.RotationEnabled, f.RotationPeriodDays,
-				f.Origin, f.KeyManager, f.MultiRegion,
-				f.Region, f.AccountID, metadata,
-			)
-			return e
-		})
-		if err != nil {
-			log.Printf("Warning: failed to store KMS key %s: %v", f.KeyID, err)
-		}
+	if len(findings) == 0 {
+		return nil
 	}
-
-	// Then land the same keys in the FIRST-CLASS key inventory, which is the
-	// only one a person can see. `kms_keys` above is a parallel table whose one
-	// reader is an experimental endpoint no UI calls; without this hop a
-	// discovered key is invisible no matter how well it was discovered.
-	//
-	// Deliberately after the kms_keys write and non-fatal: publishing is how
-	// the key becomes VISIBLE, not how it is stored, so an inventory-service
-	// that is down must not lose the discovery.
-	s.publishToKeyInventory(ctx, tenantID, integrationID, provider, findings)
-
-	return nil
-}
-
-// publishToKeyInventory hands the findings to inventory-service's internal
-// cloud-key intake. Failures are logged, never returned: see StoreKMSKeyFindings.
-func (s *KMSDiscoveryService) publishToKeyInventory(
-	ctx context.Context,
-	tenantID uuid.UUID,
-	integrationID uuid.UUID,
-	provider string,
-	findings []KMSKeyFinding,
-) {
-	if s.keyPublisher == nil || len(findings) == 0 {
-		return
+	if s.keyPublisher == nil {
+		// NewInventoryCloudKeyPublisherFromEnv logged why at construction.
+		return fmt.Errorf("%d %s KMS keys found but not recorded: the key inventory client is not configured", len(findings), provider)
 	}
 	records := cloudKeyRecordsFrom(provider, integrationID, findings)
 	written, err := s.keyPublisher.PublishCloudKeys(ctx, tenantID, records)
 	if err != nil {
-		log.Printf("Warning: %s KMS keys stored but not published to key inventory: %v", provider, err)
-		return
+		return fmt.Errorf("%d %s KMS keys found but not recorded in the key inventory: %w", len(records), provider, err)
 	}
 	log.Printf("Published %d/%d %s KMS keys to the key inventory", written, len(records), provider)
+	return nil
 }
 
 // keySpecToSize maps AWS KMS key spec to key size in bits

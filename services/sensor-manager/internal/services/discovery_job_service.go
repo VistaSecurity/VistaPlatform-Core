@@ -13,6 +13,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
+	"github.com/vistasecurity/vistaplatform/shared/events"
 	"github.com/vistasecurity/vistaplatform/shared/jobunits"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
@@ -20,6 +21,17 @@ import (
 // DiscoveryJobService handles discovery job operations
 type DiscoveryJobService struct {
 	db *sql.DB
+	// queuePublisher wakes discovery-processor once a tenant sensor's unit
+	// report has committed — jobunits.Commit mirrors each unit's findings into
+	// sensor_discoveries under the job's id ( WP1). See SetQueuePublisher.
+	queuePublisher events.MessagePublisher
+}
+
+// SetQueuePublisher wires the NATS client RecordSensorUnits publishes
+// discovery.queue.ready on. Pass the service's client even when it is nil
+// (see SensorService.SetQueuePublisher).
+func (s *DiscoveryJobService) SetQueuePublisher(p events.MessagePublisher) {
+	s.queuePublisher = p
 }
 
 // NewDiscoveryJobService creates a new discovery job service
@@ -211,6 +223,14 @@ const unreportedHostMessage = "not scanned: the sensor finished the job without 
 // shared/jobunits.RecordSensorBatch.
 func (s *DiscoveryJobService) RecordSensorUnits(ctx context.Context, tenantID, sensorID, jobID uuid.UUID, batch sensordispatch.UnitBatch) (sensordispatch.UnitBatchResponse, error) {
 	resp, err := jobunits.RecordSensorBatch(ctx, s.db, tenantID, sensorID, jobID, batch)
+	// RecordSensorBatch commits one transaction per host, so every accepted
+	// unit is durable by now — including when a later host failed and err is
+	// set. Its findings were mirrored into sensor_discoveries under the job's
+	// id (jobunits.InsertMirror). A unit whose findings mirrored nothing makes
+	// this a wake with nothing to claim, which costs one query.
+	if resp.Accepted > 0 {
+		_ = events.PublishDiscoveryQueueReady(ctx, s.queuePublisher, tenantID, jobID.String(), "sensor-manager.record_sensor_units")
+	}
 	if errors.Is(err, jobunits.ErrJobNotAssignedToSensor) {
 		return resp, ErrJobNotAssignedToSensor
 	}

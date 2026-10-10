@@ -76,7 +76,9 @@ var metadataProvenanceKeys = []string{
 // the row as stored, not against the input: a sensor re-stating the ownership,
 // tags and discovery source an asset already has, every coalescing window,
 // changes nothing, and a timeline row per window buried the few that said
-// something. A `created` row records everything the asset was created with.
+// something. On creation, everything the asset was created with is folded into
+// the identification engine's own `created` row (foldIntoCreatedHistory), so a
+// new asset has one `created` row, not two.
 //
 // Listing is not this function's to record. The first time an import or a
 // declaration lists an asset is written by the identification engine
@@ -237,8 +239,82 @@ func (s *AssetService) applyAssetContext(tx *sqlx.Tx, tenantID, assetID uuid.UUI
 	if len(changes) == 0 {
 		return nil
 	}
+	if action == identity.ActionCreated && s.foldIntoCreatedHistory(tx, tenantID, assetID, source, changes) {
+		return nil
+	}
 	s.recordAssetHistory(tx, tenantID, assetID, action, source, changes)
 	return nil
+}
+
+// foldIntoCreatedHistory adds the context an asset was created with to the
+// `created` row the identification engine wrote for it moments earlier on
+// the same transaction, and reports whether it did ( F6).
+//
+// A new asset used to get TWO `created` rows: the engine's (class,
+// identifiers, endpoints) and this file's (tags, attributes, metadata,
+// ownership). The timeline showed the asset being created twice, and anything
+// counting creations counted it twice. One creation is one row, carrying
+// everything the asset was born with.
+//
+// It folds only into a row with the SAME producer (asset_history.source) this
+// write would have recorded, so a context write from some other source is
+// never misattributed to the engine's; the engine's own keys win a collision
+// (its `source_kind` is the same value). It folds only into a row THIS
+// transaction wrote (xmin = the current transaction id), so a caller that
+// passes ActionCreated for an asset that already existed can never rewrite an
+// older audit row. False — nothing folded — when there is no such row (a
+// caller that created the asset some other way) or the
+// UPDATE failed; the caller then writes its own row, which is the old
+// behaviour.
+func (s *AssetService) foldIntoCreatedHistory(tx *sqlx.Tx, tenantID, assetID uuid.UUID, source identity.Source, changes map[string]any) bool {
+	payload, err := json.Marshal(changes)
+	if err != nil {
+		log.Printf("[AssetService] history: marshalling created context for asset %s failed: %v", assetID, err)
+		return false
+	}
+	folded := false
+	err = s.exec(tx, tenantID, func(tx *sqlx.Tx) error {
+		return withSavepoint(tx, "asset_history_created_fold", func() error {
+			res, e := tx.Exec(`
+				UPDATE asset_history
+				   SET changes_json = $4::jsonb || changes_json
+				 WHERE id = (
+					SELECT id FROM asset_history
+					 WHERE tenant_id = $1 AND asset_id = $2 AND action = 'created' AND source = $3
+					   AND xmin::text = pg_current_xact_id()::xid::text
+					 ORDER BY seq DESC
+					 LIMIT 1)`,
+				tenantID, assetID, historySourceRef(source), string(payload))
+			if e != nil {
+				return e
+			}
+			n, e := res.RowsAffected()
+			folded = e == nil && n == 1
+			return e
+		})
+	})
+	if err != nil {
+		log.Printf("[AssetService] history: folding created context into asset %s's created row failed; recording it separately: %v", assetID, err)
+		return false
+	}
+	return folded
+}
+
+// historySourceRef is the asset_history.source value for source — the same
+// spelling the identification engine's history writer uses, so the two can be
+// matched.
+func historySourceRef(source identity.Source) string {
+	ref := strings.TrimSpace(source.Ref)
+	if ref == "" {
+		ref = string(source.Kind)
+	}
+	if ref == "" {
+		// asset_history.source is NOT NULL and a change with no producer cannot
+		// be audited. Recording "unknown" says that out loud instead of
+		// pretending the row has provenance.
+		ref = "unknown"
+	}
+	return ref
 }
 
 // exec runs fn on the caller's transaction when there is one, and on a fresh
@@ -360,16 +436,7 @@ func (s *AssetService) recordAssetHistoryBy(tx *sqlx.Tx, tenantID, assetID, acto
 		log.Printf("[AssetService] history: marshalling %s for asset %s failed: %v", action, assetID, err)
 		return
 	}
-	ref := strings.TrimSpace(source.Ref)
-	if ref == "" {
-		ref = string(source.Kind)
-	}
-	if ref == "" {
-		// asset_history.source is NOT NULL and a change with no producer cannot
-		// be audited. Recording "unknown" says that out loud instead of
-		// pretending the row has provenance.
-		ref = "unknown"
-	}
+	ref := historySourceRef(source)
 	var actorArg any
 	if actor != uuid.Nil {
 		actorArg = actor

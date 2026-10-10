@@ -21,7 +21,9 @@ package services
 //
 //	identity    → a sighting to inventory-service's identification engine
 //	facts       → asset_facts, under the `device-agent` producer
-//	sockets     → asset_endpoints, one per listening socket
+//	sockets     → asset_endpoints, one per listening socket — carried ON the
+//	              sighting as its complete endpoint set, written and
+//	              reconciled by that engine ( WP7); never by this file
 //	packages    → software_products + software_installs, source_kind `measured`
 //
 // Each of those already has a writer. This file is the mapping, and almost all
@@ -128,6 +130,9 @@ type HostInventoryCounts struct {
 	Endpoints   int `json:"endpoints"`
 	// EndpointsClosed is how many of this agent's previously-recorded sockets
 	// were absent from this collection and are therefore no longer listening.
+	// inventory-service's engine closes them, inside the transaction that
+	// resolved the host, from the sighting's complete endpoint set ( WP7);
+	// this is its count.
 	// `closed`, never deleted — the row keeps its first_seen_at and last_seen_at
 	// so "this host was serving 8080 in March and stopped" stays answerable, and
 	// crypto configurations, external connections and ssh keys all point at
@@ -413,6 +418,47 @@ func hostInventorySource(agentID, jobID uuid.UUID) identity.Source {
 	}
 }
 
+// managedAddress is the address the platform itself knows this host by,
+// beside whatever the report says about its interfaces ( WP7):
+//
+//   - a REMOTE collection: the address the job dialled (`parameters.ip_address`
+//     on its device_jobs row). An authenticated session answered there, so it
+//     is the host's;
+//   - a LOCAL report: the primary address its agent reported for itself
+//     (`device_agents.ip_address`). The platform cannot observe it through
+//     NAT, which is why the agent's word and not the request's source is used.
+//
+// It is what keeps a report with no usable `net.interfaces` section — a
+// failed or opted-out step, an older collector — from reaching the engine
+// with no address at all. Empty when neither is known; a lookup failure is
+// logged and treated as unknown, because the report itself still lands.
+func (h *HostInventoryIngest) managedAddress(ctx context.Context, tenantID, agentID, jobID uuid.UUID, meta hostInventoryMetadata) string {
+	if h.db == nil {
+		return ""
+	}
+	var addr sql.NullString
+	err := shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
+		if meta.Mode == string(hostinventory.ModeLocal) {
+			if agentID == uuid.Nil {
+				return nil
+			}
+			return tx.QueryRowContext(ctx, `SELECT ip_address FROM device_agents WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`,
+				tenantID, agentID).Scan(&addr)
+		}
+		return tx.QueryRowContext(ctx, `SELECT parameters->>'ip_address' FROM device_jobs WHERE tenant_id = $1 AND id = $2`,
+			tenantID, jobID).Scan(&addr)
+	})
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("[HostInventory] job %s: reading the managed address failed (continuing without it): %v", jobID, err)
+		return ""
+	}
+	a, ok := parseHostAddress(addr.String)
+	if !ok {
+		return ""
+	}
+	return a
+}
+
 // Materialise turns one host-inventory collection into inventory.
 //
 // `obs` is the SANITISED observations half of the submission — the half that
@@ -463,12 +509,31 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 		return counts, fmt.Errorf("host inventory: the observations carry no subject, so there is nothing to bind them to")
 	}
 
-	sighting, err := hostSighting(tenantID, subject, meta, obs, source, hostInventoryRunRef(agentID, jobID))
+	sighting, err := hostSighting(tenantID, subject, meta, obs, source, hostInventoryRunRef(agentID, jobID),
+		h.managedAddress(ctx, tenantID, agentID, jobID, meta))
 	if err != nil {
 		return counts, err
 	}
 	if original != nil {
 		sighting = *original
+	}
+	// The endpoint licence, BEFORE the engine runs: a report is a complete
+	// statement about this host's sockets only when the listeners step
+	// SUCCEEDED and its list actually ARRIVED (listenerListArrived). Then the
+	// sighting says so (EndpointsComplete), and inventory-service's engine
+	// closes this agent's sockets the report no longer lists, inside the
+	// transaction that resolved the host — on a match only, never for held or
+	// supporting evidence ( WP7 F12). This service writes no endpoint.
+	if reason, ok := listenerListArrived(
+		meta.Sections[hostinventory.SectionListeners],
+		hasFact(obs, facts.KeySvcListeningSockets),
+		len(sighting.Endpoints),
+	); !ok {
+		if reason != "" {
+			counts.Errors = append(counts.Errors, reason)
+		}
+	} else if original == nil {
+		sighting.EndpointsComplete = &identity.CompleteEndpointSet{SourcePrefix: hostInventorySourceRef(agentID, jobID) + ":"}
 	}
 	if receipt == "" {
 		receipt = sightingReceiptKey(sighting)
@@ -537,6 +602,14 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 
 	counts.AssetID = res.Asset.ID
 	counts.AssetCreated = res.Outcome == identity.OutcomeCreated
+	if res.EvidenceHeld {
+		// Supporting evidence the engine linked to the asset but wrote nothing
+		// from (platform ADR-0003 D2): its identifiers and sockets stay on the
+		// observation until an operator links it. As at the floor, the counts
+		// are what this run wrote.
+		counts.Identifiers = 0
+		counts.Endpoints = 0
+	}
 	// Two ways the class can have reached the asset, and they are mutually
 	// exclusive: applied at CREATION from the observation, or promoted onto an
 	// existing asset that was still on the floor. `applied` alone would claim a
@@ -605,23 +678,9 @@ func (h *HostInventoryIngest) materialise(ctx context.Context, tenantID, agentID
 
 	// --- endpoint retirement ------------------------------------------------
 	//
-	// Same two-gate discipline as the software sweep, for the same reason: a
-	// report is a complete statement about this host's sockets only when the
-	// listeners step SUCCEEDED and its list actually arrived.
-	if reason, ok := listenerListArrived(
-		meta.Sections[hostinventory.SectionListeners],
-		hasFact(obs, facts.KeySvcListeningSockets),
-		len(sighting.Endpoints),
-	); !ok {
-		if reason != "" {
-			counts.Errors = append(counts.Errors, reason)
-		}
-	} else if closed, err := h.closeAbsentEndpoints(ctx, tenantID, assetID,
-		hostInventorySourceRef(agentID, jobID)+":", hostInventoryRunRef(agentID, jobID), sighting.ObservedAt); err != nil {
-		counts.Errors = append(counts.Errors, fmt.Sprintf("closing absent endpoints: %v", err))
-	} else {
-		counts.EndpointsClosed = closed
-	}
+	// Done by the engine, on its transaction, from the sighting's complete
+	// endpoint set (see EndpointsComplete above); this is its count.
+	counts.EndpointsClosed = res.EndpointsClosed
 
 	log.Printf("[HostInventory] %s → asset %s (created=%t): %d identifiers, %d facts, %d endpoints (-%d closed), installs +%d ~%d -%d",
 		meta.label(), counts.AssetID, counts.AssetCreated,
@@ -794,6 +853,10 @@ func (h *HostInventoryIngest) writeConnections(ctx context.Context, tenantID, ag
 		}
 		return nil
 	})
+	if err == nil && queued > 0 {
+		// Committed: wake discovery-processor (discovery.queue.ready).
+		notifyDiscoveryQueue(ctx, tenantID, batchID, "device-interrogation.host_inventory_connections")
+	}
 	return queued, err
 }
 
@@ -854,65 +917,6 @@ func hasFact(obs *di.InterrogateResult, key string) bool {
 		}
 	}
 	return false
-}
-
-// closeAbsentEndpoints marks this agent's previously-recorded sockets that the
-// current collection did not report as `closed`, and returns how many.
-//
-// Three things it is careful about:
-//
-//   - **Only THIS agent's rows.** The scope is `source_ref` starting with
-//     `agent:<agent id>:`, so an endpoint a network scan or a cloud connector
-//     recorded is untouched. A host inventory is authoritative about the
-//     sockets the host is listening on; it is not authoritative about an
-//     endpoint some other source observed, and closing those would let one
-//     source silently overrule every other. `starts_with` rather than LIKE so
-//     no value can be read as a pattern.
-//   - **`closed`, never DELETE.** `crypto_implementations.endpoint_id`,
-//     `external_connections.source_endpoint_id` and `ssh_keys.endpoint_id` all
-//     point at these rows, and the history is the point besides: the row keeps
-//     its first_seen_at and its last_seen_at, so "this host was serving 8080 in
-//     March and stopped" stays answerable. A socket that comes back is upserted
-//     straight back to `active`.
-//   - **last_seen_at is left alone.** It records when the endpoint was last
-//     SEEN, and this run did not see it. Bumping it would say the opposite of
-//     what just happened.
-//
-// Its own transaction rather than the engine's: the engine's has already
-// committed the endpoints this run observed by the time we know which rows are
-// absent. The window between them can only show an old socket still `active`,
-// which is the state it was in a moment earlier anyway.
-func (h *HostInventoryIngest) closeAbsentEndpoints(
-	ctx context.Context, tenantID, assetID uuid.UUID, agentPrefix, runRef string,
-	observedAt ...time.Time,
-) (int, error) {
-	var closed int
-	at := time.Now().UTC()
-	if len(observedAt) > 0 && !observedAt[0].IsZero() {
-		at = observedAt[0]
-	}
-	err := shareddatabase.WithTenantTx(ctx, h.db, tenantID, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `
-			UPDATE asset_endpoints
-			   SET status = 'closed', updated_at = now()
-			 WHERE tenant_id = $1
-			   AND asset_id = $2
-			   AND status <> 'closed'
-			   AND source_ref IS NOT NULL
-			   AND starts_with(source_ref, $3)
-			   AND source_ref <> $4 AND last_seen_at <= $5`,
-			tenantID, assetID, agentPrefix, runRef, at)
-		if err != nil {
-			return err
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		closed = int(n)
-		return nil
-	})
-	return closed, err
 }
 
 // ---------------------------------------------------------------------------
@@ -1516,10 +1520,16 @@ func (m hostInventoryMetadata) primaryAddress(obs *di.InterrogateResult) string 
 type hostAddress struct {
 	addr       string
 	assignment identity.AddressAssignment
+	// virtual says the address is on one of the host's virtual interfaces
+	// (a bridge, a veth, a tunnel). It is still sent — as provenance, which
+	// Intake keeps as attribute evidence and never as an identifier — rather
+	// than dropped here ( WP7).
+	virtual bool
 }
 
-// hostAddresses are the host's own addresses from net.interfaces: non-virtual
-// interfaces only, without prefix lengths, deduplicated, in report order, each
+// hostAddresses are the host's own addresses from net.interfaces: every
+// interface, a virtual one's addresses flagged (hostAddress.virtual) rather
+// than omitted, without prefix lengths, deduplicated, in report order, each
 // with the assignment the collector read (`static_addresses` /
 // `dynamic_addresses`,; neither is unknown). The filter is primaryAddress's —
 // loopback, link-local and unspecified addresses are not where a host lives —
@@ -1527,7 +1537,7 @@ type hostAddress struct {
 // IPv6 privacy address rotates daily and is never an identifier.
 func (m hostInventoryMetadata) hostAddresses(obs *di.InterrogateResult) []hostAddress {
 	var out []hostAddress
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	for _, f := range obs.Facts {
 		if f.Key != facts.KeyNetInterfaces {
 			continue
@@ -1546,9 +1556,6 @@ func (m hostInventoryMetadata) hostAddresses(obs *di.InterrogateResult) []hostAd
 			return nil
 		}
 		for _, ifc := range ifaces {
-			if ifc.Virtual {
-				continue
-			}
 			assigned := map[string]identity.AddressAssignment{}
 			for _, raw := range ifc.StaticAddresses {
 				assigned[strings.TrimSpace(raw)] = identity.AssignmentStatic
@@ -1558,17 +1565,29 @@ func (m hostInventoryMetadata) hostAddresses(obs *di.InterrogateResult) []hostAd
 			}
 			for _, raw := range ifc.Addresses {
 				a, ok := parseHostAddress(raw)
-				if !ok || seen[a] {
+				if !ok {
 					continue
 				}
 				if attrlist.AddressAttribute(netip.MustParseAddr(a), false) != "" {
 					continue
 				}
-				seen[a] = true
-				out = append(out, hostAddress{addr: a, assignment: assigned[strings.TrimSpace(raw)]})
+				ha := hostAddress{addr: a, assignment: assigned[strings.TrimSpace(raw)], virtual: ifc.Virtual}
+				if i, dup := seen[a]; dup {
+					// The same address on a real interface is where the host
+					// lives, whichever interface listed it first.
+					if out[i].virtual && !ha.virtual {
+						out[i] = ha
+					}
+					continue
+				}
+				seen[a] = len(out)
+				out = append(out, ha)
 			}
 		}
 	}
+	// Real interfaces first, so the sighting's own segment is never a
+	// bridge's, and report order within each.
+	sort.SliceStable(out, func(i, j int) bool { return !out[i].virtual && out[j].virtual })
 	return out
 }
 

@@ -39,9 +39,9 @@ func TestExtractCryptoDetails_PassiveCapture(t *testing.T) {
 	}
 	metadata, _ := json.Marshal(raw)
 
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
-		t.Fatal("expected non-nil ExternalCryptoDetails")
+		t.Fatal("expected a writer view")
 	}
 
 	assertStrPtr(t, "protocol version", d.ProtocolVersion, "1.3")
@@ -99,9 +99,9 @@ func TestExtractCryptoDetails_ActiveProbe(t *testing.T) {
 	}
 	metadata, _ := json.Marshal(raw)
 
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
-		t.Fatal("expected non-nil ExternalCryptoDetails")
+		t.Fatal("expected a writer view")
 	}
 
 	// Should use the leaf cert (chain_order 0)
@@ -146,9 +146,9 @@ func TestExtractCryptoDetails_CertValidationOnEnvelopeOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
-		t.Fatal("expected non-nil ExternalCryptoDetails")
+		t.Fatal("expected a writer view")
 	}
 	assertStrPtr(t, "envelope cert_validation_status", d.CertValidationStatus, "expired")
 }
@@ -193,9 +193,9 @@ func TestExtractCryptoDetails_SensorManagerEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
-		t.Fatal("expected non-nil ExternalCryptoDetails")
+		t.Fatal("expected a writer view")
 	}
 	assertStrPtr(t, "protocol version", d.ProtocolVersion, "TLS 1.3")
 	assertStrPtr(t, "cipher suite", d.CipherSuite, "TLS_AES_128_GCM_SHA256")
@@ -212,9 +212,9 @@ func TestExtractCryptoDetails_TLSVersions(t *testing.T) {
 	}
 	metadata, _ := json.Marshal(raw)
 
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
-		t.Fatal("expected non-nil ExternalCryptoDetails")
+		t.Fatal("expected a writer view")
 	}
 
 	assertStrPtr(t, "protocol version", d.ProtocolVersion, "1.2")
@@ -240,28 +240,13 @@ func TestExtractCryptoDetails_TLSVersionsFromEnvelope(t *testing.T) {
 	}
 	metadata, _ := json.Marshal(envelope)
 
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
-		t.Fatal("expected non-nil ExternalCryptoDetails")
+		t.Fatal("expected a writer view")
 	}
 
 	if len(d.SupportedTLSVersions) != 2 {
 		t.Fatalf("expected 2 supported TLS versions from envelope, got %d: %v", len(d.SupportedTLSVersions), d.SupportedTLSVersions)
-	}
-}
-
-func TestExtractCryptoDetails_Empty(t *testing.T) {
-	if got := extractCryptoDetails(nil); got != nil {
-		t.Errorf("expected nil for empty metadata, got %+v", got)
-	}
-	if got := extractCryptoDetails([]byte{}); got != nil {
-		t.Errorf("expected nil for empty slice, got %+v", got)
-	}
-}
-
-func TestExtractCryptoDetails_InvalidJSON(t *testing.T) {
-	if got := extractCryptoDetails([]byte("not-json")); got != nil {
-		t.Errorf("expected nil for invalid JSON, got %+v", got)
 	}
 }
 
@@ -272,37 +257,11 @@ func TestIsWeakProtocol_ViaExtract(t *testing.T) {
 		"cipher_suite": "TLS_AES_256_GCM_SHA384",
 	}
 	metadata, _ := json.Marshal(raw)
-	d := extractCryptoDetails(metadata)
+	d := routeWriterViewOf(t, metadata)
 	if d == nil {
 		t.Fatal("expected non-nil result")
 	}
 	assertStrPtr(t, "version", d.ProtocolVersion, "1.3")
-}
-
-func TestTimeField_MultipleLayouts(t *testing.T) {
-	want := time.Date(2026, 4, 20, 12, 30, 0, 0, time.UTC)
-
-	tests := []struct {
-		name  string
-		value string
-	}{
-		{"RFC3339", "2026-04-20T12:30:00Z"},
-		{"Go String() UTC", "2026-04-20 12:30:00 +0000 UTC"},
-		{"Go String() with offset", "2026-04-20 14:30:00 +0200 CEST"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			m := map[string]interface{}{"ts": tc.value}
-			got := timeField(m, "ts")
-			if got == nil {
-				t.Fatalf("timeField returned nil for %q", tc.value)
-			}
-			if !got.UTC().Equal(want) {
-				t.Errorf("expected %v, got %v", want, got.UTC())
-			}
-		})
-	}
 }
 
 // --- helpers ---
@@ -331,11 +290,11 @@ func assertIntPtr(t *testing.T, label string, got *int, want int) {
 
 func TestExtractCryptoDetails_DoesNotInventExchangeSize(t *testing.T) {
 	for _, raw := range []string{`{"cipher_suite":"TLS_AES_128_GCM_SHA256"}`, `{"cipher_suite":"TLS_AES_128_GCM_SHA256","key_size":128}`, `{"cipher_suite":"TLS_AES_256_GCM_SHA384","key_size":2048}`} {
-		got := extractCryptoDetails([]byte(raw))
+		got := routeWriterViewOf(t, []byte(raw))
 		if got.KeySize != nil {
 			t.Fatalf("ambiguous cipher/cert bits became exchange bits: %s => %d", raw, *got.KeySize)
 		}
 	}
-	got := extractCryptoDetails([]byte(`{"key_exchange_algorithm":"ECDHE","key_exchange_key_size":224}`))
+	got := routeWriterViewOf(t, []byte(`{"key_exchange_algorithm":"ECDHE","key_exchange_key_size":224}`))
 	assertIntPtr(t, "measured exchange size", got.KeySize, 224)
 }

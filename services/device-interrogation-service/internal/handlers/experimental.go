@@ -130,7 +130,12 @@ func parsePagination(c *gin.Context) (page, pageSize, offset int) {
 	return
 }
 
-// ListKMSKeys handles GET - returns KMS keys for the tenant
+// ListKMSKeys handles GET - returns KMS keys for the tenant.
+//
+// It reads `kms_keys`, which nothing writes any more ( WP6 F13): a
+// discovered cloud key lives in inventory-service's `keys` table, shown in
+// Inventory → Keys. No UI calls this endpoint; it goes when the table is
+// dropped.
 func (h *ExperimentalHandlers) ListKMSKeys(c *gin.Context) {
 	tenantID, ok := getTenantID(c)
 	if !ok {
@@ -391,7 +396,9 @@ func (h *ExperimentalHandlers) ListSSHKeys(c *gin.Context) {
 	})
 }
 
-// GetExperimentalStats handles GET - returns summary counts for the experimental features
+// GetExperimentalStats handles GET - returns summary counts for the experimental features.
+// Its kms_keys counts read a table nothing writes any more ( WP6 F13); see
+// ListKMSKeys.
 func (h *ExperimentalHandlers) GetExperimentalStats(c *gin.Context) {
 	tenantID, ok := getTenantID(c)
 	if !ok {

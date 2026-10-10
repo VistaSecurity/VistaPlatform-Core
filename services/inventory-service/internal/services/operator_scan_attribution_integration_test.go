@@ -238,7 +238,7 @@ func TestIntegration_OperatorScan_AttachesToTheScannedAsset(t *testing.T) {
 	// The automatic scan's earlier receipt shares the observation row (same
 	// source, same evidence) and stays held; so does a later automatic one.
 	var pending int
-	if err := f.raw.QueryRow(`SELECT count(*) FROM identity_observation_payloads WHERE tenant_id=$1 AND observation_id=$2 AND materialized_at IS NULL`,
+	if err := f.raw.QueryRow(`SELECT count(*) FROM deferred_crypto_findings WHERE tenant_id=$1 AND observation_id=$2 AND replayed_at IS NULL`,
 		f.tenant, got.ObservationID).Scan(&pending); err != nil {
 		t.Fatal(err)
 	}

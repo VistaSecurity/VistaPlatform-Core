@@ -11,13 +11,24 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
-	"github.com/vistasecurity/vistaplatform/inventory-service/internal/events"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
 
-// SweepIdentityEvidence is bounded and restart-safe. A receipt is marked done
-// only after idempotent materialization succeeds. The lease prevents duplicate
-// work across replicas; an interrupted attempt becomes eligible again.
+// SweepIdentityEvidence is the identity evidence worker's per-tenant pass. It
+// expires observations, replays the crypto evidence that became due
+// (replayDueDeferredCrypto, deferred_crypto.go), and materializes retained
+// passive host-observation payloads.
+//
+// The payload half is bounded and restart-safe. A receipt is marked done only
+// after idempotent materialization succeeds. The lease prevents duplicate work
+// across replicas; an interrupted attempt becomes eligible again.
+//
+// identity_observation_payloads holds only `host_observation` payloads now: a
+// discovery finding's crypto is held in deferred_crypto_findings and replayed
+// by the one replay every approval path uses ( F8). The claim below
+// selects host observations only, so a stray crypto payload an older pod wrote
+// during a rolling upgrade is moved by adopt_legacy_crypto_deferrals() above,
+// not materialized by a second replay.
 //
 // It materialises only observations whose link ATTACHED their evidence
 // (platform ADR-0003 D2). A `supporting` row — evidence for an established
@@ -26,16 +37,20 @@ import (
 // payload stays unmaterialised, not marked done, until an operator's Link or
 // Confirm records a decision of its own and the row becomes eligible here.
 // NULL (a row resolved before the column existed) keeps the old behaviour.
-//
-// An `operator_scan_request` row — linked because a person scanned the asset
-// (operator_scan_attribution.go) — materialises only the receipts that scan
-// produced, which ingest marked in their payload. Receipts of automatic scans
-// of the same address share the row (same source, same evidence) and stay
-// held, exactly as they would have without the person's scan.
 func (s *AssetService) SweepIdentityEvidence(ctx context.Context, tenant uuid.UUID) (int, error) {
 	repo := pgidentity.New(s.db.DB.DB)
 	if err := repo.ExpireObservations(ctx, tenant.String(), time.Now().UTC()); err != nil {
 		return 0, err
+	}
+	// Crypto an older pod parked in the stores deferred_crypto_findings
+	// replaced, during the rolling upgrade that introduced it, is moved in
+	// before the replay below (the schema's POST-MIGRATIONS moved everything
+	// before that). One index probe once nothing is left.
+	if err := database.WithTenantTx(ctx, s.db, tenant, func(tx *sqlx.Tx) error {
+		_, err := tx.ExecContext(ctx, `SELECT public.adopt_legacy_crypto_deferrals($1)`, tenant)
+		return err
+	}); err != nil {
+		return 0, fmt.Errorf("adopt legacy crypto deferrals: %w", err)
 	}
 	var mode string
 	err := repo.RunInTx(ctx, tenant.String(), func(bound *pgidentity.Repository) error {
@@ -46,8 +61,12 @@ func (s *AssetService) SweepIdentityEvidence(ctx context.Context, tenant uuid.UU
 	if err != nil {
 		return 0, err
 	}
+	// Before the paused check: crypto held for an approved asset replays
+	// whatever the admission mode; the replay itself holds back
+	// observation-gated rows while admission is paused.
+	replayed, replayErr := s.replayDueDeferredCrypto(ctx, tenant)
 	if mode == "paused" {
-		return 0, nil
+		return replayed, replayErr
 	}
 	processed := 0
 	for i := 0; i < 50; i++ {
@@ -61,10 +80,10 @@ func (s *AssetService) SweepIdentityEvidence(ctx context.Context, tenant uuid.UU
 			 JOIN identity_observation_receipts r ON r.tenant_id=p.tenant_id AND r.observation_id=p.observation_id AND r.receipt_key=p.receipt_key
 			 JOIN assets a ON a.tenant_id=o.tenant_id AND a.id=o.asset_id
 			 WHERE p.tenant_id=$1 AND p.materialized_at IS NULL AND p.next_attempt_at<=now()
+			 AND p.payload->>'kind'=$2
 			 AND o.state='linked' AND o.resolution_outcome IS DISTINCT FROM 'supporting'
-			 AND (o.resolution_outcome IS DISTINCT FROM $2 OR p.payload ? $3)
 			 AND a.deleted_at IS NULL AND a.asset_status='monitoring'
-			 ORDER BY p.next_attempt_at,p.observation_id,p.receipt_key LIMIT 1 FOR UPDATE OF p SKIP LOCKED`, tenant, pgidentity.ResolutionOperatorScanRequest, operatorScanFindingKey).Scan(&observationID, &receipt, &payload, &assetID, &observedAt); err != nil {
+			 ORDER BY p.next_attempt_at,p.observation_id,p.receipt_key LIMIT 1 FOR UPDATE OF p SKIP LOCKED`, tenant, KindHostObservation).Scan(&observationID, &receipt, &payload, &assetID, &observedAt); err != nil {
 				return err
 			}
 			_, err := tx.ExecContext(ctx, `UPDATE identity_observation_payloads SET attempt_count=attempt_count+1,next_attempt_at=now()+interval '5 minutes' WHERE tenant_id=$1 AND observation_id=$2 AND receipt_key=$3`, tenant, observationID, receipt)
@@ -78,9 +97,6 @@ func (s *AssetService) SweepIdentityEvidence(ctx context.Context, tenant uuid.UU
 		}
 		var finding IngestFinding
 		materializeErr := json.Unmarshal(payload, &finding)
-		var risk []*events.AssetRiskChangedPayload
-		var crypto []*events.CryptoConfigurationAddedPayload
-		var certs []*events.CertificateExpiringPayload
 		completed := false
 		if materializeErr == nil {
 			if finding.RawData == nil {
@@ -112,22 +128,8 @@ func (s *AssetService) SweepIdentityEvidence(ctx context.Context, tenant uuid.UU
 					if !monitoring {
 						return nil // Approval changed after claim; retain for later.
 					}
-					if isHostObservation(finding) {
-						if err := s.materializeRetainedHostObservation(ctx, tenant, assetID, finding); err != nil {
-							return err
-						}
-					} else {
-						// The row's link attached its evidence (a match, a create,
-						// an operator's Link or Confirm — the claim above excludes
-						// `supporting`), so the payload's socket is the asset's.
-						// Attached here explicitly, as the engine's own match
-						// would, before the crypto lookup that never creates one.
-						if err := s.attachFindingEndpoint(ctx, tenant, assetID, finding); err != nil {
-							return err
-						}
-						if err := s.processDiscoveryCryptoData(tenant, assetID, finding, &risk, &crypto, &certs); err != nil {
-							return err
-						}
+					if err := s.materializeRetainedHostObservation(ctx, tenant, assetID, finding); err != nil {
+						return err
 					}
 					// A merge cannot move the observation until all children and
 					// this receipt acknowledgement have committed.
@@ -159,17 +161,6 @@ func (s *AssetService) SweepIdentityEvidence(ctx context.Context, tenant uuid.UU
 			continue
 		}
 		processed++
-		if s.eventPublisher != nil {
-			for _, p := range risk {
-				_ = s.eventPublisher.PublishAssetRiskChanged(ctx, tenant, p, "retained_observation")
-			}
-			for _, p := range crypto {
-				_ = s.eventPublisher.PublishCryptoConfigurationAdded(ctx, tenant, p, "retained_observation")
-			}
-			for _, p := range certs {
-				_ = s.eventPublisher.PublishCertificateExpiring(ctx, tenant, p, "retained_observation")
-			}
-		}
 	}
-	return processed, nil
+	return processed + replayed, replayErr
 }

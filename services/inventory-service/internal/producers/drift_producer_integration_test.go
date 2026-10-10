@@ -180,10 +180,15 @@ func (f *driftFixture) addCrypto(t *testing.T, assetID, endpointID uuid.UUID, pr
 	// Into the PARTITIONED table, not the view: the view exists for readers and
 	// inserting through it would be testing Postgres's auto-updatable-view rules
 	// rather than the producer.
+	//
+	// Each row is its own configuration (a distinct cipher_suite): the natural
+	// key is unique among live rows (uq_crypto_implementations_natural_key), so
+	// two live rows of one protocol on one endpoint must differ somewhere, as
+	// two real configurations would.
 	exec(t, f.owner, `INSERT INTO crypto_implementations_partitioned
-	                    (id, tenant_id, asset_id, endpoint_id, protocol, certificate_id,
+	                    (id, tenant_id, asset_id, endpoint_id, protocol, cipher_suite, certificate_id,
 	                     discovery_method, first_discovered_at, created_at, deleted_at)
-	                  VALUES ($1, $2, $3, $4, $5::public.protocol_type, $6, 'passive', $7, $7, $8)`,
+	                  VALUES ($1, $2, $3, $4, $5::public.protocol_type, 'fixture-' || $1::uuid::text, $6, 'passive', $7, $7, $8)`,
 		id, f.tenant, assetID, endpointID, protocol, cert, firstSeen, deletedAt)
 	return id
 }

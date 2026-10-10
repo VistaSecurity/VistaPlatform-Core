@@ -2,8 +2,8 @@ package processor
 
 // The WIRING test for the SNI-beats-reverse-DNS fix: a real batch, read out of
 // a real sensor_discoveries table by the real ProcessBatch, with the real
-// InventoryClient posting to a stand-in inventory-service that records what it
-// was sent.
+// InventoryClient posting to a stand-in of inventory-service's import that
+// records what it was sent and what it routed to external_connections.
 //
 // It exists because the previous attempt at this bug (the SNI-preference
 // ordering) was unit-tested in isolation, was correct in isolation, and did
@@ -22,12 +22,7 @@ package processor
 // test-integration-db).
 
 import (
-	"encoding/json"
-	"io"
-	"net/http"
 	"net/http/httptest"
-	"strings"
-	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -37,66 +32,52 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
-	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
-// recordedUpsert is the subset of the external-connections payload this test
-// is about. Decoded from the real wire bytes, so a field that never left the
-// process cannot satisfy it.
+// recordedUpsert is the subset of the external connection this test is
+// about, as inventory-service's one writer builds it from the imported
+// finding (routeToExternalConnection: dest_ip and port from the finding, the
+// hostname and its provenance from the finding and its raw_data). Decoded
+// from the real wire bytes, so a field that never left the process cannot
+// satisfy it.
 type recordedUpsert struct {
-	DestIP                 string  `json:"dest_ip"`
-	DestPort               int     `json:"dest_port"`
-	DestHostname           *string `json:"dest_hostname"`
-	DestHostnameSourceKind *string `json:"dest_hostname_source_kind"`
+	DestIP                 string
+	DestPort               int
+	DestHostname           *string
+	DestHostnameSourceKind *string
 }
 
-// fakeInventory stands in for inventory-service: it classifies everything as a
-// third party (which is what 54.163.235.119 genuinely is) and records every
-// external-connection upsert it receives.
+// fakeInventory is the import stand-in (routeInventoryStandIn, the real
+// handler's response shape): it classifies everything here as a third party
+// (which is what these addresses genuinely are), routes it, and reports the
+// connections it would have written.
 type fakeInventory struct {
-	mu        sync.Mutex
-	upserts   []recordedUpsert
-	srv       *httptest.Server
-	classifyN int
+	*routeInventoryStandIn
+	srv *httptest.Server
 }
 
 func newFakeInventory(t *testing.T) *fakeInventory {
 	t.Helper()
-	f := &fakeInventory{}
-	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/network-segments/classify-asset"):
-			f.mu.Lock()
-			f.classifyN++
-			f.mu.Unlock()
-			_ = json.NewEncoder(w).Encode(map[string]string{"ownership": "third_party", "network_type": "public"})
-		case strings.HasSuffix(r.URL.Path, "/external-connections"):
-			raw, _ := io.ReadAll(r.Body)
-			var got recordedUpsert
-			if err := json.Unmarshal(raw, &got); err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			f.mu.Lock()
-			f.upserts = append(f.upserts, got)
-			f.mu.Unlock()
-			_ = json.NewEncoder(w).Encode(map[string]string{"id": uuid.New().String()})
-		default:
-			// The managed-asset import path; nothing in this batch takes it.
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"imported": 0})
-		}
-	}))
-	t.Cleanup(f.srv.Close)
-	return f
+	s := newRouteInventoryStandIn(t)
+	return &fakeInventory{routeInventoryStandIn: s, srv: s.srv}
 }
 
 func (f *fakeInventory) recorded() []recordedUpsert {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]recordedUpsert, len(f.upserts))
-	copy(out, f.upserts)
+	var out []recordedUpsert
+	for _, finding := range f.routedFindings() {
+		u := recordedUpsert{DestHostname: finding.Hostname}
+		if finding.IPAddress != nil {
+			u.DestIP = *finding.IPAddress
+		}
+		if finding.Port != nil {
+			u.DestPort = *finding.Port
+		}
+		if kind, ok := finding.RawData["dest_hostname_source_kind"].(string); ok && kind != "" {
+			u.DestHostnameSourceKind = &kind
+		}
+		out = append(out, u)
+	}
 	return out
 }
 
@@ -151,7 +132,7 @@ func TestIntegration_ProcessBatch_EnrichmentRowInheritsSiblingSNI(t *testing.T) 
 		t.Fatalf("NewInventoryClient: %v", err)
 	}
 
-	p := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), approval.NewService(raw), inventoryClient, nil)
+	p := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), inventoryClient, nil)
 
 	batchID := uuid.New().String()
 	sensorID := uuid.New()
@@ -170,9 +151,15 @@ func TestIntegration_ProcessBatch_EnrichmentRowInheritsSiblingSNI(t *testing.T) 
 		t.Fatalf("ProcessBatch: %v", err)
 	}
 
+	// One upsert, not two: the passive row and the enrichment row it
+	// triggered describe one endpoint and are folded into one finding before
+	// classification ( F11, tls_pair_fold.go). The merged row must still
+	// carry the captured SNI, not the PTR answer. The sibling-SNI borrow for an
+	// active row the fold refuses to pair is held by
+	// TestIntegration_TLSPairFold_AmbiguousPairIsRefused.
 	upserts := inventory.recorded()
-	if len(upserts) != 2 {
-		t.Fatalf("inventory-service received %d external-connection upserts, want 2 (one per discovery row)", len(upserts))
+	if len(upserts) != 1 {
+		t.Fatalf("inventory-service received %d external-connection upserts, want 1 (the passive + active pair is one endpoint)", len(upserts))
 	}
 
 	for i, got := range upserts {
@@ -218,7 +205,7 @@ func TestIntegration_ProcessBatch_ReverseDNSStillFiresAndIsLabelledInferred(t *t
 		t.Fatalf("NewInventoryClient: %v", err)
 	}
 
-	p := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), approval.NewService(raw), inventoryClient, nil)
+	p := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), inventoryClient, nil)
 
 	batchID := uuid.New().String()
 	seedTLSDiscovery(t, db, tenant, uuid.New(), batchID, "198.51.100.77", 443, nil,

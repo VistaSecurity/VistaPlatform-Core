@@ -109,11 +109,34 @@ function clickButton(text: string) {
   btn.click();
 }
 
+/**
+ * Pin the clock AND the timezone for one test.
+ *
+ * The default due date is calendar arithmetic on "now" in the browser's zone,
+ * so a test that reads the real clock is a test of what time it is where CI
+ * happens to run. It was: the pre-fill assertion compared against `Date.now()`
+ * and failed the core-v4.5.0-rc.3 export gate at 23:17 UTC on 8 Oct 2026, on a
+ * runner in an American zone, because the 30-day window crossed the end of US
+ * daylight saving. Only `Date` is faked — `settle()` still needs real timers.
+ *
+ * Node re-reads `process.env.TZ` on assignment, so setting it here moves the
+ * zone for this worker; `afterEach` puts it back.
+ */
+const ORIGINAL_TZ = process.env.TZ;
+function at(instant: string, timeZone: string) {
+  process.env.TZ = timeZone;
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(instant));
+}
+
 beforeEach(() => { posted.length = 0; put.length = 0; deleted.length = 0; });
 afterEach(async () => {
   await act(async () => { root.unmount(); });
   container.remove();
   vi.clearAllMocks();
+  vi.useRealTimers();
+  if (ORIGINAL_TZ === undefined) delete process.env.TZ;
+  else process.env.TZ = ORIGINAL_TZ;
 });
 
 describe('the create-ticket modal', () => {
@@ -126,21 +149,43 @@ describe('the create-ticket modal', () => {
     for (const legacy of LEGACY_TICKET_CATEGORIES) expect(options).not.toContain(legacy);
   });
 
-  it('pre-fills a due date, so no ticket is filed invisible to the SLA views', async () => {
+  // Midday UTC is a day's width from midnight on either side, so the date the
+  // modal shows is the same in every zone — including Europe/London, whose
+  // window crosses the 29 March DST change. The fixed answer is 10 March plus
+  // DEFAULT_SLA_DAYS.medium (30).
+  it.each(['UTC', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Asia/Tokyo'])(
+    'pre-fills a due date, so no ticket is filed invisible to the SLA views (%s)',
+    async (timeZone) => {
+      expect(DEFAULT_SLA_DAYS.medium).toBe(30);
+      at('2026-03-10T12:00:00Z', timeZone);
+      await mount(<CreateTicketModal open onClose={() => {}} />);
+      expect((field('Due') as HTMLInputElement).value).toBe('2026-04-09');
+    },
+  );
+
+  it('pins the pre-filled date late on an American evening, across the end of US daylight saving', async () => {
+    // The instant that failed the rc.3 export: 19:17 EDT on 8 Oct. Thirty
+    // local days later is 19:17 EST on 7 Nov — an hour later in UTC than
+    // 30 x 24h, i.e. 00:17Z on 8 Nov, and the input shows the UTC calendar
+    // day. The old assertion measured 31 days from Date.now() and went red.
+    //
+    // OPEN QUESTION for the owner: the user's local calendar day is 7 Nov. The
+    // input shows the UTC day of local-now + N, so anyone in the Americas
+    // filing a ticket in the evening sees the window one day longer than it
+    // says. This pins TODAY's behaviour so the test is deterministic; a fix
+    // that derives the date from the local calendar day changes it to
+    // ''.
+    at('2026-10-08T23:17:00Z', 'America/New_York');
     await mount(<CreateTicketModal open onClose={() => {}} />);
-    const due = (field('Due') as HTMLInputElement).value;
-    expect(due).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    const days = Math.round((new Date(`${due}T12:00:00Z`).getTime() - Date.now()) / 86400000);
-    expect(days).toBe(DEFAULT_SLA_DAYS.medium);
+    expect((field('Due') as HTMLInputElement).value).toBe('2026-11-08');
   });
 
   it('moves the due date when the priority changes', async () => {
+    at('2026-03-10T12:00:00Z', 'UTC');
     await mount(<CreateTicketModal open onClose={() => {}} />);
-    const before = (field('Due') as HTMLInputElement).value;
+    expect((field('Due') as HTMLInputElement).value).toBe('2026-04-09');
     await act(async () => { setValue(field('Priority'), 'critical'); });
-    const after = (field('Due') as HTMLInputElement).value;
-    expect(after).not.toBe(before);
-    expect(new Date(after).getTime()).toBeLessThan(new Date(before).getTime());
+    expect((field('Due') as HTMLInputElement).value).toBe('2026-03-17');
   });
 
   it('stops re-deriving the due date once the user sets one', async () => {

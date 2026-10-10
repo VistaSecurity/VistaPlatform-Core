@@ -167,14 +167,88 @@ func (s *AssetService) resolveObservationAttributed(
 	attribute func(ctx context.Context, tx *sqlx.Tx) (*identity.OperatorScanRequest, error),
 	after func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error,
 ) (identity.Resolution, error) {
+	res, _, _, err := s.resolveObservationGated(ctx, obs, nil, attribute, after)
+	return res, err
+}
+
+// existingAsset is what an intake learns, before it resolves, about the asset
+// an observation's identifiers already belong to: the first owner, in
+// observation order, whose asset row is not soft-deleted.
+type existingAsset struct {
+	ID     uuid.UUID
+	Status string
+	Found  bool
+}
+
+// observationGate is an intake's decision, taken on the engine's transaction
+// before Resolve, about whether this observation is resolved at all. It sees
+// the asset the observation's identifiers already belong to and may amend obs
+// (its class hint) before the engine reads it. Returning false declines: the
+// transaction is rolled back having written nothing, and the caller acts on
+// the existing asset it was shown (a denied asset's last-seen, a third-party
+// route) outside it.
+type observationGate func(ctx context.Context, tx *sqlx.Tx, existing existingAsset, obs *identity.Observation) (proceed bool, err error)
+
+// errObservationDeclined is how a declining gate leaves the transaction: as an
+// error, so RunInTx rolls back; it never reaches a caller.
+var errObservationDeclined = errors.New("the intake declined the observation before resolution")
+
+// resolveObservationGated is [AssetService.resolveObservationAttributed] with an
+// optional gate, run on the engine's transaction before Resolve ( F5).
+//
+// The gate replaces a pre-lookup an intake used to make on its own
+// connections ([AssetService.lookupExistingAsset]) before handing the same
+// observation to the engine, which then looked every identifier up a second
+// time. Here the owners are read ONCE, under the identifier locks
+// ([identity.Engine.SnapshotOwners]); the gate decides on them, and the engine
+// resolves on the same snapshot ([identity.Engine.WithOwnerSnapshot]). The
+// intake's decision and the engine's therefore rest on one read instead of two
+// that a concurrent writer could separate.
+//
+// It reports the existing asset the gate saw (from the last attempt, when the
+// identifier-conflict retry ran twice) and whether the observation was
+// resolved; resolved is false only when the gate declined.
+func (s *AssetService) resolveObservationGated(
+	ctx context.Context,
+	obs identity.Observation,
+	gate observationGate,
+	attribute func(ctx context.Context, tx *sqlx.Tx) (*identity.OperatorScanRequest, error),
+	after func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error,
+) (identity.Resolution, existingAsset, bool, error) {
 	engine, err := s.identityEngine()
 	if err != nil {
-		return identity.Resolution{}, fmt.Errorf("identification engine unavailable: %w", err)
+		return identity.Resolution{}, existingAsset{}, false, fmt.Errorf("identification engine unavailable: %w", err)
 	}
 	var res identity.Resolution
+	var existing existingAsset
+	// The observation as the engine resolved it — the gate may have amended
+	// its class hint — for the post-commit audit and drift events.
+	resolvedObs := obs
 	run := func() error {
+		existing = existingAsset{}
 		return s.identityRepo.RunInTx(ctx, obs.TenantID, func(r *pgidentity.Repository) error {
 			tx := s.sqlxOver(r.Tx())
+			resolveObs := obs
+			var snapshot *identity.OwnerSnapshot
+			if gate != nil {
+				snap, sErr := engine.WithRepository(r).SnapshotOwners(ctx, resolveObs)
+				if sErr != nil {
+					return sErr
+				}
+				ex, eErr := existingFromSnapshot(ctx, tx, resolveObs.TenantID, snap)
+				if eErr != nil {
+					return eErr
+				}
+				existing = ex
+				proceed, gErr := gate(ctx, tx, ex, &resolveObs)
+				if gErr != nil {
+					return gErr
+				}
+				if !proceed {
+					return errObservationDeclined
+				}
+				snapshot = snap
+			}
 			// The tenant's auto-accept threshold, read in THIS transaction.
 			//
 			// Per observation and uncached, deliberately. A cache would make a
@@ -198,7 +272,7 @@ func (s *AssetService) resolveObservationAttributed(
 				return mErr
 			}
 
-			eng := engine.WithAutoAcceptThreshold(threshold).WithAutoMergeExisting(autoMerge).WithRepository(r)
+			eng := engine.WithAutoAcceptThreshold(threshold).WithAutoMergeExisting(autoMerge).WithRepository(r).WithOwnerSnapshot(snapshot)
 			if attribute != nil {
 				req, aErr := attribute(ctx, tx)
 				if aErr != nil {
@@ -208,8 +282,9 @@ func (s *AssetService) resolveObservationAttributed(
 					eng = eng.WithOperatorScanRequest(*req)
 				}
 			}
+			resolvedObs = resolveObs
 			var rErr error
-			res, rErr = eng.Resolve(ctx, obs)
+			res, rErr = eng.Resolve(ctx, resolveObs)
 			if rErr != nil {
 				return rErr
 			}
@@ -240,16 +315,51 @@ func (s *AssetService) resolveObservationAttributed(
 		log.Printf("[AssetService] identity: %s raced another writer for an identifier; resolving again", observationLabel(obs))
 		err = run()
 	}
+	if errors.Is(err, errObservationDeclined) {
+		return identity.Resolution{}, existing, false, nil
+	}
 	if err != nil {
-		return identity.Resolution{}, err
+		return identity.Resolution{}, existing, false, err
 	}
 	// AFTER the commit. An audit event announcing a merge that then rolled back
 	// would be a record of something that did not happen.
-	s.auditAutoAcceptedMerge(ctx, obs, res)
+	s.auditAutoAcceptedMerge(ctx, resolvedObs, res)
 	// The same reason: a host key rotation announced for a resolution that
 	// rolled back never happened ( Decision 4).
-	s.publishIdentityDrift(ctx, obs, res)
-	return res, nil
+	s.publishIdentityDrift(ctx, resolvedObs, res)
+	return res, existing, true, nil
+}
+
+// existingFromSnapshot finds the first owner in the snapshot, in observation
+// order, whose asset is not soft-deleted, and reads its approval status on the
+// engine's transaction. It is lookupExistingAsset's answer computed from the
+// owners the engine will resolve on, without reading them again.
+func existingFromSnapshot(ctx context.Context, tx *sqlx.Tx, tenantID string, snap *identity.OwnerSnapshot) (existingAsset, error) {
+	checked := map[string]bool{}
+	for _, io := range snap.Owners() {
+		for _, ref := range io.Owners {
+			if checked[ref.ID] {
+				continue
+			}
+			checked[ref.ID] = true
+			assetID, err := uuid.Parse(ref.ID)
+			if err != nil {
+				continue
+			}
+			var status string
+			err = tx.QueryRowContext(ctx, `
+				SELECT asset_status FROM assets
+				WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`, tenantID, assetID).Scan(&status)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return existingAsset{}, fmt.Errorf("reading asset status: %w", err)
+			}
+			return existingAsset{ID: assetID, Status: status, Found: true}, nil
+		}
+	}
+	return existingAsset{}, nil
 }
 
 // autoAcceptThreshold reads the tenant's setting on the engine's transaction.
@@ -468,14 +578,15 @@ func (s *AssetService) resolveEndpointForFinding(ctx context.Context, tenantID, 
 	return id, nil
 }
 
-// attachFindingEndpoint writes the finding's endpoint onto an asset that an
-// identity decision made OUTSIDE the engine has already chosen: an
-// interrogation finding that verifiably belongs to the device that was
-// interrogated (interrogation_owned_ingest.go). That claim is checked before
-// this runs, and is the same decision a match is, so it attaches the socket
-// the way the engine's match would. Every other path leaves endpoint writes to
-// the engine.
-func (s *AssetService) attachFindingEndpoint(ctx context.Context, tenantID, assetID uuid.UUID, f IngestFinding) error {
+// attachDecidedFindingEndpoint has the engine write a finding's endpoint onto
+// an asset a decision outside the precedence walk already chose ( WP7
+// F17): an interrogation finding that verifiably belongs to the device that was
+// interrogated (interrogation_owned_ingest.go), or a retained payload replayed
+// onto the asset its observation is linked to. Endpoints are written only by
+// shared/identity (identity.AttachDecidedEndpoints): sanitised, never onto an
+// archived or denied asset, and named on the asset's timeline with the
+// decision that attached them.
+func (s *AssetService) attachDecidedFindingEndpoint(ctx context.Context, tenantID, assetID uuid.UUID, f IngestFinding, decision identity.DecidedEndpoints) error {
 	ep, ok := findingEndpoint(f, nonPlaceholderIP(f.IPAddress))
 	if !ok {
 		return nil
@@ -487,33 +598,28 @@ func (s *AssetService) attachFindingEndpoint(ctx context.Context, tenantID, asse
 	if f.SourceSensorID != nil && *f.SourceSensorID != "" {
 		src.Ref = "sensor:" + *f.SourceSensorID
 	}
-	eps := identity.ObservationEndpoints(identity.Observation{Source: src, Endpoints: []identity.EndpointObservation{ep}}, findingObservedAt(f))
-	if len(eps) == 0 {
-		return nil
-	}
+	obs := identity.Observation{TenantID: tenantID.String(), Source: src, Endpoints: []identity.EndpointObservation{ep}}
 	ref := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
-	if _, err := s.identityRepo.UpsertEndpoints(ctx, ref, eps); err != nil {
-		return fmt.Errorf("upsert endpoint %s: %w", ep.Key(), err)
-	}
-	return nil
+	return s.identityRepo.RunInTx(ctx, tenantID.String(), func(r *pgidentity.Repository) error {
+		if _, err := identity.AttachDecidedEndpoints(ctx, r, obs, ref, decision, findingObservedAt(f)); err != nil {
+			return fmt.Errorf("attach endpoint %s: %w", ep.Key(), err)
+		}
+		return nil
+	})
 }
 
-// attachObservationEndpoints writes an observation's evidence endpoints onto
-// the asset a decision linked it to, inside the caller's transaction. It is
-// what Link and Confirm do with supporting evidence the engine held (platform
-// ADR-0003 D2): the operator's decision is the attachment the engine declined
-// to make. Endpoints are stamped with the observation's own source and time,
-// so the asset's Services & Endpoints tab says who measured them, not who
-// clicked.
-func attachObservationEndpoints(ctx context.Context, repo *pgidentity.Repository, ref identity.AssetRef, obs identity.Observation, at time.Time) error {
+// attachObservationEndpoints has the engine write an observation's evidence
+// endpoints onto the asset a decision linked it to, inside the caller's
+// transaction. It is what Link and Confirm do with supporting evidence the
+// engine held (platform ADR-0003 D2), and what corroboration does with a held
+// observation's sockets: the decision is the attachment the engine declined to
+// make. Endpoints are stamped with the observation's own source and time, so
+// the asset's Services & Endpoints tab says who measured them, not who clicked.
+func attachObservationEndpoints(ctx context.Context, repo *pgidentity.Repository, ref identity.AssetRef, obs identity.Observation, at time.Time, decision identity.DecidedEndpoints) error {
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
-	eps := identity.ObservationEndpoints(obs, at)
-	if len(eps) == 0 {
-		return nil
-	}
-	if _, err := repo.UpsertEndpoints(ctx, ref, eps); err != nil {
+	if _, err := identity.AttachDecidedEndpoints(ctx, repo, obs, ref, decision, at); err != nil {
 		return fmt.Errorf("attach the observation's endpoints to %s: %w", ref.ID, err)
 	}
 	return nil
@@ -574,6 +680,12 @@ func observationLabel(obs identity.Observation) string {
 // is the platform's own collector (cloudCollectorAuthoritative), which picks
 // the `api` channel.
 func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding, effectiveIP *string, ownership string) (identity.Observation, error) {
+	return s.discoveryObservationIn(nil, tenantID, f, effectiveIP, ownership)
+}
+
+// discoveryObservationIn is discoveryObservation scoped against an import
+// request's one segment snapshot ( F4).
+func (s *AssetService) discoveryObservationIn(segs *importSegments, tenantID uuid.UUID, f IngestFinding, effectiveIP *string, ownership string) (identity.Observation, error) {
 	if f.SourceSensorID != nil && findingCollectorSource(f) {
 		sensorID, err := uuid.Parse(strings.TrimSpace(*f.SourceSensorID))
 		if err != nil || sensorID == uuid.Nil || s.db == nil {
@@ -595,7 +707,7 @@ func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding,
 	}
 	// Leniency is a decision made HERE and visible: one malformed MAC in a batch
 	// must not lose the whole finding, and assessSighting logs every reject.
-	res, err := s.assessSighting(context.Background(), findingLabel(f), discoverySighting(tenantID, f, effectiveIP, ownership, cloudAuthoritative))
+	res, err := s.assessSightingIn(context.Background(), segs, findingLabel(f), discoverySighting(tenantID, f, effectiveIP, ownership, cloudAuthoritative))
 	if errors.Is(err, identity.ErrNoUsableIdentifier) {
 		return identity.Observation{}, fmt.Errorf("%w: %s", errNoIdentifiers, findingLabel(f))
 	}

@@ -95,7 +95,7 @@ func main() {
 		if natsErr != nil {
 			log.Printf("Warning: Failed to connect to NATS: %v (PCAP uploads will work but events won't be published)", natsErr)
 		} else {
-			log.Printf("NATS client connected for PCAP job events")
+			log.Printf("NATS client connected for PCAP job and discovery-queue events")
 		}
 	}
 
@@ -143,6 +143,14 @@ func main() {
 	}
 	if natsClient != nil {
 		handler.SetNATSClient(natsClient)
+	}
+	// Every sensor_discoveries writer here wakes discovery-processor after it
+	// commits (discovery.queue.ready, WP1). Wired unconditionally: a nil
+	// client (NATS_URL unset or unreachable) becomes a once-per-process
+	// WARNING on the first write, not a silent fall-back to the poll.
+	sensorService.SetQueuePublisher(natsClient)
+	if discoveryJobService != nil {
+		discoveryJobService.SetQueuePublisher(natsClient)
 	}
 
 	// Set Gin mode

@@ -17,7 +17,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/processor"
-	"github.com/vistasecurity/vistaplatform/shared/approval"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
@@ -58,7 +57,6 @@ func main() {
 
 	// Initialize services
 	converter := converter.NewSensorDiscoveryConverter()
-	approvalService := approval.NewService(db.DB.DB)
 	inventoryClient, err := client.NewInventoryClient(cfg)
 	if err != nil {
 		log.Fatalf("Failed to create inventory client: %v", err)
@@ -73,7 +71,7 @@ func main() {
 	))
 	defer auditMiddleware.Stop()
 
-	batchProcessor := processor.NewBatchProcessor(db.DB, converter, approvalService, inventoryClient, auditMiddleware)
+	batchProcessor := processor.NewBatchProcessor(db.DB, converter, inventoryClient, auditMiddleware)
 	discoveryProcessor := processor.NewDiscoveryProcessor(db.DB, bypassDB, batchProcessor, cfg)
 
 	// Retention sweep: purge PROCESSED sensor_discoveries rows once they pass
@@ -117,7 +115,6 @@ func main() {
 		_, _ = fmt.Fprint(w, "# Discovery Processor Service Metrics\n")
 		_, _ = fmt.Fprintf(w, "# Poll interval: %d seconds\n", cfg.PollIntervalSeconds)
 		_, _ = fmt.Fprintf(w, "# Batch size: %d\n", cfg.BatchSize)
-		_, _ = fmt.Fprintf(w, "# Concurrent batches: %d\n", cfg.ConcurrentBatches)
 		// TODO: Add actual metrics (batches processed, findings processed, etc.)
 	})
 
@@ -128,9 +125,8 @@ func main() {
 			"service": "discovery-processor-service",
 			"status": "running",
 			"poll_interval_seconds": %d,
-			"batch_size": %d,
-			"concurrent_batches": %d
-		}`, cfg.PollIntervalSeconds, cfg.BatchSize, cfg.ConcurrentBatches)
+			"batch_size": %d
+		}`, cfg.PollIntervalSeconds, cfg.BatchSize)
 	})
 
 	// Health check server (HTTP, port 8080) - used separately when mTLS is enabled

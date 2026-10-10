@@ -69,6 +69,12 @@ const (
 	// StatusAccepted and StatusRejected are what a reviewer's decision stamps.
 	StatusAccepted = "accepted"
 	StatusRejected = "rejected"
+
+	// AcceptedByPromote is the `accepted_by` stamp on a proposal [Promote]
+	// closed because it applied the very class the proposal asked for. A
+	// reviewer's acceptance carries no such key (their id is on the
+	// `class_accepted` row), so the stamp is what tells the two apart.
+	AcceptedByPromote = "promote"
 )
 
 // Tx is the transaction [Record] runs on.
@@ -344,6 +350,22 @@ func Record(
 		// order to discover it was pointless.
 		return nil
 	}
+	if prop.Class != "" {
+		ancestor, err := isAncestorClass(ctx, tx, tenantID, prop.Class, current)
+		if err != nil {
+			return err
+		}
+		if ancestor {
+			// The asset's class already says everything the proposal does and
+			// more: `workstation` is a `computer`. Proposing the coarser class
+			// asks a reviewer to approve a downgrade nobody wants, so the
+			// vendor-OUI rule that can only say "computer" stays quiet about an
+			// asset a device agent measured as a workstation. A DESCENDANT
+			// (more specific) or a sibling is a real question and still gets
+			// proposed.
+			return nil
+		}
+	}
 	if prop.Class == "" && classIn(prop.ConflictingClasses, current) {
 		// A CONFLICT proposes no class, so the check above cannot see that the
 		// question has already been answered — and a conflict is exactly the
@@ -563,7 +585,62 @@ func Promote(
 	}); err != nil {
 		return false, err
 	}
+
+	// The asset now holds the class a pending proposal for it was asking for
+	// (an interrogation proposed it hours ago; this observation applied it).
+	// Left open, Approvals would ask a reviewer to approve what the asset
+	// already is. Only proposals for EXACTLY the applied class close: one for a
+	// different class is still a live question.
+	if err := closeSatisfiedProposals(ctx, tx, tenantID, assetID, prop.Class); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+// closeSatisfiedProposals stamps every pending proposal for this asset naming
+// `class` as accepted-by-promote, in the same shape inventory-service's Decide
+// leaves an accepted one (status + accepted_class_key), so every reader treats
+// it as decided. The
+// row keeps its `class_proposed` action: the history that a proposal was raised
+// survives. No `class_rejected` row is involved, so rejection memory is
+// untouched.
+func closeSatisfiedProposals(ctx context.Context, tx Tx, tenantID, assetID uuid.UUID, class string) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE asset_history
+		   SET changes_json = changes_json
+		       || jsonb_build_object('status', $4::text,
+		                             'accepted_class_key', $3::text,
+		                             'accepted_by', $5::text)
+		 WHERE tenant_id = $1 AND asset_id = $2
+		   AND action = 'class_proposed'
+		   AND changes_json->>'kind' = $6
+		   AND COALESCE(changes_json->>'status', $7::text) = $7::text
+		   AND changes_json->>'proposed_class_key' = $3`,
+		tenantID, assetID, class, StatusAccepted, AcceptedByPromote, Kind, StatusPending); err != nil {
+		return fmt.Errorf("close the class proposals the promotion satisfied: %w", err)
+	}
+	return nil
+}
+
+// isAncestorClass reports whether `candidate` is a strict ancestor of
+// `current` in the class hierarchy: its path is a prefix of current's path at a
+// `.` boundary (`hardware.computer` is an ancestor of
+// `hardware.computer.workstation`; `hardware.comp` is not, and a class is not
+// its own ancestor). Paths come from [classPathFor], so a tenant leaf subclass
+// resolves through its stored path.
+func isAncestorClass(ctx context.Context, tx Tx, tenantID uuid.UUID, candidate, current string) (bool, error) {
+	if candidate == "" || current == "" || candidate == current {
+		return false, nil
+	}
+	candPath, err := classPathFor(ctx, tx, tenantID, candidate)
+	if err != nil {
+		return false, err
+	}
+	curPath, err := classPathFor(ctx, tx, tenantID, current)
+	if err != nil {
+		return false, err
+	}
+	return candPath != curPath && strings.HasPrefix(curPath, candPath+"."), nil
 }
 
 // classPathFor resolves the materialised ancestry `assets.class_path` carries.

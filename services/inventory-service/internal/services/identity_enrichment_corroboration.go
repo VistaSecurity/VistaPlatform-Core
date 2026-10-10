@@ -148,7 +148,7 @@ func (b *IdentityEnrichmentBackend) corroborateDNS(ctx context.Context, tenant u
 		// proof resolved its identifiers, not its endpoints.
 		if !resolved.EvidenceHeld {
 			current.TenantID = tenant.String()
-			if err := attachObservationEndpoints(ctx, repo, resolved.Asset, current, current.ObservedAt); err != nil {
+			if err := attachObservationEndpoints(ctx, repo, resolved.Asset, current, current.ObservedAt, identity.DecidedByCorroboration); err != nil {
 				return err
 			}
 		}

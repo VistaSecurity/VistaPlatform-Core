@@ -255,15 +255,15 @@ func TestASupportingRowDoesNotCostTheBatch(t *testing.T) {
 		findings[i] = converter.IngestFinding{Kind: "crypto", Hostname: &host}
 	}
 
-	var imported int
+	var summary importSummary
 	logged := captureStdout(t, func() {
-		imported, err = p.importInChunks(uuid.New(), uuid.New(), findings, rows, "pending_approval")
+		summary, err = p.importInChunks(uuid.New(), uuid.New(), findings, rows)
 	})
 	if err != nil {
 		t.Fatalf("one supporting finding failed the whole import: %v — the poller retries that three times and then rejects every row in the batch", err)
 	}
-	if imported != 3 {
-		t.Fatalf("imported %d of 3 findings", imported)
+	if summary.imported != 3 {
+		t.Fatalf("imported %d of 3 findings", summary.imported)
 	}
 	if strings.Contains(logged, "no arm for") {
 		t.Fatalf("`supporting` reached the unknown-outcome path: %s", strings.TrimSpace(logged))

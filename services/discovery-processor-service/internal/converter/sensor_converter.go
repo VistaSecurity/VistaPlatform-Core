@@ -65,6 +65,15 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 	if val, ok := metadata["cipher_suite"].(string); ok {
 		cipherSuite = &val
 	}
+	// The active prober names the negotiated suite "selected_cipher". Read
+	// only when cipher_suite says nothing, as discovery-processor's deleted
+	// external-connections writer read it — every row is imported now, so the
+	// import must not lose a suite that writer used to record ( WP3).
+	if cipherSuite == nil || strings.TrimSpace(*cipherSuite) == "" {
+		if val, ok := metadata["selected_cipher"].(string); ok && strings.TrimSpace(val) != "" {
+			cipherSuite = &val
+		}
+	}
 	if val, ok := metadata["key_size"].(float64); ok && val > 0 {
 		keySizeInt := int(val)
 		keySize = &keySizeInt

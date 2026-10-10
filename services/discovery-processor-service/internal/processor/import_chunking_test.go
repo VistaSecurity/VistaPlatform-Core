@@ -54,7 +54,7 @@ func TestImportRetainedEvidenceAcknowledgement(t *testing.T) {
 			p := &BatchProcessor{inventoryClient: c}
 			rule := uuid.New()
 			row := &models.SensorDiscovery{ID: uuid.New(), ApprovalStatus: "auto_approved", AutoApprovalRuleID: &rule}
-			imported, err := p.importInChunks(uuid.New(), uuid.New(), []converter.IngestFinding{{Kind: "host"}}, []*models.SensorDiscovery{row}, "monitoring")
+			summary, err := p.importInChunks(uuid.New(), uuid.New(), []converter.IngestFinding{{Kind: "host"}}, []*models.SensorDiscovery{row})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("import error=%v, wantErr=%v", err, tc.wantErr)
 			}
@@ -65,8 +65,8 @@ func TestImportRetainedEvidenceAcknowledgement(t *testing.T) {
 			if wantStatus == "" {
 				wantStatus = "observed"
 			}
-			if imported != 0 || row.ApprovalStatus != wantStatus || row.AssetID != nil {
-				t.Fatalf("row settled as %q (wanted %q): imported=%d row=%+v", row.ApprovalStatus, wantStatus, imported, row)
+			if summary.imported != 0 || row.ApprovalStatus != wantStatus || row.AssetID != nil {
+				t.Fatalf("row settled as %q (wanted %q): imported=%d row=%+v", row.ApprovalStatus, wantStatus, summary.imported, row)
 			}
 			if wantStatus == "observed" && row.AutoApprovalRuleID != nil {
 				t.Fatalf("retained evidence acquired an approval rule: %+v", row)
@@ -133,12 +133,12 @@ func TestImportIsChunkedToFitTheClientTimeout(t *testing.T) {
 		rows[i] = &models.SensorDiscovery{ID: uuid.New(), ApprovalStatus: "pending"}
 	}
 
-	imported, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows, "monitoring")
+	summary, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows)
 	if err != nil {
 		t.Fatalf("importInChunks: %v", err)
 	}
-	if imported != findings {
-		t.Fatalf("imported %d findings, sent %d", imported, findings)
+	if summary.imported != findings {
+		t.Fatalf("imported %d findings, sent %d", summary.imported, findings)
 	}
 
 	mu.Lock()
@@ -246,7 +246,7 @@ func TestImportAdoptsTheStatusTheAssetActuallyHas(t *testing.T) {
 		rows[i] = &models.SensorDiscovery{ID: uuid.New(), ApprovalStatus: "pending"}
 	}
 
-	if _, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows, "pending_approval"); err != nil {
+	if _, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows); err != nil {
 		t.Fatalf("importInChunks: %v", err)
 	}
 
@@ -300,7 +300,7 @@ func TestImportLeavesRowsAloneWhenInventoryIsSilent(t *testing.T) {
 	batch := []converter.IngestFinding{{Kind: "crypto", Hostname: &h}}
 	rows := []*models.SensorDiscovery{{ID: uuid.New(), ApprovalStatus: "pending"}}
 
-	if _, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows, "pending_approval"); err != nil {
+	if _, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows); err != nil {
 		t.Fatalf("importInChunks: %v", err)
 	}
 	if rows[0].ApprovalStatus != "pending" {
@@ -366,7 +366,7 @@ func TestImportSuppressesRowsOnArchivedOrDeniedAssets(t *testing.T) {
 		rows[i] = &models.SensorDiscovery{ID: uuid.New(), ApprovalStatus: "pending"}
 	}
 
-	if _, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows, "pending_approval"); err != nil {
+	if _, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows); err != nil {
 		t.Fatalf("importInChunks: %v", err)
 	}
 
@@ -431,7 +431,7 @@ func TestHostObservationRowsAreObservedNotPendingOrApproved(t *testing.T) {
 	metadata, _ := json.Marshal(map[string]interface{}{"discovery_type": "host_observation"})
 	rows := []*models.SensorDiscovery{{ID: uuid.New(), ApprovalStatus: "observed", Metadata: metadata}}
 
-	if _, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows, "monitoring"); err != nil {
+	if _, err := p.importInChunks(uuid.New(), uuid.New(), batch, rows); err != nil {
 		t.Fatalf("importInChunks: %v", err)
 	}
 	if rows[0].ApprovalStatus != "observed" {

@@ -12,6 +12,13 @@ This feature helps you focus on cryptography on your own network while identifyi
   - **3rd party** – does not match (e.g. internet or partner destinations)
   - **Unknown** – private IP but no matching segment (review recommended)
 
+  "Private" here means RFC 1918, IPv6 unique-local (fc00::/7), loopback,
+  link-local — and **carrier-grade NAT (100.64.0.0/10)**. Overlay networks such
+  as Tailscale and ZeroTier hand out carrier-grade NAT addresses, so a host on
+  one is listed as an **Unknown** asset for you to review, not as an external
+  connection. Being an internal candidate does **not** make it scannable or
+  enrichable: see the carrier-grade NAT note below.
+
 **Important:** define your internal network in **Network Segments** first, or the
 internal / 3rd-party split is a guess.
 
@@ -138,8 +145,11 @@ it presents. We call that *enrichment*.
 - connections you **elevated** to monitored (below) — that one endpoint, not every
   port on the vendor's host.
 
-Carrier-grade NAT space (100.64.0.0/10) is **not** treated as yours by default: it
-is your provider's space, with other customers on the far side.
+Carrier-grade NAT space (100.64.0.0/10) is **not** treated as yours for probing
+by default: it is your provider's space, with other customers on the far side.
+(Its hosts still appear as **Unknown** assets rather than external connections —
+see [How 3rd party is determined](#how-3rd-party-is-determined) — but nothing
+probes them until you register the range.)
 
 > **Tailscale and other CGNAT overlays: register your range.** Tailscale gives
 > every device an address in 100.64.0.0/10. Until you register that space under
@@ -272,7 +282,9 @@ internal certs get. That's your vendor-cryptography posture in one view.
 ## Data source
 
 - **Sensor discoveries** record both source and destination when your sensors see traffic. The platform stores **source IP** with each discovery so it can show “which internal hosts talk to which destination.”
-- Connections are only shown for discoveries that have been **processed** and have a **source IP** (sensor-reported traffic). Cloud-only discoveries may not have source IP.
+- Connections are only shown for discoveries that have been **processed** and have a **source IP** (sensor-reported traffic). A 3rd-party observation with no source address — an active probe of a public address, for example — is not a connection and is not recorded as one; it is counted in the discovery batch's record instead. Cloud-only discoveries may not have source IP.
+- Every discovery is classified once, by the platform's inventory, against your Network Segments — the same answer decides whether it becomes an asset or an external connection, and whether a segment's auto-approval applies.
+- Each connection keeps the certificate assessment the probe made: the certificate's validation result, whether it carries Certificate Transparency timestamps, a known-bad issuing CA, and OCSP revocation status. These are the same signals your own certificates are assessed with.
 
 ## Related
 

@@ -4,8 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
+
+	"github.com/vistasecurity/vistaplatform/shared/network/addrscope"
 )
 
 // ErrUnresolvableHost reports that a URL's hostname could not be resolved.
@@ -155,20 +158,15 @@ var awsMetadataIPv6 = net.ParseIP("fd00:ec2::254")
 // This is the NEGOTIABLE half: a connector whose target system is on-premises
 // by construction may opt into it, per connection and with an audit entry.
 func isRFC1918OrULA(ip net.IP) bool {
-	if ip == nil {
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
 		return false
 	}
-	if ip.IsPrivate() {
-		// net.IP.IsPrivate covers 10/8, 172.16/12, 192.168/16 and fc00::/7.
-		return true
-	}
-	// 100.64.0.0/10 (RFC 6598) is not IsPrivate but is equally not the public
-	// internet; a name resolving into it is not a target we reach by accident.
-	_, cgnat, err := net.ParseCIDR("100.64.0.0/10")
-	if err != nil {
-		return false
-	}
-	return cgnat.Contains(ip)
+	// 100.64.0.0/10 (RFC 6598) is equally not the public internet; a name
+	// resolving into it is not a target we reach by accident. Loopback and
+	// link-local are addrscope.Private too, but IsNeverReachable refuses them
+	// before this is asked, so only the ranges are named here.
+	return addrscope.IsPrivateRange(addr) || addrscope.Classify(addr) == addrscope.CGNAT
 }
 
 // IsPrivateReachableWithOptIn reports whether host — an IP literal or a

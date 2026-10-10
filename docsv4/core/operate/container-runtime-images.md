@@ -57,7 +57,7 @@ same way:
 
 **Build/runtime bases (all 16, `pcap-processor` noted separately):**
 
-- Compile stage: `golang:1.26.8-alpine` (`ARG GO_BUILDER_IMAGE`)
+- Compile stage: `golang:1.26.9-alpine` (`ARG GO_BUILDER_IMAGE`)
 - Runtime: `alpine:3.24.2` + a static Go binary (`ARG RUNTIME_IMAGE`)
 - **`pcap-processor` is the one exception.** It needs CGO and libpcap (packet
   capture is not pure Go), so its build stage adds `gcc musl-dev libpcap-dev`

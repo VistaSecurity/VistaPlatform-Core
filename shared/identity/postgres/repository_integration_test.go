@@ -619,6 +619,10 @@ func (c *contractRepo) UpsertEndpoints(ctx context.Context, asset identity.Asset
 	return c.inner.UpsertEndpoints(ctx, c.ref(asset), eps)
 }
 
+func (c *contractRepo) ReconcileSourceEndpoints(ctx context.Context, asset identity.AssetRef, sourcePrefix string, observed []identity.EndpointObservation, at time.Time) ([]string, error) {
+	return c.inner.ReconcileSourceEndpoints(ctx, c.ref(asset), sourcePrefix, observed, at)
+}
+
 func (c *contractRepo) HistoryHasChange(ctx context.Context, asset identity.AssetRef, action identity.HistoryAction, subset map[string]any) (bool, error) {
 	return c.inner.HistoryHasChange(ctx, c.ref(asset), action, subset)
 }

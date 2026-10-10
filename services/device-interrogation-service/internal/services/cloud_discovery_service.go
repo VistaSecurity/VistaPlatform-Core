@@ -676,13 +676,17 @@ func (s *CloudDiscoveryService) WriteSensorDiscoveries(ctx context.Context, tena
 		inserted, err = s.writeSensorDiscoveriesTx(ctx, tx, tenantID, batchID, integrationID, cloudProvider, devices, time.Time{}, true)
 		return err
 	})
+	if err == nil && inserted > 0 {
+		// Committed: wake discovery-processor (discovery.queue.ready).
+		notifyDiscoveryQueue(ctx, tenantID, batchID, "device-interrogation.cloud_discovery")
+	}
 	return inserted, err
 }
 
 func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, batchID string, integrationID uuid.UUID, cloudProvider string, devices []models.Device, observedAt time.Time, resolveDNS bool) (int, error) {
 	hasFindings := false
 	for _, device := range devices {
-		if !inventoryOnlyDeviceTypes[device.DeviceType] {
+		if becomesDiscoveryRow(device.DeviceType) {
 			hasFindings = true
 			break
 		}
@@ -730,7 +734,12 @@ func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx
 		// fabrication this file already documents twice. It is skipped here and
 		// nowhere else: the identification engine has already recorded it as an
 		// asset (cloud_enumeration.go), which is the whole of what it is.
-		if inventoryOnlyDeviceTypes[device.DeviceType] {
+		//
+		// A cloud KMS key is skipped for a different reason: it already landed
+		// in the key inventory through POST /keys/cloud (see
+		// keyInventoryDeviceTypes), and a discovery row would only send it
+		// round the whole queue a second time.
+		if !becomesDiscoveryRow(device.DeviceType) {
 			continue
 		}
 
@@ -1026,6 +1035,39 @@ var inventoryOnlyDeviceTypes = map[string]bool{
 	DeviceTypeGCPSubnetwork:      true,
 }
 
+// keyInventoryDeviceTypes are the cloud KMS keys: an AWS KMS key, an Azure Key
+// Vault key, a GCP Cloud KMS crypto key. The collector hands each one to
+// inventory-service's key inventory over POST /keys/cloud
+// (KMSDiscoveryService.PublishKMSKeyFindings). That intake is the key's ONE
+// path ( decision D3 as amended): it writes the `keys` row AND creates or
+// refreshes the key's endpoint-less Key Store asset.
+//
+// They used to ALSO be written to sensor_discoveries as at-rest rows, so every
+// key travelled the whole discovery queue — processor classification, identity
+// resolution, the crypto pass — just to reach that asset ( F13). They are distinct from atRestDeviceTypes' buckets and databases,
+// which ARE assets whose data has an encryption posture, and from
+// inventoryOnlyDeviceTypes, which the identification engine records directly.
+//
+// They are still returned from the collectors, so a cloud job still reports how
+// many keys it found.
+var keyInventoryDeviceTypes = map[string]bool{
+	"aws_kms":            true,
+	"azure_keyvault_key": true,
+	"gcp_kms_crypto_key": true,
+}
+
+// becomesDiscoveryRow reports whether a collected cloud device is written to
+// sensor_discoveries at all. Enumerated compute/network resources and cloud KMS
+// keys each have their own single path into inventory; everything else — the
+// endpoints with a TLS measurement and the at-rest storage/database resources —
+// goes through the discovery queue.
+func becomesDiscoveryRow(deviceType string) bool {
+	return !inventoryOnlyDeviceTypes[deviceType] && !keyInventoryDeviceTypes[deviceType]
+}
+
+// The three key-store types stay listed here although becomesDiscoveryRow
+// keeps them out of sensor_discoveries: if they ever reach the fallback branch
+// again, their honest shape is still "at rest, no protocol", never TLS:443.
 var atRestDeviceTypes = map[string]bool{
 	"aws_s3_bucket":         true,
 	"aws_rds_instance":      true,
@@ -1462,8 +1504,8 @@ func azureCloudCollectors(s *CloudDiscoveryService, tenantID, integrationID uuid
 	return collectors
 }
 
-// discoverAzureKeyVaultKeys discovers Key Vault keys, persists them to the
-// kms_keys table (provider "azure"), and returns device records for visibility —
+// discoverAzureKeyVaultKeys discovers Key Vault keys, publishes them to the key
+// inventory (provider "azure"), and returns device records for the job result —
 // mirroring the AWS/GCP KMS paths.
 func (s *CloudDiscoveryService) discoverAzureKeyVaultKeys(ctx context.Context, tenantID uuid.UUID, integrationID uuid.UUID, azClient *azureclient.Client) ([]models.Device, error) {
 	kmsService := NewKMSDiscoveryService(s.db, s.bypassDB, s.masterKey)
@@ -1473,25 +1515,7 @@ func (s *CloudDiscoveryService) discoverAzureKeyVaultKeys(ctx context.Context, t
 		return nil, fmt.Errorf("discovering Azure Key Vault keys: %w", err)
 	}
 
-	if err := kmsService.StoreKMSKeyFindings(ctx, tenantID, integrationID, "azure", findings); err != nil {
-		log.Printf("Warning: failed to store Azure Key Vault key findings: %v", err)
-	}
-
-	var devices []models.Device
-	for _, f := range findings {
-		metadata := keyStoreDeviceMetadata(f, "subscription_id")
-		devices = append(devices, models.Device{
-			ID:               uuid.New(),
-			TenantID:         tenantID,
-			DeviceType:       "azure_keyvault_key",
-			Vendor:           stringPtr("Microsoft"),
-			Hostname:         stringPtr(resourceShortName(f.KeyID)),
-			DiscoveryMethod:  "cloud_api",
-			ConnectionStatus: "discovered",
-			Metadata:         models.JSONB(metadata),
-		})
-	}
-	return devices, nil
+	return s.landKMSKeys(ctx, kmsService, tenantID, integrationID, "azure", findings)
 }
 
 // discoverApplicationGateways discovers Azure Application Gateways
@@ -1827,9 +1851,9 @@ func gcpCloudCollectors(s *CloudDiscoveryService, tenantID, integrationID uuid.U
 	return collectors
 }
 
-// discoverGCPKMSKeys discovers Cloud KMS keys, persists them to the kms_keys
-// table (provider "gcp"), and returns device records for visibility in the
-// device list — mirroring the AWS discoverKMSKeys path.
+// discoverGCPKMSKeys discovers Cloud KMS keys, publishes them to the key
+// inventory (provider "gcp"), and returns device records for the job result —
+// mirroring the AWS discoverKMSKeys path.
 func (s *CloudDiscoveryService) discoverGCPKMSKeys(ctx context.Context, tenantID uuid.UUID, integrationID uuid.UUID, gcpCli *gcpclient.Client) ([]models.Device, error) {
 	kmsService := NewKMSDiscoveryService(s.db, s.bypassDB, s.masterKey)
 
@@ -1838,25 +1862,7 @@ func (s *CloudDiscoveryService) discoverGCPKMSKeys(ctx context.Context, tenantID
 		return nil, fmt.Errorf("GCP KMS key discovery failed: %w", err)
 	}
 
-	if err := kmsService.StoreKMSKeyFindings(ctx, tenantID, integrationID, "gcp", findings); err != nil {
-		log.Printf("Warning: failed to store GCP KMS key findings: %v", err)
-	}
-
-	var devices []models.Device
-	for _, f := range findings {
-		metadata := keyStoreDeviceMetadata(f, "project_id")
-		devices = append(devices, models.Device{
-			ID:               uuid.New(),
-			TenantID:         tenantID,
-			DeviceType:       "gcp_kms_crypto_key",
-			Vendor:           stringPtr("Google Cloud"),
-			Hostname:         stringPtr(resourceShortName(f.KeyID)),
-			DiscoveryMethod:  "cloud_api",
-			ConnectionStatus: "discovered",
-			Metadata:         models.JSONB(metadata),
-		})
-	}
-	return devices, nil
+	return s.landKMSKeys(ctx, kmsService, tenantID, integrationID, "gcp", findings)
 }
 
 // keyStoreDeviceMetadata is the device metadata for one managed key from a
@@ -2326,45 +2332,72 @@ func (s *CloudDiscoveryService) discoverKMSKeys(
 		return nil, fmt.Errorf("KMS key discovery failed: %w", err)
 	}
 
-	// Store findings in the kms_keys table
-	if err := kmsService.StoreKMSKeyFindings(ctx, tenantID, integrationID, "aws", findings); err != nil {
-		log.Printf("Warning: failed to store KMS key findings: %v", err)
-	}
+	log.Printf("Discovered %d AWS KMS keys across %d regions", len(findings), len(regions))
+	return s.landKMSKeys(ctx, kmsService, tenantID, integrationID, "aws", findings)
+}
 
-	// Create device records for visibility in device list
+// landKMSKeys is the one thing every cloud KMS collector does with the keys it
+// listed: publish them to the key inventory, their only home ( decision
+// D3), and return device records for the job result.
+//
+// The devices are NOT written to sensor_discoveries — WriteSensorDiscoveries
+// skips keyInventoryDeviceTypes — so they only say how many keys this run
+// found.
+//
+// The key inventory is the keys' only destination, so a failed publish is the
+// collector's failure: returned beside the devices it found, it lands on the
+// job's per-type outcome instead of in a log line nobody reads.
+func (s *CloudDiscoveryService) landKMSKeys(ctx context.Context, kmsService *KMSDiscoveryService, tenantID, integrationID uuid.UUID, provider string, findings []KMSKeyFinding) ([]models.Device, error) {
+	publishErr := kmsService.PublishKMSKeyFindings(ctx, tenantID, integrationID, provider, findings)
+	return kmsKeyDevices(tenantID, provider, findings), publishErr
+}
+
+// kmsKeyDevices is the job-result record of each key, in the shape each
+// provider's collector has always reported.
+func kmsKeyDevices(tenantID uuid.UUID, provider string, findings []KMSKeyFinding) []models.Device {
 	var devices []models.Device
 	for _, f := range findings {
-		keyName := f.KeyID
-		if len(f.AliasNames) > 0 {
-			keyName = f.AliasNames[0]
-		}
-
-		metadata := map[string]interface{}{
-			"key_id":           f.KeyID,
-			"arn":              f.KeyARN,
-			"key_state":        f.KeyState,
-			"key_usage":        f.KeyUsage,
-			"key_spec":         f.KeySpec,
-			"origin":           f.Origin,
-			"rotation_enabled": f.RotationEnabled,
-			"region":           f.Region,
-			"creation_date":    f.CreationDate,
-			"aliases":          f.AliasNames,
-		}
-
 		device := models.Device{
 			ID:               uuid.New(),
 			TenantID:         tenantID,
-			DeviceType:       "aws_kms",
-			Vendor:           stringPtr("AWS"),
-			Hostname:         stringPtr(keyName),
 			DiscoveryMethod:  "cloud_api",
 			ConnectionStatus: "discovered",
-			Metadata:         models.JSONB(metadata),
+		}
+		switch provider {
+		case "aws":
+			keyName := f.KeyID
+			if len(f.AliasNames) > 0 {
+				keyName = f.AliasNames[0]
+			}
+			device.DeviceType = "aws_kms"
+			device.Vendor = stringPtr("AWS")
+			device.Hostname = stringPtr(keyName)
+			device.Metadata = models.JSONB{
+				"key_id":           f.KeyID,
+				"arn":              f.KeyARN,
+				"key_state":        f.KeyState,
+				"key_usage":        f.KeyUsage,
+				"key_spec":         f.KeySpec,
+				"origin":           f.Origin,
+				"rotation_enabled": f.RotationEnabled,
+				"region":           f.Region,
+				"creation_date":    f.CreationDate,
+				"aliases":          f.AliasNames,
+			}
+		case "azure":
+			device.DeviceType = "azure_keyvault_key"
+			device.Vendor = stringPtr("Microsoft")
+			device.Hostname = stringPtr(resourceShortName(f.KeyID))
+			device.Metadata = models.JSONB(keyStoreDeviceMetadata(f, "subscription_id"))
+		case "gcp":
+			device.DeviceType = "gcp_kms_crypto_key"
+			device.Vendor = stringPtr("Google Cloud")
+			device.Hostname = stringPtr(resourceShortName(f.KeyID))
+			device.Metadata = models.JSONB(keyStoreDeviceMetadata(f, "project_id"))
+		default:
+			continue
 		}
 		devices = append(devices, device)
 	}
-
-	log.Printf("Discovered %d AWS KMS keys across %d regions", len(findings), len(regions))
-	return devices, nil
+	return devices
 }

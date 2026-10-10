@@ -20,8 +20,8 @@ export POSTGRES_DB ?= crypto_inventory
 #                       downloads 1.27+ — it removes the tripwire entirely.
 #   GOTOOLCHAIN=goX.Y.Z does both: it auto-provisions exactly that toolchain and
 #                       still hard-fails any module requiring a newer one, e.g.
-#                       "go.mod requires go >= 1.27.0 (running go 1.26.8;
-#                        GOTOOLCHAIN=go1.26.8)".
+#                       "go.mod requires go >= 1.27.0 (running go 1.26.9;
+#                        GOTOOLCHAIN=go1.26.9)".
 #
 # The patch version is derived from go.work so there is exactly one place to bump
 # it, but the MAJOR.MINOR line is asserted against the policy below — otherwise a
@@ -305,7 +305,7 @@ build-services-parallel: ## Build all Go services in parallel
 # unbuildable outside this lab.
 #
 # To build against public bases deliberately (e.g. reproducing a community
-# build): make build-dist GO_BUILDER_IMAGE=golang:1.26.8-alpine RUNTIME_IMAGE=alpine:3.24.2
+# build): make build-dist GO_BUILDER_IMAGE=golang:1.26.9-alpine RUNTIME_IMAGE=alpine:3.24.2
 #
 # The builder is pinned to the EXACT Go version go.work declares, never the
 # floating 1.26 tag. The Dockerfiles set GOTOOLCHAIN to that exact version, so a

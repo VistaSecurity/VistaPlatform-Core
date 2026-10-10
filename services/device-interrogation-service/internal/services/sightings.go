@@ -155,18 +155,31 @@ func peerIdentifierCanIdentify(kind identity.Kind, value string) bool {
 // hostSighting is the sighting for one host inventory: the host's own account
 // of itself, taken by its agent or over an authenticated session to it.
 //
-// Every interface address is its own identifier, scoped by Intake on its own
-// ( decision 1). An address the host reported as STATICALLY configured is
-// SelfReported, which pins it (decision 1); one it reported as a DHCP lease
-// carries that assignment and is never pinned; one it said nothing about is
-// neither. The hostname is seen AT the primary address, so it takes that
-// address's segment, else a domain segment, as it always did.
+// Every address the host reported is sent ( WP7), each scoped by Intake
+// on its own ( decision 1). An address the host reported as STATICALLY
+// configured is SelfReported, which pins it (decision 1); one it reported as a
+// DHCP lease carries that assignment and is never pinned; one it said nothing
+// about is neither. An address on a VIRTUAL interface is sent with that
+// provenance (IdentifierProvenance.VirtualInterface): Intake keeps it as
+// attribute evidence, never as an identifier, instead of this file dropping it.
 //
-// The run's listening sockets are the endpoints, carrying the RUN's ref so the
-// absent-endpoint sweep (closeAbsentEndpoints) can tell this run's rows from
-// the last one's.
-func hostSighting(tenantID uuid.UUID, subject di.PeerRef, meta hostInventoryMetadata, obs *di.InterrogateResult, source identity.Source, runRef string) (identity.Sighting, error) {
+// managed is the address the platform knows the host by (managedAddress: the
+// remote job's target, or the agent's own reported address). It is sent too
+// when the interface list does not already carry it, and it is the primary
+// when the interfaces offer none — so a report with no `net.interfaces`
+// section still reaches the engine with an address. The hostname is seen AT
+// the primary address, so it takes that address's segment, else a domain
+// segment, as it always did.
+//
+// The run's listening sockets are the endpoints, carrying the RUN's ref under
+// the agent's prefix, which is what lets the engine's reconciliation
+// (EndpointsComplete, set by the caller when the list is licensed) tell this
+// run's sockets from the last one's.
+func hostSighting(tenantID uuid.UUID, subject di.PeerRef, meta hostInventoryMetadata, obs *di.InterrogateResult, source identity.Source, runRef, managed string) (identity.Sighting, error) {
 	primary := meta.primaryAddress(obs)
+	if primary == "" {
+		primary = managed
+	}
 	out := identity.Sighting{
 		TenantID:   tenantID.String(),
 		Source:     source,
@@ -187,6 +200,13 @@ func hostSighting(tenantID uuid.UUID, subject di.PeerRef, meta hostInventoryMeta
 	// Addresses first, the primary leading, so the sighting's own segment is
 	// the primary's whenever the primary is inside one.
 	addrs := meta.hostAddresses(obs)
+	listed := false
+	for _, ha := range addrs {
+		listed = listed || ha.addr == managed
+	}
+	if managed != "" && !listed {
+		addrs = append(addrs, hostAddress{addr: managed})
+	}
 	for i, ha := range addrs {
 		if ha.addr == primary && i > 0 {
 			addrs[0], addrs[i] = addrs[i], addrs[0]
@@ -196,7 +216,10 @@ func hostSighting(tenantID uuid.UUID, subject di.PeerRef, meta hostInventoryMeta
 	for _, ha := range addrs {
 		out.Identifiers = append(out.Identifiers, identity.SightedIdentifier{
 			Kind: identity.KindIPAddress, Value: ha.addr, Assignment: ha.assignment,
-			Provenance: identity.IdentifierProvenance{SelfReported: ha.assignment == identity.AssignmentStatic},
+			Provenance: identity.IdentifierProvenance{
+				SelfReported:     ha.assignment == identity.AssignmentStatic && !ha.virtual,
+				VirtualInterface: ha.virtual,
+			},
 		})
 	}
 	for _, id := range subject.Identifiers {
@@ -386,6 +409,36 @@ func knownAssetIdentifiers(ctx context.Context, db *sql.DB, tenantID, assetID uu
 		return rows.Err()
 	})
 	return out, err
+}
+
+// assetOwns reports whether the identifiers the platform already holds for an
+// asset (knownAssetIdentifiers) include this kind and value. The value is
+// compared in its normal form, as asset_identifiers stores it.
+//
+// A first-hand sighting of an identifier the asset already owns changes
+// nothing the engine keeps for the asset, but its source ref is the job
+// (`interrogation:<jobID>`), so under enforced admission every run mints a new
+// retained identity_observations row that never expires. A caller whose
+// sighting adds nothing but that row sends it only for a value this reports
+// as new to the asset.
+func assetOwns(known []identity.SightedIdentifier, kind identity.Kind, value string) bool {
+	want, err := identity.Normalize(kind, value)
+	if err != nil {
+		want = strings.TrimSpace(value)
+	}
+	for _, k := range known {
+		if k.Kind != kind {
+			continue
+		}
+		have, err := identity.Normalize(k.Kind, k.Value)
+		if err != nil {
+			have = strings.TrimSpace(k.Value)
+		}
+		if have == want {
+			return true
+		}
+	}
+	return false
 }
 
 // selfIdentitySighting is what an interrogation's own DeviceIdentity says

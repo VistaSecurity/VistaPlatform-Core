@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -45,31 +46,19 @@ func TestIngestPipelineFindings_RejectsNonInternalCallers(t *testing.T) {
 	}
 }
 
-// Even on the internal transport the status is not taken verbatim: only
-// "monitoring" (a rule discovery-processor already matched) moves off the
-// default, and auto_approve is not part of the wire shape at all — a body
-// carrying it binds cleanly and changes nothing.
-func TestResolveIngestedAssetStatus_DefaultsDenyAndIgnoresAutoApprove(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		body string
-		want string
-	}{
-		{"auto_approve is not read at all", `{"findings":[],"auto_approve":true}`, "pending_approval"},
-		{"unknown status falls back", `{"findings":[],"asset_status":"approved"}`, "pending_approval"},
-		{"denied cannot be asserted", `{"findings":[],"asset_status":"denied"}`, "pending_approval"},
-		{"empty status falls back", `{"findings":[],"asset_status":""}`, "pending_approval"},
-		{"absent status falls back", `{"findings":[]}`, "pending_approval"},
-		{"monitoring is honoured", `{"findings":[],"asset_status":"monitoring"}`, "monitoring"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var body ingestFindingsBody
-			if err := json.Unmarshal([]byte(tc.body), &body); err != nil {
-				t.Fatalf("bind %s: %v", tc.body, err)
-			}
-			if got := resolveIngestedAssetStatus(body.AssetStatus); got != tc.want {
-				t.Fatalf("body %s resolved to %q, want %q", tc.body, got, tc.want)
-			}
-		})
+// The body has no status a caller can set. Since WP3 inventory-service
+// evaluates the tenant's auto-approval rules itself, so asset_status (which
+// discovery-processor used to send) and auto_approve are both outside the
+// wire shape: a body carrying them binds, and nothing reads them. The
+// behavioural half — a "monitoring" asset_status leaves a new asset pending —
+// is TestIntegration_RoutePipelineImport_IgnoresSuppliedStatus.
+func TestIngestFindingsBody_CarriesNoStatus(t *testing.T) {
+	var body ingestFindingsBody
+	if err := json.Unmarshal([]byte(`{"findings":[],"asset_status":"monitoring","auto_approve":true}`), &body); err != nil {
+		t.Fatalf("a legacy body must still bind: %v", err)
+	}
+	typ := reflect.TypeOf(body)
+	if typ.NumField() != 1 || typ.Field(0).Name != "Findings" {
+		t.Fatalf("ingestFindingsBody grew a field (%d fields); a caller-settable status is what this transport must not carry", typ.NumField())
 	}
 }

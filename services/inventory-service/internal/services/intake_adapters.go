@@ -64,11 +64,26 @@ func (s *AssetService) intake() (*identity.Intake, error) {
 // The result is returned in full even with identity.ErrNoUsableIdentifier, so
 // a caller can still record what was withheld.
 func (s *AssetService) assessSighting(ctx context.Context, label string, sg identity.Sighting) (identity.IntakeResult, error) {
+	return s.assessSightingIn(ctx, nil, label, sg)
+}
+
+// assessSightingIn is assessSighting scoped against the request's one segment
+// snapshot ( F4); a nil segs reads a snapshot for this sighting alone.
+func (s *AssetService) assessSightingIn(ctx context.Context, segs *importSegments, label string, sg identity.Sighting) (identity.IntakeResult, error) {
 	in, err := s.intake()
 	if err != nil {
 		return identity.IntakeResult{}, fmt.Errorf("identity intake unavailable: %w", err)
 	}
-	res, err := in.Assess(ctx, sg)
+	var res identity.IntakeResult
+	if segs != nil && sg.TenantID == segs.tenantID.String() {
+		snap, serr := segs.snapshot(ctx, in)
+		if serr != nil {
+			return identity.IntakeResult{}, serr
+		}
+		res, err = in.AssessWithSnapshot(ctx, sg, snap)
+	} else {
+		res, err = in.Assess(ctx, sg)
+	}
 	for _, r := range res.Rejected {
 		log.Printf("[AssetService] identity: %s dropped a %s identifier: %v", label, r.Identifier.Kind, r.Err)
 	}

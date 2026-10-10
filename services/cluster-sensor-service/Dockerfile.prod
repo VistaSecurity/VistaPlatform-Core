@@ -1,5 +1,5 @@
 # Production Dockerfile for cluster-sensor-service
-ARG GO_BUILDER_IMAGE=golang:1.26.8-alpine
+ARG GO_BUILDER_IMAGE=golang:1.26.9-alpine
 ARG RUNTIME_IMAGE=alpine:3.24.2
 FROM ${GO_BUILDER_IMAGE} AS builder
 
@@ -8,7 +8,7 @@ RUN apk add --no-cache ca-certificates tzdata git
 
 # Explicitly enable workspace mode
 ENV GOWORK=/workspace/go.work
-ENV GOTOOLCHAIN=go1.26.8
+ENV GOTOOLCHAIN=go1.26.9
 
 # Copy workspace files in correct order
 COPY go.work ./

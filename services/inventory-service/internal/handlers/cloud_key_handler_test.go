@@ -28,6 +28,9 @@ type recordingCloudKeyStore struct {
 	calls   int
 	err     error
 	written int
+	// keyStoreCalls counts RecordCloudKeyStores: the intake must create the
+	// Key Store assets, not only the key rows.
+	keyStoreCalls int
 }
 
 func (s *recordingCloudKeyStore) UpsertCloudKeys(tenantID uuid.UUID, records []services.CloudKeyRecord) (int, error) {
@@ -35,6 +38,11 @@ func (s *recordingCloudKeyStore) UpsertCloudKeys(tenantID uuid.UUID, records []s
 	s.tenant = tenantID
 	s.records = records
 	return s.written, s.err
+}
+
+func (s *recordingCloudKeyStore) RecordCloudKeyStores(tenantID uuid.UUID, records []services.CloudKeyRecord) (int, error) {
+	s.keyStoreCalls++
+	return len(records), nil
 }
 
 func cloudKeyRouter(store *recordingCloudKeyStore, tenant uuid.UUID, internal bool) *gin.Engine {
@@ -104,6 +112,9 @@ func TestIngestCloudKeys_AcceptsInternalCall(t *testing.T) {
 	}
 	if store.calls != 1 {
 		t.Fatalf("store called %d times, want 1", store.calls)
+	}
+	if store.keyStoreCalls != 1 {
+		t.Fatalf("Key Store assets recorded %d times, want 1 — the key intake is the only path that creates them (#2374 D3)", store.keyStoreCalls)
 	}
 	if store.tenant != tenant {
 		t.Errorf("store got tenant %s, want %s", store.tenant, tenant)

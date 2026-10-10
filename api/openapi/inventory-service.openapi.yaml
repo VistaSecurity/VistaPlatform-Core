@@ -13620,6 +13620,9 @@ components:
         proposal_id:
           type: string
           format: uuid
+        evidence_held:
+          type: boolean
+          description: True when the sighting was linked to asset_id as supporting evidence but none of its identifiers or endpoints were written onto the asset, so the caller must not treat it as materialized there.
         reasons:
           type: array
           items:

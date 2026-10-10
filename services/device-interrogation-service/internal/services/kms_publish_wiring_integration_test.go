@@ -1,25 +1,28 @@
 package services
 
-// WIRING proof: storing KMS findings must also PUBLISH them to the key
-// inventory, over the real HTTP client, with the real signed request.
+// WIRING proof: discovered KMS keys are PUBLISHED to the key inventory, over
+// the real HTTP client, with the real signed request — and that is the only
+// place they go ( decision D3).
 //
 // This is deliberately not a test of PublishCloudKeys in isolation. The repo
 // has been burned twice by a correct helper whose CALL SITE was the hole (
-//), and this is the same shape: `kms_keys` gets written either way, so a
-// missing publish looks exactly like a successful discovery and the key is
-// simply never seen. Delete the s.publishToKeyInventory(...) line in
-// StoreKMSKeyFindings and TestIntegration_StoreKMSKeyFindings_PublishesToKeyInventory
-// fails — no request arrives.
+//), and this is the same shape: a missing publish looks exactly like a
+// successful discovery and the key is simply never seen. Delete the
+// PublishCloudKeys call in PublishKMSKeyFindings and
+// TestIntegration_PublishKMSKeyFindings_PublishesToKeyInventory fails — no
+// request arrives.
 //
 // Skips without TEST_DATABASE_URL (nightly test-backend / make
 // test-integration-db).
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,7 +33,8 @@ import (
 )
 
 // newKMSPublishFixture returns a KMS discovery service wired to a real Postgres
-// (so the kms_keys write is genuine) plus the tenant and integration ids.
+// (so "kms_keys is not written" is checked against the real table) plus the
+// tenant and integration ids.
 func newKMSPublishFixture(t *testing.T) (*KMSDiscoveryService, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	raw := testdb.Connect(t)
@@ -67,7 +71,7 @@ func awsManagedFinding() KMSKeyFinding {
 	}
 }
 
-func TestIntegration_StoreKMSKeyFindings_PublishesToKeyInventory(t *testing.T) {
+func TestIntegration_PublishKMSKeyFindings_PublishesToKeyInventory(t *testing.T) {
 	svc, tenant, integration := newKMSPublishFixture(t)
 
 	type received struct {
@@ -99,12 +103,12 @@ func TestIntegration_StoreKMSKeyFindings_PublishesToKeyInventory(t *testing.T) {
 	svc.SetCloudKeyPublisher(NewInventoryCloudKeyPublisher(srv.URL, nil))
 
 	findings := []KMSKeyFinding{awsManagedFinding()}
-	if err := svc.StoreKMSKeyFindings(context.Background(), tenant, integration, "aws", findings); err != nil {
-		t.Fatalf("StoreKMSKeyFindings: %v", err)
+	if err := svc.PublishKMSKeyFindings(context.Background(), tenant, integration, "aws", findings); err != nil {
+		t.Fatalf("PublishKMSKeyFindings: %v", err)
 	}
 
 	if got.gotCalls != 1 {
-		t.Fatalf("key inventory received %d calls, want 1 — storing a KMS key must also publish it", got.gotCalls)
+		t.Fatalf("key inventory received %d calls, want 1 — a discovered KMS key must be published", got.gotCalls)
 	}
 	if got.path != cloudKeyIngestPath {
 		t.Errorf("published to %q, want %q", got.path, cloudKeyIngestPath)
@@ -129,20 +133,27 @@ func TestIntegration_StoreKMSKeyFindings_PublishesToKeyInventory(t *testing.T) {
 		t.Errorf("published key_arn = %q, want %q", k.KeyARN, findings[0].KeyARN)
 	}
 
-	// The parallel table is still written — retiring it is a separate decision,
-	// and double-writing is what keeps the experimental endpoint working.
+	// The parallel table is NOT written any more ( F13): the key row the
+	// publish just created is the key's one home.
+	assertNoKMSKeysRows(t, svc.db, tenant)
+}
+
+func assertNoKMSKeysRows(t *testing.T, db *sql.DB, tenant uuid.UUID) {
+	t.Helper()
 	var n int
-	if err := svc.db.QueryRow(`SELECT count(*) FROM kms_keys WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM kms_keys WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
 		t.Fatalf("count kms_keys: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("kms_keys has %d rows, want 1 — the existing write must not regress", n)
+	if n != 0 {
+		t.Errorf("kms_keys has %d rows, want 0 — inventory's key row is the one home of a cloud key (#2374 D3)", n)
 	}
 }
 
-// An inventory that is down must not lose the discovery: kms_keys is still
-// written and StoreKMSKeyFindings still succeeds.
-func TestIntegration_StoreKMSKeyFindings_SurvivesInventoryOutage(t *testing.T) {
+// An inventory that is down is a FAILED key collection, not a silent one.
+// While kms_keys held a copy, a failed publish could be a log line; with the
+// key inventory as the only destination, the collector must say the keys were
+// not recorded so the job's outcome shows it, and the next run re-publishes.
+func TestIntegration_PublishKMSKeyFindings_InventoryOutageIsAnError(t *testing.T) {
 	svc, tenant, integration := newKMSPublishFixture(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -151,14 +162,12 @@ func TestIntegration_StoreKMSKeyFindings_SurvivesInventoryOutage(t *testing.T) {
 	defer srv.Close()
 	svc.SetCloudKeyPublisher(NewInventoryCloudKeyPublisher(srv.URL, nil))
 
-	if err := svc.StoreKMSKeyFindings(context.Background(), tenant, integration, "aws", []KMSKeyFinding{awsManagedFinding()}); err != nil {
-		t.Fatalf("a failed publish must not fail the discovery: %v", err)
+	err := svc.PublishKMSKeyFindings(context.Background(), tenant, integration, "aws", []KMSKeyFinding{awsManagedFinding()})
+	if err == nil {
+		t.Fatal("a publish that did not land returned nil: the key is recorded nowhere and nothing says so")
 	}
-	var n int
-	if err := svc.db.QueryRow(`SELECT count(*) FROM kms_keys WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
-		t.Fatalf("count kms_keys: %v", err)
+	if !strings.Contains(err.Error(), "not recorded") {
+		t.Errorf("error %q does not say the keys were not recorded", err)
 	}
-	if n != 1 {
-		t.Errorf("kms_keys has %d rows, want 1", n)
-	}
+	assertNoKMSKeysRows(t, svc.db, tenant)
 }

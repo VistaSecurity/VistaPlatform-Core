@@ -39,9 +39,15 @@ func TestIntegration_CryptoRisks_HTTPJudgmentParity(t *testing.T) {
 		return id
 	}
 	host := asset(tenant, "monitoring")
+	// Each configuration is measured on its own endpoint: the natural key is
+	// unique among live rows, so several otherwise identical TLS1.0 rows on one
+	// host need something that makes them distinct configurations.
+	port := 10000
 	add := func(owner, host uuid.UUID, strength string, score *int) uuid.UUID {
-		ci, alg := uuid.New(), uuid.New()
-		exec(`INSERT INTO crypto_implementations(id,tenant_id,asset_id,protocol,protocol_version,discovery_method,risk_score,created_at,updated_at) VALUES($1,$2,$3,'TLS','TLS1.0','passive',0,NOW(),NOW())`, ci, owner, host)
+		ci, alg, ep := uuid.New(), uuid.New(), uuid.New()
+		port++
+		exec(`INSERT INTO asset_endpoints(id,tenant_id,asset_id,address,port,transport) VALUES($1,$2,$3,'192.0.2.200'::inet,$4,'tcp')`, ep, owner, host, port)
+		exec(`INSERT INTO crypto_implementations(id,tenant_id,asset_id,endpoint_id,protocol,protocol_version,discovery_method,risk_score,created_at,updated_at) VALUES($1,$2,$3,$4,'TLS','TLS1.0','passive',0,NOW(),NOW())`, ci, owner, host, ep)
 		exec(`INSERT INTO algorithms(id,code,name,category,strength,risk_score) VALUES($1,$2,'read test','symmetric',$3,$4)`, alg, "READ-"+alg.String(), strength, 0)
 		exec(`UPDATE algorithms SET risk_score=$2 WHERE id=$1`, alg, score)
 		exec(`INSERT INTO crypto_implementation_algorithms(crypto_implementation_id,algorithm_id,algorithm_type) VALUES($1,$2,'protocol_version')`, ci, alg)

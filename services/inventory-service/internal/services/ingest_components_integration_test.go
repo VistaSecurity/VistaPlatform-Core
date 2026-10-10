@@ -18,7 +18,7 @@ package services
 // test-integration-db).
 
 import (
-	"encoding/json"
+	"context"
 	"strings"
 	"testing"
 
@@ -203,7 +203,7 @@ func TestIntegration_ApproveAssets_MaterializesAndClearsDeferredFindings(t *test
 	svc := &AssetService{db: db, algorithmService: NewAlgorithmService(db)}
 
 	suite := "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
-	asset := insertPendingAssetWithDeferredFinding(t, db, tenant, IngestFinding{
+	asset := insertPendingAssetWithDeferredFinding(t, svc, tenant, IngestFinding{
 		Protocol:    "TLS",
 		CipherSuite: &suite,
 	})
@@ -216,10 +216,10 @@ func TestIntegration_ApproveAssets_MaterializesAndClearsDeferredFindings(t *test
 	var hasDeferred bool
 	var implementations int
 	if err := db.QueryRow(`
-		SELECT asset_status, metadata ? 'deferred_findings'
-		  FROM assets
+		SELECT asset_status, EXISTS (SELECT 1 FROM deferred_crypto_findings d WHERE d.tenant_id = a.tenant_id AND d.asset_id = a.id AND d.replayed_at IS NULL)
+		  FROM assets a
 		 WHERE tenant_id = $1 AND id = $2`, tenant, asset).Scan(&status, &hasDeferred); err != nil {
-		t.Fatalf("read approved asset metadata: %v", err)
+		t.Fatalf("read approved asset: %v", err)
 	}
 	if err := db.QueryRow(`
 		SELECT count(*)
@@ -232,7 +232,7 @@ func TestIntegration_ApproveAssets_MaterializesAndClearsDeferredFindings(t *test
 		t.Fatalf("asset_status = %q, want monitoring", status)
 	}
 	if hasDeferred {
-		t.Fatal("deferred_findings was still present after successful materialization")
+		t.Fatal("a deferred finding was still unreplayed after successful materialization")
 	}
 	if implementations != 1 {
 		t.Fatalf("materialized crypto implementations = %d, want 1", implementations)
@@ -247,7 +247,7 @@ func TestIntegration_ApproveAssets_PreservesDeferredFindingsWhenMaterializationF
 	svc := &AssetService{db: db, algorithmService: NewAlgorithmService(db)}
 
 	tooLongProtocolVersion := strings.Repeat("T", 101)
-	asset := insertPendingAssetWithDeferredFinding(t, db, tenant, IngestFinding{
+	asset := insertPendingAssetWithDeferredFinding(t, svc, tenant, IngestFinding{
 		Protocol:        "TLS",
 		ProtocolVersion: &tooLongProtocolVersion,
 	})
@@ -263,8 +263,9 @@ func TestIntegration_ApproveAssets_PreservesDeferredFindingsWhenMaterializationF
 	var status string
 	var deferredCount int
 	if err := db.QueryRow(`
-		SELECT asset_status, jsonb_array_length(metadata->'deferred_findings')
-		  FROM assets
+		SELECT asset_status, (SELECT count(*) FROM deferred_crypto_findings d
+		                       WHERE d.tenant_id = a.tenant_id AND d.asset_id = a.id AND d.replayed_at IS NULL AND d.last_error <> '')
+		  FROM assets a
 		 WHERE tenant_id = $1 AND id = $2`, tenant, asset).Scan(&status, &deferredCount); err != nil {
 		t.Fatalf("read preserved deferred finding: %v", err)
 	}
@@ -273,23 +274,21 @@ func TestIntegration_ApproveAssets_PreservesDeferredFindingsWhenMaterializationF
 		t.Fatalf("asset_status = %q, want monitoring; approval should commit before materialization retry state", status)
 	}
 	if deferredCount != 1 {
-		t.Fatalf("deferred_findings count = %d, want 1 preserved for retry", deferredCount)
+		t.Fatalf("unreplayed deferred findings with a retry reason = %d, want 1 preserved for retry", deferredCount)
 	}
 }
 
-func insertPendingAssetWithDeferredFinding(t *testing.T, db *database.DB, tenant uuid.UUID, finding IngestFinding) uuid.UUID {
+func insertPendingAssetWithDeferredFinding(t *testing.T, svc *AssetService, tenant uuid.UUID, finding IngestFinding) uuid.UUID {
 	t.Helper()
 
 	asset := uuid.New()
-	deferredJSON, err := json.Marshal([]IngestFinding{finding})
-	if err != nil {
-		t.Fatalf("marshal deferred finding: %v", err)
+	if _, err := svc.db.Exec(`
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'approval-deferred.example.test', 'server', 'hardware.computer.server', 'pending_approval', NOW(), NOW(), NOW(), NOW())`, asset, tenant); err != nil {
+		t.Fatalf("insert pending asset: %v", err)
 	}
-
-	if _, err := db.Exec(`
-		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, metadata, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1, $2, 'approval-deferred.example.test', 'server', 'hardware.computer.server', 'pending_approval', jsonb_build_object('deferred_findings', $3::jsonb), NOW(), NOW(), NOW(), NOW())`, asset, tenant, string(deferredJSON)); err != nil {
-		t.Fatalf("insert pending asset with deferred finding: %v", err)
+	if err := svc.deferCryptoForAsset(context.Background(), tenant, asset, finding); err != nil {
+		t.Fatalf("defer finding: %v", err)
 	}
 	return asset
 }

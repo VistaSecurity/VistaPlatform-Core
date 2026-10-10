@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"fmt"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -154,6 +155,48 @@ func (e EndpointObservation) Sanitized() EndpointObservation {
 	return out
 }
 
+// CompleteEndpointSet marks an observation's endpoints as the complete set of
+// sockets ONE source found on the thing at the observation's time: a host's
+// own socket table, read by its agent or over an authenticated session
+// ( WP7 F12). A network scan never carries one — it sees what answered,
+// not what is listening.
+//
+// When such an observation MATCHES an asset, the engine closes, inside its own
+// transaction ([Repository.ReconcileSourceEndpoints]), the endpoints that
+// source recorded earlier and no longer lists: status `closed`, never deleted,
+// last-seen untouched. Only that source's rows — those whose source ref starts
+// with SourcePrefix — and only rows last seen no later than this observation,
+// so a replayed older report cannot close a socket a newer one saw. Supporting
+// evidence, a held observation and a conflict close nothing: a report that did
+// not land on the asset says nothing about the asset's sockets.
+type CompleteEndpointSet struct {
+	// SourcePrefix names the source whose set this is. It must extend the
+	// observation's own source ref (a source reconciles only its own rows),
+	// and every endpoint in the set must carry a source ref under it, so the
+	// rows this set writes are the rows the next set reconciles.
+	SourcePrefix string `json:"source_prefix"`
+}
+
+// Validate reports why a complete-set marker cannot be honoured for an
+// observation from src carrying eps, or nil.
+func (c CompleteEndpointSet) Validate(src Source, eps []EndpointObservation) error {
+	prefix := strings.TrimSpace(c.SourcePrefix)
+	switch {
+	case prefix == "" || prefix != c.SourcePrefix:
+		return fmt.Errorf("complete endpoint set: source prefix %q is empty or padded", c.SourcePrefix)
+	case src.Kind != SourceMeasured:
+		return fmt.Errorf("complete endpoint set: only a measured source states one, not %q", src.Kind)
+	case strings.TrimSpace(src.Ref) == "" || !strings.HasPrefix(prefix, src.Ref):
+		return fmt.Errorf("complete endpoint set: prefix %q does not extend the source ref %q", prefix, src.Ref)
+	}
+	for _, ep := range eps {
+		if !strings.HasPrefix(ep.Source.Ref, prefix) {
+			return fmt.Errorf("complete endpoint set: endpoint %s carries source ref %q, outside %q", ep.Key(), ep.Source.Ref, prefix)
+		}
+	}
+	return nil
+}
+
 // Observation is one sighting handed to the engine by an intake path.
 //
 // It is deliberately a value with no behaviour beyond normalisation: the
@@ -199,6 +242,11 @@ type Observation struct {
 
 	Identifiers []Identifier          `json:"identifiers,omitempty"`
 	Endpoints   []EndpointObservation `json:"endpoints,omitempty"`
+
+	// EndpointsComplete marks Endpoints as the COMPLETE set of sockets one
+	// source found on the thing when it looked ([CompleteEndpointSet]). Nil —
+	// every network observation — says nothing about sockets it did not see.
+	EndpointsComplete *CompleteEndpointSet `json:"endpoints_complete,omitempty"`
 
 	Source     Source    `json:"source"`
 	ObservedAt time.Time `json:"observed_at"`

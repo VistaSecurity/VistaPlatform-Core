@@ -407,27 +407,43 @@ func TestIntegration_Ingest_ProspectiveReceiptsSurvivePendingApproval(t *testing
 			t.Fatal(err)
 		}
 	}
+	// 51 distinct receipts of one observation, each delivered twice. The
+	// store keeps the newest 50 observed (maxDeferredCryptoRows), so the
+	// oldest receipt is dropped — and stays dropped when its transport replay
+	// arrives — and nothing is buffered on the asset itself.
 	var asset uuid.UUID
-	var deferred, receipts, materialized int
-	if err := f.db.QueryRow(`SELECT id,jsonb_array_length(COALESCE(metadata->'deferred_findings','[]')) FROM assets WHERE tenant_id=$1`, f.tenant).Scan(&asset, &deferred); err != nil {
+	var held, materialized, onAsset int
+	if err := f.db.QueryRow(`SELECT id FROM assets WHERE tenant_id=$1`, f.tenant).Scan(&asset); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.QueryRow(`SELECT count(*),count(materialized_at) FROM identity_observation_payloads WHERE tenant_id=$1`, f.tenant).Scan(&receipts, &materialized); err != nil {
+	if err := f.db.QueryRow(`SELECT count(*),count(replayed_at),count(*) FILTER (WHERE asset_id IS NOT NULL)
+	 FROM deferred_crypto_findings WHERE tenant_id=$1`, f.tenant).Scan(&held, &materialized, &onAsset); err != nil {
 		t.Fatal(err)
 	}
-	if receipts != 51 || materialized != 0 || deferred != 0 {
-		t.Fatalf("receipts=%d materialized=%d metadata buffer=%d", receipts, materialized, deferred)
+	if held != maxDeferredCryptoRows || materialized != 0 || onAsset != 0 {
+		t.Fatalf("held=%d replayed=%d asset-gated=%d, want %d held for the observation and none replayed", held, materialized, onAsset, maxDeferredCryptoRows)
+	}
+	var oldest, newest int
+	if err := f.db.QueryRow(`SELECT count(*) FILTER (WHERE finding->'raw_data'->>'discovery_id'='receipt-0'),
+	 count(*) FILTER (WHERE finding->'raw_data'->>'discovery_id'='receipt-50') FROM deferred_crypto_findings WHERE tenant_id=$1`, f.tenant).Scan(&oldest, &newest); err != nil {
+		t.Fatal(err)
+	}
+	if oldest != 0 || newest != 1 {
+		t.Fatalf("cap kept the oldest receipt=%d newest=%d; newest observed wins", oldest, newest)
 	}
 	if n, err := f.svc.SweepIdentityEvidence(context.Background(), f.tenant); err != nil || n != 0 {
 		t.Fatalf("unapproved replay=%d: %v", n, err)
 	}
+	// Approval replays every held receipt itself; the sweep after it has
+	// nothing left to do.
 	if err := f.svc.ApproveAssets(f.tenant, []uuid.UUID{asset}, uuid.Nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []int{50, 1, 0} {
-		if n, err := f.svc.SweepIdentityEvidence(context.Background(), f.tenant); err != nil || n != want {
-			t.Fatalf("replay=%d want %d: %v", n, want, err)
-		}
+	if n, err := f.svc.SweepIdentityEvidence(context.Background(), f.tenant); err != nil || n != 0 {
+		t.Fatalf("replay after approval=%d, want 0: %v", n, err)
+	}
+	if err := f.db.QueryRow(`SELECT count(*) FROM deferred_crypto_findings WHERE tenant_id=$1 AND replayed_at IS NULL`, f.tenant).Scan(&held); err != nil || held != 0 {
+		t.Fatalf("%d held findings left unreplayed after approval: %v", held, err)
 	}
 	if err := f.db.QueryRow(`SELECT count(*) FROM crypto_implementations WHERE tenant_id=$1`, f.tenant).Scan(&materialized); err != nil {
 		t.Fatal(err)
@@ -486,7 +502,7 @@ func TestIntegration_Ingest_DirectMaterializationFollowsMergeAndApproval(t *test
 	finding := leafCertFinding("surviving-host.example.test", "198.51.100.32", 443, hexFingerprint("redirect-cert"))
 	// The endpoint the identity decision attached, moved to the survivor by
 	// the merge (platform ADR-0003 D2: materialisation only looks it up).
-	if err := f.svc.attachFindingEndpoint(context.Background(), f.tenant, survivor, finding); err != nil {
+	if err := f.svc.attachDecidedFindingEndpoint(context.Background(), f.tenant, survivor, finding, identity.DecidedByLinkedObservation); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.svc.processApprovedDiscoveryCryptoData(f.tenant, source, finding, nil, nil, nil); err != nil {

@@ -17,7 +17,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/models"
-	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/autoscan"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
@@ -40,28 +39,33 @@ type AuditSink interface {
 type BatchProcessor struct {
 	db              *sqlx.DB
 	converter       *converter.SensorDiscoveryConverter
-	approvalService *approval.Service
 	inventoryClient *client.InventoryClient
 	audit           AuditSink
+	// retry is how a failed row is retried and when it gives up; see
+	// recordRowFailures. NewBatchProcessor sets the default.
+	retry RetryPolicy
 }
 
 // NewBatchProcessor creates a new batch processor.
+//
+// It takes no approval service: the tenant's auto-approval rules are
+// evaluated by inventory-service on the import, against its own
+// classification ( WP3).
 //
 // auditSink may be nil (no audit-service configured); the batch then records
 // nothing rather than failing.
 func NewBatchProcessor(
 	db *sqlx.DB,
 	converter *converter.SensorDiscoveryConverter,
-	approvalService *approval.Service,
 	inventoryClient *client.InventoryClient,
 	auditSink AuditSink,
 ) *BatchProcessor {
 	return &BatchProcessor{
 		db:              db,
 		converter:       converter,
-		approvalService: approvalService,
 		inventoryClient: inventoryClient,
 		audit:           auditSink,
+		retry:           DefaultRetryPolicy(),
 	}
 }
 
@@ -131,11 +135,41 @@ func (p *BatchProcessor) logBatchAudit(ctx context.Context, tenantID uuid.UUID, 
 	}
 }
 
-// ProcessBatch processes a batch of discoveries.
-// Discoveries are split into two tracks:
-//   - third_party (public internet) → external_connections table via UpsertExternalConnection
-//   - everything else               → managed asset lifecycle (approval, compliance, findings)
-func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err error) {
+// ProcessBatch processes every unprocessed row of a batch, claimed or not.
+// It is for a caller that holds no claim (tests, one-off tooling); the poller
+// uses ProcessClaimedBatch.
+func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) error {
+	return p.processBatch(batchID, tenantID, nil)
+}
+
+// ProcessClaimedBatch processes the rows of a batch that ONE claim took:
+// those whose claimed_at is the claim's stamp. processNextBatch's claim sets
+// claimed_at = now() on every row it takes in a single statement, so they all
+// carry the same transaction timestamp, and it is returned with the claim.
+//
+// Reading every `processed_at IS NULL` row of the batch instead (the old
+// query) processed two kinds of row the claim was not entitled to: a failed
+// row released with a backoff — its claimed_at is now - batchClaimTimeout +
+// backoff, which a re-claim of the batch (triggered by any other claimable
+// row in it) would otherwise retry early — and a row that joined the batch
+// after the claim (claimed_at NULL), processed with no claim at all, and
+// possibly by two replicas at once. Both are left for the claim entitled to
+// them.
+func (p *BatchProcessor) ProcessClaimedBatch(batchID string, tenantID uuid.UUID, claimedAt time.Time) error {
+	return p.processBatch(batchID, tenantID, &claimedAt)
+}
+
+// processBatch processes a batch of discoveries: all of its unprocessed rows
+// when claimedAt is nil, only the rows of that claim otherwise.
+//
+// Every row is imported into inventory-service, third-party ones included
+// ( WP3). This service folds TLS pairs, fills a missing hostname with
+// its provenance, flattens the envelope and converts; it no longer classifies
+// ownership, evaluates auto-approval rules or writes external_connections.
+// inventory-service does all three, once per finding, and answers per finding
+// with what happened — the outcome, the asset, the rule that auto-approved
+// it — which is what the discovery row is stamped from.
+func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claimedAt *time.Time) (err error) {
 	// ProcessBatch is invoked per-(batch, tenant) by the poller, which already
 	// resolved tenantID. No ctx is threaded into this method, so use
 	// context.Background() to match the existing pattern.
@@ -154,16 +188,25 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		       auto_approval_rule_id, asset_id, hostname, source_ip
 		FROM sensor_discoveries
 		WHERE batch_id = $1 AND tenant_id = $2 AND processed_at IS NULL
+		  AND ($3::timestamptz IS NULL OR claimed_at = $3::timestamptz)
 		ORDER BY created_at ASC
 	`
+	var claimArg interface{}
+	if claimedAt != nil {
+		claimArg = *claimedAt
+	}
 
 	// RLS-scoped read: sensor_discoveries is a security_invoker view over
 	// sensor_discoveries_partitioned, which carries a tenant_isolation policy.
 	// WithTenantTx sets app.tenant_id; the explicit WHERE tenant_id = $2 is kept
 	// as the primary control (belt-and-suspenders).
 	var discoveries []*models.SensorDiscovery
+	// scanFailures are rows the read could not decode. They keep their claim
+	// until recorded below: skipping them silently would leave them claimed and
+	// re-claimed every batchClaimTimeout with no attempt ever counted.
+	var scanFailures []rowFailure
 	err = shareddatabase.WithTenantTx(ctx, p.db.DB, tenantID, func(tx *sql.Tx) error {
-		rows, qErr := tx.QueryContext(ctx, query, batchID, tenantID)
+		rows, qErr := tx.QueryContext(ctx, query, batchID, tenantID, claimArg)
 		if qErr != nil {
 			return fmt.Errorf("failed to query discoveries: %w", qErr)
 		}
@@ -180,7 +223,15 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 				&sd.ApprovalStatus, &sd.AutoApprovalRuleID, &sd.AssetID,
 				&sd.Hostname, &sd.SourceIP,
 			); scanErr != nil {
-				continue // skip rows with scan errors
+				// The id is the first column, so it is set whenever the row
+				// is identifiable at all. A scan error is a property of the
+				// row's stored content, so retrying cannot fix it: permanent.
+				if sd.ID != uuid.Nil {
+					scanFailures = append(scanFailures, rowFailure{id: sd.ID, err: fmt.Errorf("scan discovery: %w", scanErr), permanent: true})
+				} else {
+					fmt.Printf("Warning: batch %s: a row could not be scanned and has no readable id; the claim timeout will release it: %v\n", batchID, scanErr)
+				}
+				continue
 			}
 			sd.Metadata = metadataJSON
 			discoveries = append(discoveries, &sd)
@@ -191,53 +242,49 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		return err
 	}
 
-	ba.counts["discoveries_read"] = len(discoveries)
+	ba.counts["discoveries_read"] = len(discoveries) + len(scanFailures)
 
 	if len(discoveries) == 0 {
+		if len(scanFailures) > 0 {
+			return p.settleFailures(ctx, tenantID, batchID, ba, scanFailures, nil, len(scanFailures), nil)
+		}
 		return fmt.Errorf("no discoveries found for batch %s", batchID)
 	}
 
-	// Auto-approval rules are per-tenant and do not change mid-batch, so load
-	// them ONCE here rather than re-querying (a fresh WithTenantTx round-trip)
-	// for every discovery. A rule-load failure is not fatal: it degrades the
-	// batch to "nothing auto-approves", which is what the previous per-discovery
-	// code did on error too.
-	rules, err := p.approvalService.GetActiveRulesForTenant(tenantID)
-	if err != nil {
-		fmt.Printf("Warning: failed to load auto-approval rules for tenant %s: %v\n", tenantID, err)
-		rules = nil
-	}
+	var entries []importEntry
 
-	// Split discoveries into two tracks:
-	//   1. third_party → external connections path (new lightweight table)
-	//   2. everything else → managed asset lifecycle (approval, compliance, findings)
-	type externalEntry struct {
-		Discovery      *models.SensorDiscovery
-		Classification *models.NetworkClassification
-		// HostnameSourceKind is the provenance of Discovery.Hostname in the
-		// ADR-0005 vocabulary, or "" when nothing stated it. Carried beside
-		// the discovery rather than on it because sensor_discoveries has no
-		// column for it — it exists to travel to external_connections, which
-		// does.
-		HostnameSourceKind string
-	}
-	var externalEntries []externalEntry
-	var findingsWithStatus []FindingWithStatus
-
-	// Third-party upserts that failed. Their discoveries are deliberately left
-	// unprocessed (see below) and the batch is reported as failed so the poller
-	// retries it with backoff instead of treating a dropped connection as done.
-	externalFailed := 0
-	var externalErr error
+	// Rows that did not land, each with the reason ( F14). They are
+	// recorded per row at the end — retried with backoff, or terminal once
+	// permanent or out of attempts — while every row that DID land is marked
+	// processed as usual. One bad row or chunk no longer decides the fate of
+	// the rest of the batch.
+	failures := scanFailures
 
 	// What each destination in this batch was actually asked for, before any
 	// row is looked at on its own. The active enricher's row cannot answer that
 	// question about itself — its passive sibling can. See batchSNIIndex.
+	// Built from the unfolded rows, so an active row the fold below refuses
+	// to pair can still borrow its sibling's name.
 	sniIndex := buildBatchSNIIndex(discoveries)
+
+	// One endpoint, one finding ( F11). A passive TLS row and the
+	// active_enrichment row it triggered describe the SAME endpoint; fold each
+	// unambiguous pair into one row BEFORE import, so the pair is classified,
+	// rule-evaluated and imported (or written to external_connections) once.
+	// Measured active fields win unless empty, the passive row fills the rest,
+	// and an explicit false is a value — the envelope rule in CLAUDE.md ("The
+	// discovery metadata envelope: empty never wins"). The folded-away row
+	// follows the survivor's outcome through processedMarks. Pairing key and
+	// refusals: see tls_pair_fold.go.
+	discoveries, foldFollowers := foldTLSEnrichmentPairs(discoveries)
+	if n := countFollowers(foldFollowers); n > 0 {
+		ba.counts["tls_enrichment_pairs_folded"] = n
+	}
 
 	for _, discovery := range discoveries {
 		// Host observations (asset-inventory ADR-0004 D2) travel through this
-		// loop untouched by two steps that would otherwise misread them.
+		// loop untouched by the hostname fill, which would otherwise misread
+		// them.
 		hostObservation := isHostObservationDiscovery(discovery)
 
 		// Fill a missing hostname, preferring measured facts over inference.
@@ -265,6 +312,14 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 		// public VIP or a tunnel's far end is somebody's DNS naming an address
 		// the device merely CONFIGURES — and a borrowed sibling SNI describes
 		// a different observation altogether.
+		//
+		// The fill stays HERE, ahead of the import, rather than moving into
+		// inventory-service with the classification ( WP3): a PTR lookup
+		// can take its full timeout, and here it runs outside the import's
+		// request deadline (client.ImportTimeout), which a chunk of fifty
+		// slow lookups would otherwise blow. inventory-service's one
+		// external-connections writer stores the name with the provenance
+		// stamped below.
 		hostnameSourceKind := ""
 		if discovery.Hostname != nil && strings.TrimSpace(*discovery.Hostname) != "" {
 			hostnameSourceKind = string(identity.SourceMeasured)
@@ -276,144 +331,40 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 			}
 		}
 
-		classification := p.classifyNetwork(tenantID, discovery.DestIP, discovery.Hostname, cloudResourceHint(discovery))
-		if shouldKeepCloudPlaceholderManaged(discovery, classification) {
-			classification.Ownership = "unknown"
-			classification.Type = "private"
-		}
-		if hostObservation && classification.Ownership == "third_party" {
-			// A passively observed host is never a third party, whatever its
-			// address classifies as.
-			//
-			// `third_party` means "a public endpoint something here connected
-			// OUT to", and that is a statement about a FLOW. A host observation
-			// is a statement that a device exists on a segment we are watching:
-			// there is no flow, no far end, and the device is on our own wire.
-			// Two ways it reached third_party — an observation with no address
-			// at all (dest_ip 0.0.0.0, which is not RFC 1918) and one carrying a
-			// public address that is simply not in a registered segment — and
-			// both are the classifier answering a question it was not asked.
-			//
-			// `unknown` rather than `internal`, because we genuinely do not know
-			// it is in a registered segment; that is what `unknown` means, and
-			// it keeps the row on the managed-asset path where it belongs.
-			// Auto-approval still has to find a matching segment rule to fire,
-			// so this widens nothing.
-			classification.Ownership = "unknown"
-		}
-
-		// Third-party public internet connections bypass the asset lifecycle entirely.
-		// They are written to external_connections for 3rd party crypto visibility.
-		// Skip third-party discoveries without a source IP (cannot create a connection row).
-		//
-		// A host observation is never one of these, whatever its address
-		// classifies as. external_connections records a CONNECTION — a flow
-		// between two endpoints with a protocol and a cipher — and a host
-		// observation has no flow, no source and no cryptography. Without this
-		// guard an observation of a host with a public address would be routed
-		// there and then dropped for having no source IP, logging a warning
-		// about a row that was never a connection.
-		//
-		// Nor is a finding an interrogated device reported about ITSELF — a
-		// tunnel whose far end is public, a public VIP, a decryption profile
-		// that names no address. It describes the device's configuration, not
-		// a flow out of the tenant, and it has no source IP, so this branch
-		// used to drop it with a stdout warning while the interrogation job
-		// reported success (finding P-11). It goes to inventory on the
-		// managed path instead, where it lands on the device the row names
-		// (inventory-service verifies that claim; see
-		// interrogation_owned_ingest.go there). The classification is left
-		// as it is: it is a true statement about the address, and inventory
-		// reads it to decide the finding is the device's.
-		if !hostObservation && classification.Ownership == "third_party" && !claimsInterrogatedDevice(discovery) {
-			if discovery.SourceIP != nil && *discovery.SourceIP != "" {
-				externalEntries = append(externalEntries, externalEntry{
-					Discovery:          discovery,
-					Classification:     classification,
-					HostnameSourceKind: hostnameSourceKind,
-				})
-			} else {
-				// Counted, not only printed: a batch that dropped findings
-				// must say how many in its audit record.
-				ba.counts["third_party_dropped_no_source_ip"]++
-				fmt.Printf("Warning: skipping third-party discovery %s (no source IP)\n", discovery.ID)
-			}
-			continue
-		}
-
-		// Evaluate auto-approval rules for managed assets against the
-		// batch-scoped rule set loaded above.
-		//
-		// The observation's KIND is part of the rule vocabulary, so a tenant can
-		// write `kind:host_observation and network.segment_id=…` — auto-approve
-		// the passively seen hosts on a segment I own — without that rule also
-		// approving every TLS endpoint the same sensor reports. `source` cannot
-		// express it: both come from the sensor.
-		approvalInput := discovery.ApprovalInput().WithKind(approvalKindOf(hostObservation))
-		autoApprove, ruleID, err := p.approvalService.EvaluateAutoApprovalWithRules(rules, approvalInput, classification)
-		if err != nil {
-			fmt.Printf("Warning: failed to evaluate auto-approval for discovery %s: %v\n", discovery.ID, err)
-		}
-
-		finding, err := p.converter.ToIngestFinding(discovery)
+		finding, err := p.importFinding(discovery)
 		if err != nil {
 			fmt.Printf("Warning: failed to convert discovery %s: %v\n", discovery.ID, err)
+			// The row's own content cannot be converted; retrying cannot change it.
+			failures = append(failures, rowFailure{id: discovery.ID, err: fmt.Errorf("convert discovery: %w", err), permanent: true, drop: true})
 			continue
 		}
-
-		// Promote fields nested inside "raw_metadata" (the sensor-manager envelope)
-		// to the top level of RawData so inventory-service's certificate extractor
-		// can find the "certificates" array. This mirrors what extractCryptoDetails()
-		// already does for the external-connections path.
-		if finding.RawData != nil {
-			finding.RawData = flattenSensorDiscoveryMetadata(finding.RawData)
-		}
-
-		assetStatus := "pending_approval"
-		if autoApprove {
-			assetStatus = "monitoring"
-		}
-
-		if finding.RawData == nil {
-			finding.RawData = make(map[string]interface{})
-		}
-		finding.RawData["network_ownership"] = classification.Ownership
-		finding.RawData["network_type"] = classification.Type
 		if hostnameSourceKind != "" {
-			// inventory-service can also route a finding to
-			// external_connections from the INGEST side (AssetService's
-			// routeToExternalConnection), on its own classification rather than
-			// ours. A name that reached this row by reverse DNS must still be
-			// labelled an inference when it arrives there, or it outranks a
-			// stored measurement and we are back where we started by a
-			// different door.
+			// The name's provenance travels with it: a name that reached this
+			// row by reverse DNS must arrive at external_connections labelled
+			// an inference, or it outranks a stored measurement.
 			finding.RawData["dest_hostname_source_kind"] = hostnameSourceKind
 		}
 		if discovery.SourceIP != nil && *discovery.SourceIP != "" {
+			// The other end of the observed connection. inventory-service
+			// needs it to record a third-party connection, and drops a
+			// third-party finding without one ( D2).
 			finding.RawData["source_ip"] = *discovery.SourceIP
 		}
 
-		findingsWithStatus = append(findingsWithStatus, FindingWithStatus{
-			Finding:     *finding,
-			AssetStatus: assetStatus,
-			Discovery:   discovery,
-		})
+		entries = append(entries, importEntry{Finding: *finding, Discovery: discovery})
 
+		// The row's state until inventory-service answers. Rule decisions,
+		// effective statuses and outcomes are adopted from the import's
+		// per-finding results (importInChunks).
+		discovery.AutoApprovalRuleID = nil
 		if hostObservation {
 			// A host observation is identity evidence — "this device exists on
 			// a segment we watch" — not a cryptographic finding awaiting a
-			// human's approval. `assetStatus` above still decides what a NEW
-			// asset lands as; this is the separate, row-level answer to "does
-			// this discovery need an approval decision", and for a host
-			// observation the honest answer is that none will ever be made,
-			// whatever the resulting asset's own status is. `observed` says
-			// so as a terminal value, rather than leaving the row `pending`
-			// (or crediting a rule with `auto_approved`) where nothing —
-			// Discovery → Approvals included — will ever clear it.
+			// human's approval. `observed` says so as a terminal value, rather
+			// than leaving the row `pending` (or crediting a rule with
+			// `auto_approved`) where nothing — Discovery → Approvals included —
+			// will ever clear it.
 			discovery.ApprovalStatus = "observed"
-		} else if autoApprove && ruleID != nil {
-			discovery.ApprovalStatus = "auto_approved"
-			discovery.AutoApprovalRuleID = ruleID
 		} else {
 			discovery.ApprovalStatus = "pending"
 		}
@@ -435,7 +386,7 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 	// Counted so an operator can still see how much of a batch was host
 	// presence rather than cryptography — the number that was
 	// `host_observations_held`, now saying what actually happens to them.
-	ba.counts["host_observations_forwarded"] = countHostObservations(findingsWithStatus)
+	ba.counts["host_observations_forwarded"] = countHostObservations(entries)
 
 	now := time.Now()
 
@@ -445,194 +396,79 @@ func (p *BatchProcessor) ProcessBatch(batchID string, tenantID uuid.UUID) (err e
 	// see markProcessed. Rows that are NOT added here stay unprocessed and are
 	// re-polled.
 	marks := newProcessedMarks()
+	marks.follow(foldFollowers)
 
-	// --- External connections path ---
-	for _, entry := range externalEntries {
-		d := entry.Discovery
-		crypto := extractCryptoDetails(d.Metadata)
+	ba.counts["findings_forwarded"] = len(entries)
 
-		req := client.ExternalConnectionUpsert{
-			SourceIP: *d.SourceIP,
-			DestIP:   d.DestIP,
-			DestPort: d.Port,
-			Protocol: d.Protocol,
-			SensorID: &d.SensorID,
-		}
-		if sourceAssetID := sourceAssetIDFromMetadata(d.Metadata); sourceAssetID != nil {
-			req.SourceAssetID = sourceAssetID
-		}
-		if d.Hostname != nil {
-			req.DestHostname = d.Hostname
-			if entry.HostnameSourceKind != "" {
-				kind := entry.HostnameSourceKind
-				req.DestHostnameSourceKind = &kind
+	// A batch in which every row was skipped for its own content: each is
+	// already a permanent row failure, so record them (terminal, with the
+	// reason) and the batch is never claimed again.
+	if len(entries) == 0 {
+		return p.settleFailures(ctx, tenantID, batchID, ba, failures, foldFollowers, len(discoveries)+countFollowers(foldFollowers),
+			fmt.Errorf("%w for batch %s", ErrNoValidFindings, batchID))
+	}
+
+	findings := make([]converter.IngestFinding, len(entries))
+	rows := make([]*models.SensorDiscovery, len(entries))
+	for i, e := range entries {
+		findings[i] = e.Finding
+		rows[i] = e.Discovery
+	}
+
+	// A chunk that fails costs only its own rows: they become row failures,
+	// every other chunk is still imported, and the rows that landed are
+	// marked processed below ( F14).
+	importFailed := map[uuid.UUID]bool{}
+	summary, importErr := p.importInChunks(tenantID, uuid.New(), findings, rows)
+	var f *importFailures
+	if errors.As(importErr, &f) {
+		for _, rf := range f.rows {
+			importFailed[rf.id] = true
+			failures = append(failures, rf)
+			if rf.drop && errors.Is(rf.err, errThirdPartyNoSourceIP) {
+				// Counted, not only printed: a batch that dropped findings
+				// must say how many in its audit record.
+				ba.counts["third_party_dropped_no_source_ip"]++
 			}
 		}
-		if crypto != nil {
-			req.ProtocolVersion = crypto.ProtocolVersion
-			req.CipherSuite = crypto.CipherSuite
-			req.KeyExchangeAlgorithm = crypto.KeyExchangeAlgorithm
-			req.KeySize = crypto.KeySize
-			req.SupportedTLSVersions = crypto.SupportedTLSVersions
-			req.CertSubject = crypto.CertSubject
-			req.CertIssuer = crypto.CertIssuer
-			req.CertSAN = crypto.CertSAN
-			req.CertNotBefore = crypto.CertNotBefore
-			req.CertNotAfter = crypto.CertNotAfter
-			req.CertFingerprintSHA256 = crypto.CertFingerprintSHA256
-			req.CertPublicKeyAlgorithm = crypto.CertPublicKeyAlgorithm
-			req.CertPublicKeySize = crypto.CertPublicKeySize
-			req.CertSignatureAlgorithm = crypto.CertSignatureAlgorithm
-			req.CertValidationStatus = crypto.CertValidationStatus
-			req.CertPEM = crypto.CertPEM
-			req.CertHasSCT = crypto.CertHasSCT
-			req.CertSCTSource = crypto.CertSCTSource
-			req.CertKnownBadCA = crypto.CertKnownBadCA
-			req.CertNoSubject = crypto.CertNoSubject
-			req.CertNoCommonName = crypto.CertNoCommonName
-			req.CertIsEV = crypto.CertIsEV
-			req.CertLargeSANCount = crypto.CertLargeSANCount
-			req.OCSPStatus = crypto.OCSPStatus
-		}
+	}
+	ba.imported = summary.imported
+	ba.counts["import_failed"] = len(importFailed)
 
-		if err := p.inventoryClient.UpsertExternalConnection(tenantID, req); err != nil {
-			// Do NOT stamp processed_at here. A failed upsert means the
-			// connection was never recorded anywhere; marking the discovery
-			// processed would drop it permanently, so a transient
-			// inventory-service outage silently erased every third-party
-			// discovery in the batch. Leaving the row unprocessed lets the
-			// poller pick the batch up again.
-			externalFailed++
-			externalErr = err
-			fmt.Printf("Warning: failed to upsert external connection for discovery %s (left unprocessed for retry): %v\n", d.ID, err)
+	autoApproved := 0
+	for _, d := range rows {
+		if importFailed[d.ID] {
 			continue
 		}
-
-		marks.add(d.ID, "auto_approved", nil)
+		if d.ApprovalStatus == "auto_approved" {
+			autoApproved++
+		}
+		// d.AssetID is what adoptAssetID read off the import response — the
+		// asset this row actually landed on, or nil.
+		marks.addWithAsset(d.ID, d.ApprovalStatus, d.AutoApprovalRuleID, d.AssetID)
 	}
+	ba.counts["external_connections"] = summary.routed
+	ba.counts["auto_approved"] = autoApproved
 
-	ba.counts["internal_findings"] = len(findingsWithStatus)
-	ba.counts["external_connections"] = len(externalEntries) - externalFailed
-	ba.counts["external_failed"] = externalFailed
-
-	// --- Managed asset pipeline ---
-	// A batch of nothing but host observations was processed correctly — the
-	// rows are stored and deliberately not imported. Returning
-	// ErrNoValidFindings for it would mark a healthy batch permanently failed,
-	// because that sentinel is classified as terminal.
-	if len(findingsWithStatus) == 0 && len(externalEntries) == 0 {
-		return fmt.Errorf("%w for batch %s", ErrNoValidFindings, batchID)
-	}
-
-	if len(findingsWithStatus) > 0 {
-		monitoringFindings := []converter.IngestFinding{}
-		pendingFindings := []converter.IngestFinding{}
-		var monitoringDiscoveries []*models.SensorDiscovery
-		var pendingDiscoveries []*models.SensorDiscovery
-
-		for _, fws := range findingsWithStatus {
-			if fws.AssetStatus == "monitoring" {
-				monitoringFindings = append(monitoringFindings, fws.Finding)
-				monitoringDiscoveries = append(monitoringDiscoveries, fws.Discovery)
-			} else {
-				pendingFindings = append(pendingFindings, fws.Finding)
-				pendingDiscoveries = append(pendingDiscoveries, fws.Discovery)
-			}
-		}
-
-		ba.counts["monitoring"] = len(monitoringFindings)
-		ba.counts["pending_approval"] = len(pendingFindings)
-
-		batchJobID := uuid.New()
-		totalImported := 0
-
-		if len(monitoringFindings) > 0 {
-			imported, err := p.importInChunks(tenantID, batchJobID, monitoringFindings, monitoringDiscoveries, "monitoring")
-			totalImported += imported
-			ba.imported = totalImported
-			if err != nil {
-				// Flush what IS settled (the external connections already
-				// upserted above) before bailing, so the retry does not redo
-				// them.
-				p.markProcessed(ctx, tenantID, now, marks)
-				return fmt.Errorf("failed to import monitoring findings: %w", err)
-			}
-		}
-
-		if len(pendingFindings) > 0 {
-			imported, err := p.importInChunks(tenantID, batchJobID, pendingFindings, pendingDiscoveries, "pending_approval")
-			totalImported += imported
-			ba.imported = totalImported
-			if err != nil {
-				p.markProcessed(ctx, tenantID, now, marks)
-				return fmt.Errorf("failed to import pending findings: %w", err)
-			}
-		}
-
-		allDiscoveries := append(monitoringDiscoveries, pendingDiscoveries...)
-		for _, discovery := range allDiscoveries {
-			// discovery.AssetID is what adoptAssetID read off the import
-			// response — the asset this row actually landed on, or nil.
-			marks.addWithAsset(discovery.ID, discovery.ApprovalStatus, discovery.AutoApprovalRuleID, discovery.AssetID)
-		}
-
-		// "%d assets created/updated" is inventory-service's import counter: assets
-		// created + assets refreshed/status-changed + findings routed to
-		// external_connections. Pending-approval findings DO create assets — their
-		// certificates/crypto configurations are deferred into asset metadata until
-		// the asset is approved (Discovery → Approvals), so a batch that reports
-		// pending findings here has produced work even though the certificates and
-		// crypto_implementations tables stay empty.
-		deferredNote := ""
-		if len(pendingFindings) > 0 {
-			deferredNote = " — certs/crypto deferred until approval"
-		}
-		fmt.Printf("Successfully processed batch %s: %d internal findings (%d monitoring, %d pending approval%s), %d assets created/updated, %d external connections (%d failed)\n",
-			batchID, len(monitoringFindings)+len(pendingFindings), len(monitoringFindings), len(pendingFindings), deferredNote,
-			totalImported, len(externalEntries)-externalFailed, externalFailed)
-	} else {
-		// This branch means the batch produced no importable internal
-		// (managed-asset) findings — everything was classified third_party or
-		// held back as a host observation. Say which, rather than the old "0
-		// asset findings", which read as "the pipeline produced nothing" even
-		// when other batches were creating pending assets.
-		fmt.Printf("Successfully processed batch %s: no internal findings imported from this batch (%d external connection(s), %d failed)\n",
-			batchID, len(externalEntries)-externalFailed, externalFailed)
-	}
+	// "%d assets created/updated" is inventory-service's import counter: assets
+	// created + assets refreshed/status-changed + findings routed to
+	// external_connections. Pending-approval findings DO create assets — their
+	// certificates/crypto configurations are deferred until the asset is
+	// approved (Discovery → Approvals).
+	fmt.Printf("Successfully processed batch %s: %d finding(s) imported, %d assets created/updated or connections recorded (%d to external_connections), %d auto-approved, %d not landed\n",
+		batchID, len(entries), summary.imported, summary.routed, autoApproved, len(importFailed))
 
 	// One transaction, one UPDATE per distinct outcome — see markProcessed.
-	p.markProcessed(ctx, tenantID, now, marks)
-
-	if externalFailed > 0 {
-		// Their rows are still unprocessed. Report the batch as failed so the
-		// poller retries with backoff (and, if the failure is permanent,
-		// terminates it via markBatchAsFailed) rather than leaving the rows to
-		// be rediscovered every poll cycle forever.
-		return fmt.Errorf("%d of %d external connection upserts failed: %w",
-			externalFailed, len(externalEntries), externalErr)
+	if err := p.markProcessed(ctx, tenantID, now, marks); err != nil {
+		// The work landed but the rows could not be stamped, so they would be
+		// re-imported at every claim without ever ending. Charge each an attempt
+		// instead; the retry is transient (a database fault), so it backs off.
+		fmt.Printf("Warning: failed to mark discoveries processed for tenant %s (recorded on the rows for retry): %v\n", tenantID, err)
+		failures = append(failures, marks.failures(fmt.Errorf("mark processed: %w", err))...)
 	}
 
-	return nil
-}
-
-// claimsInterrogatedDevice reports whether a discovery row is a device
-// interrogation finding that names the device it was read from.
-//
-// This is a ROUTING hint, not a trust decision: it only keeps the row out of
-// the external-connections branch, which could not record it anyway (it has no
-// source IP). Whether the claim is honoured — whether the finding really lands
-// on that device — is decided by inventory-service against the database: the
-// row must have been written under the tenant's platform interrogation sensor
-// and the asset must exist. A row that fails that check takes inventory's
-// ordinary route.
-func claimsInterrogatedDevice(d *models.SensorDiscovery) bool {
-	metadata, ok := interrogationMetadata(d)
-	if !ok {
-		return false
-	}
-	value, _ := metadata["source_asset_id"].(string)
-	id, err := uuid.Parse(strings.TrimSpace(value))
-	return err == nil && id != uuid.Nil
+	// Then the rows that did not land, each on its own terms.
+	return p.settleFailures(ctx, tenantID, batchID, ba, failures, foldFollowers, len(discoveries)+countFollowers(foldFollowers)+len(scanFailures), nil)
 }
 
 // isInterrogationDiscovery reports whether a row was written by device
@@ -658,31 +494,64 @@ func interrogationMetadata(d *models.SensorDiscovery) (map[string]any, bool) {
 	return metadata, true
 }
 
-func sourceAssetIDFromMetadata(raw []byte) *uuid.UUID {
-	if len(raw) == 0 {
-		return nil
-	}
-	var metadata map[string]any
-	if json.Unmarshal(raw, &metadata) != nil {
-		return nil
-	}
-	if metadata["discovery_type"] != "host_connection" || metadata["discovery_method"] != "host_inventory" {
-		return nil
-	}
-	value, _ := metadata["source_asset_id"].(string)
-	id, err := uuid.Parse(strings.TrimSpace(value))
-	if err != nil {
-		return nil
-	}
-	return &id
+// importEntry pairs a converted finding with the row it came from.
+type importEntry struct {
+	Finding   converter.IngestFinding
+	Discovery *models.SensorDiscovery
 }
 
-// FindingWithStatus pairs a converted finding with the asset status
-// discovery-processor already decided for it and the row it came from.
-type FindingWithStatus struct {
-	Finding     converter.IngestFinding
-	AssetStatus string
-	Discovery   *models.SensorDiscovery
+// importFinding converts one row into the finding sent to inventory-service:
+// the converter over conversionView, then the envelope flatten
+// (flattenSensorDiscoveryMetadata), which promotes the nested raw_metadata so
+// inventory-service's certificate extractor and quality-flag reader find the
+// "certificates" array and the flags beside it, and upgrades the legacy flat
+// certificate shape. RawData is never nil on return.
+func (p *BatchProcessor) importFinding(d *models.SensorDiscovery) (*converter.IngestFinding, error) {
+	conv := p.converter
+	if conv == nil {
+		conv = converter.NewSensorDiscoveryConverter()
+	}
+	finding, err := conv.ToIngestFinding(conversionView(d))
+	if err != nil {
+		return nil, err
+	}
+	if finding.RawData != nil {
+		finding.RawData = flattenSensorDiscoveryMetadata(finding.RawData)
+	}
+	if finding.RawData == nil {
+		finding.RawData = make(map[string]interface{})
+	}
+	return finding, nil
+}
+
+// conversionView is the row the converter reads: for a row in the
+// sensor-manager envelope, the envelope merged with its nested raw_metadata
+// under the CLAUDE.md rule — outer keys win EXCEPT when empty. The converter's
+// own merge is outer-wins, so `"version": ""` on the envelope erased the
+// version the active enricher measured, and the finding reached inventory with
+// no protocol version. discovery-processor's deleted external-connections
+// writer read through this merge (extractCryptoDetails); with every row now
+// imported, the import must read through it too or third-party connections
+// lose their measured version ( WP3). Host observations keep their
+// own conversion, which already ignores empty values.
+func conversionView(d *models.SensorDiscovery) *models.SensorDiscovery {
+	if d == nil || len(d.Metadata) == 0 || isHostObservationDiscovery(d) {
+		return d
+	}
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(d.Metadata, &metadata); err != nil {
+		return d
+	}
+	if _, nested := metadata["raw_metadata"].(map[string]interface{}); !nested {
+		return d
+	}
+	flat, err := json.Marshal(flattenSensorDiscoveryEnvelope(metadata))
+	if err != nil {
+		return d
+	}
+	view := *d
+	view.Metadata = flat
+	return &view
 }
 
 // countHostObservations reports how many of a batch's findings are passive
@@ -702,30 +571,14 @@ type FindingWithStatus struct {
 // inventory-service branches on it before any of those three can happen. The
 // count stays because "how much of this batch was host presence" is still the
 // question an operator asks of a batch log.
-func countHostObservations(findings []FindingWithStatus) int {
+func countHostObservations(entries []importEntry) int {
 	n := 0
-	for _, fws := range findings {
-		if fws.Finding.Kind == converter.KindHostObservation {
+	for _, e := range entries {
+		if e.Finding.Kind == converter.KindHostObservation {
 			n++
 		}
 	}
 	return n
-}
-
-// approvalKindOf maps "is this a host observation" onto the `kind` vocabulary
-// the observation target publishes (shared/query/catalog/registrycatalog).
-//
-// Both values are STATED rather than one being left absent. A rule writer can
-// then say `kind:crypto` and mean it — where leaving the crypto path empty
-// would make that predicate Unknown for the very findings it names, which is
-// the "a check that cannot fire" shape. The paths that genuinely have no answer
-// (manual create, spreadsheet import, CMDB pull) are the ones that leave it
-// empty.
-func approvalKindOf(hostObservation bool) string {
-	if hostObservation {
-		return converter.KindHostObservation
-	}
-	return approval.KindCrypto
 }
 
 // processedMark is the row state a settled discovery should be stamped with.
@@ -743,6 +596,24 @@ type processedMarks struct {
 	// landed on one. Per-row rather than per-mark, so it cannot ride on the
 	// grouped UPDATE and gets its own statement — see markProcessed.
 	assets map[string]string
+	// followers are rows folded into another row (foldTLSEnrichmentPairs):
+	// whatever outcome the surviving row is stamped with, they are stamped
+	// with too — same status, same rule, same asset. A survivor that is left
+	// unprocessed leaves its followers unprocessed with it.
+	followers tlsFoldFollowers
+}
+
+// follow registers rows folded into others; see processedMarks.followers.
+func (m *processedMarks) follow(followers tlsFoldFollowers) {
+	m.followers = followers
+}
+
+func countFollowers(followers tlsFoldFollowers) int {
+	n := 0
+	for _, ids := range followers {
+		n += len(ids)
+	}
+	return n
 }
 
 func newProcessedMarks() *processedMarks {
@@ -761,9 +632,11 @@ func (m *processedMarks) addWithAsset(id uuid.UUID, approvalStatus string, ruleI
 	if _, seen := m.ids[key]; !seen {
 		m.order = append(m.order, key)
 	}
-	m.ids[key] = append(m.ids[key], id.String())
-	if assetID != nil && *assetID != uuid.Nil {
-		m.assets[id.String()] = assetID.String()
+	for _, rowID := range append([]uuid.UUID{id}, m.followers[id]...) {
+		m.ids[key] = append(m.ids[key], rowID.String())
+		if assetID != nil && *assetID != uuid.Nil {
+			m.assets[rowID.String()] = assetID.String()
+		}
 	}
 }
 
@@ -781,6 +654,20 @@ func (m *processedMarks) assetPairs() (discoveryIDs, assetIDs []string) {
 	return discoveryIDs, assetIDs
 }
 
+// failures turns every row the marks would have stamped into a retryable row
+// failure carrying cause.
+func (m *processedMarks) failures(cause error) []rowFailure {
+	var out []rowFailure
+	for _, key := range m.order {
+		for _, s := range m.ids[key] {
+			if id, err := uuid.Parse(s); err == nil {
+				out = append(out, rowFailure{id: id, err: cause})
+			}
+		}
+	}
+	return out
+}
+
 func (m *processedMarks) empty() bool { return len(m.order) == 0 }
 
 // markProcessed stamps every settled discovery in one transaction, with one
@@ -794,8 +681,10 @@ func (m *processedMarks) empty() bool { return len(m.order) == 0 }
 // lets the planner prune to the one partition that can hold the row, and
 // `id = ANY(...)` collapses a batch into a handful of statements.
 //
-// Failures are logged, not returned: the rows simply stay unprocessed and the
-// batch is re-polled, which is the same outcome the per-row version produced.
+// A failure is returned (one transaction: all or nothing) and the caller
+// records it on every row as a failed attempt, so rows that landed but could
+// not be stamped are retried a bounded number of times, not re-imported at
+// every claim for ever.
 // importChunkSize bounds how many findings go to inventory-service in one
 // import call.
 //
@@ -815,20 +704,28 @@ func (m *processedMarks) empty() bool { return len(m.order) == 0 }
 const importChunkSize = 50
 
 // importInChunks imports findings in importChunkSize-sized calls, returning
-// how many were imported before any error.
+// how many were imported.
 //
 // Chunks share the batch's job ID: inventory-service uses it only to stamp the
 // audit event, so one logical import stays one job in the audit trail.
 //
-// A chunk that fails abandons the rest — the caller retries the whole batch,
-// and the upserts on the far side are idempotent (proved in anger:'s
-// three concurrent imports of the same batch still produced exactly one crypto
-// implementation per endpoint). Re-importing a chunk that already landed is
-// wasted work, not corruption.
+// A chunk that fails costs only its own rows ( F14): they are reported in
+// an *importFailures error and every remaining chunk is still sent. The
+// caller records them per row — retried with backoff, terminal after the
+// retry policy's attempts — and marks every other row processed. It used to
+// abandon the rest of the batch on the first failed chunk, and the poller's
+// eventual markBatchAsFailed then rejected the rows of chunks that had never
+// been tried. Re-importing a chunk that already landed (a retried row whose
+// chunk-mates succeeded) is wasted work, not corruption: the upserts on the
+// far side are idempotent (proved in anger:'s three concurrent imports
+// of the same batch still produced exactly one crypto implementation per
+// endpoint).
+//
 // discoveries is index-aligned with findings: entry i is the row finding i was
 // converted from, and it is what adoptEffectiveStatus stamps.
-func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []converter.IngestFinding, discoveries []*models.SensorDiscovery, assetStatus string) (int, error) {
-	imported := 0
+func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []converter.IngestFinding, discoveries []*models.SensorDiscovery) (importSummary, error) {
+	var summary importSummary
+	failed := &importFailures{}
 	unknownOutcomes := map[string]int{}
 	defer func() {
 		// Loud, once per import, naming the value and how many rows carried it
@@ -838,16 +735,25 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 				outcome, n)
 		}
 	}()
+	failChunk := func(start, end int, err error) {
+		failed.add(err)
+		for i := start; i < end && i < len(discoveries); i++ {
+			if d := discoveries[i]; d != nil {
+				failed.rows = append(failed.rows, rowFailure{id: d.ID, err: err, permanent: isPermanentError(err)})
+			}
+		}
+	}
 	for start := 0; start < len(findings); start += importChunkSize {
 		end := start + importChunkSize
 		if end > len(findings) {
 			end = len(findings)
 		}
-		response, err := p.inventoryClient.ImportFindings(tenantID, jobID, findings[start:end], assetStatus)
+		response, err := p.inventoryClient.ImportFindings(tenantID, jobID, findings[start:end])
 		if err != nil {
-			return imported, fmt.Errorf("chunk %d-%d of %d: %w", start, end, len(findings), err)
+			failChunk(start, end, fmt.Errorf("chunk %d-%d of %d: %w", start, end, len(findings), err))
+			continue
 		}
-		imported += response.Imported
+		summary.imported += response.Imported
 		if end > len(discoveries) {
 			// The two slices are built side by side by the caller, so this
 			// cannot happen without a bug — and a silent no-op would leave
@@ -857,13 +763,34 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 				len(findings), len(discoveries))
 			continue
 		}
+		// The rule inventory-service credited, BEFORE the effective status:
+		// a rule that matched a finding whose asset turned out archived or
+		// denied must not overwrite the `suppressed` adoptEffectiveStatus
+		// stamps for it.
+		if len(response.Results) == end-start {
+			adoptAutoApprovalRules(discoveries[start:end], response.Results)
+		}
 		adoptEffectiveStatus(discoveries[start:end], response.AssetStatuses)
 		if len(response.Results) != 0 {
 			if len(response.Results) != end-start {
-				return imported, fmt.Errorf("inventory returned %d outcomes for %d findings", len(response.Results), end-start)
+				failChunk(start, end, fmt.Errorf("inventory returned %d outcomes for %d findings", len(response.Results), end-start))
+				continue
 			}
 			for i, result := range response.Results {
 				d := discoveries[start+i]
+				if result.Outcome == outcomeDropped {
+					// inventory-service recorded the finding nowhere, for a
+					// property of its own ( D2). Settled terminal with
+					// the reason, like any row skipped for its content; not
+					// a failure of the batch.
+					if d != nil {
+						failed.rows = append(failed.rows, rowFailure{id: d.ID, err: droppedReason(result.Reason), permanent: true, drop: true})
+					}
+					continue
+				}
+				if result.Outcome == outcomeRouted {
+					summary.routed++
+				}
 				adoptAssetID(d, result.AssetID)
 				if err := applyIngestOutcome(d, result); err != nil {
 					if errors.Is(err, errUnknownIngestOutcome) {
@@ -872,12 +799,66 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 						unknownOutcomes[result.Outcome]++
 						continue
 					}
-					return imported, err
+					// This row's outcome cannot be honoured; its chunk-mates'
+					// can. Only this row is retried.
+					failChunk(start+i, start+i+1, err)
 				}
 			}
 		}
 	}
-	return imported, nil
+	if len(failed.rows) == 0 && failed.first == nil {
+		return summary, nil
+	}
+	return summary, failed
+}
+
+// importSummary is what importInChunks' import calls reported.
+type importSummary struct {
+	// imported is inventory-service's import counter, summed.
+	imported int
+	// routed is how many findings it wrote to external_connections.
+	routed int
+}
+
+// Outcomes inventory-service stamps itself, beside the identity.Outcome set.
+const (
+	outcomeRouted  = "routed"
+	outcomeDropped = "dropped"
+	// dropReasonThirdPartyNoSourceIP is inventory-service's reason for a
+	// dropped third-party finding with no source address.
+	dropReasonThirdPartyNoSourceIP = "third_party_no_source_ip"
+)
+
+// droppedReason turns a dropped finding's reason into the error recorded on
+// its row.
+func droppedReason(reason string) error {
+	if reason == dropReasonThirdPartyNoSourceIP {
+		return errThirdPartyNoSourceIP
+	}
+	if reason == "" {
+		reason = "no reason given"
+	}
+	return fmt.Errorf("inventory-service dropped the finding: %s", reason)
+}
+
+// adoptAutoApprovalRules stamps the rows whose finding inventory-service
+// auto-approved by a tenant rule: `auto_approved`, crediting the rule.
+// inventory-service evaluates the rules now ( WP3); this is the half of
+// the old in-batch evaluation that stamped the row. results is index-aligned
+// with discoveries. A host observation keeps `observed` — its row never awaits
+// an approval decision, whichever status its asset landed on.
+func adoptAutoApprovalRules(discoveries []*models.SensorDiscovery, results []identity.IngestResult) {
+	for i, result := range results {
+		if i >= len(discoveries) || discoveries[i] == nil || isHostObservationDiscovery(discoveries[i]) {
+			continue
+		}
+		id, err := uuid.Parse(strings.TrimSpace(result.AutoApprovalRuleID))
+		if err != nil || id == uuid.Nil {
+			continue
+		}
+		discoveries[i].ApprovalStatus = "auto_approved"
+		discoveries[i].AutoApprovalRuleID = &id
+	}
 }
 
 // errUnknownIngestOutcome is what [applyIngestOutcome] reports for an outcome
@@ -926,7 +907,7 @@ func applyIngestOutcome(d *models.SensorDiscovery, result identity.IngestResult)
 			d.ApprovalStatus = "observed"
 			d.AutoApprovalRuleID = nil
 		}
-	case "routed":
+	case outcomeRouted:
 		// Not an identity.Outcome: asset_service stamps it itself for a
 		// finding it classified third-party, so there is no constant to
 		// name here.
@@ -982,6 +963,11 @@ func applyIngestOutcome(d *models.SensorDiscovery, result identity.IngestResult)
 		//
 		// Neither outcome is an approval, and neither arm claims one: no arm
 		// here ever writes `auto_approved`.
+	case outcomeDropped:
+		// Also inventory-service's own: the finding was recorded nowhere, for
+		// a reason of its own. importInChunks settles the row as a dropped
+		// row failure before this switch is reached; the arm is here so the
+		// outcome is never mistaken for one this build cannot interpret.
 	case "rejected":
 		// Also not an identity.Outcome: like "routed", asset_service stamps
 		// it for a finding it declined to materialize (the asset is archived
@@ -1086,9 +1072,9 @@ func adoptEffectiveStatus(discoveries []*models.SensorDiscovery, statuses []stri
 	}
 }
 
-func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, now time.Time, marks *processedMarks) {
+func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, now time.Time, marks *processedMarks) error {
 	if marks == nil || marks.empty() {
-		return
+		return nil
 	}
 
 	// RLS-scoped write on sensor_discoveries (security_invoker view over the
@@ -1103,7 +1089,8 @@ func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, 
 			}
 			if _, e := tx.ExecContext(ctx, `
 				UPDATE sensor_discoveries
-				SET processed_at = $1, approval_status = $2, auto_approval_rule_id = $3::uuid
+				SET processed_at = $1, approval_status = $2, auto_approval_rule_id = $3::uuid,
+				    process_error = NULL
 				WHERE tenant_id = $4 AND id = ANY($5::uuid[])`,
 				now, key.approvalStatus, ruleID, tenantID, pq.Array(ids),
 			); e != nil {
@@ -1128,129 +1115,7 @@ func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, 
 		}
 		return nil
 	})
-	if err != nil {
-		fmt.Printf("Warning: failed to mark discoveries processed for tenant %s: %v\n", tenantID, err)
-	}
-}
-
-// classifyNetwork classifies via inventory-service network-segments/classify-asset; falls back to RFC 1918 on error.
-// Returns one of three Ownership values:
-//   - "internal"    — IP (or, for a cloud discovery, the cloud segment) matches a known tenant segment
-//   - "third_party" — IP is a public internet address not in any registered segment
-//   - "unknown"     — IP is RFC 1918 private but not in any known segment
-//
-// cloud is non-nil only for cloud-API discoveries; see cloudResourceHint.
-func (p *BatchProcessor) classifyNetwork(tenantID uuid.UUID, ipAddress string, hostname *string, cloud *client.CloudResourceHint) *models.NetworkClassification {
-	classification := &models.NetworkClassification{
-		Type: "public",
-	}
-
-	resp, err := p.inventoryClient.ClassifyAsset(tenantID, ipAddress, hostname, cloud)
-	if err != nil {
-		// Fallback: RFC 1918 private → unknown (unregistered internal subnet),
-		// public → third_party.
-		ip := net.ParseIP(ipAddress)
-		if ip != nil && ip.IsPrivate() {
-			classification.Ownership = "unknown"
-			classification.Type = "private"
-		} else {
-			classification.Ownership = "third_party"
-		}
-		return classification
-	}
-
-	switch resp.Ownership {
-	case "internal":
-		classification.Ownership = "internal"
-	case "third_party":
-		classification.Ownership = "third_party"
-	default:
-		// inventory-service returned "unknown" or anything else — determine via RFC 1918
-		ip := net.ParseIP(ipAddress)
-		if ip != nil && ip.IsPrivate() {
-			classification.Ownership = "unknown"
-		} else {
-			classification.Ownership = "third_party"
-		}
-	}
-	classification.Type = resp.NetworkType
-	if classification.Type == "" {
-		if classification.Ownership == "internal" || classification.Ownership == "unknown" {
-			classification.Type = "private"
-		} else {
-			classification.Type = "public"
-		}
-	}
-	if resp.SegmentID != nil && *resp.SegmentID != "" {
-		if id, err := uuid.Parse(*resp.SegmentID); err == nil {
-			classification.SegmentID = &id
-		}
-	}
-	classification.SegmentName = resp.SegmentName
-	return classification
-}
-
-// cloudResourceHint extracts the cloud account/region/VPC a discovery came
-// from, or nil if it is not a cloud-API discovery (or is one that named no
-// region — older rows, before the writer stamped cloud_region).
-//
-// This is the fix for the placeholder address. A cloud resource's ownership
-// cannot be read off its IP: a KMS key, a bucket or a managed database has no
-// address at all, so the writer stores an unspecified-address placeholder, and
-// an unspecified address is neither RFC 1918 nor in any CIDR segment — it
-// classified as third_party and was then forced to "unknown", which no segment
-// rule can match. The account and region the resource lives in are what
-// actually say whose it is, and they are already on the row.
-func cloudResourceHint(discovery *models.SensorDiscovery) *client.CloudResourceHint {
-	if discovery == nil || len(discovery.Metadata) == 0 {
-		return nil
-	}
-	var metadata map[string]interface{}
-	if err := json.Unmarshal(discovery.Metadata, &metadata); err != nil {
-		return nil
-	}
-	if method, _ := metadata["discovery_method"].(string); method != "cloud_api" {
-		return nil
-	}
-	provider, _ := metadata["cloud_provider"].(string)
-	region, _ := metadata["cloud_region"].(string)
-	if provider == "" || region == "" {
-		return nil
-	}
-	vpcID, _ := metadata["vpc_id"].(string)
-	env, _ := metadata["environment"].(string)
-	return &client.CloudResourceHint{
-		Provider:    provider,
-		Region:      region,
-		VPCID:       vpcID,
-		Environment: env,
-	}
-}
-
-// shouldKeepCloudPlaceholderManaged returns true for cloud API discoveries that
-// represent non-network resources (KMS keys, storage buckets, SQL databases)
-// rather than an observed network connection. WriteSensorDiscoveries uses an
-// unspecified IP placeholder for those rows; routing them to the third-party
-// connection path would require source_ip and drop/reject the asset instead of
-// importing it.
-func shouldKeepCloudPlaceholderManaged(discovery *models.SensorDiscovery, classification *models.NetworkClassification) bool {
-	if discovery == nil || classification == nil || classification.Ownership != "third_party" {
-		return false
-	}
-	if discovery.SourceIP != nil && *discovery.SourceIP != "" {
-		return false
-	}
-	ip := net.ParseIP(discovery.DestIP)
-	if ip == nil || !ip.IsUnspecified() {
-		return false
-	}
-
-	var metadata map[string]interface{}
-	if err := json.Unmarshal(discovery.Metadata, &metadata); err != nil {
-		return false
-	}
-	method, _ := metadata["discovery_method"].(string)
-	return method == "cloud_api"
+	return err
 }
 
 // resolveMissingHostname fills a discovery's absent hostname, preferring the

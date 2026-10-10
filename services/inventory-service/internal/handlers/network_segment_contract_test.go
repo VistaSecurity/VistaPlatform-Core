@@ -44,8 +44,6 @@ type stubNetworkSegmentService struct {
 	updateInput  models.NetworkSegmentInput // what the handler handed to Update
 	deleteErr    error
 	// cloud classification (B-49)
-	cloudSegment    *models.NetworkSegment
-	cloudSegmentErr error
 	// claim ( D8)
 	claimResult  *models.NetworkSegment
 	claimChanged bool
@@ -75,17 +73,8 @@ func (s *stubNetworkSegmentService) Update(_ uuid.UUID, _ uuid.UUID, in models.N
 }
 func (s *stubNetworkSegmentService) Delete(uuid.UUID, uuid.UUID) error                  { return s.deleteErr }
 func (s *stubNetworkSegmentService) ManageAutoApprovalRules(uuid.UUID, uuid.UUID) error { return nil }
-func (s *stubNetworkSegmentService) GetSegmentForIP(uuid.UUID, *string, *string) (*models.NetworkSegment, error) {
-	return nil, nil
-}
-func (s *stubNetworkSegmentService) ClassifyAsset(uuid.UUID, *string, *string, []string) (string, error) {
-	return "", nil
-}
-func (s *stubNetworkSegmentService) FindOrCreateCloudSegment(uuid.UUID, string, string, string, string) (*models.NetworkSegment, error) {
-	return s.cloudSegment, s.cloudSegmentErr
-}
-func (s *stubNetworkSegmentService) ReclassifyAllAssets(uuid.UUID) (int, error)      { return 0, nil }
-func (s *stubNetworkSegmentService) MigrateFromNetworkSpaces(uuid.UUID) (int, error) { return 0, nil }
+func (s *stubNetworkSegmentService) ReclassifyAllAssets(uuid.UUID) (int, error)         { return 0, nil }
+func (s *stubNetworkSegmentService) MigrateFromNetworkSpaces(uuid.UUID) (int, error)    { return 0, nil }
 func (s *stubNetworkSegmentService) Claim(uuid.UUID, uuid.UUID, uuid.UUID, string) (*models.NetworkSegment, bool, error) {
 	return s.claimResult, s.claimChanged, s.claimErr
 }

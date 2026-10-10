@@ -248,17 +248,31 @@ func TestIntegration_CryptoMaterialization_DedupsWhenComponentsAreNull(t *testin
 	}
 }
 
+// deferredFindings is what deferred_crypto_findings holds, unreplayed, for
+// the asset, oldest first.
 func deferredFindings(t *testing.T, svc *AssetService, tenant, asset uuid.UUID) []IngestFinding {
 	t.Helper()
-	var metadataJSON []byte
-	if err := svc.db.QueryRow(
-		`SELECT COALESCE(metadata->'deferred_findings', '[]'::jsonb) FROM assets WHERE id = $1 AND tenant_id = $2`,
-		asset, tenant).Scan(&metadataJSON); err != nil {
+	rows, err := svc.db.Query(
+		`SELECT finding FROM deferred_crypto_findings WHERE tenant_id = $1 AND asset_id = $2 AND replayed_at IS NULL ORDER BY last_seen_at, created_at, id`,
+		tenant, asset)
+	if err != nil {
 		t.Fatalf("read deferred findings: %v", err)
 	}
+	defer func() { _ = rows.Close() }()
 	var out []IngestFinding
-	if err := json.Unmarshal(metadataJSON, &out); err != nil {
-		t.Fatalf("unmarshal deferred findings: %v", err)
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatalf("scan deferred finding: %v", err)
+		}
+		var f IngestFinding
+		if err := json.Unmarshal(raw, &f); err != nil {
+			t.Fatalf("unmarshal deferred finding: %v", err)
+		}
+		out = append(out, f)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read deferred findings: %v", err)
 	}
 	return out
 }
@@ -267,7 +281,8 @@ func deferredFindings(t *testing.T, svc *AssetService, tenant, asset uuid.UUID) 
 // the bug: while an asset waits in Discovery → Approvals, every ingest used to
 // append the ENTIRE finding — certificate PEM chains and all — to its metadata,
 // rewriting the whole JSONB document each time and firing all of them in one
-// burst on approval.
+// burst on approval. The store is deferred_crypto_findings now ( F8); the
+// dedup holds there.
 func TestIntegration_DeferredFindings_DedupBeforeAppend(t *testing.T) {
 	svc, tenant, _, pending := newDedupFixture(t)
 
@@ -275,7 +290,7 @@ func TestIntegration_DeferredFindings_DedupBeforeAppend(t *testing.T) {
 	// differs every time, which is precisely why a whole-blob comparison would
 	// dedup nothing.
 	for i := 0; i < 10; i++ {
-		svc.storeDeferredFinding(tenant, pending, tlsFinding(time.Now().Add(time.Duration(i)*time.Hour)))
+		svc.deferCryptoFinding(tenant, pending, tlsFinding(time.Now().Add(time.Duration(i)*time.Hour)))
 	}
 
 	stored := deferredFindings(t, svc, tenant, pending)
@@ -286,13 +301,13 @@ func TestIntegration_DeferredFindings_DedupBeforeAppend(t *testing.T) {
 	// A genuinely different observation still lands.
 	other := tlsFinding(time.Now())
 	other.CipherSuite = strPtr("TLS_RSA_WITH_AES_128_CBC_SHA")
-	svc.storeDeferredFinding(tenant, pending, other)
+	svc.deferCryptoFinding(tenant, pending, other)
 	if stored = deferredFindings(t, svc, tenant, pending); len(stored) != 2 {
 		t.Fatalf("a genuinely different pending observation gave %d deferred findings, want 2", len(stored))
 	}
 
 	// Approving materializes one configuration per distinct deferred finding —
-	// not one per observation — and clears the array.
+	// not one per observation — and marks every held row replayed.
 	if err := svc.ApproveAssets(tenant, []uuid.UUID{pending}, uuid.Nil); err != nil {
 		t.Fatalf("ApproveAssets: %v", err)
 	}
@@ -305,23 +320,23 @@ func TestIntegration_DeferredFindings_DedupBeforeAppend(t *testing.T) {
 }
 
 // TestIntegration_DeferredFindings_Capped proves the backstop against unbounded
-// JSONB growth holds even when every observation IS distinct.
+// growth holds even when every observation IS distinct: newest wins.
 func TestIntegration_DeferredFindings_Capped(t *testing.T) {
 	svc, tenant, _, pending := newDedupFixture(t)
 
-	for i := 0; i < maxDeferredFindings+10; i++ {
+	for i := 0; i < maxDeferredCryptoRows+10; i++ {
 		f := tlsFinding(time.Now())
 		size := 1024 + i // a different key size each time: genuinely distinct
 		f.KeySize = &size
-		svc.storeDeferredFinding(tenant, pending, f)
+		svc.deferCryptoFinding(tenant, pending, f)
 	}
 
 	stored := deferredFindings(t, svc, tenant, pending)
-	if len(stored) != maxDeferredFindings {
-		t.Fatalf("stored %d deferred findings, want the cap of %d", len(stored), maxDeferredFindings)
+	if len(stored) != maxDeferredCryptoRows {
+		t.Fatalf("stored %d deferred findings, want the cap of %d", len(stored), maxDeferredCryptoRows)
 	}
 	// Oldest dropped, newest kept.
-	if stored[len(stored)-1].KeySize == nil || *stored[len(stored)-1].KeySize != 1024+maxDeferredFindings+9 {
+	if stored[len(stored)-1].KeySize == nil || *stored[len(stored)-1].KeySize != 1024+maxDeferredCryptoRows+9 {
 		t.Errorf("newest deferred finding was not retained: %v", stored[len(stored)-1].KeySize)
 	}
 }

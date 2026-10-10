@@ -180,11 +180,21 @@ func ClampClassProposalPage(limit, offset int) (int, int) {
 	return limit, offset
 }
 
+// classProposalPredicate selects the proposals that still need a reviewer. The
+// NOT EXISTS drops one whose proposed class the asset ALREADY holds — raised
+// before a promotion, a decision or a declaration put it there — because asking
+// a reviewer to approve what the asset already is, is noise. A conflict
+// proposal names no class (its proposed key is empty), so it can never match.
 const classProposalPredicate = `
 	tenant_id = $1
 	AND action = 'class_proposed'
 	AND changes_json->>'kind' = 'class_proposal'
-	AND COALESCE(changes_json->>'status', 'pending') = 'pending'`
+	AND COALESCE(changes_json->>'status', 'pending') = 'pending'
+	AND NOT EXISTS (
+		SELECT 1 FROM assets a
+		 WHERE a.tenant_id = asset_history.tenant_id
+		   AND a.id = asset_history.asset_id
+		   AND a.class_key = asset_history.changes_json->>'proposed_class_key')`
 
 // ListPending returns one page of pending class proposals, newest first, and
 // the TOTAL the page was cut from.

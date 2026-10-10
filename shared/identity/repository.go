@@ -645,6 +645,16 @@ type Repository interface {
 	// reported by the write, not re-derived.
 	UpsertEndpoints(ctx context.Context, asset AssetRef, eps []EndpointObservation) (changed int, err error)
 
+	// ReconcileSourceEndpoints closes the asset's endpoints one source
+	// recorded (source ref starting with sourcePrefix) that are absent from
+	// observed — compared by [EndpointObservation.Key] — and were last seen
+	// no later than at. Closed means status `closed`: never deleted (crypto
+	// configurations, external connections and ssh keys point at the rows)
+	// and last-seen left alone (this observation did not see them). It
+	// returns the keys it closed, sorted. See [CompleteEndpointSet]; the
+	// engine is its only caller.
+	ReconcileSourceEndpoints(ctx context.Context, asset AssetRef, sourcePrefix string, observed []EndpointObservation, at time.Time) (closed []string, err error)
+
 	// Touch advances the asset's last-seen. It never moves it backwards: a
 	// late-arriving old observation is still evidence the asset existed then,
 	// not evidence it has not been seen since.

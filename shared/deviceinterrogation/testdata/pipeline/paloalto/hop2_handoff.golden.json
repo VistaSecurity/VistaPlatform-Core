@@ -1,9 +1,8 @@
 {
   "vendor": "paloalto",
-  "input_sha256": "2712ba40582aa8154e31b6510018756aa2ecdbdf2658123846a0775a87bbfc89",
+  "input_sha256": "4b57a22269f0fb06b6b19c4851504ca7414a8bdc80005f2159367aa332ca3d0b",
   "imports": [
     {
-      "asset_status": "pending_approval",
       "findings": [
         {
           "asset_type": "server",
@@ -27,8 +26,6 @@
             "device_job_id": "{{DEVICE_JOB_ID}}",
             "discovery_id": "{{DISCOVERY_ID:0}}",
             "discovery_method": "device_interrogation",
-            "network_ownership": "third_party",
-            "network_type": "public",
             "pqc_kex_detected": false,
             "sensor_id": "{{SENSOR_ID}}",
             "source": "device_interrogation",
@@ -64,8 +61,6 @@
             "device_job_id": "{{DEVICE_JOB_ID}}",
             "discovery_id": "{{DISCOVERY_ID:1}}",
             "discovery_method": "device_interrogation",
-            "network_ownership": "third_party",
-            "network_type": "public",
             "pqc_kex_detected": false,
             "profile_name": "ssl-fwd-proxy-default",
             "sensor_id": "{{SENSOR_ID}}",
@@ -83,7 +78,6 @@
       ]
     }
   ],
-  "external_connections": [],
   "rows": [
     {
       "row": 0,
@@ -118,6 +112,24 @@
           "value": "{{APPLIANCE_IP}}",
           "scope": "tenant",
           "source_kind": "declared"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:0a:0b:0c",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:0a:0b:0d",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:0a:0b:0f",
+          "scope": null,
+          "source_kind": "measured"
         },
         {
           "kind": "serial_number",

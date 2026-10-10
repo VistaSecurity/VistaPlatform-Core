@@ -49,7 +49,7 @@ Azure Load Balancer (Standard and Basic SKUs).
 
 - **Discovery**: Enumerates keys across every Key Vault in the subscription (`armkeyvault` management plane)
 - **Interrogation**: Per key — key type/size/curve normalized to a canonical key spec (RSA-2048/3072/4096, ECC P-256/384/521, etc.), key state (enabled/disabled), protection level (software vs **HSM**), rotation-policy presence, and creation time
-- Keys are written to the `kms_keys` inventory (provider `azure`) and surface as cryptographic-key assets
+- Keys are recorded in the key inventory (**Inventory → Keys**, provider `azure`), which also creates each key's **Key Store** Infrastructure Asset
 - **Note:** key *metadata* only — Key Vault does not expose key material, and the platform does not retrieve it
 
 #### Storage Account Encryption (at-rest)
@@ -479,7 +479,7 @@ Minimum Azure RBAC permissions for discovery:
 |----------|--------|-------|
 | Application Gateway | ✅ Implemented | Full SSL policy extraction + TLS handshake certificate chain |
 | Load Balancer | ✅ Implemented | Public IP detection, L4 TLS inferred |
-| Key Vault keys | ✅ Implemented | Key-management inventory (spec, state, rotation, HSM) → `kms_keys` |
+| Key Vault keys | ✅ Implemented | Key-management inventory (spec, state, rotation, HSM) → Inventory → Keys |
 | Storage accounts | ✅ Implemented | At-rest encryption posture (Microsoft-managed vs CMK) |
 | SQL Database (TDE) | ✅ Implemented | Per-database TDE; service-managed vs Key Vault CMK |
 | Front Door | 🚧 Planned | Structure ready |

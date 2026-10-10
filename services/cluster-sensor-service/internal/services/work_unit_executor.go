@@ -36,11 +36,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
+	"github.com/vistasecurity/vistaplatform/shared/events"
 	"github.com/vistasecurity/vistaplatform/shared/jobunits"
 )
 
@@ -449,7 +451,7 @@ func (jp *JobProcessor) claimUnit(job *models.DiscoveryJob, u jobUnit, t *planTa
 func (r *planRun) commitUnit(u jobUnit, t *planTarget, attempt int, out shareddisc.UnitOutput) error {
 	jp, job := r.jp, r.job
 	unit := jobunits.Unit{ID: u.ID, JobID: job.ID, TenantID: job.TenantID, TargetID: t.rowID, TargetInput: t.input, Address: u.Address, Hostname: t.hostname}
-	return jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
+	err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
 		return jobunits.Commit(tx, unit, out, jobunits.CommitOptions{
 			From: unitRunning, Attempt: attempt, ActiveScan: r.activeScan,
 			MirrorSensorID: func(jobunits.Tx) (string, error) { return jp.platformSensorIDTx(tx, job.TenantID) },
@@ -458,4 +460,15 @@ func (r *planRun) commitUnit(u jobUnit, t *planTarget, attempt int, out shareddi
 			},
 		})
 	})
+	if err != nil {
+		return err
+	}
+	// The unit's findings are committed and mirrored into sensor_discoveries
+	// under the job's id: wake discovery-processor now rather than leaving the
+	// host's findings to its fallback poll. After the commit, never inside it
+	// (jobunits.Commit runs in the caller's transaction and must not publish).
+	if tenant, perr := uuid.Parse(job.TenantID); perr == nil {
+		_ = events.PublishDiscoveryQueueReady(context.Background(), jp.queuePublisher, tenant, job.ID, "cluster-sensor.commit_unit")
+	}
+	return nil
 }

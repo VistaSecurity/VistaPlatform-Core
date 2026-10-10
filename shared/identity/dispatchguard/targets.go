@@ -10,6 +10,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/shared/autoscan"
 	"github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/network/addrscope"
 )
 
 // Target authorization — the check that applies to EVERY dispatch, not just the
@@ -51,7 +52,7 @@ var reservedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),       // "this network" / unspecified
 	netip.MustParsePrefix("127.0.0.0/8"),     // loopback
 	netip.MustParsePrefix("169.254.0.0/16"),  // link-local, incl. 169.254.169.254
-	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 carrier-grade NAT
+	addrscope.CGNATRange(),                   // RFC 6598 carrier-grade NAT
 	netip.MustParsePrefix("192.0.0.0/24"),    // IETF protocol assignments
 	netip.MustParsePrefix("192.0.2.0/24"),    // documentation
 	netip.MustParsePrefix("198.51.100.0/24"), // documentation
@@ -122,7 +123,7 @@ func reservedReason(p netip.Prefix) (string, bool) {
 		return "link-local addresses include the cloud instance-metadata service (169.254.169.254)", true
 	case "fe80::/10", "fec0::/10":
 		return "link-local addresses are never scanned", true
-	case "100.64.0.0/10":
+	case addrscope.CGNATRange().String():
 		return "carrier-grade NAT space is shared between operators; register it as a network segment if it really is yours", true
 	case "192.0.0.0/24":
 		return "IETF protocol-assignment space is not a host range", true
@@ -143,12 +144,10 @@ func reservedReason(p netip.Prefix) (string, bool) {
 // address in particular — has to be inside a network segment the tenant
 // explicitly registered as theirs, which is the statement of ownership this
 // code requires before the platform will send a packet at it.
-var privatePrefixes = []netip.Prefix{
-	netip.MustParsePrefix("10.0.0.0/8"),
-	netip.MustParsePrefix("172.16.0.0/12"),
-	netip.MustParsePrefix("192.168.0.0/16"),
-	netip.MustParsePrefix("fc00::/7"),
-}
+//
+// The ranges are addrscope's ( F3): one definition for classification,
+// automatic scanning, probe consent and this guard.
+var privatePrefixes = addrscope.PrivateRanges()
 
 // TargetScope is one tenant's scannable address space at one moment.
 type TargetScope struct {

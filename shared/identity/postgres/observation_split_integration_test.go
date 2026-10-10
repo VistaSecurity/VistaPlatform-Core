@@ -131,6 +131,28 @@ func (f *splitFixture) payloadRow(obs identity.Observation) string {
 	return id
 }
 
+// deferralHold holds a discovery finding for the receipt the way
+// inventory-service does under identity admission (deferred_crypto_findings,
+// keyed by the receipt in dedup_key, F8), and deferralHoldRow reads which
+// observation it is held under now.
+func (f *splitFixture) deferralHold(observationID string, obs identity.Observation) {
+	f.t.Helper()
+	if _, err := f.db.Exec(`INSERT INTO deferred_crypto_findings(tenant_id,observation_id,dedup_key,finding) VALUES($1,$2,$3,'{}')`,
+		f.tenant, observationID, identity.ObservationReceiptKey(obs)); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *splitFixture) deferralHoldRow(obs identity.Observation) string {
+	f.t.Helper()
+	var id string
+	if err := f.db.QueryRow(`SELECT observation_id::text FROM deferred_crypto_findings WHERE tenant_id=$1 AND dedup_key=$2`,
+		f.tenant, identity.ObservationReceiptKey(obs)).Scan(&id); err != nil {
+		f.t.Fatal(err)
+	}
+	return id
+}
+
 // TestIntegration_ObservationSplit_NewSightingElsewhereSplitsTheRow: the same
 // frame resolved to A, then — a new sighting — to B. It must not fail, and
 // must not move what A's row already holds: A's receipt and the payload
@@ -148,6 +170,7 @@ func TestIntegration_ObservationSplit_NewSightingElsewhereSplitsTheRow(t *testin
 	first := f.sighting(f.now.Add(-2 * time.Hour))
 	row, _ := f.resolve(first, f.a)
 	f.retainPayload(row, first)
+	f.deferralHold(row, first)
 	original := f.row(row)
 
 	second := f.sighting(f.now.Add(-time.Hour))
@@ -172,6 +195,9 @@ func TestIntegration_ObservationSplit_NewSightingElsewhereSplitsTheRow(t *testin
 	}
 	if got := f.payloadRow(first); got != row {
 		t.Errorf("A's retained payload moved to %s; context retained under A's resolution must stay with A", got)
+	}
+	if got := f.deferralHoldRow(first); got != row {
+		t.Errorf("A's held crypto finding moved to %s; evidence held under A's resolution must stay with A", got)
 	}
 	for _, ref := range []identity.AssetRef{f.a, f.b} {
 		if n := f.historyKinds(ref, "observation_split"); n != 1 {
@@ -307,6 +333,7 @@ func TestIntegration_ObservationSplit_OperatorLinkIsNeverMovedByTheEngine(t *tes
 		f.resolve(second, f.a)
 		confirm(f, row)
 		f.retainPayload(row, second)
+		f.deferralHold(row, second)
 
 		_, settled := f.resolve(second, f.b) // a replay, on a confirmed row
 
@@ -318,6 +345,9 @@ func TestIntegration_ObservationSplit_OperatorLinkIsNeverMovedByTheEngine(t *tes
 		}
 		if got := f.payloadRow(second); got != settled {
 			t.Errorf("the replayed sighting's payload is on %s; context retained under a receipt follows the receipt (%s)", got, settled)
+		}
+		if got := f.deferralHoldRow(second); got != settled {
+			t.Errorf("the replayed sighting's held crypto finding is on %s; it follows its receipt (%s)", got, settled)
 		}
 		var confirmedBy sql.NullString
 		if err := f.db.QueryRow(`SELECT confirmed_by::text FROM identity_observations WHERE tenant_id=$1 AND id=$2`,

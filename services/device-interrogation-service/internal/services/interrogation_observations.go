@@ -251,6 +251,15 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 		}
 	}
 
+	// The device owns every interface MAC it reports, so a sensor hearing it
+	// from another interface matches it instead of "replacing" it.
+	if selfDue && obs.producer() == facts.ProducerDeviceInterrogation {
+		if err := s.persistInterfaceMACs(ctx, tenantID, assetID, source, at, wrapped.Facts); err != nil {
+			errs = append(errs, err)
+			pass.fail(selfPeerKey)
+		}
+	}
+
 	obs.DeviceIdentity, obs.Facts, obs.Relationships = wrapped.DeviceIdentity, wrapped.Facts, wrapped.Relationships
 	ctx, retained, err := s.preparePeerContext(ctx, tenantID, assetID, source, at, obs)
 	if err != nil {
@@ -389,6 +398,11 @@ func (s *ObservationSink) persistIdentity(
 			// — a duplicate of this one. Not sent; the next interrogation of a
 			// device that has an identifier sends it.
 			log.Printf("[ObservationSink] serial %q read from asset %s not sent: the asset holds no identifier to bind it to", serial, self.ID)
+			return errors.Join(errs...)
+		}
+		if assetOwns(known, identity.KindSerialNumber, serial) {
+			// Already the device's: a sighting would add only a retained
+			// observation row per run (its source is the job).
 			return errors.Join(errs...)
 		}
 		_, res, err := postSighting(ctx, s.db, selfIdentitySighting(tenantID, source, at, serial, known))

@@ -20,6 +20,24 @@
           "source_kind": "declared"
         },
         {
+          "kind": "mac_address",
+          "value": "00:1b:17:0a:0b:0c",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:0a:0b:0d",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "00:1b:17:0a:0b:0f",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
           "kind": "serial_number",
           "value": "013201001234",
           "scope": null,

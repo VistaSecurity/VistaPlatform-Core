@@ -20,6 +20,24 @@
           "source_kind": "declared"
         },
         {
+          "kind": "mac_address",
+          "value": "4c:77:ab:cd:12:12",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "74:ad:ab:cd:dc:ba",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
+          "kind": "mac_address",
+          "value": "c4:f7:d5:14:69:00",
+          "scope": null,
+          "source_kind": "measured"
+        },
+        {
           "kind": "serial_number",
           "value": "REDACTEDSN5",
           "scope": null,

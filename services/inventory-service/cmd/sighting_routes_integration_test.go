@@ -25,6 +25,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/handlers"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identitytest/intakematrix"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -373,5 +374,63 @@ func TestIntegration_SightingRoute_HearsayPeerInheritsItsSegmentsSite(t *testing
 	post()
 	if _, loc, site := placement(created.AssetID); loc != "" || site != "Curated" {
 		t.Errorf("curated asset placement = (%s, %q), want it left at (\"\", \"Curated\")", loc, site)
+	}
+}
+
+// Evidence the engine links to an established asset but writes nothing from
+// (platform ADR-0003 D2) has to say so in the route's answer: a caller across
+// the route (host inventory's endpoint sweep, in device-interrogation-service)
+// otherwise reads it as an ordinary link and treats the run as materialized.
+// Mutation: drop EvidenceHeld from SightingResult's construction in
+// IngestSightings, or from Resolution.IngestResult → red.
+func TestIntegration_SightingRoute_HeldEvidenceSaysSo(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	tenant := testdb.NewTenant(t, raw)
+	f := intakematrix.Setup(t, raw, tenant)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	r := gin.New()
+	mountSightingRoutes(r, handlers.NewSightingHandler(services.NewAssetService(db)), sourceTestSecret)
+
+	// Hearsay about the fixture's established gateway, carrying a socket it
+	// does not have: linked to the gateway, and held.
+	body, err := json.Marshal(map[string]any{"sightings": []identity.Sighting{{
+		Source:  identity.Source{Kind: identity.SourceMeasured, Ref: "interrogation"},
+		Channel: identity.ChannelRelayed, ObservedAt: f.Now,
+		Identifiers: []identity.SightedIdentifier{
+			{Kind: identity.KindHostname, Value: intakematrix.AssetName},
+			{Kind: identity.KindIPAddress, Value: intakematrix.TenantAddr},
+		},
+		Endpoints: []identity.EndpointObservation{{Address: intakematrix.TenantAddr, Port: 9443, Transport: "tcp"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, sightingsPath, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(serviceauth.HeaderTenantID, tenant.String())
+	serviceauth.NewSigner(sourceTestSecret).SignRequest(req)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	var resp struct {
+		Results []services.SightingResult `json:"results"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &resp) != nil || len(resp.Results) != 1 {
+		t.Fatalf("call = %d %s", w.Code, w.Body.String())
+	}
+	got := resp.Results[0]
+	if got.Outcome != string(identity.OutcomeSupporting) || got.AssetID != f.Asset.String() {
+		t.Fatalf("advert = %+v, want supporting evidence for %s", got, f.Asset)
+	}
+	var ports int
+	if err := raw.QueryRow(`SELECT count(*) FROM asset_endpoints WHERE tenant_id=$1 AND asset_id=$2 AND port=9443`, tenant, f.Asset).Scan(&ports); err != nil {
+		t.Fatal(err)
+	}
+	if ports != 0 {
+		t.Fatalf("the engine wrote %d held endpoint(s); this test assumes it holds them", ports)
+	}
+	if !got.EvidenceHeld {
+		t.Errorf("advert = %+v, want evidence_held: the engine wrote nothing from it", got)
 	}
 }

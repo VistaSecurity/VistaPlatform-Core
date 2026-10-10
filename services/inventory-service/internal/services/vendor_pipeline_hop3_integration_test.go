@@ -16,11 +16,6 @@ package services
 // Output: hop3_inventory.golden.json, a summary of the inventory, and the
 // per-vendor claims in vendorPipelineHop3Claims.
 //
-// It also holds hop 2's one stand-in honest: hop 2 classifies addresses with
-// a fake of inventory's classify-asset endpoint, and here the REAL
-// NetworkSegmentService.ClassifyAsset, over the same segments, must agree
-// with every answer it gave.
-//
 // Skips without TEST_DATABASE_URL.
 
 import (
@@ -114,7 +109,9 @@ func ingestVendorHop2(t *testing.T, db *database.DB, s pipelinetest.Scenario, ho
 	t.Helper()
 	tenant := testdb.NewTenant(t, db.DB.DB)
 	svc := NewAssetService(db)
-	segments := NewNetworkSegmentService(db, nil)
+	// Wired as cmd/main.go wires it, so the import classifies over the
+	// segments seeded below — the one classifier ( WP3).
+	svc.SetEnrichmentServices(NewNetworkSegmentService(db, nil), nil)
 
 	// The tenant as hop 1 left it: its registered networks and the segments
 	// the interrogation learned.
@@ -189,23 +186,13 @@ func ingestVendorHop2(t *testing.T, db *database.DB, s pipelinetest.Scenario, ho
 			if err := json.Unmarshal(one, &csf); err != nil {
 				t.Fatalf("a finding hop 2 posted does not decode as the handler decodes it: %v", err)
 			}
-			f := csf.ToIngestFinding()
-			// Hop 2 classified this address with a stand-in; the real
-			// classifier must agree, or hop 2's golden describes a pipeline
-			// that does not exist.
-			said, _ := f.RawData["network_ownership"].(string)
-			real, err := segments.ClassifyAsset(tenant, f.IPAddress, f.Hostname, nil)
-			if err != nil {
-				t.Fatalf("ClassifyAsset: %v", err)
-			}
-			if said != real {
-				t.Errorf("hop 2's classify stand-in said %q for %v, the real classifier says %q", said, hop3Str(f.IPAddress), real)
-			}
-			findings = append(findings, f)
+			findings = append(findings, csf.ToIngestFinding())
 		}
-		report, err := svc.IngestFindingsReport(tenant, findings, req.AssetStatus)
+		// The pipeline import: classification and the tenant's auto-approval
+		// rules run here, over the segments seeded above ( WP3).
+		report, err := svc.IngestPipelineFindingsReport(tenant, findings)
 		if err != nil {
-			t.Fatalf("IngestFindingsReport: %v", err)
+			t.Fatalf("IngestPipelineFindingsReport: %v", err)
 		}
 		for _, r := range report.Results {
 			outcomes = append(outcomes, string(r.Outcome))
@@ -309,13 +296,6 @@ func insertPipelineAssets(t *testing.T, db *database.DB, tenant, device uuid.UUI
 		}
 	}
 	return labels
-}
-
-func hop3Str(p *string) string {
-	if p == nil {
-		return "<nil>"
-	}
-	return *p
 }
 
 // summariseInventory reads the tenant's inventory the way a tenant sees it.

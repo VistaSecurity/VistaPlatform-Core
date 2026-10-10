@@ -55,7 +55,7 @@ func (e *Engine) resolveConfirmedLink(ctx context.Context, obs Observation, obse
 	// A previous human link never licenses stealing or ignoring another owner.
 	owners := map[string][]AssetRef{}
 	for _, id := range ids {
-		refs, err := e.repo.FindByIdentifier(ctx, obs.TenantID, id.Kind, id.Value, id.Scope)
+		refs, err := e.ownersOf(ctx, obs.TenantID, id)
 		if err != nil {
 			return nil, err
 		}

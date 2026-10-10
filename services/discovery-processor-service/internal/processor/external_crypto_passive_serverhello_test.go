@@ -10,7 +10,7 @@ import (
 // version and suite in the sensor's TOP-LEVEL Version / CipherSuite — which
 // sensor-manager's StoreDiscoveries promotes onto the envelope — and its
 // certificate chain inside raw_metadata. These pin that shape end to end
-// through extractCryptoDetails, and that a ClientHello-only discovery (the
+// through the import (routeWriterViewOf), and that a ClientHello-only discovery (the
 // only shape a sensor that never saw the ServerHello produces) yields no
 // version or suite rather than an empty one.
 
@@ -28,7 +28,7 @@ func passiveEnvelope(version, cipher string, raw map[string]interface{}) []byte 
 }
 
 func TestExtractCryptoDetails_PassiveServerHelloEnvelope(t *testing.T) {
-	d := extractCryptoDetails(passiveEnvelope("TLS 1.2", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", map[string]interface{}{
+	d := routeWriterViewOf(t, passiveEnvelope("TLS 1.2", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", map[string]interface{}{
 		"session_id":             "s1",
 		"reassembled":            true,
 		"handshake_types":        []interface{}{"ClientHello", "ServerHello", "Certificate"},
@@ -56,7 +56,7 @@ func TestExtractCryptoDetails_PassiveServerHelloEnvelope(t *testing.T) {
 }
 
 func TestExtractCryptoDetails_PassiveClientHelloOnlyEnvelopeInventsNothing(t *testing.T) {
-	d := extractCryptoDetails(passiveEnvelope("", "", map[string]interface{}{
+	d := routeWriterViewOf(t, passiveEnvelope("", "", map[string]interface{}{
 		"handshake_types":            []interface{}{"ClientHello"},
 		"sni":                        "ws.example.com",
 		"client_max_offered_version": "TLS 1.3",

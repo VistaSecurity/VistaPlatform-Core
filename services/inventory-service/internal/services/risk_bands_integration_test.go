@@ -168,8 +168,8 @@ func TestIntegration_RiskSummary_BucketsAreExclusiveAndExhaustive(t *testing.T) 
 		}
 		for _, score := range sc.scores {
 			if _, err := db.Exec(`
-				INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, discovery_method, risk_score, created_at, updated_at)
-				VALUES ($1,$2,$3,'TLS','passive',$4,NOW(),NOW())`,
+				INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, cipher_suite, discovery_method, risk_score, created_at, updated_at)
+				VALUES ($1,$2,$3,'TLS','fixture-' || $1::uuid::text,'passive',$4,NOW(),NOW())`,
 				uuid.New(), tenant, assetID, score); err != nil {
 				t.Fatalf("insert impl %d for %s: %v", score, sc.name, err)
 			}

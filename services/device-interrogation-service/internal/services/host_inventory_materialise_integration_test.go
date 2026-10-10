@@ -1096,8 +1096,10 @@ func endpointRows(t *testing.T, db *sql.DB, tenantID uuid.UUID, assetID string) 
 // `closed`, never DELETE: crypto_implementations, external_connections and
 // ssh_keys all reference endpoint rows, and the history is the point besides.
 //
-// Mutation check: delete the closeAbsentEndpoints call and the retired socket
-// stays `active`; make the endpoint source ref stable per-agent instead of
+// Mutation check: stop sending the sighting's EndpointsComplete marker (the
+// materialise step), or delete the ReconcileSourceEndpoints call in the
+// engine's applyToAsset ( WP7: the engine closes them now, inside its
+// transaction), and the retired socket stays `active`; make the endpoint source ref stable per-agent instead of
 // per-run and NOTHING is ever closed, which is the vacuously-false-test trap
 // the install sweep documents.
 func TestIntegration_HostInventory_Materialises_AbsentListenerIsClosed(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,8 +122,11 @@ type asset struct {
 	identOrder     []string
 	endpoints      map[string]identity.EndpointObservation
 	epOrder        []string
-	firstSeen      time.Time
-	lastSeen       time.Time
+	// closedEndpoints are the endpoint keys ReconcileSourceEndpoints closed
+	// (`asset_endpoints.status = 'closed'`); an upsert reopens one.
+	closedEndpoints map[string]bool
+	firstSeen       time.Time
+	lastSeen        time.Time
 	// segment and attributes travel with the asset because a merge candidate's
 	// SUMMARY carries them (identity.AssetSummary): the matcher seam compares
 	// the segment and the comparable class attributes, and a fake that cannot
@@ -384,6 +388,7 @@ func (a *asset) putEndpoint(ep identity.EndpointObservation) bool {
 		a.epOrder = append(a.epOrder, k)
 	}
 	a.endpoints[k] = ep
+	delete(a.closedEndpoints, k)
 	return changed
 }
 
@@ -433,6 +438,56 @@ func (r *Repository) UpsertEndpoints(_ context.Context, ref identity.AssetRef, e
 		}
 	}
 	return changed, nil
+}
+
+// ReconcileSourceEndpoints implements identity.Repository, with
+// [postgres.Repository.ReconcileSourceEndpoints]'s rules: only the source's own
+// endpoints (source ref under sourcePrefix), only those absent from observed,
+// only those last seen no later than at; closed, never removed.
+func (r *Repository) ReconcileSourceEndpoints(_ context.Context, ref identity.AssetRef, sourcePrefix string, observed []identity.EndpointObservation, at time.Time) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", identity.ErrAssetNotFound, ref.ID)
+	}
+	if strings.TrimSpace(sourcePrefix) == "" {
+		return nil, fmt.Errorf("memory: ReconcileSourceEndpoints: empty source prefix")
+	}
+	keep := make(map[string]bool, len(observed))
+	for _, ep := range observed {
+		keep[ep.Sanitized().Key()] = true
+	}
+	var closed []string
+	for _, k := range a.epOrder {
+		ep := a.endpoints[k]
+		if keep[k] || a.closedEndpoints[k] || !strings.HasPrefix(ep.Source.Ref, sourcePrefix) || ep.SeenAt.After(at) {
+			continue
+		}
+		if a.closedEndpoints == nil {
+			a.closedEndpoints = map[string]bool{}
+		}
+		a.closedEndpoints[k] = true
+		closed = append(closed, k)
+	}
+	sort.Strings(closed)
+	return closed, nil
+}
+
+// ClosedEndpoints returns the keys of an asset's closed endpoints, sorted.
+func (r *Repository) ClosedEndpoints(ref identity.AssetRef) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.assets[assetKey(ref.TenantID, ref.ID)]
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(a.closedEndpoints))
+	for k := range a.closedEndpoints {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Touch implements identity.Repository.

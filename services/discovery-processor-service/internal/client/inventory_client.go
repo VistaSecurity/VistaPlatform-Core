@@ -96,90 +96,14 @@ func NewInventoryClient(cfg *config.Config) (*InventoryClient, error) {
 	}, nil
 }
 
-// ExternalConnectionUpsert is the payload sent to inventory-service POST /external-connections.
-// Mirrors models.ExternalConnectionUpsert in inventory-service.
-type ExternalConnectionUpsert struct {
-	SourceIP       string     `json:"source_ip"`
-	SourceHostname *string    `json:"source_hostname,omitempty"`
-	SourceAssetID  *uuid.UUID `json:"source_asset_id,omitempty"`
-	DestIP         string     `json:"dest_ip"`
-	DestHostname   *string    `json:"dest_hostname,omitempty"`
-	// DestHostnameSourceKind states where DestHostname came from, in the
-	// ADR-0005 vocabulary: "measured" for a name read off the wire (the TLS
-	// SNI, a name the host announced), "inferred" for a reverse-DNS guess.
-	// inventory-service refuses an inference that would overwrite a stored
-	// measurement, which is what stops a generic cloud PTR replacing the
-	// vhost the client actually asked for.
-	DestHostnameSourceKind *string    `json:"dest_hostname_source_kind,omitempty"`
-	DestPort               int        `json:"dest_port"`
-	Protocol               string     `json:"protocol"`
-	ProtocolVersion        *string    `json:"protocol_version,omitempty"`
-	CipherSuite            *string    `json:"cipher_suite,omitempty"`
-	KeyExchangeAlgorithm   *string    `json:"key_exchange_algorithm,omitempty"`
-	KeySize                *int       `json:"key_size,omitempty"`
-	SupportedTLSVersions   []string   `json:"supported_tls_versions,omitempty"`
-	SensorID               *uuid.UUID `json:"sensor_id,omitempty"`
-
-	// Certificate fields
-	CertSubject            *string    `json:"cert_subject,omitempty"`
-	CertIssuer             *string    `json:"cert_issuer,omitempty"`
-	CertSAN                []string   `json:"cert_san,omitempty"`
-	CertNotBefore          *time.Time `json:"cert_not_before,omitempty"`
-	CertNotAfter           *time.Time `json:"cert_not_after,omitempty"`
-	CertFingerprintSHA256  *string    `json:"cert_fingerprint_sha256,omitempty"`
-	CertPublicKeyAlgorithm *string    `json:"cert_public_key_algorithm,omitempty"`
-	CertPublicKeySize      *int       `json:"cert_public_key_size,omitempty"`
-	CertSignatureAlgorithm *string    `json:"cert_signature_algorithm,omitempty"`
-	CertValidationStatus   *string    `json:"cert_validation_status,omitempty"`
-	CertPEM                *string    `json:"cert_pem,omitempty"`
-
-	// Sensor-level certificate quality flags
-	CertHasSCT        *bool   `json:"cert_has_sct,omitempty"`
-	CertSCTSource     *string `json:"cert_sct_source,omitempty"`
-	CertKnownBadCA    *string `json:"cert_known_bad_ca,omitempty"`
-	CertNoSubject     bool    `json:"cert_no_subject,omitempty"`
-	CertNoCommonName  bool    `json:"cert_no_common_name,omitempty"`
-	CertIsEV          bool    `json:"cert_is_ev,omitempty"`
-	CertLargeSANCount *int    `json:"cert_large_san_count,omitempty"`
-	OCSPStatus        *string `json:"ocsp_status,omitempty"`
-}
-
-// UpsertExternalConnection calls POST /api/v2/inventory-service/external-connections
-// to record a 3rd party TLS/crypto connection observed by a sensor.
-func (c *InventoryClient) UpsertExternalConnection(tenantID uuid.UUID, req ExternalConnectionUpsert) error {
-	url := fmt.Sprintf("%s/api/v2/inventory-service/external-connections", c.baseURL)
-	jsonData, err := json.Marshal(req)
-	if err != nil {
-		return fmt.Errorf("marshal external connection upsert: %w", err)
-	}
-	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Tenant-ID", tenantID.String())
-	serviceauth.SignRequestFromEnv(httpReq)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("send external connection upsert: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return &HTTPStatusError{
-			StatusCode: resp.StatusCode,
-			Op:         "inventory-service external-connections",
-			Body:       string(body),
-		}
-	}
-	return nil
-}
-
-// ImportFindingsRequest represents the request body for importing findings
+// ImportFindingsRequest represents the request body for importing findings.
+//
+// It carries no status. inventory-service classifies each finding and
+// evaluates the tenant's auto-approval rules itself ( WP3); the
+// per-finding results say what each landed as and which rule, if any,
+// approved it.
 type ImportFindingsRequest struct {
-	Findings    []converter.IngestFinding `json:"findings"`
-	AssetStatus *string                   `json:"asset_status,omitempty"` // "monitoring" or "pending_approval"
+	Findings []converter.IngestFinding `json:"findings"`
 }
 
 // ImportFindingsResponse represents the response from importing findings
@@ -199,84 +123,14 @@ type ImportFindingsResponse struct {
 	AssetStatuses []string `json:"asset_statuses,omitempty"`
 }
 
-// ClassifyResponse is the response from POST network-segments/classify-asset
-type ClassifyResponse struct {
-	SegmentID   *string `json:"segment_id,omitempty"` // UUID string when segment matched
-	SegmentName *string `json:"segment_name,omitempty"`
-	Ownership   string  `json:"ownership"`
-	NetworkType string  `json:"network_type"`
-}
-
-// CloudResourceHint identifies the cloud account/region/VPC a discovery came
-// from. Present only for cloud-API discoveries, where it — not the address —
-// is what ownership resolves from.
-type CloudResourceHint struct {
-	Provider    string
-	Region      string
-	VPCID       string
-	Environment string
-}
-
-// ClassifyAsset calls POST /api/v2/inventory-service/network-segments/classify-asset with HMAC and X-Tenant-ID.
-// cloud may be nil; when set, inventory-service classifies by cloud segment rather than by address.
-func (c *InventoryClient) ClassifyAsset(tenantID uuid.UUID, ipAddress string, hostname *string, cloud *CloudResourceHint) (*ClassifyResponse, error) {
-	url := fmt.Sprintf("%s/api/v2/inventory-service/network-segments/classify-asset", c.baseURL)
-	reqBody := map[string]interface{}{"ip_address": ipAddress}
-	if hostname != nil {
-		reqBody["hostname"] = *hostname
-	}
-	if cloud != nil {
-		reqBody["cloud_provider"] = cloud.Provider
-		reqBody["cloud_region"] = cloud.Region
-		reqBody["vpc_id"] = cloud.VPCID
-		reqBody["environment"] = cloud.Environment
-	}
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Tenant-ID", tenantID.String())
-	serviceauth.SignRequestFromEnv(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, &HTTPStatusError{
-			StatusCode: resp.StatusCode,
-			Op:         "inventory-service classify-asset",
-			Body:       string(body),
-		}
-	}
-	var result ClassifyResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-	return &result, nil
-}
-
 // ImportFindings calls the inventory-service API to import findings
 // Note: Uses /api/v1 prefix for service-to-service calls with internal headers
-func (c *InventoryClient) ImportFindings(tenantID, jobID uuid.UUID, findings []converter.IngestFinding, assetStatus string) (*ImportFindingsResponse, error) {
+func (c *InventoryClient) ImportFindings(tenantID, jobID uuid.UUID, findings []converter.IngestFinding) (*ImportFindingsResponse, error) {
 	// Use the same route as gateway: /api/v1/inventory-service/discovery/jobs/:id/import
 	url := fmt.Sprintf("%s/api/v1/inventory-service/discovery/jobs/%s/import", c.baseURL, jobID.String())
 
 	reqBody := ImportFindingsRequest{
 		Findings: findings,
-	}
-	if assetStatus != "" {
-		reqBody.AssetStatus = &assetStatus
 	}
 
 	jsonData, err := json.Marshal(reqBody)

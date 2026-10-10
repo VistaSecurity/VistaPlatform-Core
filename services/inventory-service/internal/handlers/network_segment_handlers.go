@@ -28,9 +28,6 @@ type networkSegmentService interface {
 	Claim(tenantID, id, userID uuid.UUID, fallbackName string) (*models.NetworkSegment, bool, error)
 	RevokeClaim(tenantID, id uuid.UUID) (*models.NetworkSegment, map[string]interface{}, error)
 	ManageAutoApprovalRules(tenantID, userID uuid.UUID) error
-	GetSegmentForIP(tenantID uuid.UUID, ipAddress *string, hostname *string) (*models.NetworkSegment, error)
-	ClassifyAsset(tenantID uuid.UUID, ipAddress *string, hostname *string, fqdns []string) (string, error)
-	FindOrCreateCloudSegment(tenantID uuid.UUID, cloudProvider, cloudRegion, vpcID, environment string) (*models.NetworkSegment, error)
 	ReclassifyAllAssets(tenantID uuid.UUID) (int, error)
 	MigrateFromNetworkSpaces(tenantID uuid.UUID) (int, error)
 }
@@ -409,68 +406,6 @@ func auditSegmentClaim(c *gin.Context, eventType string, seg *models.NetworkSegm
 			"source_asset_id":    seg.Metadata["source_asset_id"],
 			"claim":              claim,
 		})
-}
-
-// ClassifyAsset handles POST /inventory-service/network-segments/classify-asset
-func (h *NetworkSegmentHandler) ClassifyAsset(c *gin.Context) {
-	tenantID, ok := getTenantID(c)
-	if !ok {
-		return
-	}
-	var req models.ClassifyAssetRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-
-	// A cloud-API resource is classified by the account/region/VPC it lives in,
-	// not by its address. Most of them have no address — the discovery carries a
-	// placeholder — and the ones that do have a public address would classify as
-	// third_party even though they are the tenant's own resources, pulled with
-	// the tenant's own credentials. The segment resolved here is the same one
-	// the import path attributes the asset to (FindOrCreateCloudSegment), so
-	// classification and attribution cannot disagree.
-	if req.CloudProvider != "" && req.CloudRegion != "" {
-		env := req.Environment
-		if env == "" {
-			env = "production"
-		}
-		seg, err := h.segmentService.FindOrCreateCloudSegment(tenantID, req.CloudProvider, req.CloudRegion, req.VPCID, env)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to classify asset"})
-			return
-		}
-		if seg != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"segment":      seg,
-				"ownership":    "internal",
-				"segment_id":   seg.ID,
-				"segment_name": seg.Name,
-				"network_type": seg.NetworkType,
-			})
-			return
-		}
-	}
-
-	seg, err := h.segmentService.GetSegmentForIP(tenantID, req.IPAddress, req.Hostname)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to classify asset"})
-		return
-	}
-	ownership, err := h.segmentService.ClassifyAsset(tenantID, req.IPAddress, req.Hostname, nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to classify asset"})
-		return
-	}
-	resp := gin.H{"segment": seg, "ownership": ownership}
-	if seg != nil {
-		resp["segment_id"] = seg.ID
-		resp["segment_name"] = seg.Name
-		resp["network_type"] = seg.NetworkType
-	} else {
-		resp["network_type"] = "public"
-	}
-	c.JSON(http.StatusOK, resp)
 }
 
 // ReclassifyAllAssets handles POST /inventory-service/network-segments/reclassify-all

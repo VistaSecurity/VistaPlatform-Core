@@ -71,8 +71,9 @@ type Rule struct {
 // Ownership has three values:
 //   - "internal"    — IP belongs to a known tenant network segment
 //   - "third_party" — IP is a public internet address outside any registered segment
-//   - "unknown"     — IP is RFC 1918 private but not in any registered segment
-//     (may be an unregistered internal subnet)
+//   - "unknown"     — IP is private by address class or carrier-grade NAT
+//     (addrscope.IsTenantAddressable) but not in any registered segment (may
+//     be an unregistered internal subnet or overlay)
 //
 // Only "third_party" discoveries are routed to the external connections path.
 // "unknown" private addresses still go through the managed asset pipeline.

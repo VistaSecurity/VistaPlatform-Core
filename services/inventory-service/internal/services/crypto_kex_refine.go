@@ -51,6 +51,7 @@ package services
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -114,6 +115,38 @@ const kexCompatibleRowsSQL = `
 		   AND (hash_algorithm       IS NULL OR $9::text     IS NULL OR hash_algorithm       = $9::text)
 		   AND (key_size             IS NULL OR $10::integer IS NULL OR key_size             = $10::integer)
 		 ORDER BY first_discovered_at ASC, id ASC`
+
+// findKeyExchangeTwinSQL locates the live row, other than $2, that already
+// holds the natural key row $2 would have once its key exchange became $3:
+// the same (asset, endpoint, protocol, primary method) and the same six other
+// components, compared null-safely as the unique index compares them.
+//
+// Refining is a key change, so it can meet a row that already carries the
+// group: two label spellings (ECDHE, ECDHE_RSA) of one endpoint refined to the
+// same group, or a label row beside a row a measuring producer wrote under the
+// same method. Rewriting the label row would then violate
+// uq_crypto_implementations_natural_key; it is the same configuration, so it
+// is folded into the row that already has the group instead.
+const findKeyExchangeTwinSQL = `
+		SELECT t.id
+		  FROM crypto_implementations s
+		  JOIN crypto_implementations t
+		    ON t.tenant_id = s.tenant_id
+		   AND t.asset_id = s.asset_id
+		   AND t.endpoint_id IS NOT DISTINCT FROM s.endpoint_id
+		   AND t.protocol = s.protocol
+		   AND t.protocol_version     IS NOT DISTINCT FROM s.protocol_version
+		   AND t.cipher_suite         IS NOT DISTINCT FROM s.cipher_suite
+		   AND t.signature_algorithm  IS NOT DISTINCT FROM s.signature_algorithm
+		   AND t.symmetric_encryption IS NOT DISTINCT FROM s.symmetric_encryption
+		   AND t.hash_algorithm       IS NOT DISTINCT FROM s.hash_algorithm
+		   AND t.key_size             IS NOT DISTINCT FROM s.key_size
+		   AND t.key_exchange_algorithm = $3::text
+		   AND t.discovery_method = s.discovery_method
+		 WHERE s.tenant_id = $1 AND s.id = $2
+		   AND t.id <> s.id AND t.deleted_at IS NULL
+		 ORDER BY t.first_discovered_at ASC, t.id ASC
+		 LIMIT 1`
 
 // refineKeyExchangeSQL replaces a row's family-label key exchange with the
 // measured group.
@@ -207,8 +240,23 @@ func refineCryptoKeyExchange(tx *sqlx.Tx, tenantID uuid.UUID, k *cryptoImplement
 			kex := c.kex
 			switch {
 			case isSuiteKeyExchangeLabel(&kex):
-				if _, err := tx.Exec(refineKeyExchangeSQL, c.id, group); err != nil {
-					return false, fmt.Errorf("refine key exchange of crypto implementation %s: %w", c.id, err)
+				var twin uuid.UUID
+				err := tx.QueryRow(findKeyExchangeTwinSQL, tenantID, c.id, group).Scan(&twin)
+				switch {
+				case err == nil:
+					// Already held under the group: fold the label row into
+					// it, then repair the twin's links below exactly as the
+					// already-refined case does.
+					if err := foldCryptoImplementation(tx, tenantID, c.id, twin); err != nil {
+						return false, err
+					}
+					c.id = twin
+				case errors.Is(err, sql.ErrNoRows):
+					if _, err := tx.Exec(refineKeyExchangeSQL, c.id, group); err != nil {
+						return false, fmt.Errorf("refine key exchange of crypto implementation %s: %w", c.id, err)
+					}
+				default:
+					return false, fmt.Errorf("look up key-exchange twin of crypto implementation %s: %w", c.id, err)
 				}
 			case strings.EqualFold(kex, group):
 				// Already refined: repair a label link that reached it later.

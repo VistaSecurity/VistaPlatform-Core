@@ -23,7 +23,12 @@ func StartIdentityEvidenceWorker(ctx context.Context, bypass *sql.DB, sweeper Id
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
-		rows, err := bypass.QueryContext(ctx, `SELECT tenant_id FROM identity_observations UNION SELECT tenant_id FROM asset_merge_audits WHERE events_published_at IS NULL AND pending_events <> '[]'::jsonb ORDER BY tenant_id`)
+		// A tenant with crypto held for an asset is swept even if it has no
+		// identity observation (admission disabled stores none): the replay of
+		// deferred_crypto_findings lives in the same pass.
+		rows, err := bypass.QueryContext(ctx, `SELECT tenant_id FROM identity_observations
+			UNION SELECT tenant_id FROM deferred_crypto_findings WHERE replayed_at IS NULL
+			UNION SELECT tenant_id FROM asset_merge_audits WHERE events_published_at IS NULL AND pending_events <> '[]'::jsonb ORDER BY tenant_id`)
 		if err != nil {
 			log.Printf("[IdentityEvidence] enumerate tenants: %v", err)
 		} else {

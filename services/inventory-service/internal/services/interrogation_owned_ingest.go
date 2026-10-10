@@ -291,11 +291,11 @@ func (s *AssetService) attachToInterrogatedDevice(
 		// Written before the deferral too: an engine match on a pending asset
 		// writes its endpoint at once, and the replay at approval looks the
 		// endpoint up rather than creating it.
-		if err := s.attachFindingEndpoint(ctx, tenantID, current, owned); err != nil {
+		if err := s.attachDecidedFindingEndpoint(ctx, tenantID, current, owned, identity.DecidedByInterrogatedDevice); err != nil {
 			return err
 		}
 		if status != identity.StatusMonitoring {
-			s.storeDeferredFinding(tenantID, current, owned)
+			s.deferCryptoFinding(tenantID, current, owned)
 			return nil
 		}
 		return onMaterialize(current, owned)

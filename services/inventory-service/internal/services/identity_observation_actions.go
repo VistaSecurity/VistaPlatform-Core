@@ -380,9 +380,9 @@ func (s *AssetService) DecideIdentityObservation(ctx context.Context, tenant, id
 			}
 			// The decision attaches the evidence (platform ADR-0003 D2): the
 			// observation's sockets become the asset's endpoints now, and the
-			// recorded outcome lets the retained-evidence worker materialise
-			// its payload onto them.
-			if err := attachObservationEndpoints(ctx, repo, identity.AssetRef{TenantID: tenant.String(), ID: assetID}, obs, seen); err != nil {
+			// recorded outcome lets the deferred-crypto replay materialise the
+			// findings held for it onto them (deferred_crypto.go).
+			if err := attachObservationEndpoints(ctx, repo, identity.AssetRef{TenantID: tenant.String(), ID: assetID}, obs, seen, identity.DecidedByOperatorLink); err != nil {
 				return err
 			}
 			if err := repo.SetResolutionOutcome(ctx, tenant.String(), id.String(), decisionOutcome(action)); err != nil {
@@ -608,7 +608,7 @@ func (s *AssetService) joinConfirmedSibling(ctx context.Context, repo *pgidentit
 // supporting evidence the engine linked to an established asset but held
 // (platform ADR-0003 D2). The operator's decision is the attachment the engine
 // declined to make: the observation's sockets become the asset's endpoints,
-// and its retained payload becomes eligible for the materialisation worker.
+// and the findings held for it become eligible for the deferred-crypto replay.
 // Nothing about identity changes — the observation already belongs to this
 // asset, and an advertised alias still does not become an identifier.
 func (s *AssetService) attachHeldEvidence(ctx context.Context, repo *pgidentity.Repository, tenant, id, actor uuid.UUID, action string, input ObservationDecisionInput, assetID, state string, raw []byte, seen time.Time, result *identity.IngestResult) error {
@@ -628,7 +628,7 @@ func (s *AssetService) attachHeldEvidence(ctx context.Context, repo *pgidentity.
 		return err
 	}
 	obs.TenantID = tenant.String()
-	if err := attachObservationEndpoints(ctx, repo, identity.AssetRef{TenantID: tenant.String(), ID: assetID}, obs, seen); err != nil {
+	if err := attachObservationEndpoints(ctx, repo, identity.AssetRef{TenantID: tenant.String(), ID: assetID}, obs, seen, identity.DecidedByOperatorLink); err != nil {
 		return err
 	}
 	if err := repo.SetResolutionOutcome(ctx, tenant.String(), id.String(), decisionOutcome(action)); err != nil {

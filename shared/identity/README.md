@@ -68,6 +68,26 @@ consent rule reads "a spreadsheet has listed it" off the timeline. `created`,
 `approved`, `merge_proposed`, merges and identity-status transitions are not
 affected.
 
+**An intake that must decide before resolving reads the owners once.** A path
+that needs to know what an observation's identifiers already belong to before
+anything is written (inventory-service's ingest: a denied asset is only touched,
+a non-elevated third-party endpoint goes to `external_connections`, a
+suppressed fingerprint is not re-created) calls `Engine.SnapshotOwners(ctx, obs)`
+on the engine's transaction, decides on the result, and resolves with
+`engine.WithOwnerSnapshot(snap).Resolve(ctx, obs)`. The snapshot is taken under
+the same identifier locks `Resolve` takes (it re-takes them; transaction-scoped
+advisory locks allow that), and the engine consults it only for the owner reads
+it makes before its first write — the precedence walk, pinned and lease-fresh
+addresses, confirmed links. The hearsay-yield and operator-scan re-runs read
+afresh. Each identifier is looked up once per observation, not once by the
+intake and again by the engine (#2374 F5).
+
+**A new asset has ONE `created` row.** The engine writes it (class, identifiers,
+endpoints); an intake that also applies context to the asset on the same
+transaction (inventory-service's `applyAssetContext`: tags, attributes,
+metadata, ownership) folds those keys into that row instead of writing a second
+`created` row (#2374 F6).
+
 ### Building the observation: `Intake`
 
 An intake path should not decide scopes, `DynamicScopes` or admission flags
@@ -870,6 +890,7 @@ In the table, "host key" in the Different column means `differ` unless noted.
 |---|---|---|---|---|
 | `hardware_id_kept_key_changed` | serial / agent / cloud id | host key | **rotated** | match; retire old key; `ssh_host_key_rotated` |
 | `address_kept_hardware_changed` | IP | MAC (host key differs or unknown) | **replaced** | merge proposal (the singleton-conflict path, as before) |
+| `name_kept_hardware_and_address_changed` | hostname / FQDN | MAC and IP (the IP is new beside a live one, or absent; no serial / agent agrees; host key does not agree) | **distinct** | a second device sharing a weak name: with a measured, unrelayed observation from a controller channel (source ref `interrogation:` or an authoritative admission; never a sensor's own probe) and a name-decided match, create a pending asset with the unowned identifiers (new MAC, new IP) and leave the matched asset untouched, no proposal; any other source (relayed, sensor or scan probe, declared target, installation identity) and any locally administered (randomised) MAC on either side behaves as if no row applied. The created asset's `created` history records the name as `shares_name`; afterwards that name resolving to the other asset does not vote against the device-binding identifier (MAC, serial, host key, agent id) that decided the match, so replaying the second device's report stays `matched` to it (any other cross-asset name still conflicts) |
 | `mac_kept_os_material_changed` | MAC | host key, TLS cert, hostname | **reimaged** | match; retire old key; `identity_material_rotated` |
 | `mac_and_address_kept_key_changed` | MAC, IP | host key | **rotated** | match; retire old key; `ssh_host_key_rotated` |
 | `keys_kept_address_changed` | MAC and/or host key (host key `agree`, `unknown` or `added`) | IP, old one silent | **moved** | match; release old address; `address_moved` |
@@ -1008,13 +1029,46 @@ asset (`Sighting.ClaimsAddresses`). Contract:
 
 ## Endpoints follow the identity decision (#2205 Decision 2)
 
-Endpoints are written only where an identity decision attaches them. `matched`,
-`created` and `provisional` resolutions attach the sighting's endpoints inside
-the engine's transaction. A `supporting` resolution on an ESTABLISHED asset (and
-any non-sighting, such as a DNS answer) attaches nothing: `Resolution.EvidenceHeld`
-is true, the sockets stay on the observation, and every caller after the engine
-must write nothing from it either (no service identification, crypto
-configuration or deferred finding). `ObservationEndpoints` gives a caller the
+Endpoints are written only where an identity decision attaches them, and only
+by this package (#2374 WP7 F17). `matched`, `created` and `provisional`
+resolutions attach the sighting's endpoints inside the engine's transaction. A
+`supporting` resolution on an ESTABLISHED asset (and any non-sighting, such as a
+DNS answer) attaches no identifiers. Its endpoints:
+
+- **D4 (#2374):** when the observation is a measurement that reached the device
+  — `Source.Kind` measured, `Admission.Direct`, not `Relayed`, the shape that
+  lets evidence count in `AssessAdmission` — and its ONE owner is neither
+  archived nor denied, the engine attaches the endpoints to that owner, in its
+  transaction, and the `updated` history row (`supporting: true`) names them
+  under `endpoints`. `Resolution.SupportingEndpoints` is set and `EvidenceHeld`
+  is not, so callers may hang service identification and crypto off them.
+  Contested and unresolved outcomes have no single owner and attach nothing.
+- **otherwise** `Resolution.EvidenceHeld` is true, the sockets stay on the
+  observation, and every caller after the engine must write nothing from it
+  either (no service identification, crypto configuration or deferred finding).
+
+In enforce admission a D4 row's retained payload is still `supporting`, so the
+retained-evidence worker leaves its crypto for Link or Confirm, as before.
+
+**A complete endpoint set** (`Observation.EndpointsComplete`, carried from
+`Sighting.EndpointsComplete`) says the endpoints are every socket one source —
+a host's own socket table, via its agent or an authenticated session — found at
+the observation's time. On a MATCH (`applyToAsset`), the engine calls
+`Repository.ReconcileSourceEndpoints`, closing that source's earlier endpoints
+(source ref under `SourcePrefix`) that the set no longer lists and that were last
+seen no later than the observation: status `closed`, never deleted, last-seen
+untouched; the history row carries `endpoints_closed` and the count travels as
+`Resolution.EndpointsClosed`. Supporting evidence never reconciles
+(`resolveSupporting` drops the marker), nor does a conflict or a held
+observation. `CompleteEndpointSet.Validate` refuses a prefix that does not extend
+the observation's own source ref, or an endpoint outside it.
+
+**Decided endpoints.** The decisions that tie evidence to an asset without the
+precedence walk — an operator's Link or Confirm, the enrichment worker's
+corroboration, an interrogated device's verified finding, a retained payload
+replayed onto its linked asset — call `AttachDecidedEndpoints`, which writes
+through the repository under the same rules (never onto an archived or denied
+asset) and records the decision as `decided_by` on the timeline. `ObservationEndpoints` gives a caller the
 sanitised endpoints the engine would have written, for the moment an operator
 decides.
 
@@ -1031,8 +1085,9 @@ as it always was. Link and Confirm in inventory-service
 (`DecideIdentityObservation`) attach the evidence endpoints at once; a Confirm
 that overlaps exactly one asset an earlier confirmation from the same collector
 and network created joins it. Existing endpoint rows are never deleted; they stop
-refreshing. The interrogated-device claim (`attachFindingEndpoint`) is the one
-non-engine path that still attaches, because the claim is verified first.
+refreshing. No endpoint is written outside this package: the interrogated-device
+claim used to attach its finding's socket itself (`attachFindingEndpoint`,
+deleted in #2374 WP7) and now goes through `AttachDecidedEndpoints`.
 The review table's ownership rule (`SuggestObservation`: ready to confirm when
 nothing owns an identifier of the row, link-existing when exactly one linkable
 asset does, needs-review otherwise) shares the owner query with the decision.

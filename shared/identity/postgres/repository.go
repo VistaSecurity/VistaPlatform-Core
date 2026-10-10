@@ -35,6 +35,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -694,6 +695,110 @@ func (r *Repository) UpsertEndpoints(ctx context.Context, asset identity.AssetRe
 		return 0, err
 	}
 	return changed, nil
+}
+
+// ReconcileSourceEndpoints closes the asset's endpoints one source recorded
+// that a complete set from it no longer lists (see
+// [identity.Repository.ReconcileSourceEndpoints] and
+// [identity.CompleteEndpointSet]). It is the only writer of an endpoint's
+// `closed` status from observation; it used to live in
+// device-interrogation-service as a separate transaction after the engine's
+// (closeAbsentEndpoints, WP7 F12), and runs on the engine's now.
+//
+// The source match is `starts_with(source_ref, prefix)` rather than LIKE, so no
+// value can be read as a pattern. Absence is decided by endpoint key in Go,
+// the same key the engine dedupes and upserts on, with the address in its
+// canonical form on both sides.
+func (r *Repository) ReconcileSourceEndpoints(ctx context.Context, asset identity.AssetRef, sourcePrefix string, observed []identity.EndpointObservation, at time.Time) ([]string, error) {
+	if strings.TrimSpace(sourcePrefix) == "" {
+		return nil, fmt.Errorf("identity/postgres: reconcile endpoints: empty source prefix")
+	}
+	assetID, err := parseAsset(asset.ID)
+	if err != nil {
+		return nil, err
+	}
+	keep := make(map[string]bool, len(observed))
+	for _, ep := range observed {
+		ep = ep.Sanitized()
+		keep[reconcileEndpointKey(ep.Address, ep.FQDN, ep.Port, ep.Transport)] = true
+	}
+	var closed []string
+	err = r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
+		closed = nil
+		writable, err := lockWritableAsset(ctx, tx, asset)
+		if err != nil || !writable {
+			return err
+		}
+		// The same per-asset lock the upsert takes, so a concurrent upsert
+		// cannot reopen a row between this read and the close.
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+			endpointUpsertLockKey(asset.TenantID, asset.ID)); err != nil {
+			return fmt.Errorf("identity/postgres: lock endpoints for asset %s: %w", asset.ID, err)
+		}
+		rows, err := tx.QueryContext(ctx, `
+			SELECT id, coalesce(host(address), ''), coalesce(fqdn, ''), coalesce(port, 0), transport
+			  FROM public.asset_endpoints
+			 WHERE tenant_id = $1 AND asset_id = $2
+			   AND status <> 'closed'
+			   AND source_ref IS NOT NULL
+			   AND starts_with(source_ref, $3)
+			   AND last_seen_at <= $4`,
+			asset.TenantID, assetID, sourcePrefix, at.UTC())
+		if err != nil {
+			return fmt.Errorf("identity/postgres: read %s's endpoints on %s: %w", sourcePrefix, asset.ID, err)
+		}
+		var ids []string
+		for rows.Next() {
+			var id, addr, fqdn, transport string
+			var port int
+			if err := rows.Scan(&id, &addr, &fqdn, &port, &transport); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			key := reconcileEndpointKey(addr, fqdn, port, transport)
+			if keep[key] {
+				continue
+			}
+			ids = append(ids, id)
+			closed = append(closed, key)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		_, err = tx.ExecContext(ctx, `
+			UPDATE public.asset_endpoints SET status = 'closed', updated_at = now()
+			 WHERE tenant_id = $1 AND id = ANY($2::uuid[])`,
+			asset.TenantID, pgUUIDArray(ids))
+		if err != nil {
+			return fmt.Errorf("identity/postgres: close absent endpoints on %s: %w", asset.ID, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(closed)
+	return closed, nil
+}
+
+// reconcileEndpointKey is [identity.EndpointObservation.Key] with the address
+// in netip's canonical spelling, so a stored inet and an observed string
+// compare equal however each was written.
+func reconcileEndpointKey(addr, fqdn string, port int, transport string) string {
+	addr = strings.TrimSpace(addr)
+	if a, err := netip.ParseAddr(addr); err == nil {
+		addr = a.Unmap().WithZone("").String()
+	}
+	switch t := strings.ToLower(strings.TrimSpace(transport)); t {
+	case "tcp", "udp", "none":
+		transport = t
+	default:
+		transport = "none"
+	}
+	return identity.EndpointObservation{Address: addr, FQDN: fqdn, Port: port, Transport: transport}.Key()
 }
 
 func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset identity.AssetRef, eps []identity.EndpointObservation) (int, error) {

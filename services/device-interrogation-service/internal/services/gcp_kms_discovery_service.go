@@ -14,7 +14,7 @@ import (
 
 // DiscoverGCPKMSKeys enumerates customer-managed Cloud KMS keys across every KMS
 // location in the project and returns them as provider-neutral KMSKeyFinding
-// records (the same shape the AWS path produces), ready for StoreKMSKeyFindings.
+// records (the same shape the AWS path produces), ready for PublishKMSKeyFindings.
 func (s *KMSDiscoveryService) DiscoverGCPKMSKeys(
 	ctx context.Context,
 	tenantID uuid.UUID,

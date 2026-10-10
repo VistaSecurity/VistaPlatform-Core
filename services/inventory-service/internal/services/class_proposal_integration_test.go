@@ -589,3 +589,48 @@ func TestIntegration_ClassProposal_AConflictCannotBeAcceptedWithoutAChoice(t *te
 		t.Fatalf("accepting a conflict with no class returned %v, want a refusal naming the choices", err)
 	}
 }
+
+// A pending proposal whose class the asset ALREADY holds is not a question for
+// a reviewer, and the queue neither lists it nor counts it. One for a class the
+// asset does not hold still appears.
+//
+// Mutation-tested (see the PR): dropping the NOT EXISTS from
+// classProposalPredicate turns this red on both the count and the page.
+func TestIntegration_ClassProposal_ListPendingExcludesAClassTheAssetAlreadyHolds(t *testing.T) {
+	_, db, tenant := newHostObsFixture(t)
+
+	insertAsset := func(class, path string) uuid.UUID {
+		id := uuid.New()
+		if _, err := db.Exec(`INSERT INTO assets(id, tenant_id, hostname, class_key, class_path, class_source_kind, asset_status)
+			VALUES ($1, $2, $3, $4, $5, 'rule', 'monitoring')`,
+			id, tenant, "lp-"+id.String()[:8], class, path); err != nil {
+			t.Fatalf("insert asset: %v", err)
+		}
+		return id
+	}
+	propose := func(asset uuid.UUID, proposed, current string) {
+		if _, err := db.Exec(`INSERT INTO asset_history(tenant_id, asset_id, source, action, changes_json)
+			VALUES ($1, $2, 'classifier:rules', 'class_proposed',
+			        jsonb_build_object('kind', 'class_proposal', 'status', 'pending',
+			                           'proposed_class_key', $3::text, 'current_class_key', $4::text))`,
+			tenant, asset, proposed, current); err != nil {
+			t.Fatalf("insert proposal: %v", err)
+		}
+	}
+
+	stale := insertAsset("smart_device", "smart_device")
+	propose(stale, "smart_device", "unknown_host") // already satisfied
+	live := insertAsset("unknown_host", "unknown_host")
+	propose(live, "printer", "unknown_host") // still a question
+
+	views, total, err := NewClassProposalService(db).ListPending(context.Background(), tenant, 50, 0)
+	if err != nil {
+		t.Fatalf("ListPending: %v", err)
+	}
+	if total != 1 || len(views) != 1 {
+		t.Fatalf("total = %d, page = %d rows; want 1 and 1 — the stale proposal must not be counted or listed", total, len(views))
+	}
+	if views[0].AssetID != live || views[0].ProposedClassKey != "printer" {
+		t.Errorf("listed %s -> %q, want the printer proposal on the asset that does not hold it", views[0].AssetID, views[0].ProposedClassKey)
+	}
+}

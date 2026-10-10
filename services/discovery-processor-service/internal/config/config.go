@@ -12,8 +12,7 @@ type Config struct {
 	InventoryServiceURL string
 
 	// Batch Processing
-	BatchSize         int
-	ConcurrentBatches int
+	BatchSize int
 
 	// Retry Configuration
 	MaxRetries       int
@@ -46,18 +45,19 @@ func Load() *Config {
 
 	return &Config{
 		// Polling Configuration
-		PollIntervalSeconds: sharedconfig.GetEnvAsInt("DISCOVERY_POLL_INTERVAL", 5), // Production: 10
+		// Fallback poll only ( D6): every sensor_discoveries writer
+		// publishes discovery.queue.ready, which drains the queue at once.
+		PollIntervalSeconds: sharedconfig.GetEnvAsInt("DISCOVERY_POLL_INTERVAL", 60),
 
 		// Service URLs
 		InventoryServiceURL: sharedconfig.PeerServiceURLAuto("INVENTORY_SERVICE_URL", "inventory-service"),
 
 		// Batch Processing
-		BatchSize:         sharedconfig.GetEnvAsInt("DISCOVERY_BATCH_SIZE", 100),       // Max discoveries per API call
-		ConcurrentBatches: sharedconfig.GetEnvAsInt("DISCOVERY_CONCURRENT_BATCHES", 3), // Max batches processed in parallel
+		BatchSize: sharedconfig.GetEnvAsInt("DISCOVERY_BATCH_SIZE", 100), // Max discoveries per API call
 
 		// Retry Configuration
-		MaxRetries:       sharedconfig.GetEnvAsInt("DISCOVERY_MAX_RETRIES", 3),        // Retry attempts
-		RetryBackoffBase: sharedconfig.GetEnvAsInt("DISCOVERY_RETRY_BACKOFF_BASE", 1), // Base seconds for exponential backoff
+		MaxRetries:       sharedconfig.GetEnvAsInt("DISCOVERY_MAX_RETRIES", 7),         // Failed attempts per row before it is rejected
+		RetryBackoffBase: sharedconfig.GetEnvAsInt("DISCOVERY_RETRY_BACKOFF_BASE", 30), // Seconds after the first failure; doubles per attempt, capped at 10 min
 
 		// Database Configuration
 		DatabaseURL:      sharedconfig.GetEnv("DATABASE_URL", "postgres://crypto_user:crypto_pass_dev@postgres:5432/crypto_inventory?sslmode=prefer"),

@@ -537,7 +537,17 @@ answered, and silence there might be a firewall. On the next collection a socket
 that has gone shows as **closed** on the asset's Endpoints tab, keeping its
 history; if it comes back it goes active again. Endpoints that something *else*
 found — an active scan, a cloud connector — are never touched by this, because
-the agent is only authoritative about its own host.
+the agent is only authoritative about its own host. Sockets are closed only by a
+collection the platform recognised as this host: a report that could only be
+held for review in **Discovery → Observations** closes nothing.
+
+**Addresses.** Every address the host reports is used to recognise it, plus the
+address the platform reached it at (a remote collection) or the address the
+agent reported for itself, so a collection without a network-interfaces section
+still lands on the right asset. Addresses on virtual interfaces — container
+bridges, veths, tunnels — are recorded on the asset as evidence but never used
+to match it, because the same bridge address exists on every host running the
+same software.
 
 **The Endpoints tab's Exposure column has three states, and blank is one of
 them.** "Bound to localhost" and "reachable" are both measurements the host

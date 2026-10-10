@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity/matcher"
 )
 
@@ -205,7 +206,22 @@ func (e *Engine) classifyDrift(ctx context.Context, obs Observation, at time.Tim
 			HostKeyAlgorithms:   hostKeyAlgorithms(sum.Identifiers),
 		},
 	})
+	if res.Verdict == matcher.DriftDistinct && (anyLocallyAdministeredMAC(observed) || anyLocallyAdministeredMAC(sum.Identifiers)) {
+		// A randomised (locally administered) MAC is not a hardware binding:
+		// a phone rotating its address is not a second device. The row does
+		// not apply, and the observation gets what it got before it existed.
+		res = matcher.DriftResult{Evidence: res.Evidence}
+	}
 	return driftCheck{result: res, summary: sum, silent: silent, obsIDs: observed}, nil
+}
+
+func anyLocallyAdministeredMAC(ids []Identifier) bool {
+	for _, id := range ids {
+		if id.Kind == KindMACAddress && hostobs.MACLocallyAdministered(id.Value) {
+			return true
+		}
+	}
+	return false
 }
 
 // hostKeyAlgorithms maps each SSH host key fingerprint whose algorithm is known
@@ -412,4 +428,97 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
+}
+
+// sharedNameDoesNotVote reports whether `weak`, an identifier resolving to an
+// asset other than `decided`, is a name the two assets share rather than a
+// contradiction. All of: it is a hostname, FQDN or name; a native (observed,
+// not derived) device-binding identifier — MAC, serial, host key, agent id —
+// decided the match; and the decided asset's creation recorded this very name
+// as shared with an existing holder ([Engine.resolveDistinctDevice]). The
+// repository already carries that fact in the asset's timeline, so no name is
+// ever treated as shared on the engine's say-so alone.
+func (e *Engine) sharedNameDoesNotVote(ctx context.Context, decided AssetRef, decidedBy Kind, decider, weak Identifier) (bool, error) {
+	switch weak.Kind {
+	case KindHostname, KindFQDN, KindName:
+	default:
+		return false, nil
+	}
+	if decider.Inferred() {
+		return false, nil
+	}
+	switch decidedBy {
+	case KindMACAddress, KindSerialNumber, KindSSHHostKeyFingerprint, KindAgentID:
+	default:
+		return false, nil
+	}
+	return e.repo.HistoryHasChange(ctx, decided, ActionCreated, map[string]any{sharesNameKey: []string{weak.Key()}})
+}
+
+// sharesNameKey is the `created` history change that records the weak names a
+// distinct device was created beside.
+const sharesNameKey = "shares_name"
+
+// distinctDeviceCreates reports whether a [matcher.DriftDistinct] verdict may
+// act: the observation is a measured, unrelayed report from a controller
+// channel (a source ref with the "interrogation:" prefix: a controller or API
+// interrogation job) or from an authoritative admission (an authenticated
+// session). The gate keys on the CHANNEL, never on what the report carries: a
+// sensor's own probe ("sensor:", "scan:") that meets a new MAC and a new
+// address under a shared name is still a question for a person. A WEAK name
+// kind must have decided the match, the decider is observed rather than
+// derived, and nothing asked for a human's answer first (a declared target, a
+// host's own installation identity, an admission layer that cannot establish
+// entities).
+func (e *Engine) distinctDeviceCreates(obs Observation, decidedBy Kind, decider Identifier, installation bool) bool {
+	if installation || e.admissionCandidate != nil || decider.Inferred() || !controllerChannel(obs) {
+		return false
+	}
+	if e.admissionDecision != nil && !e.admissionDecision.Established {
+		return false
+	}
+	switch decidedBy {
+	case KindHostname, KindFQDN, KindName:
+		return true
+	default:
+		return false
+	}
+}
+
+// controllerInterrogationPrefix is the source ref prefix of a controller/API
+// interrogation job's observation.
+const controllerInterrogationPrefix = "interrogation:"
+
+// controllerChannel is a measured, unrelayed observation that came through a
+// controller interrogation or an authoritative admission.
+func controllerChannel(obs Observation) bool {
+	if obs.Source.Kind != SourceMeasured || obs.Admission.Relayed {
+		return false
+	}
+	return obs.Admission.Authoritative || strings.HasPrefix(obs.Source.Ref, controllerInterrogationPrefix)
+}
+
+// resolveDistinctDevice creates the second device a [matcher.DriftDistinct]
+// verdict found. The new asset carries the identifiers nobody owns — the new
+// MAC and address; the shared name stays with the asset that already holds it
+// — and the matched asset is left untouched. No merge proposal: the evidence
+// already answers the question a reviewer would be asked.
+//
+// handled is false when the observation has nothing of its own to create the
+// asset with (every identifier is owned, or only derived ones are free); the
+// caller then proceeds as if the table had no opinion.
+func (e *Engine) resolveDistinctDevice(ctx context.Context, obs Observation, at time.Time, ids []Identifier, owners map[string][]AssetRef) (res Resolution, handled bool, err error) {
+	attach, unattached := splitByOwner(ids, owners, "")
+	if len(attach) == 0 || allInferred(attach) {
+		return Resolution{}, false, nil
+	}
+	var shared []string
+	for _, u := range unattached {
+		switch u.Kind {
+		case KindHostname, KindFQDN, KindName:
+			shared = append(shared, u.Key())
+		}
+	}
+	res, err = e.resolveCreate(ctx, obs, at, attach, unattached, map[string]any{sharesNameKey: shared})
+	return res, err == nil, err
 }

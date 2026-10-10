@@ -85,12 +85,21 @@ func (s *AssetService) retainedEvidence(ctx context.Context, tx *sqlx.Tx, tenant
 
 	// Count before LIMIT. Payloads over one MiB still get a receipt summary but
 	// are not decrypted/decoded into API memory. No arbitrary JSON is returned.
+	//
+	// A discovery finding held for this observation lives in
+	// deferred_crypto_findings ( F8); identity_observation_payloads keeps
+	// passive host observations, and crypto receipts materialized before the
+	// move.
 	rows, err := tx.QueryContext(ctx, `WITH evidence AS (
  SELECT CASE WHEN p.payload->>'kind'='host_observation' THEN 'passive_host' ELSE 'crypto' END AS kind,p.receipt_key AS key,
  r.observed_at,p.materialized_at,NULL::timestamptz AS superseded_at,p.last_error<>'' AS failed,
  p.payload::text AS payload,COALESCE(r.evidence,'{}'::jsonb) AS envelope,false AS encrypted
  FROM identity_observation_payloads p LEFT JOIN identity_observation_receipts r ON r.tenant_id=p.tenant_id AND r.observation_id=p.observation_id AND r.receipt_key=p.receipt_key
  WHERE p.tenant_id=$1 AND p.observation_id=$2
+ UNION ALL SELECT 'crypto',d.dedup_key,COALESCE(r.observed_at,d.created_at),d.replayed_at,NULL::timestamptz,d.last_error<>'',
+ d.finding::text,COALESCE(r.evidence,'{}'::jsonb),false
+ FROM deferred_crypto_findings d LEFT JOIN identity_observation_receipts r ON r.tenant_id=d.tenant_id AND r.observation_id=d.observation_id AND r.receipt_key=d.dedup_key
+ WHERE d.tenant_id=$1 AND d.observation_id=$2
  UNION ALL SELECT 'host_inventory',receipt_key,observed_at,materialized_at,superseded_at,last_error<>'',payload::text,observation,false
  FROM identity_observation_host_inventories WHERE tenant_id=$1 AND observation_id=$2
  UNION ALL SELECT 'peer',context_id,observed_at,materialized_at,retired_at,last_error<>'',payload::text,'{}'::jsonb,false

@@ -24,7 +24,7 @@ package processor
 //	    asset_id assertion goes red
 //	delete the asset-id UPDATE from markProcessed                  → the same
 //	    (the id is adopted in memory and never written)
-//	delete the `case "routed":` arm from importInChunks            → the CDN
+//	delete the `case outcomeRouted:` arm from applyIngestOutcome   → the CDN
 //	    row is `pending` again, which is the exact bug
 //
 // Skips without TEST_DATABASE_URL (nightly test-backend / make
@@ -42,7 +42,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/client"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/discovery-processor-service/internal/converter"
-	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -54,17 +53,16 @@ type cloudImportOutcome struct {
 	assetID string // results[i].asset_id; "" means none
 }
 
-// newCloudSettlementInventory answers classify-asset the way a cloud-hinted
-// classification really does — `internal`, because the resource sits in a cloud
-// segment the tenant owns, which is why these rows travel the managed path
-// rather than the processor's own third-party door — and answers the import
-// from the per-hostname table.
+// newCloudSettlementInventory answers the import from the per-hostname table.
+// Since WP3 the import is the only call: inventory classifies a cloud
+// resource by its cloud segment and decides the outcome itself.
 func newCloudSettlementInventory(t *testing.T, outcomes map[string]cloudImportOutcome) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if req.URL.Path == "/api/v2/inventory-service/network-segments/classify-asset" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"ownership": "internal", "network_type": "private"})
+			t.Errorf("the processor called the deleted classify-asset route")
+			http.NotFound(w, req)
 			return
 		}
 		var body struct {
@@ -131,7 +129,7 @@ func TestIntegration_CloudDiscoveryRowsAreSettledAndLinkedToTheirAsset(t *testin
 	if err != nil {
 		t.Fatalf("NewInventoryClient: %v", err)
 	}
-	processor := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), approval.NewService(raw), inventory, nil)
+	processor := NewBatchProcessor(db, converter.NewSensorDiscoveryConverter(), inventory, nil)
 
 	batchID, sensorID := uuid.New().String(), uuid.New()
 	rows := []struct {

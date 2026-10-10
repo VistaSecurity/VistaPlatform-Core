@@ -193,6 +193,13 @@ func splitObservation(ctx context.Context, tx *sql.Tx, tenantID, oldID, fingerpr
 			return "", fmt.Errorf("identity/postgres: move %s of the split sighting: %w", table, err)
 		}
 	}
+	// A discovery finding held for the sighting until its observation is
+	// linked (inventory-service's deferred_crypto_findings, F8) follows
+	// it as well. There the receipt key is the row's dedup_key.
+	if _, err := tx.ExecContext(ctx, `UPDATE deferred_crypto_findings SET observation_id=$3
+		 WHERE tenant_id=$1 AND observation_id=$2 AND dedup_key=$4`, tenantID, oldID, newID, receipt); err != nil {
+		return "", fmt.Errorf("identity/postgres: move the held crypto finding of the split sighting: %w", err)
+	}
 	// The old row's summary was advanced by this sighting in StoreObservation;
 	// it is recomputed from the receipts it still holds.
 	if _, err := tx.ExecContext(ctx, `

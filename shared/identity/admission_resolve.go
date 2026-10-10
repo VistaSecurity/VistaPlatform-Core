@@ -24,20 +24,8 @@ type ObservationRepository interface {
 
 func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, error) {
 	obs = canonicalSensorIdentity(obs)
-	if locker, ok := e.repo.(interface {
-		LockIdentifiers(context.Context, string, []Identifier) error
-	}); ok {
-		ids := make([]Identifier, 0, len(obs.Identifiers))
-		for _, raw := range obs.Identifiers {
-			id, err := raw.Normalized()
-			if err != nil {
-				return Resolution{}, fmt.Errorf("%w: %w", ErrInvalidObservation, err)
-			}
-			ids = append(ids, id)
-		}
-		if err := locker.LockIdentifiers(ctx, obs.TenantID, ids); err != nil {
-			return Resolution{}, err
-		}
+	if err := e.lockObservationIdentifiers(ctx, obs); err != nil {
+		return Resolution{}, err
 	}
 	// Which of the observation's dynamic-scope addresses their owner has
 	// pinned (pinned.go). Read once, under the identifier locks, so admission

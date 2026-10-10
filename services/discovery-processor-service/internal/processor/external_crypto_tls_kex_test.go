@@ -18,7 +18,7 @@ func TestExtractCryptoDetails_TLSKeyExchangeGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	d := extractCryptoDetails(meta)
+	d := routeWriterViewOf(t, meta)
 	if d == nil || d.KeyExchangeAlgorithm == nil || *d.KeyExchangeAlgorithm != "X25519MLKEM768" {
 		t.Fatalf("KeyExchangeAlgorithm = %+v, want X25519MLKEM768", d)
 	}

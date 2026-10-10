@@ -81,9 +81,9 @@ func seedMapConfig(t *testing.T, db *database.DB, tenant, asset uuid.UUID, endpo
 	t.Helper()
 	id := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO crypto_implementations (id, tenant_id, asset_id, endpoint_id, certificate_id, protocol,
+		INSERT INTO crypto_implementations (id, tenant_id, asset_id, endpoint_id, certificate_id, protocol, cipher_suite,
 		                                    discovery_method, deleted_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,'TLS','active', CASE WHEN $6 THEN NOW() ELSE NULL END, NOW(), NOW())`,
+		VALUES ($1,$2,$3,$4,$5,'TLS','fixture-' || $1::uuid::text,'active', CASE WHEN $6 THEN NOW() ELSE NULL END, NOW(), NOW())`,
 		id, tenant, asset, endpoint, cert, deleted); err != nil {
 		t.Fatalf("insert configuration: %v", err)
 	}

@@ -210,6 +210,12 @@ func (s *AssetService) hostObservationObservation(tenantID uuid.UUID, f IngestFi
 // the ip_address identifier already records; an asset_endpoints row is a claim
 // about a reachable face, and nothing connected to anything here.
 func (s *AssetService) hostObservationIntake(tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) (identity.IntakeResult, error) {
+	return s.hostObservationIntakeIn(nil, tenantID, f, ho)
+}
+
+// hostObservationIntakeIn is hostObservationIntake scoped against an import
+// request's one segment snapshot ( F4).
+func (s *AssetService) hostObservationIntakeIn(segs *importSegments, tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) (identity.IntakeResult, error) {
 	verified := false
 	if agentID := strings.TrimSpace(ho.AgentID); agentID != "" {
 		if sensorID, err := uuid.Parse(agentID); err == nil && s.db != nil && f.SourceSensorID != nil && *f.SourceSensorID == agentID {
@@ -221,7 +227,7 @@ func (s *AssetService) hostObservationIntake(tenantID uuid.UUID, f IngestFinding
 		}
 	}
 	label := "host observation " + hostObservationLabel(ho)
-	res, err := s.assessSighting(context.Background(), label, hostObservationSighting(tenantID, f, ho, verified))
+	res, err := s.assessSightingIn(context.Background(), segs, label, hostObservationSighting(tenantID, f, ho, verified))
 	if errors.Is(err, identity.ErrNoUsableIdentifier) {
 		return res, fmt.Errorf("%w: %s", errNoIdentifiers, label)
 	}
@@ -515,6 +521,12 @@ func hostObservationMetadata(f IngestFinding, ho *hostobs.HostObservation) model
 // that because the next observation MATCHES the asset that exists and never
 // takes the create path again.
 func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.UUID, f IngestFinding, assetStatus string) (identity.Resolution, error) {
+	return s.ingestHostObservationIn(ctx, nil, tenantID, f, assetStatus)
+}
+
+// ingestHostObservationIn is ingestHostObservation answering its segment
+// questions from an import request's one read of them ( F4).
+func (s *AssetService) ingestHostObservationIn(ctx context.Context, segs *importSegments, tenantID uuid.UUID, f IngestFinding, assetStatus string) (identity.Resolution, error) {
 	ho, ok := hostObservationPayload(f)
 	if !ok {
 		return identity.Resolution{}, fmt.Errorf("finding is marked %s but carries no readable host_observation payload", KindHostObservation)
@@ -524,7 +536,7 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 	// the registry's manufacturer when it has one (oui_vendor.go).
 	resolveHostObservationVendor(ho)
 
-	intake, err := s.hostObservationIntake(tenantID, f, ho)
+	intake, err := s.hostObservationIntakeIn(segs, tenantID, f, ho)
 	if err != nil {
 		return identity.Resolution{}, err
 	}
@@ -537,7 +549,7 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 	// because there was nowhere honest to record one. `class_source_kind: rule`
 	// is that place.
 	classProp := s.applyClassProposal(ctx, &obs, hostObservationClassEvidence(ho))
-	ctxInput := s.hostObservationContextInput(tenantID, f, ho)
+	ctxInput := s.hostObservationContextInputIn(segs, tenantID, f, ho)
 
 	res, rerr := s.resolveObservationWithRepo(ctx, obs, func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
 		if res.Asset.Zero() {
@@ -566,7 +578,11 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 		// After the observation has landed, and outside its transaction: what a
 		// DHCP ACK says about the SEGMENT is a note about the network, not part
 		// of the one fact about the host that the transaction above keeps whole.
-		s.inferDHCPPosture(ctx, tenantID, ho, obs.ObservedAt)
+		if s.inferDHCPPosture(ctx, tenantID, ho, obs.ObservedAt) {
+			// The note changed a segment's posture, which the request's
+			// segment snapshot carries: the next finding reads it afresh.
+			segs.invalidate()
+		}
 	}
 	return res, rerr
 }
@@ -613,10 +629,13 @@ func dhcpAssignedAddresses(ho *hostobs.HostObservation) []netip.Addr {
 // already been resolved and committed; a failure here costs one note about a
 // segment, which the next ACK repeats, and must never turn into a failed
 // ingest that the sensor then retries. It is logged, not returned.
-func (s *AssetService) inferDHCPPosture(ctx context.Context, tenantID uuid.UUID, ho *hostobs.HostObservation, observedAt time.Time) {
+//
+// It reports whether it wrote a posture, so an import request holding a
+// segment snapshot knows to read it again.
+func (s *AssetService) inferDHCPPosture(ctx context.Context, tenantID uuid.UUID, ho *hostobs.HostObservation, observedAt time.Time) (wrote bool) {
 	addrs := dhcpAssignedAddresses(ho)
 	if len(addrs) == 0 || s.db == nil || s.db.DB == nil {
-		return
+		return false
 	}
 	now := time.Now()
 	if observedAt.IsZero() || observedAt.After(now) {
@@ -647,15 +666,17 @@ func (s *AssetService) inferDHCPPosture(ctx context.Context, tenantID uuid.UUID,
 		}
 		done[scope] = true
 		err = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-			_, e := pgidentity.RecordSegmentPosture(ctx, tx, tenantID.String(), segmentID.String(),
+			r, e := pgidentity.RecordSegmentPosture(ctx, tx, tenantID.String(), segmentID.String(),
 				pgidentity.PostureInferred, true, pgidentity.PostureEvidence{ObservedAt: observedAt},
 				pgidentity.SkipIfSourceStatedSince(now.Add(-dhcpInferenceThrottle)))
+			wrote = wrote || (e == nil && r.Written)
 			return e
 		})
 		if err != nil {
 			log.Printf("[AssetService] tenant %s: recording inferred DHCP posture for segment %s failed (the observation is unaffected): %v", tenantID, segmentID, err)
 		}
 	}
+	return wrote
 }
 
 // Retain decoder-owned fields and regenerate registered facts. Unrecognized
@@ -676,13 +697,17 @@ func retainedHostEvidence(ho *hostobs.HostObservation) *hostobs.HostObservation 
 }
 
 func (s *AssetService) hostObservationContextInput(tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) models.AssetInput {
+	return s.hostObservationContextInputIn(nil, tenantID, f, ho)
+}
+
+func (s *AssetService) hostObservationContextInputIn(segs *importSegments, tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) models.AssetInput {
 
 	ctxInput := models.AssetInput{
 		Metadata: hostObservationMetadata(f, ho),
 	}
 	ownership := hostObservationOwnership
 	ctxInput.AssetOwnership = &ownership
-	if tags, _ := s.getTagsForAsset(tenantID, hostObservationPrimaryAddress(ho), hostObservationBestName(ho)); len(tags) > 0 {
+	if tags, _ := s.getTagsForAssetIn(segs, tenantID, hostObservationPrimaryAddress(ho), hostObservationBestName(ho)); len(tags) > 0 {
 		ctxInput.Tags = mergeTags(models.JSONB{}, tags)
 	}
 
