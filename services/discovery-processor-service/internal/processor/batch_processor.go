@@ -788,6 +788,17 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 					}
 					continue
 				}
+				if result.Outcome == outcomeError {
+					// inventory-service could not settle this finding this
+					// time (a failed external_connections route). Not a
+					// decision: the row is retried with backoff like a failed
+					// chunk, never stamped terminal.
+					if d != nil {
+						failed.rows = append(failed.rows, rowFailure{id: d.ID, err: errorOutcomeReason(result.Reason)})
+						failed.add(errorOutcomeReason(result.Reason))
+					}
+					continue
+				}
 				if result.Outcome == outcomeRouted {
 					summary.routed++
 				}
@@ -824,6 +835,9 @@ type importSummary struct {
 const (
 	outcomeRouted  = "routed"
 	outcomeDropped = "dropped"
+	// outcomeError is a finding inventory-service could not settle this time;
+	// the row is retried (see importInChunks).
+	outcomeError = "error"
 	// dropReasonThirdPartyNoSourceIP is inventory-service's reason for a
 	// dropped third-party finding with no source address.
 	dropReasonThirdPartyNoSourceIP = "third_party_no_source_ip"
@@ -839,6 +853,15 @@ func droppedReason(reason string) error {
 		reason = "no reason given"
 	}
 	return fmt.Errorf("inventory-service dropped the finding: %s", reason)
+}
+
+// errorOutcomeReason is the error recorded on a row whose finding inventory
+// reported as outcome "error". It is deliberately not a permanent error.
+func errorOutcomeReason(reason string) error {
+	if reason == "" {
+		reason = "no reason given"
+	}
+	return fmt.Errorf("inventory-service could not settle the finding: %s", reason)
 }
 
 // adoptAutoApprovalRules stamps the rows whose finding inventory-service
@@ -968,6 +991,10 @@ func applyIngestOutcome(d *models.SensorDiscovery, result identity.IngestResult)
 		// a reason of its own. importInChunks settles the row as a dropped
 		// row failure before this switch is reached; the arm is here so the
 		// outcome is never mistaken for one this build cannot interpret.
+	case outcomeError:
+		// Retried, not settled: importInChunks records the row as a transient
+		// failure before this switch is reached; the arm only keeps the
+		// outcome from being mistaken for one this build cannot interpret.
 	case "rejected":
 		// Also not an identity.Outcome: like "routed", asset_service stamps
 		// it for a finding it declined to materialize (the asset is archived

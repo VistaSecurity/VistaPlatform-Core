@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,13 +19,55 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services/certtrust"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 )
 
 type CertificateService struct {
 	db             *database.DB
 	eventPublisher *EventPublisherService
+	// trust decides certificates.trust_status. Nil until first use:
+	// trustEvaluator builds it from db, so a CertificateService built as a
+	// struct literal still evaluates every certificate it stores.
+	trustMu sync.Mutex
+	trust   *certtrust.Evaluator
 }
+
+// trustEvaluator returns the service's trust evaluator, building the default
+// (embedded public roots) on first use.
+func (s *CertificateService) trustEvaluator() *certtrust.Evaluator {
+	s.trustMu.Lock()
+	defer s.trustMu.Unlock()
+	if s.trust == nil {
+		s.trust = certtrust.NewEvaluator(s.db)
+	}
+	return s.trust
+}
+
+// SetTrustEvaluator replaces the trust evaluator (tests substitute one whose
+// public roots are generated).
+func (s *CertificateService) SetTrustEvaluator(e *certtrust.Evaluator) {
+	s.trustMu.Lock()
+	defer s.trustMu.Unlock()
+	s.trust = e
+}
+
+// evaluateTrust is the ingest hook: after a certificate is stored or a chain
+// link changes, the certificate and everything chaining through it get a
+// trust verdict. A failure is logged, never fatal to the write that triggered
+// it — the row keeps its previous verdict (or NULL, "not yet evaluated"), and
+// the next recompute converges it.
+func (s *CertificateService) evaluateTrust(tenantID, certID uuid.UUID) {
+	// LocalOnly: a write never waits on an AIA fetch; a chain that needs one
+	// is completed in the background (certtrust.LocalOnly).
+	if _, err := s.trustEvaluator().EvaluateSubtree(certtrust.LocalOnly(context.Background()), tenantID, certID); err != nil {
+		log.Printf("[CertificateService] trust evaluation for certificate %s failed: %v", certID, err)
+	}
+}
+
+// TrustStatusUnevaluated is the trust_status filter value for a certificate
+// whose trust has not been computed yet (NULL).
+const TrustStatusUnevaluated = "unevaluated"
 
 func NewCertificateService(db *database.DB, eventPublisher *EventPublisherService) *CertificateService {
 	return &CertificateService{
@@ -48,7 +91,8 @@ const certificateColumns = `
 	data_completeness, data_source, last_data_update,
 	created_at, updated_at,
 	known_bad_ca, cert_ownership,
-	has_sct, sct_source, is_ev, ocsp_status, ocsp_detail`
+	has_sct, sct_source, is_ev, ocsp_status, ocsp_detail,
+	trust_status, trust_anchor_certificate_id, trust_evaluated_at, chain_source`
 
 // effectiveOwnershipExpr resolves the SAME "which ownership bucket does this
 // certificate belong to" answer for both the `?ownership=` filter and the
@@ -112,6 +156,8 @@ func scanCertificateRowFull(scanner interface {
 	var sanArray pq.StringArray
 	var deploymentCount sql.NullInt64
 	var effectiveOwnership sql.NullString
+	var trustStatus, trustAnchorID, chainSource sql.NullString
+	var trustEvaluatedAt sql.NullTime
 
 	dest := []interface{}{
 		&cert.ID, &cert.TenantID, &serialNumber, &cert.SubjectDN, &cert.IssuerDN, &commonName,
@@ -126,6 +172,7 @@ func scanCertificateRowFull(scanner interface {
 		&cert.CreatedAt, &cert.UpdatedAt,
 		&knownBadCA, &certOwnership,
 		&hasSCT, &sctSource, &isEV, &ocspStatus, &ocspDetail,
+		&trustStatus, &trustAnchorID, &trustEvaluatedAt, &chainSource,
 	}
 	if withDeploymentCount {
 		dest = append(dest, &deploymentCount)
@@ -186,6 +233,25 @@ func scanCertificateRowFull(scanner interface {
 	if ocspDetail.Valid && ocspDetail.String != "" {
 		v := ocspDetail.String
 		cert.OCSPDetail = &v
+	}
+
+	// Tenant trust. NULL stays nil: "not yet evaluated".
+	if trustStatus.Valid && trustStatus.String != "" {
+		v := trustStatus.String
+		cert.TrustStatus = &v
+	}
+	if trustAnchorID.Valid {
+		if id, err := uuid.Parse(trustAnchorID.String); err == nil {
+			cert.TrustAnchorCertificateID = &id
+		}
+	}
+	if trustEvaluatedAt.Valid {
+		v := trustEvaluatedAt.Time
+		cert.TrustEvaluatedAt = &v
+	}
+	if chainSource.Valid && chainSource.String != "" {
+		v := chainSource.String
+		cert.ChainSource = &v
 	}
 
 	if serialNumber.Valid {
@@ -344,6 +410,30 @@ func (s *CertificateService) GetCertificates(tenantID uuid.UUID, filters models.
 		argCount++
 		whereConditions = append(whereConditions, fmt.Sprintf(`issuer_dn ILIKE $%d`, argCount))
 		args = append(args, "%"+*filters.Issuer+"%")
+	}
+
+	// Trust status: any of the listed statuses; "unevaluated" is
+	// NULL, the not-yet-evaluated state the UI never shows as trusted.
+	if len(filters.TrustStatus) > 0 {
+		var statuses []string
+		unevaluated := false
+		for _, v := range filters.TrustStatus {
+			if v == TrustStatusUnevaluated {
+				unevaluated = true
+			} else {
+				statuses = append(statuses, v)
+			}
+		}
+		var parts []string
+		if len(statuses) > 0 {
+			argCount++
+			parts = append(parts, fmt.Sprintf(`trust_status = ANY($%d::text[])`, argCount))
+			args = append(args, pq.Array(statuses))
+		}
+		if unevaluated {
+			parts = append(parts, `trust_status IS NULL`)
+		}
+		whereConditions = append(whereConditions, "("+strings.Join(parts, " OR ")+")")
 	}
 
 	if filters.SelfSigned != nil {
@@ -627,15 +717,23 @@ func (s *CertificateService) getRelatedAssets(tenantID, certID uuid.UUID) ([]mod
 // protocols sharing one cert). Tenant scoping is enforced on both the
 // certificate and the crypto_implementation rows.
 func (s *CertificateService) GetCertificatesByAssetID(tenantID, assetID uuid.UUID) ([]models.Certificate, error) {
+	//
+	// The linkage is a semi-join (IN), not a JOIN: certificateColumns names its
+	// columns bare, and crypto_implementations also has id / tenant_id /
+	// created_at, so selecting them over a JOIN failed with `column reference
+	// "id" is ambiguous` on every call. The IN form also makes DISTINCT moot.
 	query := `
-		SELECT DISTINCT ON (certificates.id)` + certificateColumns + `
+		SELECT` + certificateColumns + `
 		FROM certificates
-		JOIN crypto_implementations ci ON ci.certificate_id = certificates.id
-		WHERE ci.asset_id = $1
-		  AND certificates.tenant_id = $2
-		  AND ci.tenant_id = $2
-		  AND ci.deleted_at IS NULL
-		ORDER BY certificates.id`
+		WHERE tenant_id = $2
+		  AND id IN (
+			SELECT ci.certificate_id
+			  FROM crypto_implementations ci
+			 WHERE ci.asset_id = $1
+			   AND ci.tenant_id = $2
+			   AND ci.deleted_at IS NULL
+			   AND ci.certificate_id IS NOT NULL)
+		ORDER BY id`
 
 	// RLS-scoped read over certificates / crypto_implementations.
 	certificates := make([]models.Certificate, 0)
@@ -1011,9 +1109,11 @@ func (s *CertificateService) CreateCertificate(
 			subject_alternative_names, signature_algorithm, public_key_algorithm,
 			public_key_size, not_before, not_after, fingerprint_sha1, fingerprint_sha256,
 			certificate_pem, is_self_signed, is_ca_certificate, key_usage, extended_key_usage,
-			issuer_certificate_id, certificate_state, data_completeness, data_source, cert_ownership
+			issuer_certificate_id, certificate_state, data_completeness, data_source, cert_ownership,
+			chain_source
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23,
+			NULLIF($24, '')
 		) RETURNING id, created_at, updated_at
 	`
 
@@ -1071,7 +1171,7 @@ func (s *CertificateService) CreateCertificate(
 			certPEM, certData.IsSelfSigned, certData.IsCACertificate,
 			pq.Array(certData.KeyUsage), pq.Array(certData.ExtendedKeyUsage),
 			certData.IssuerCertificateID, certificateState, dataCompleteness, dataSource,
-			certOwnershipVal,
+			certOwnershipVal, certData.ChainSource,
 		).Scan(&certID, &createdAt, &updatedAt)
 	})
 
@@ -1081,6 +1181,9 @@ func (s *CertificateService) CreateCertificate(
 
 	// Persist certificate quality flags if present
 	s.updateCertQualityFlags(tenantID, certID, certData)
+
+	// Trust verdict for the new row (and anything already chaining to it).
+	s.evaluateTrust(tenantID, certID)
 
 	// Record certificate creation history
 	_ = s.RecordCertificateHistory(tenantID, certID, "created", map[string]interface{}{
@@ -1116,6 +1219,34 @@ func (s *CertificateService) CreateCertificate(
 		CreatedAt:               createdAt,
 		UpdatedAt:               updatedAt,
 	}
+	if certData.ChainSource != "" {
+		v := certData.ChainSource
+		cert.ChainSource = &v
+	}
+	// The verdict evaluateTrust just stored, so the caller's response carries
+	// it. A read failure leaves the fields nil ("not yet evaluated").
+	_ = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		var status, anchor sql.NullString
+		var at sql.NullTime
+		if err := tx.QueryRow(`SELECT trust_status, trust_anchor_certificate_id, trust_evaluated_at FROM certificates WHERE id = $1 AND tenant_id = $2`,
+			certID, tenantID).Scan(&status, &anchor, &at); err != nil {
+			return err
+		}
+		if status.Valid {
+			v := status.String
+			cert.TrustStatus = &v
+		}
+		if anchor.Valid {
+			if id, err := uuid.Parse(anchor.String); err == nil {
+				cert.TrustAnchorCertificateID = &id
+			}
+		}
+		if at.Valid {
+			v := at.Time
+			cert.TrustEvaluatedAt = &v
+		}
+		return nil
+	})
 
 	// Publish certificate created event
 	if s.eventPublisher != nil {
@@ -1151,6 +1282,11 @@ func (s *CertificateService) UpdateCertificate(
 	// check (or before SCT/EV were measured) could never acquire the flags:
 	// every later observation goes through FindOrCreateCertificate → here.
 	s.updateCertQualityFlags(tenantID, certID, certData)
+
+	// A new issuer link can change where the chain ends.
+	if certData.IssuerCertificateID != nil {
+		s.evaluateTrust(tenantID, certID)
+	}
 
 	// Record update history (args carries the trailing certID + tenantID)
 	_ = s.RecordCertificateHistory(tenantID, certID, "data_enriched", map[string]interface{}{
@@ -1267,14 +1403,30 @@ func (s *CertificateService) buildCertificateUpdateQuery(
 // LinkCertificateIssuer links a certificate to its issuer certificate
 func (s *CertificateService) LinkCertificateIssuer(tenantID, certID, issuerCertID uuid.UUID) error {
 	// RLS-scoped write over certificates.
-	return database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		query := `UPDATE certificates SET issuer_certificate_id = $1 WHERE id = $2`
-		_, err := tx.Exec(query, issuerCertID, certID)
+	//
+	// Written only when the link actually changes: ingest re-links every
+	// observed chain on every observation, and a changed link is what
+	// triggers re-evaluating everything chaining through the certificate —
+	// for an issuing CA, potentially every leaf it signed.
+	var changed int64
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		query := `UPDATE certificates SET issuer_certificate_id = $1 WHERE id = $2 AND issuer_certificate_id IS DISTINCT FROM $1`
+		res, err := tx.Exec(query, issuerCertID, certID)
 		if err != nil {
 			return fmt.Errorf("failed to link certificate issuer: %w", err)
 		}
+		changed, _ = res.RowsAffected()
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	if changed > 0 {
+		// The chain now ends somewhere else: re-evaluate the certificate and
+		// everything that chains through it.
+		s.evaluateTrust(tenantID, certID)
+	}
+	return nil
 }
 
 // LinkCertificateToImplementation links a certificate to a crypto configuration
@@ -1440,8 +1592,17 @@ func (s *CertificateService) GetCertificateHistory(
 }
 
 // RebuildCertificateChain attempts to rebuild the certificate chain by matching issuer DNs
-// This is useful when certificates are discovered separately and need to be linked
+// This is useful when certificates are discovered separately and need to be linked.
+// The certificate's trust verdict is re-evaluated afterwards, links or not.
 func (s *CertificateService) RebuildCertificateChain(tenantID uuid.UUID, certID uuid.UUID) (*RebuildChainResult, error) {
+	result, err := s.rebuildCertificateChain(tenantID, certID)
+	if err == nil {
+		s.evaluateTrust(tenantID, certID)
+	}
+	return result, err
+}
+
+func (s *CertificateService) rebuildCertificateChain(tenantID uuid.UUID, certID uuid.UUID) (*RebuildChainResult, error) {
 	result := &RebuildChainResult{
 		CertificateID: certID,
 		LinksCreated:  0,
@@ -1740,7 +1901,7 @@ func (s *CertificateService) RebuildAllCertificateChains(ctx context.Context, te
 		default:
 		}
 
-		chainResult, err := s.RebuildCertificateChain(tenantID, certID)
+		chainResult, err := s.rebuildCertificateChain(tenantID, certID)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("cert %s: %v", certID, err))
 			continue
@@ -1753,6 +1914,12 @@ func (s *CertificateService) RebuildAllCertificateChains(ctx context.Context, te
 		if chainResult.ChainComplete {
 			result.CompletedChains++
 		}
+	}
+
+	// Every certificate of the tenant gets a current trust verdict — this is
+	// also how certificates stored before trust evaluation existed get one.
+	if _, err := s.trustEvaluator().RecomputeTenant(certtrust.LocalOnly(ctx), tenantID); err != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("trust evaluation: %v", err))
 	}
 
 	return result, nil

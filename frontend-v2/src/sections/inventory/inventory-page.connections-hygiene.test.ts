@@ -38,19 +38,23 @@ describe('Connections lens: certificate-hygiene surfaced separately from strengt
 
   it('the connections row reads cert_hygiene_flags into its own hygieneFlags/hygieneTitle, separate from weak_reasons/reasonsTitle', () => {
     expect(src).toMatch(/const hygieneFlags = cn\.cert_hygiene_flags;/);
-    expect(src).toMatch(/const hygieneTitle = hygieneFlags && hygieneFlags\.length > 0 \? hygieneFlags\.join\(['"]; ['"]\) : undefined;/);
+    // The flags pass through presentHygieneFlags (: the probe's unknown-CA
+    // flag is reworded, or dropped once the platform's trust_status is on the
+    // row) — still hygiene flags only, never weak_reasons.
+    expect(src).toMatch(/const shownHygiene = presentHygieneFlags\(hygieneFlags, trustStatus\);/);
+    expect(src).toMatch(/const hygieneTitle = shownHygiene\.length > 0 \? shownHygiene\.join\(['"]; ['"]\) : undefined;/);
     // reasonsTitle (weak_reasons) must be a SEPARATE variable — the strength
     // badge's tooltip source — not reused for hygiene text.
     expect(src).toMatch(/const reasonsTitle = weakReasons && weakReasons\.length > 0/);
   });
 
   it('renders a hygiene indicator icon, gated on hygieneTitle, alongside (not merged into) the strength badge', () => {
-    const idx = src.indexOf('const hygieneTitle = hygieneFlags');
+    const idx = src.indexOf('const hygieneTitle = ');
     expect(idx).toBeGreaterThan(-1);
     // The strength badge and the hygiene indicator must be two sibling
     // elements: the badge's own title stays reasonsTitle (weak_reasons), and
     // a second, conditionally-rendered element carries the hygiene tooltip.
-    const after = src.slice(idx, idx + 2000);
+    const after = src.slice(idx, idx + 2600); // the destination cell now also holds the trust chip (#2397)
     expect(after).toMatch(/title=\{reasonsTitle\}/);
     expect(after).toMatch(/\{hygieneTitle && \(/);
     expect(after).toMatch(/<Icon name="shield-alert"/);

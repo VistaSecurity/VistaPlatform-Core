@@ -1037,6 +1037,117 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/trust-anchors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List this organisation's certificate-authority trust decisions
+         * @description Every explicit trust or distrust decision the tenant has recorded against a CA certificate in its inventory, newest first, each with how many certificates currently chain to that CA. Public roots trusted by default are not listed here; see GET /trust-anchors/public-roots. Readable with `assets.read`.
+         */
+        get: operations["listTrustAnchors"];
+        put?: never;
+        /**
+         * Record a trust or distrust decision for a CA certificate
+         * @description RBAC-gated `certificates.trust`. Names the CA either by `certificate_id` (a certificate already in inventory, which must be a CA certificate) or by `certificate_pem` (one or more PEM CA certificates; each is stored into inventory with chain_source `upload` if not already present, and the decision is recorded against the LAST one in the file, i.e. the top of the chain). Exactly one of the two must be given. Recording a decision re-evaluates `trust_status` on every certificate of the tenant that chains to the CA, synchronously.
+         */
+        post: operations["createTrustAnchor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/trust-anchors/from-chain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trust (or distrust) the CA at the top of a chain a server presented
+         * @description RBAC-gated `certificates.trust`. Takes the chain a server presented in a TLS handshake (as an integration test-connection returns it in `presented_chain`), stores every CA certificate in it into inventory that is not already there (chain_source `served`), links issuers, and records the decision against the top-most CA of the chain — the last CA certificate when ordered leaf → root. The leaf itself is never stored by this call and never becomes an anchor. If the top CA is already a public root in the embedded bundle the decision is still recorded (so a public root can be distrusted). Re-evaluates affected certificates synchronously.
+         */
+        post: operations["createTrustAnchorFromChain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/internal/trust/anchors": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The tenant's CA trust decisions, for a service building a TLS trust pool (internal)
+         * @description HMAC-only (a signed `X-Tenant-ID` is required; denied at the edge under `/inventory-service/internal/`). A connector service calls this when it opens a connection to a tenant's third-party system, so a CA the organisation trusted in inventory is trusted by its integrations too, and a distrusted CA is refused even if the host OS trusts it. Public roots are not listed — the caller already has the system store and the embedded bundle.
+         */
+        get: operations["internalTrustAnchors"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/trust-anchors/public-roots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Describe the public root bundle the platform trusts by default
+         * @description The embedded public root store (the Mozilla CA bundle) that every tenant trusts unless a root is explicitly distrusted. Reports the bundle version and the number of roots so the Trusted CAs page can show what "public" means on this release.
+         */
+        get: operations["getPublicRootsInfo"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/trust-anchors/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Trust anchor (decision) id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Change a decision (trusted <-> distrusted) or its note
+         * @description RBAC-gated `certificates.trust`. Re-evaluates affected certificates synchronously.
+         */
+        put: operations["updateTrustAnchor"];
+        post?: never;
+        /**
+         * Remove a decision
+         * @description RBAC-gated `certificates.trust`. The CA certificate stays in inventory; certificates chaining to it return to `untrusted` (or `public` if the CA is a public root) on the synchronous re-evaluation.
+         */
+        delete: operations["deleteTrustAnchor"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/crypto-configurations": {
         parameters: {
             query?: never;
@@ -4804,6 +4915,18 @@ export interface components {
             is_ev?: boolean;
             ocsp_status?: string;
             ocsp_detail?: string;
+            trust_status?: components["schemas"]["TrustStatus"];
+            /**
+             * Format: uuid
+             * @description The certificate at the top of the chain the trust decision was made on (a public root, a tenant anchor, or the last issuer found when `incomplete`). Absent until evaluated.
+             */
+            trust_anchor_certificate_id?: string;
+            /**
+             * Format: date-time
+             * @description When trust_status was last computed. Absent until evaluated.
+             */
+            trust_evaluated_at?: string;
+            chain_source?: components["schemas"]["ChainSource"];
             /**
              * @description Ownership explicitly declared for manually-uploaded certs (internal | third_party). Absent (NULL) when unset; for sensor-discovered certs ownership is derived from the linked asset rather than this column.
              * @enum {string}
@@ -4875,6 +4998,103 @@ export interface components {
         /** @description GET /certificates/expiring envelope. Just an array under `certificates`. */
         ExpiringCertificateListResponse: {
             certificates: components["schemas"]["ExpiringCertificateRow"][];
+        };
+        /**
+         * @description Where a certificate's chain ends, as decided by the platform for this tenant (not by whichever agent observed it). `public`: chains to a root in the embedded public bundle. `private_trusted`: chains to a CA this organisation explicitly trusted. `self_signed`: a self-signed leaf. `untrusted`: chains to a CA nobody has trusted. `distrusted`: chains to a CA this organisation explicitly distrusted (overrides the bundle). `incomplete`: an issuer in the chain is not in inventory, so no decision can be made yet. Absent until the certificate has been evaluated.
+         * @enum {string}
+         */
+        TrustStatus: "public" | "private_trusted" | "self_signed" | "untrusted" | "distrusted" | "incomplete";
+        /**
+         * @description How this certificate reached inventory — presented in a TLS handshake, fetched from an issuer's AIA URL, copied from the embedded public bundle, stored while recording a trust decision, or uploaded.
+         * @enum {string}
+         */
+        ChainSource: "served" | "aia" | "bundle" | "tenant_anchor" | "upload";
+        /** @description The CA certificate a decision is about, as shown in the Trusted CAs table. */
+        TrustAnchorCertificate: {
+            /** Format: uuid */
+            id: string;
+            subject_dn: string;
+            issuer_dn: string;
+            common_name?: string;
+            fingerprint_sha256: string;
+            /** Format: date-time */
+            not_before?: string;
+            /** Format: date-time */
+            not_after?: string;
+            is_self_signed: boolean;
+            is_ca_certificate: boolean;
+        };
+        /** @description One explicit trust or distrust decision this organisation recorded against a CA certificate. */
+        TrustAnchor: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            certificate_id: string;
+            /** @enum {string} */
+            decision: "trusted" | "distrusted";
+            /** @description Free text recorded with the decision (why, ticket, owner). Absent when empty. */
+            note?: string;
+            /**
+             * Format: uuid
+             * @description The user who made the decision. No FK — a deleted author leaves the row intact. Absent when unknown.
+             */
+            decided_by?: string;
+            /** Format: date-time */
+            decided_at: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            certificate: components["schemas"]["TrustAnchorCertificate"];
+            /** @description Certificates of this tenant whose chain currently ends at this CA (the CA itself excluded). */
+            affected_certificates: number;
+            /** @description Distinct assets deploying those certificates. */
+            affected_assets: number;
+        };
+        TrustAnchorList: {
+            anchors: components["schemas"]["TrustAnchor"][];
+            total: number;
+        };
+        TrustAnchorCreateRequest: {
+            /**
+             * Format: uuid
+             * @description A CA certificate already in inventory. Mutually exclusive with certificate_pem.
+             */
+            certificate_id?: string;
+            /** @description One or more PEM CA certificates. Mutually exclusive with certificate_id. The decision is recorded against the last certificate in the file. */
+            certificate_pem?: string;
+            /** @enum {string} */
+            decision: "trusted" | "distrusted";
+            note?: string;
+        };
+        TrustAnchorUpdateRequest: {
+            /** @enum {string} */
+            decision?: "trusted" | "distrusted";
+            note?: string;
+        };
+        TrustAnchorFromChainRequest: {
+            /** @description The presented chain as concatenated PEM, leaf first, exactly as `presented_chain[].pem` from a connector test joined together. At least one CA certificate must be present. */
+            chain_pem: string;
+            /** @enum {string} */
+            decision: "trusted" | "distrusted";
+            note?: string;
+        };
+        InternalTrustAnchors: {
+            /** @description PEM of every CA certificate the tenant explicitly trusted. */
+            trusted_pem: string[];
+            /** @description Lower-case hex SHA-256 of every CA certificate the tenant explicitly distrusted; a caller refuses any chain containing one. */
+            distrusted_fingerprints_sha256: string[];
+            /** @description Version of the embedded public root bundle the platform evaluates against, for diagnostics. */
+            bundle_version: string;
+        };
+        PublicRootsInfo: {
+            /** @description The embedded bundle's version, as its source publishes it (a date for the Mozilla bundle). */
+            version: string;
+            root_count: number;
+            /** @description Where the bundle comes from (e.g. "Mozilla NSS root store via curl.se/ca"). */
+            source?: string;
         };
         /** @description CURRENT response for GET /certificates/{id}/chain. `chain` is a flat ordered array [leaf, issuer, ..., root]. `is_complete` is derived from whether the last element is self-signed or has subject == issuer. */
         CertificateChainResponse: {
@@ -6403,6 +6623,8 @@ export interface components {
             weak_reasons?: string[];
             /** @description Certificate-hygiene observations (missing SCT, an untrusted or pinned CA, an incomplete chain, a missing Subject DN) that affect confidence in the chain but say nothing about cryptographic strength. Never influences strength/weak_reasons — see CLAUDE.md "Certificate quality flags". */
             cert_hygiene_flags?: string[];
+            /** @description The organisation's trust verdict on the connection's certificate, decided from the leaf's issuer (the connection keeps only the leaf): trusted/distrusted decisions in Settings → Policies → Trusted CAs, then the embedded public bundle. Absent until evaluated. Replaces the probe's own untrusted-CA hygiene flag when present. */
+            trust_status?: components["schemas"]["TrustStatus"];
             cert_subject?: string;
             cert_issuer?: string;
             cert_san?: string[];
@@ -9468,6 +9690,8 @@ export interface operations {
                 issuer?: string;
                 /** @description Restrict to self-signed (`true`/`1`) or not (`false`/`0`). */
                 self_signed?: "true" | "false" | "1" | "0";
+                /** @description Restrict to certificates with this trust status (feature). A comma-separated list selects several; `unevaluated` selects certificates whose trust has not been computed yet. */
+                trust_status?: string;
                 /** @description Restrict to certificates whose owning asset has this ownership — e.g. `third_party` for the vendor-certificates view. Unrecognized values are ignored. */
                 ownership?: "internal" | "third_party" | "unknown";
                 /** @description Restrict to a specific certificate id (UUID). */
@@ -9718,6 +9942,207 @@ export interface operations {
                 };
             };
             401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    listTrustAnchors: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The decisions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrustAnchorList"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    createTrustAnchor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TrustAnchorCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description The recorded decision. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrustAnchor"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            /** @description A decision already exists for this CA; change it with PUT /trust-anchors/{id}. `error` names the existing decision. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    createTrustAnchorFromChain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TrustAnchorFromChainRequest"];
+            };
+        };
+        responses: {
+            /** @description The recorded decision. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrustAnchor"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            /** @description A decision already exists for the top CA; change it with PUT /trust-anchors/{id}. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    internalTrustAnchors: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call writes for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["SourceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The decisions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InternalTrustAnchors"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getPublicRootsInfo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Bundle metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PublicRootsInfo"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+        };
+    };
+    updateTrustAnchor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Trust anchor (decision) id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TrustAnchorUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated decision. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TrustAnchor"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    deleteTrustAnchor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Trust anchor (decision) id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -11227,7 +11652,7 @@ export interface operations {
                  *
                  *     The count is produced by compiling the same `finding:(…)` query the facet rail writes, through the same translator the asset list compiles, so clicking the number returns exactly the assets it counted.
                  */
-                level: "class" | "risk" | "tag" | "has_findings" | "has_endpoints" | "status" | "environment" | "ownership" | "stale_status" | "site" | "region" | "zone" | "segment" | "owner_email" | "business_unit" | "support_group" | "operating_system" | "source" | "proposed_by" | "asset_type";
+                level: "class" | "risk" | "tag" | "has_findings" | "has_endpoints" | "status" | "environment" | "ownership" | "stale_status" | "site" | "region" | "zone" | "segment" | "owner_email" | "business_unit" | "support_group" | "operating_system" | "source" | "proposed_by" | "asset_type" | "cert_trust";
                 limit?: number;
                 /** @description The SAME query the list takes, so the counts describe the filtered set. A rail whose numbers do not move when you filter is a rail nobody trusts twice. */
                 query?: string;

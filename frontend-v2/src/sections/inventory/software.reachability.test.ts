@@ -61,11 +61,12 @@ describe('the Inventory software lens', () => {
 });
 
 describe('the Upload SBOM page', () => {
-  it('has a nav home under Discovery → Sources, beside the other file intake', () => {
-    // Sources is a nav GROUP, not a page, so this is a sibling of PCAP Upload
-    // rather than a card on a page that does not exist.
+  it('has a nav home under Discovery → Sensors & Scanning, beside the other intake', () => {
+    // Sensors & Scanning is the one group for every way data comes in, so a
+    // file upload is a sibling of PCAP Upload and the sensors themselves
+    // rather than a card on a "Sources" page that does not exist.
     const discovery = SECTIONS.find((s) => s.id === 'discovery')!;
-    const sources = (discovery.groups ?? []).find((g) => g.label === 'Sources')!;
+    const sources = (discovery.groups ?? []).find((g) => g.label === 'Sensors & Scanning')!;
     const labels = sources.items.map((i) => i.label);
     expect(labels).toContain('SBOM Upload');
     expect(labels).toContain('PCAP Upload');

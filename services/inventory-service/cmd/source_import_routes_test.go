@@ -58,7 +58,7 @@ func sourceEngine(t *testing.T) *gin.Engine {
 	})
 	users.GET("/inventory-service/assets", func(c *gin.Context) { c.Status(http.StatusOK) })
 
-	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), sourceTestSecret)
+	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), handlers.NewInternalTrustHandler(nil), sourceTestSecret)
 	return r
 }
 
@@ -86,6 +86,9 @@ var sourceRoutes = []struct{ method, path string }{
 	{http.MethodGet, "/api/v1/inventory-service/internal/ci-export/items"},
 	{http.MethodPost, "/api/v1/inventory-service/internal/ci-export/assets"},
 	{http.MethodGet, "/api/v1/inventory-service/internal/ci-export/relationships"},
+	// slice 4: the tenant's trust decisions, for a connector service's
+	// connection trust pool.
+	{http.MethodGet, "/api/v1/inventory-service/internal/trust/anchors"},
 }
 
 func sourceRequest(method, path string, body []byte) *http.Request {
@@ -205,7 +208,7 @@ func TestSourceImportRoutes_AdmitASignedServiceCall(t *testing.T) {
 func TestSourceImportRoutes_FailClosedWithoutASecret(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), "")
+	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), handlers.NewInternalTrustHandler(nil), "")
 	req := sourceRequest(http.MethodPost, "/api/v1/inventory-service/internal/sources/segments", nil)
 	req.Header.Set(serviceauth.HeaderTenantID, uuid.NewString())
 	serviceauth.NewSigner("anything-at-all-0123456789").SignRequest(req)
@@ -226,7 +229,7 @@ func TestMainMountsSourceImportRoutesOnlyThroughTheGate(t *testing.T) {
 	if !regexp.MustCompile(`(?m)^\s*mountSourceImportRoutes\(r,`).MatchString(src) {
 		t.Error("main.go does not call mountSourceImportRoutes(r, …); the internal source routes are not served")
 	}
-	for _, prefix := range []string{"/internal/sources/", "/internal/ci-export/"} {
+	for _, prefix := range []string{"/internal/sources/", "/internal/ci-export/", "/internal/trust/"} {
 		if strings.Contains(src, prefix) {
 			t.Errorf("main.go names an %s path directly; it must be mounted only by mountSourceImportRoutes, behind the signed-call gate", prefix)
 		}

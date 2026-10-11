@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.5.0-rc.4] - 2026-10-07
+## [4.5.0-rc.5] - 2026-10-07
 
 **Version 4.5.0 is a security-hardening and dependency release, and it also improves
 classification, DHCP matching, the agent installers and the discovery pipeline.** The edge,
@@ -30,6 +30,13 @@ first schema upgrade can take longer on a large inventory, and a sensor installe
 earlier installer needs a new registration key.
 
 ### Highlights
+
+- **Organisation-managed certificate trust.** Trusted CAs records trust and distrust,
+  certificate and asset views show the evaluated status, and Certificate Hygiene flags
+  untrusted issuers. Integration connection tests can offer a presented CA for approval.
+- **Discovery navigation and import fixes.** Discovery tools are grouped together, imported
+  assets inherit their segment environment, integration audit events are retained, and the
+  Windows sensor installer works in Windows PowerShell 5.1.
 
 - **Security review fixes.** Account takeover through the profile closed; sign-in reveals
   nothing about which addresses exist and platform-admin sign-in is rate limited; sessions

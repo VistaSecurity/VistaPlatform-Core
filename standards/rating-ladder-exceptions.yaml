@@ -94,7 +94,7 @@ frontend-v2/src/sections/dashboard/dashboard-page.tsx#DashboardPage:
   concept: dashboard_counts
   reason: Displays per-grade counts and trends; unrelated count/length comparisons
     are not a ladder.
-  fingerprint: 8c4ca3dd1453405d0409c83b78239d4ad7dfe908d419368a9d83158002202e58
+  fingerprint: 10506caf0f86e47debf742ea2891860baebb138976bdf7a79887c777ed4efffe
 frontend-v2/src/sections/findings/findings-page.tsx#FindingsPage:
   concept: findings_loaded_view_counts
   reason: UI comparisons and conditional labels describe row counts, filters and
@@ -105,7 +105,7 @@ frontend-v2/src/sections/inventory/inventory-page.tsx#InventoryPage:
   concept: inventory_counts
   reason: Displays grade groups and asset counts; risk conversion delegates to
     shared helpers.
-  fingerprint: c62de72751bf03526ca94f04c45a0ea9cf5cc07d2dcce33f777eba38bdbdeb4a
+  fingerprint: ea514fd5a44b8dd5b700dcae0d22e0bac9e6486b76f884f1ded1b9bb8f56332b
 frontend-v2/src/sections/posture/algorithm-reference.tsx#AlgorithmReference:
   concept: catalogue_display
   reason: Strength filter values, row counts and column alignment coexist; score

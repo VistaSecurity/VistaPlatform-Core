@@ -96,6 +96,11 @@ tmp/
 !shared/deviceinterrogation/testdata/pipeline/_shared/ca.pem
 !shared/deviceinterrogation/testdata/pipeline/_shared/leaf.pem
 
+# Exception: the embedded public root store (Mozilla's CA certificates as
+# extracted by curl). Public CA certificates only, refreshed per release; see
+# shared/certificates/publicroots/README.md.
+!shared/certificates/publicroots/cacert.pem
+
 
 config/rke2/values.env
 # RKE2 generated api-gateway Traefik ConfigMap (regenerated each deploy)

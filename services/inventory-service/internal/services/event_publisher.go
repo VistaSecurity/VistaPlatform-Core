@@ -21,6 +21,27 @@ type EventPublisherService struct {
 	// notify publishes a tenant notification on `notifications.send`. Nil when
 	// NATS is unavailable, which drops the notification and nothing else.
 	notify func(sharedevents.NotificationEvent) error
+	// reconcile publishes a per-tenant compliance reconcile job on
+	// `compliance.reconcile.tenant`. Nil when NATS is unavailable.
+	reconcile func(ComplianceReconcileJob) error
+}
+
+// ComplianceReconcileJob is the body compliance-engine's reconcile worker
+// consumes on events.SubjectComplianceReconcileTenant — the shape of its
+// ReconcileJob, copied rather than imported (a service never imports
+// another's internals).
+type ComplianceReconcileJob struct {
+	TenantID string `json:"tenant_id"`
+	Reason   string `json:"reason"`
+}
+
+// PublishComplianceReconcile asks compliance-engine to re-evaluate one
+// tenant's frameworks. A no-op when NATS is unavailable.
+func (s *EventPublisherService) PublishComplianceReconcile(_ context.Context, tenantID uuid.UUID, reason string) error {
+	if s == nil || s.reconcile == nil {
+		return nil
+	}
+	return s.reconcile(ComplianceReconcileJob{TenantID: tenantID.String(), Reason: reason})
 }
 
 // NewEventPublisherService creates a new event publisher service
@@ -46,6 +67,9 @@ func NewEventPublisherService() (*EventPublisherService, error) {
 		lifecycle: lifecycle,
 		notify: func(n sharedevents.NotificationEvent) error {
 			return sharedevents.PublishJSON(client, sharedevents.SubjectNotificationsSend, n)
+		},
+		reconcile: func(j ComplianceReconcileJob) error {
+			return sharedevents.PublishJSON(client, sharedevents.SubjectComplianceReconcileTenant, j)
 		},
 	}, nil
 }

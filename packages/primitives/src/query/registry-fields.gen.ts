@@ -152,6 +152,13 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'business_unit' },
     },
     {
+      name: 'cert_trust',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cert_trust' },
+      enum: ['public', 'private_trusted', 'incomplete', 'self_signed', 'untrusted', 'distrusted', 'unevaluated', 'none'],
+      description: 'worst trust status of the asset\'s certificates; unevaluated = none evaluated yet, none = no certificate',
+    },
+    {
       name: 'class',
       type: 'class',
       accessor: { kind: 'column', column: 'class_key', pathColumn: 'class_path' },
@@ -444,6 +451,12 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       name: 'subject_dn',
       type: 'text',
       accessor: { kind: 'column', column: 'subject_dn' },
+    },
+    {
+      name: 'trust_status',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'trust_status', cast: 'text' },
+      enum: ['public', 'private_trusted', 'self_signed', 'untrusted', 'distrusted', 'incomplete'],
     },
   ],
   crypto_configuration: [

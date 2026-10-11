@@ -149,6 +149,13 @@ features:
     status: available
     edition: core
     docs: features/certificate-chain-management
+  - id: certificate_trust
+    group: discover_inventory
+    name: Certificate trust
+    summary: Decide which CAs you trust; every certificate is classed public, trusted, self-signed, untrusted or distrusted, so what you never agreed to trust is findable.
+    status: available
+    edition: core
+    docs: features/certificate-trust
   - id: third_party_connections
     group: discover_inventory
     name: Third-party connections

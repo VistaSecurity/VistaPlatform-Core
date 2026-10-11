@@ -106,6 +106,20 @@ var certificateStateValues = []string{
 	"pre-activation", "active", "suspended", "deactivated", "revoked", "expired", "destroyed",
 }
 
+// certificateTrustStatusValues is `certificates_trust_status_check`.
+// NULL — not yet evaluated — is not a value; `trust_status:*` / `exists`
+// distinguish it.
+var certificateTrustStatusValues = []string{
+	"public", "private_trusted", "self_signed", "untrusted", "distrusted", "incomplete",
+}
+
+// certTrustAssetValues is the asset's derived `cert_trust`: the worst of its
+// certificates' statuses, plus unevaluated and none (shared/query/sql
+// CertTrustValues, which the translator's expression produces).
+var certTrustAssetValues = []string{
+	"public", "private_trusted", "incomplete", "self_signed", "untrusted", "distrusted", "unevaluated", "none",
+}
+
 // cryptoStrengthValues is §4.3's vocabulary for the derived `strength` field:
 // the `algorithms.strength` catalogue column, read through the shared helper.
 // It has no CHECK of its own, so it is not in the schema-parity test; the

@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/findings"
+	querysql "github.com/vistasecurity/vistaplatform/shared/query/sql"
 )
 
 // assetFacetExpr maps a facet level to the SQL that produces its bucket key.
@@ -58,6 +59,13 @@ var assetFacetExpr = map[string]string{
 	"source":            "COALESCE(a.class_source_kind, 'Unknown')",
 	"class_source_kind": "COALESCE(a.class_source_kind, 'Unknown')",
 	"proposed_by":       "COALESCE(a.class_source_ref, 'Unknown')",
+
+	// Certificate trust: the WORST trust status among the asset's
+	// certificates, `unevaluated` when it has certificates none of which is
+	// evaluated yet, `none` when it has no certificate. The SAME expression
+	// the query language's `cert_trust` field compiles to, so a bucket's
+	// click (`cert_trust:<key>`) lists exactly the assets it counted.
+	"cert_trust": querysql.AssetCertTrustSQL("a", func(p string) string { return "facet_" + p }),
 }
 
 // assetFacetLevelAliases resolves the levels that are not a plain column

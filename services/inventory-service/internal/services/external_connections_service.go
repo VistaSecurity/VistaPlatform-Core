@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services/certtrust"
 	"github.com/vistasecurity/vistaplatform/shared/cryptoparse"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	cryptostrength "github.com/vistasecurity/vistaplatform/shared/strength"
@@ -25,7 +27,14 @@ type ExternalConnectionsService struct {
 	db                       *database.DB
 	algorithms               externalAlgorithmLookup
 	serviceIdentificationSvc *ServiceIdentificationService
+	// trust classifies a connection's leaf against the tenant's trust
+	// decisions. Nil: trust_status is left as it is and the probe's
+	// verdict alone drives the hygiene flags.
+	trust *certtrust.Evaluator
 }
+
+// SetTrustEvaluator wires tenant certificate trust into 3rd-party connections.
+func (s *ExternalConnectionsService) SetTrustEvaluator(e *certtrust.Evaluator) { s.trust = e }
 
 // NewExternalConnectionsService creates a new service wired to the algorithm service
 // for crypto strength assessment.
@@ -83,6 +92,18 @@ func (s *ExternalConnectionsService) Upsert(tenantID uuid.UUID, input models.Ext
 
 	now := time.Now()
 
+	// Tenant trust of the presented leaf, decided before the row
+	// lock: it reads certificates and decisions, never external_connections.
+	// nil keeps the stored verdict (no certificate in this observation).
+	var trustStatus *string
+	if s.trust != nil && input.CertPEM != nil && strings.TrimSpace(*input.CertPEM) != "" {
+		if v, err := s.trust.PresentedVerdict(context.Background(), tenantID, *input.CertPEM); err != nil {
+			log.Printf("[ExternalConnections] tenant %s: trust of %s:%d: %v", tenantID, input.DestIP, input.DestPort, err)
+		} else if v != "" {
+			trustStatus = &v
+		}
+	}
+
 	var certSAN pq.StringArray
 	if len(input.CertSAN) > 0 {
 		certSAN = pq.StringArray(input.CertSAN)
@@ -113,7 +134,7 @@ upserted AS (
         cert_public_key_algorithm, cert_public_key_size, cert_signature_algorithm,
         cert_is_expired, cert_validation_status, cert_sct_source, cert_pem,
         first_seen_at, last_seen_at, observation_count, sensor_id,
-        created_at, updated_at
+        created_at, updated_at, trust_status
     ) VALUES (
         $1, $2::inet, $6, $7,
         $3::inet, $8, $33, $4, $5, $9,
@@ -125,7 +146,7 @@ upserted AS (
         $21, $22, $23,
         $24, $25, $32, $26,
         $27, $27, 1, $28,
-        $27, $27
+        $27, $27, $34
     )
     ON CONFLICT ON CONSTRAINT uq_external_connection DO UPDATE SET
         source_hostname         = COALESCE(EXCLUDED.source_hostname, external_connections.source_hostname),
@@ -188,6 +209,7 @@ upserted AS (
         cert_validation_status  = COALESCE(EXCLUDED.cert_validation_status, external_connections.cert_validation_status),
         cert_sct_source         = COALESCE(EXCLUDED.cert_sct_source, external_connections.cert_sct_source),
         cert_pem                = COALESCE(EXCLUDED.cert_pem, external_connections.cert_pem),
+        trust_status            = COALESCE(EXCLUDED.trust_status, external_connections.trust_status),
         last_seen_at            = EXCLUDED.last_seen_at,
         observation_count       = external_connections.observation_count + 1,
         sensor_id               = COALESCE(EXCLUDED.sensor_id, external_connections.sensor_id),
@@ -251,12 +273,16 @@ LEFT JOIN prev ON true
 				return err
 			}
 			var stored struct {
-				Strength *string `json:"crypto_strength"`
+				Strength    *string `json:"crypto_strength"`
+				TrustStatus *string `json:"trust_status"`
 			}
 			if err := json.Unmarshal(priorJSON, &stored); err != nil {
 				return err
 			}
 			prior.Strength = stored.Strength
+			if trustStatus == nil {
+				trustStatus = stored.TrustStatus
+			}
 			var facts models.ExternalConnectionUpsert
 			if err := json.Unmarshal(priorJSON, &facts); err != nil {
 				return err
@@ -272,7 +298,8 @@ LEFT JOIN prev ON true
 		cryptoStrength = nullableStrength(rating)
 		isPQC = pqcRating
 		weakReasonsArr = pq.StringArray(reasons)
-		hygieneFlagsArr = pq.StringArray(appendUnique(hygiene, prior.CertHygieneFlags...))
+		hygieneFlagsArr = pq.StringArray(certtrust.ApplyTrustToHygiene(
+			appendUnique(hygiene, prior.CertHygieneFlags...), stringValue(input.CertValidationStatus), stringValue(trustStatus)))
 		certIsExpired = input.CertNotAfter != nil && input.CertNotAfter.Before(now)
 		certSAN = pq.StringArray(input.CertSAN)
 		supportedTLSVersions = pq.StringArray(input.SupportedTLSVersions)
@@ -327,6 +354,8 @@ LEFT JOIN prev ON true
 			input.CertSCTSource,
 			// $33: dest_hostname_source_kind
 			destHostnameSourceKind,
+			// $34: trust_status
+			trustStatus,
 		).Scan(
 			&conn.ID, &conn.TenantID,
 			&conn.SourceIP, &conn.SourceHostname, &conn.SourceAssetID,
@@ -770,7 +799,9 @@ func assessCertHygiene(input models.ExternalConnectionUpsert) []string {
 	if input.CertValidationStatus != nil {
 		switch strings.ToLower(strings.TrimSpace(*input.CertValidationStatus)) {
 		case "untrusted_ca":
-			flags = append(flags, "Certificate signed by an untrusted certificate authority (not in the system trust store — may be a private or pinned CA)")
+			// Rewritten from the tenant's trust decisions by
+			// certtrust.ApplyTrustToHygiene before the row is stored.
+			flags = append(flags, certtrust.HygieneUntrustedCA)
 		case "incomplete_chain":
 			flags = append(flags, "Incomplete certificate chain (missing intermediate certificates)")
 		}
@@ -964,7 +995,14 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 		argIdx++
 	}
 	if f.CertTrustIssue != nil && *f.CertTrustIssue {
-		where = append(where, "(cert_validation_status IS NOT NULL AND LOWER(TRIM(cert_validation_status)) <> 'valid')")
+		// The probe's verdict, read through the tenant's trust: an
+		// untrusted-CA / incomplete-chain verdict on a chain that reaches a
+		// CA the tenant trusted, or a public root, is not an issue; a chain
+		// to a CA the tenant distrusted is one whatever the probe said.
+		where = append(where, `((cert_validation_status IS NOT NULL AND LOWER(TRIM(cert_validation_status)) <> 'valid'
+		    AND NOT (COALESCE(trust_status, '') IN ('private_trusted', 'public')
+		             AND LOWER(TRIM(cert_validation_status)) IN ('untrusted_ca', 'incomplete_chain')))
+		  OR trust_status = 'distrusted')`)
 	}
 	if f.HasLegacyTLS != nil && *f.HasLegacyTLS {
 		where = append(where, legacyTLSVersionsArraySQL("supported_tls_versions"))

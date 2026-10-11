@@ -59,7 +59,11 @@ type edgeRouter struct {
 // internalEdgePaths are the internal routes device-interrogation-service
 // calls: the sightings route and, after an interrogation's claims settle, the
 // gateway-links route.
-var internalEdgePaths = []string{sightingsEdgePath, sightingclient.GatewayLinksPath}
+// The certificate-trust read rides the same internal prefix and is
+// pinned here too.
+var internalEdgePaths = []string{sightingsEdgePath, sightingclient.GatewayLinksPath, trustAnchorsEdgePath}
+
+const trustAnchorsEdgePath = "/api/v1/inventory-service/internal/trust/anchors"
 
 // assertEdgeDenies checks that, for each internal path, the highest-priority
 // router covering it denies it.

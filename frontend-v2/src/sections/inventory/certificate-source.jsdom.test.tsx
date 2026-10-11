@@ -129,9 +129,12 @@ it('lists the cloud-managed certificate beside the observed one, and says which 
   expect(page).toContain('cloud-managed');
   expect(page).toContain('observed');
 
+  // The row, not just its name cell: the expiry is a sibling of the name. The
+  // row now leads with the Trust chip, so it is found by its test id
+  // rather than by what its text starts with.
   const rowFor = (name: string) => {
-    const el = [...host.querySelectorAll('div')].find(
-      (d) => d.textContent?.startsWith(name) && d.textContent.length < name.length + 40,
+    const el = [...host.querySelectorAll('[data-testid="cert-row"]')].find(
+      (d) => d.textContent?.includes(name),
     );
     if (!el) throw new Error(`no row found for ${name}`);
     return el.textContent ?? '';

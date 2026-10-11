@@ -49,6 +49,12 @@ const (
 	EventCategoryData        = "data"
 	EventCategoryTenant      = "tenant"
 	EventCategoryJob         = "job"
+	// EventCategoryIntegration: exchanges with a third-party system of record —
+	// connector connections, scan consent, sync runs and their undo.
+	// Connector handlers wrote this category before it was in
+	// the CHECK, so every one of those events was discarded; the schema and
+	// this constant were added together.
+	EventCategoryIntegration = "integration"
 )
 
 // Standard event types by category

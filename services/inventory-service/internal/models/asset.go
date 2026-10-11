@@ -708,12 +708,23 @@ type Certificate struct {
 	// SCTSource is which RFC 6962 delivery route carried the SCT (embedded |
 	// tls_extension | ocsp | none). Absent means the route wasn't observable
 	// (e.g. a passive-capture-only observation) — never a false "none".
-	SCTSource     *string   `json:"sct_source,omitempty" db:"sct_source"`
-	KnownBadCA    *string   `json:"known_bad_ca,omitempty" db:"known_bad_ca"`
-	IsEV          *bool     `json:"is_ev,omitempty" db:"is_ev"`
-	OCSPStatus    *string   `json:"ocsp_status,omitempty" db:"ocsp_status"`
-	OCSPDetail    *string   `json:"ocsp_detail,omitempty" db:"ocsp_detail"`
-	CertOwnership *string   `json:"cert_ownership,omitempty" db:"cert_ownership"`
+	SCTSource     *string `json:"sct_source,omitempty" db:"sct_source"`
+	KnownBadCA    *string `json:"known_bad_ca,omitempty" db:"known_bad_ca"`
+	IsEV          *bool   `json:"is_ev,omitempty" db:"is_ev"`
+	OCSPStatus    *string `json:"ocsp_status,omitempty" db:"ocsp_status"`
+	OCSPDetail    *string `json:"ocsp_detail,omitempty" db:"ocsp_detail"`
+	CertOwnership *string `json:"cert_ownership,omitempty" db:"cert_ownership"`
+	// Tenant trust. TrustStatus is the platform's verdict on where this
+	// certificate's chain ends for this tenant — public | private_trusted |
+	// self_signed | untrusted | distrusted | incomplete — decided centrally by
+	// certtrust, not by whichever agent observed it. Nil means "not yet
+	// evaluated", which is never the same as trusted.
+	TrustStatus              *string    `json:"trust_status,omitempty" db:"trust_status"`
+	TrustAnchorCertificateID *uuid.UUID `json:"trust_anchor_certificate_id,omitempty" db:"trust_anchor_certificate_id"`
+	TrustEvaluatedAt         *time.Time `json:"trust_evaluated_at,omitempty" db:"trust_evaluated_at"`
+	// ChainSource is how the certificate reached inventory: served | aia |
+	// bundle | tenant_anchor | upload. Nil for rows stored before it was recorded.
+	ChainSource   *string   `json:"chain_source,omitempty" db:"chain_source"`
 	CreatedAt     time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at" db:"updated_at"`
 	RelatedAssets []Asset   `json:"related_assets,omitempty"`
@@ -756,6 +767,7 @@ type CertificateData struct {
 	IssuerCertificateID     *uuid.UUID
 	DataSource              string                 // e.g., "discovery", "cloud_api", "manual"
 	CertOwnership           string                 // "internal" | "third_party" | "" (unset; derived from asset link for discovered certs)
+	ChainSource             string                 // served | aia | bundle | tenant_anchor | upload; "" leaves chain_source NULL
 	ACMMetadata             map[string]interface{} // AWS ACM-specific metadata (ARN, renewal status, etc.)
 
 	// Certificate quality flags (computed during active TLS probing/enrichment)
@@ -866,11 +878,14 @@ type CertificateFilters struct {
 	// (internal | third_party | unknown), via crypto_implementations → assets.
 	// Drives the "vendor certificates" view of the cert lens.
 	Ownership *string `json:"ownership" form:"ownership"`
-	Search    *string `json:"search" form:"search"`
-	Page      int     `json:"page" form:"page"`
-	PageSize  int     `json:"page_size" form:"page_size"`
-	SortBy    string  `json:"sort_by" form:"sort_by"`
-	SortOrder string  `json:"sort_order" form:"sort_order"`
+	// TrustStatus restricts to these trust statuses; "unevaluated"
+	// selects certificates whose trust has not been computed (NULL).
+	TrustStatus []string `json:"trust_status" form:"trust_status"`
+	Search      *string  `json:"search" form:"search"`
+	Page        int      `json:"page" form:"page"`
+	PageSize    int      `json:"page_size" form:"page_size"`
+	SortBy      string   `json:"sort_by" form:"sort_by"`
+	SortOrder   string   `json:"sort_order" form:"sort_order"`
 }
 
 // CryptoImplementationFilters defines parameters for filtering crypto configuration searches

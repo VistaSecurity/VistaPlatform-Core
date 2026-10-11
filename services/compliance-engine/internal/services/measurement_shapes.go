@@ -185,6 +185,14 @@ var measurementShapes = map[string]measurementShape{
 			"issuer_dn":            {SQL: "c.issuer_dn", Kind: scanText},
 			"not_after":            {SQL: "c.not_after", Kind: scanTime},
 			"not_before":           {SQL: "c.not_before", Kind: scanTime},
+			// The platform's trust verdict (feature), NULL until the
+			// certificate has been evaluated. The anchor is the certificate the
+			// verdict was decided on; its subject is read through the tenant key
+			// so evidence can name the CA without a second round trip.
+			"trust_status":                {SQL: "c.trust_status", Kind: scanText},
+			"trust_anchor_certificate_id": {SQL: "c.trust_anchor_certificate_id::text", Kind: scanText},
+			"trust_anchor_subject_dn": {SQL: "(SELECT ta.subject_dn FROM certificates ta" +
+				" WHERE ta.tenant_id = c.tenant_id AND ta.id = c.trust_anchor_certificate_id)", Kind: scanText},
 		},
 	},
 
@@ -510,9 +518,6 @@ func (v scannedValue) number() (float64, bool) {
 	}
 	return 0, false
 }
-
-// boolean returns the value as a bool and whether it was present.
-func (v scannedValue) boolean() (bool, bool) { return v.bl.Bool, v.bl.Valid }
 
 // publish returns the value as the scalar a rule judges, or errNoMeasurement
 // when the column is NULL. A NULL is not a zero: a certificate with no recorded

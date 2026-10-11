@@ -80,6 +80,7 @@ func TestEnumsMatchSchema(t *testing.T) {
 			{"findings_detection_state_check", findingDetectionStateValues},
 			{"findings_workflow_status_check", findingWorkflowStatusValues},
 			{"valid_certificate_state", certificateStateValues},
+			{"certificates_trust_status_check", certificateTrustStatusValues},
 			// The observation target has no table, but `network.type` is not
 			// computed: the classifier copies the matching segment's column
 			// through, so the segment's CHECK IS its range. Pinning it here is

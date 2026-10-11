@@ -181,6 +181,9 @@ var assetFields = []catalog.FieldInfo{
 	enumAs("source", "class_source_kind", classSourceKindValues...),
 	withDescription(derived("proposed_by", "asset.proposed_by", ast.TypeKeyword),
 		"sugar for source in (inferred, rule) and class_source_ref=<producer> (§12 amendment 7)"),
+	withEnum(withDescription(derived("cert_trust", "asset.cert_trust", ast.TypeKeyword),
+		"worst trust status of the asset's certificates; unevaluated = none evaluated yet, none = no certificate"),
+		certTrustAssetValues...),
 	{
 		Name: "risk", Type: ast.TypeBand,
 		Accessor: ast.Accessor{
@@ -261,6 +264,7 @@ var certificateFields = []catalog.FieldInfo{
 	col("not_before", ast.TypeTimestamp),
 	col("not_after", ast.TypeTimestamp),
 	colAs("self_signed", "is_self_signed", ast.TypeBoolean),
+	enumAs("trust_status", "trust_status", certificateTrustStatusValues...),
 	col("id", ast.TypeUUID),
 }
 

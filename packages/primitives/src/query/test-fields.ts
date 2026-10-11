@@ -96,6 +96,12 @@ const ASSET_FIELDS: FieldInfo[] = [
   // stay at four, because their CHECKs do.
   enumAs('source', 'class_source_kind', 'measured', 'declared', 'imported', 'inferred', 'rule'),
   derived('proposed_by', 'asset.proposed_by', 'keyword'),
+  // The worst trust status of the asset's certificates, plus
+  // unevaluated (none evaluated yet) and none (no certificate).
+  {
+    ...derived('cert_trust', 'asset.cert_trust', 'keyword'),
+    enum: ['public', 'private_trusted', 'incomplete', 'self_signed', 'untrusted', 'distrusted', 'unevaluated', 'none'],
+  },
   {
     name: 'risk',
     type: 'band',
@@ -159,6 +165,11 @@ const CERTIFICATE_FIELDS: FieldInfo[] = [
   col('not_before', 'timestamp'),
   col('not_after', 'timestamp'),
   colAs('self_signed', 'is_self_signed', 'boolean'),
+  enumAs(
+    'trust_status',
+    'trust_status',
+    'public', 'private_trusted', 'self_signed', 'untrusted', 'distrusted', 'incomplete',
+  ),
   col('id', 'uuid'),
 ];
 

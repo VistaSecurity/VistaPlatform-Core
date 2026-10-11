@@ -16,6 +16,9 @@ export const TENANT_PERMISSIONS = {
     delete: 'assets.delete',
     manage: 'assets.manage',
   },
+  certificates: {
+    trust: 'certificates.trust',
+  },
   sensors: {
     create: 'sensors.create',
     read: 'sensors.read',

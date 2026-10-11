@@ -18,7 +18,7 @@ as well.
 | **Formats** | CycloneDX JSON 1.4 – 1.7, SPDX JSON 2.2 and 2.3 |
 | **Maximum size** | 32 MB |
 | **Maximum components** | 100,000 |
-| **Where** | Discovery → Sources → **SBOM Upload** |
+| **Where** | Discovery → Sensors & Scanning → **SBOM Upload** |
 | **Permission** | `assets.update` for an upload against an existing asset; `assets.create` to create one from the document |
 
 The format is detected **from inside the document** — CycloneDX's `bomFormat` /
@@ -27,7 +27,7 @@ Content-Type. Rename `bom.json` to `bom.txt` and it still works.
 
 ## Uploading
 
-1. Go to **Discovery → Sources → SBOM Upload**.
+1. Go to **Discovery → Sensors & Scanning → SBOM Upload**.
 2. Choose where the document belongs:
    - **An existing asset** — the host, container or application this software
      runs on. Search for it by name.

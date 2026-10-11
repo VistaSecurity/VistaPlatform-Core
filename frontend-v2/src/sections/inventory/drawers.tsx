@@ -21,6 +21,7 @@ import {
   type CryptoComponent,
   type RemediationGuidanceView,
 } from './risk-explanation';
+import { CertTrustChip, CertTrustRows } from './cert-trust';
 import { CryptoRiskChip, NOT_MEASURED_TITLE, PartialAssessmentNote, assessmentGaps, cryptoRiskPresentation, type AssessmentGapSource } from './crypto-risk-presentation';
 
 export type CryptoConfig = inventoryComponents['schemas']['CryptoImplementation'];
@@ -583,6 +584,9 @@ export function CertDrawer({ certId, onClose, active = true, depth = 0 }: {
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
               {state && <span style={{ fontSize: 11, fontWeight: 600, color: stateTone, background: `color-mix(in srgb, ${stateTone} 11%, transparent)`, borderRadius: 40, padding: '2px 9px', textTransform: 'capitalize' }}>{state}</span>}
               {expDays != null && <span className="mono" style={{ fontSize: 11.5, color: expTone }}>{expDays < 0 ? `expired ${-expDays}d ago` : `expires in ${expDays}d`}</span>}
+              {/* Where the chain ends for THIS organisation (#2397), decided
+                  centrally — absent until evaluated, and then it says so. */}
+              {cert && <CertTrustChip status={cert.trust_status} />}
               {c.is_self_signed === true && <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--warn-strong)', background: 'color-mix(in srgb, var(--warn-strong) 11%, transparent)', borderRadius: 40, padding: '2px 9px' }}>self-signed</span>}
               {c.is_ev === true && <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--ok)', background: 'color-mix(in srgb, var(--ok) 11%, transparent)', borderRadius: 40, padding: '2px 9px' }}>EV</span>}
             </div>
@@ -650,6 +654,7 @@ export function CertDrawer({ certId, onClose, active = true, depth = 0 }: {
             )}
 
             <SectionLabel icon="activity">Trust &amp; revocation</SectionLabel>
+            {cert && <CertTrustRows cert={cert} chain={chain} />}
             <MetaRow k="State" v={state} />
             <MetaRow k="OCSP" v={c.ocsp_status as string} />
             <MetaRow k="SCT (CT logged)" v={c.has_sct == null ? null : c.has_sct ? 'yes' : 'no'} />

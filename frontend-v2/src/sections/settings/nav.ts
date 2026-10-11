@@ -162,6 +162,13 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
     // rules behind it, and neither page calls a settings route.
     { key: 'classes', label: 'Classes', icon: 'shapes', built: true, permission: TENANT_PERMISSIONS.assets.read, job: 'Browse the asset class taxonomy and the attributes each class carries.' },
     { key: 'identification-rules', label: 'Identification rules', icon: 'fingerprint', built: true, permission: TENANT_PERMISSIONS.assets.read, job: 'See how a discovered thing is matched to an existing asset, and decide whether a high enough match may be accepted without you.' },
+    //. `assets.read` for the same reason as the two entries above: the
+    // page explains how the inventory's trust column is decided, so anyone who
+    // can see a certificate's trust status can see the decisions behind it.
+    // Changing them is `certificates.trust`, enforced on the write controls
+    // inside the page (and by the server) — NOT here, or a viewer would get an
+    // access notice in place of the rules their inventory is judged by.
+    { key: 'trusted-cas', label: 'Trusted CAs', icon: 'badge-check', built: true, permission: TENANT_PERMISSIONS.assets.read, job: 'Decide which certificate authorities your organisation trusts or distrusts, on top of the public roots trusted by default.' },
   ] },
   { section: 'Audit', items: [
     // audit.read, not settings.read: the audit trail is its own permission

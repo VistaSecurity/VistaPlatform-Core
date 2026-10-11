@@ -171,15 +171,44 @@ var measurementTransforms = map[string]measurementTransform{
 		return strings.Contains(up, "ECDHE") || strings.Contains(up, "DHE"), nil
 	},
 
-	// chain_valid inverts is_self_signed. A NULL is_self_signed is treated as
-	// "not self-signed", which is the behaviour this replaces; a real chain
-	// validation is a separate measurement, not a widening of this one.
-	"chain_valid": func(v scannedValue) (interface{}, error) {
-		b, ok := v.boolean()
-		if !ok {
-			return true, nil
+	// trust_ok reads the platform's trust verdict (certificates.trust_status,
+	// feature): true when the chain ends at a CA somebody trusts — a
+	// public root, or a CA the organisation trusted — and false for every
+	// verdict that says it does not. A NULL status (not yet evaluated) and any
+	// value outside the vocabulary yield NO measurement: an unevaluated
+	// certificate is not assessed, never a violation and never a pass.
+	//
+	// It replaces chain_valid, which inverted is_self_signed and so called
+	// every certificate from an unknown CA valid.
+	"trust_ok": func(v scannedValue) (interface{}, error) {
+		if v.kind != scanText && v.kind != scanTextNN {
+			return nil, errNoMeasurement
 		}
-		return !b, nil
+		if !v.str.Valid {
+			return nil, errNoMeasurement
+		}
+		ok, known := trustStatusOK[v.str.String]
+		if !known {
+			return nil, fmt.Errorf("%w: unknown trust status %q", errNoMeasurement, v.str.String)
+		}
+		return ok, nil
+	},
+
+	// trust_status publishes the trust verdict as-is, and only a value from the
+	// vocabulary. NULL (not yet evaluated) and anything unrecognised yield no
+	// measurement, so a pattern rule cannot judge a status it was not written
+	// for.
+	"trust_status": func(v scannedValue) (interface{}, error) {
+		if v.kind != scanText && v.kind != scanTextNN {
+			return nil, errNoMeasurement
+		}
+		if !v.str.Valid {
+			return nil, errNoMeasurement
+		}
+		if _, known := trustStatusOK[v.str.String]; !known {
+			return nil, fmt.Errorf("%w: unknown trust status %q", errNoMeasurement, v.str.String)
+		}
+		return v.str.String, nil
 	},
 
 	// days_floor floors a fractional day count. Floor, deliberately: a partial
@@ -217,6 +246,18 @@ var measurementTransforms = map[string]measurementTransform{
 		}
 		return int(math.Floor(time.Until(d).Hours() / 24)), nil
 	},
+}
+
+// trustStatusOK is the certificates.trust_status vocabulary (the CHECK in
+// schema.sql and the TrustStatus schema in the inventory-service OpenAPI),
+// mapped to whether the verdict means the chain ends at a trusted CA.
+var trustStatusOK = map[string]bool{
+	"public":          true,
+	"private_trusted": true,
+	"self_signed":     false,
+	"untrusted":       false,
+	"distrusted":      false,
+	"incomplete":      false,
 }
 
 // errNoMeasurement says a row yields no measurement. It is not an extraction

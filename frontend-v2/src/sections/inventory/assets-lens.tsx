@@ -11,7 +11,7 @@ import { Link, useHref, useNavigate } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import type { Asset } from '@vistasecurity/api-contract';
 import { Icon, RiskChip } from '../../components/ui';
-import { ASSETS_PAGE_SIZE, AssetQueryError, useAssetFacets, useAssetsQuery } from './asset-queries';
+import { ASSETS_PAGE_SIZE, AssetQueryError, useAssetFacets, useAssetsQuery, useOptionalAssetFacet } from './asset-queries';
 import { assetIdentity, assetRisk, classIcon } from './asset-shape';
 import { columnsForClass, gridTemplate, type AssetColumn } from './columns';
 import type { OpenAsset } from './drawers';
@@ -246,6 +246,8 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
 
   const assetsQ = useAssetsQuery(query, page);
   const facetsQ = useAssetFacets(query, FACET_LEVELS);
+  // Certificate trust counts — a level the server may not serve yet.
+  const certTrustQ = useOptionalAssetFacet('cert_trust', query);
 
   const assets = useMemo(() => assetsQ.data?.assets ?? [], [assetsQ.data]);
   const total = assetsQ.data?.total ?? 0;
@@ -400,6 +402,7 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
         <FacetRail
           facets={read.facets}
           data={facetsQ.data}
+          certTrust={certTrustQ.data}
           extra={read.extra}
           unparsed={read.unparsed}
           onChange={(next) => { setFacets(next); onPageChange(1); }}

@@ -187,6 +187,8 @@ var assetFields = []catalog.FieldInfo{
 	// database answers with no rows, for ever.
 	enumAs("source", "class_source_kind", "measured", "declared", "imported", "inferred", "rule"),
 	derived("proposed_by", "asset.proposed_by", ast.TypeKeyword),
+	enumDerived("cert_trust", "asset.cert_trust",
+		"public", "private_trusted", "incomplete", "self_signed", "untrusted", "distrusted", "unevaluated", "none"),
 	{
 		Name: "risk", Type: ast.TypeBand,
 		Accessor: ast.Accessor{
@@ -259,6 +261,8 @@ var certificateFields = []catalog.FieldInfo{
 	col("not_before", ast.TypeTimestamp),
 	col("not_after", ast.TypeTimestamp),
 	colAs("self_signed", "is_self_signed", ast.TypeBoolean),
+	enumAs("trust_status", "trust_status",
+		"public", "private_trusted", "self_signed", "untrusted", "distrusted", "incomplete"),
 	col("id", ast.TypeUUID),
 }
 

@@ -79,9 +79,27 @@ A rebuild uses whatever is in your inventory *at the moment it runs*, so one
 rebuild after importing a missing intermediate repairs every leaf beneath it at
 once.
 
-## Filling a gap
+## How chains are completed
 
-When a leaf's chain is incomplete:
+You rarely have to fill a gap yourself. When a certificate arrives whose issuer
+is not in inventory, the platform looks for that issuer in three places, in
+order: the certificates it already holds, the public root store it ships with,
+and the issuer URL the certificate itself names (the *Authority Information
+Access* extension most public and many private CAs include). An issuer found
+that way is stored, linked, and shown in the chain with a note of where it came
+from. The lookup runs in the background, never from a sensor, and only for
+certificates on your own assets — never for a third-party connection's
+certificate.
+
+Each intermediate is also checked against the organisation's trust decisions,
+which is how a certificate gets its **Trust** status — see
+[Certificate Trust](./certificate-trust.md).
+
+## Filling a gap by hand
+
+When a leaf's chain is still incomplete, the issuer was not obtainable from any
+of those sources — typically a private CA whose certificate was never served
+and has no issuer URL:
 
 1. Note the **Issuer** on the leaf — that is the certificate you are missing.
 2. Get that intermediate's PEM from your CA.
@@ -116,9 +134,10 @@ from leaf to root, its length, and whether it is complete.
 
 ## Reading chains well
 
-- **Incomplete is a statement about your inventory, not about the certificate.**
-  A perfectly valid public certificate will show an incomplete chain until you
-  have imported the intermediate that signed it.
+- **Incomplete means the issuer was unobtainable, not that the certificate is bad.**
+  A valid certificate can show an incomplete chain when its issuer was never
+  served, is not in the public root store, and names no issuer URL — usually a
+  private intermediate. Importing that intermediate completes the chain.
 - **Watch the intermediates' expiry, not just the leaves'.** An expiring
   intermediate takes every leaf beneath it down at once, and nobody has it in
   their calendar. The Certificates lens sorts by expiry; intermediates are in

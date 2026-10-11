@@ -56,30 +56,32 @@ export const SECTIONS: NavSection[] = [
     groups: [
       { items: [{ path: '/discovery', label: 'Command Center' }] },
       {
+        // Every way data comes in: what you deploy (sensors, agents, devices)
+        // and what you bring us (cloud accounts, PCAP and SBOM files). There
+        // is no separate "Sources" group — a file upload is intake just like a
+        // sensor is, so it lives here beside the other intake.
         label: 'Sensors & Scanning',
         items: [
           { path: '/discovery/sensors', label: 'Sensors & Agents' },
           { path: '/discovery/devices', label: 'Devices' },
-          { path: '/discovery/scans', label: 'Scheduled Scans' },
-        ],
-      },
-      // What you deploy (above) is separate from what has run. Job Logs used
-      // to be its own group here; it listed a subset of these same runs, so
-      // it was folded into Discovery Jobs.
-      { label: 'Activity', items: [{ path: '/discovery/jobs', label: 'Discovery Jobs' }] },
-      { label: 'Review', items: [{ path: '/discovery/observations', label: 'Observations' }, { path: '/discovery/approvals', label: 'Approvals' }] },
-      {
-        label: 'Sources',
-        items: [
           { path: '/discovery/cloud', label: 'Cloud' },
           { path: '/discovery/pcap', label: 'PCAP Upload' },
-          // Sources is a GROUP, not a page, so SBOM upload is a sibling of PCAP
-          // Upload rather than a card on a "Sources page" that does not exist.
-          // Both are the same shape of intake: bring us a file, we turn it into
-          // inventory.
           { path: '/discovery/sbom', label: 'SBOM Upload' },
         ],
       },
+      // Intake (above) is separate from processing: the schedules that drive
+      // runs and the runs themselves. Job Logs used to be its own group here;
+      // it listed a subset of these same runs, so it was folded into
+      // Discovery Jobs.
+      {
+        label: 'Activity',
+        items: [
+          { path: '/discovery/scans', label: 'Scheduled Scans' },
+          { path: '/discovery/jobs', label: 'Discovery Jobs' },
+        ],
+      },
+      // Results: what discovery saw and what is waiting on a person.
+      { label: 'Review', items: [{ path: '/discovery/observations', label: 'Observations' }, { path: '/discovery/approvals', label: 'Approvals' }] },
     ],
   },
   {

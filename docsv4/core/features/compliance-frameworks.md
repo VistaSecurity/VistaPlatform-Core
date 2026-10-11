@@ -94,6 +94,27 @@ It measures both your **certificates** and your **crypto-configurations**, becau
 
 **How to act on it:** the by-control lens groups your quantum-vulnerable crypto by control; from there (or from **Remediation**) you can open a **PQC migration** plan and track the work like any other remediation.
 
+### Certificate Hygiene
+
+**Certificate Hygiene** checks how your leaf certificates were issued. CA
+certificates themselves are not judged.
+
+| Control | What it checks | Severity |
+|---|---|---|
+| CH-001 | The key is at least 2048-bit (RSA/DSA/DH) or 256-bit (elliptic curve) | High |
+| CH-002 | The validity period is at most 398 days | Medium |
+| CH-003 | The certificate is issued by a trusted CA — it does not chain to an authority nobody trusted, or to one your organisation distrusted | High |
+| CH-004 | The certificate is not self-signed | Medium |
+
+CH-003 and CH-004 read the certificate's [trust status](./certificate-trust.md).
+A certificate whose trust has not been evaluated yet, or whose chain is
+incomplete, is not judged by either. To clear a CH-003 finding, trust the CA
+under **Settings → Policies → Trusted CAs** if it is yours, or re-issue the
+certificate from a CA you trust. The finding closes on the next evaluation.
+
+Best Practices' chain-validation control (BP-007) reads the same trust status:
+it passes only for a certificate from a public CA or a CA you trusted.
+
 ### Inventory Hygiene
 
 **Inventory Hygiene** scores the inventory *record*, not the cryptography on it.
@@ -174,7 +195,8 @@ The system includes granular measurement types organized by category:
 - `cert_expiration_days` - Days until certificate expiration (integer)
 - `key_size` - Cryptographic key size in bits (integer)
 - `cert_algorithm` - Certificate algorithm (enum: RSA, ECDSA, EdDSA, DSA)
-- `certificate_chain_valid` - Certificate chain validation status (boolean)
+- `certificate_chain_valid` - Whether the certificate chains to a CA the organisation trusts (boolean)
+- `certificate_trust_status` - The certificate's trust status: public, private_trusted, self_signed, untrusted, distrusted or incomplete (string)
 - `pfs_support` - Perfect Forward Secrecy support (boolean)
 - `tls_compression_enabled` - TLS compression status (boolean)
 

@@ -379,6 +379,33 @@ export function useAssetFacets(query: string, levels: readonly FacetLevel[], ena
   });
 }
 
+/**
+ * One facet level the server may not serve YET — the `cert_trust` level of
+ * ships with the inventory service on a sibling branch and is not in the
+ * pinned contract, so `FacetLevel` cannot name it and the request is cast.
+ *
+ * Its failure is deliberately NOT recorded the way `useAssetFacets` records
+ * one: until the server ships the level it answers 400, and a permanent
+ * "Couldn't load these counts" under a facet that filters perfectly well
+ * would be noise. `null` means "no counts available"; the rail then shows the
+ * values without numbers, the same way the Identity facet does.
+ */
+export function useOptionalAssetFacet(level: string, query: string, enabled = true) {
+  return useQuery({
+    queryKey: ['inventory', 'assets', 'facets', 'optional', level, query],
+    enabled,
+    placeholderData: keepPreviousData,
+    retry: false,
+    queryFn: async (): Promise<AssetFacetBucket[] | null> => {
+      const { data, error } = await clients.inventory.GET('/infrastructure-assets/facets', {
+        params: { query: { ...(query ? { query } : {}), level: level as FacetLevel } },
+      });
+      if (error || !data) return null;
+      return data.buckets ?? [];
+    },
+  });
+}
+
 /** Turn a bucket list into a value → count map for O(1) lookup in the rail. */
 export function bucketMap(buckets: AssetFacetBucket[] | undefined): Record<string, number> {
   const out: Record<string, number> = {};

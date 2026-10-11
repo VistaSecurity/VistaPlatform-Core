@@ -48,8 +48,8 @@ var roleGrantFilters = []roleGrantFilter{
 	// access in the migration.
 	{
 		Role:   "security_admin",
-		Revoke: "NOT (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts') OR tp.name IN ('users.read', 'settings.read', 'audit.read'))",
-		Grant:  "(tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts') OR tp.name IN ('users.read', 'settings.read', 'audit.read'))",
+		Revoke: "NOT (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts', 'certificates') OR tp.name IN ('users.read', 'settings.read', 'audit.read'))",
+		Grant:  "(tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts', 'certificates') OR tp.name IN ('users.read', 'settings.read', 'audit.read'))",
 	},
 	// Read-only across all operational resources (no billing).
 	//

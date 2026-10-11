@@ -25,6 +25,7 @@
 import { ASSET_CLASSES, type AssetClassKey } from '@vistasecurity/primitives/assets';
 import { format, parse, type Node, type Literal, type FieldRef } from '@vistasecurity/primitives/query';
 import { OPEN_FINDINGS_QUERY } from '@vistasecurity/primitives/findings';
+import { TRUST_FILTER_VALUES, TRUST_UNEVALUATED } from './trust-status';
 
 /**
  * Every facet the rail offers (ADR-0006 D2's v1 list). Each maps to one field
@@ -51,11 +52,12 @@ export type FacetKey =
   | 'tag'
   | 'risk'
   | 'provenance'
-  | 'findings';
+  | 'findings'
+  | 'cert_trust';
 
 /** The query field each multi-select facet writes. `class`, `risk`, `tag` and
  *  `findings` are shaped differently and are handled on their own. */
-export const FACET_FIELD: Readonly<Record<Exclude<FacetKey, 'class' | 'risk' | 'tag' | 'findings'>, string>> = {
+export const FACET_FIELD: Readonly<Record<Exclude<FacetKey, 'class' | 'risk' | 'tag' | 'findings' | 'cert_trust'>, string>> = {
   status: 'status',
   identity: 'identity_status',
   environment: 'environment',
@@ -80,6 +82,7 @@ export const FACET_LABEL: Readonly<Record<FacetKey, string>> = {
   risk: 'Risk',
   provenance: 'Provenance',
   findings: 'Findings',
+  cert_trust: 'Certificate trust',
 };
 
 /**
@@ -178,6 +181,9 @@ export interface FacetState {
    *  a different question from "nobody looked", and the risk facet's
    *  `not_assessed` answers the second. */
   findings?: boolean;
+  /** `trust_status` values (plus `unevaluated`) of the asset's certificates
+   *. Written as a `cert:(…)` sub-predicate — see certTrustTerm. */
+  cert_trust: string[];
   /** Free-text terms the user typed (`payroll`), preserved in order. */
   text: string[];
 }
@@ -185,7 +191,7 @@ export interface FacetState {
 export function emptyFacets(): FacetState {
   return {
     status: [], identity: [], environment: [], site: [], segment: [], owner: [],
-    business_unit: [], tag: [], risk: [], provenance: [], text: [],
+    business_unit: [], tag: [], risk: [], provenance: [], cert_trust: [], text: [],
   };
 }
 
@@ -196,7 +202,7 @@ export function facetsEmpty(f: FacetState): boolean {
     && f.status.length === 0 && f.identity.length === 0 && f.environment.length === 0 && f.site.length === 0
     && f.segment.length === 0 && f.owner.length === 0 && f.business_unit.length === 0
     && f.tag.length === 0 && f.risk.length === 0 && f.provenance.length === 0
-    && f.text.length === 0;
+    && f.cert_trust.length === 0 && f.text.length === 0;
 }
 
 /** How many individual selections are active, for the "N filters" badge. */
@@ -204,7 +210,7 @@ export function facetCount(f: FacetState): number {
   return (f.class ? 1 : 0) + (f.findings === undefined ? 0 : 1)
     + f.status.length + f.identity.length + f.environment.length + f.site.length + f.segment.length
     + f.owner.length + f.business_unit.length + f.tag.length + f.risk.length
-    + f.provenance.length + f.text.length;
+    + f.provenance.length + f.cert_trust.length + f.text.length;
 }
 
 // ------------------------------------------------------------------ write --
@@ -315,6 +321,70 @@ function tagTerm(entry: string): string {
   return `tag.${entry.slice(0, eq)}:${quoteValue(entry.slice(eq + 1))}`;
 }
 
+// ------------------------------------------------------ certificate trust --
+
+/**
+ * The Certificate trust facet's values: the certificate `trust_status`
+ * values plus `unevaluated` — exactly the words of the Certificates lens's
+ * Trust filter, so the two filters cannot drift.
+ */
+export const CERT_TRUST_VALUES: readonly string[] = TRUST_FILTER_VALUES;
+
+/** The collection and field the facet's predicate reads. */
+const CERT_COLLECTION = 'cert';
+const TRUST_FIELD = 'trust_status';
+
+/**
+ * `cert:(trust_status:…)` — assets with a certificate in one of the chosen
+ * statuses — and, for `unevaluated`, `not cert:(exists(trust_status))`: assets
+ * none of whose certificates has been evaluated, which includes assets with no
+ * certificate at all (the server's facet buckets those as `unevaluated` too).
+ *
+ * The server's `cert_trust` facet level counts each asset once, under its
+ * WORST certificate; a selected status here matches any asset that HAS such a
+ * certificate. For a single-certificate asset those agree; an asset with one
+ * public and one untrusted certificate is counted under "Untrusted CA" and is
+ * also listed when "Public CA" is ticked. The rail says so under the facet.
+ */
+export function certTrustTerm(values: readonly string[]): string | null {
+  const vs = values.filter((v) => v !== '');
+  if (vs.length === 0) return null;
+  const statuses = vs.filter((v) => v !== TRUST_UNEVALUATED);
+  const parts: string[] = [];
+  if (statuses.length === 1) parts.push(`${CERT_COLLECTION}:(${TRUST_FIELD}:${quoteValue(statuses[0])})`);
+  else if (statuses.length > 1) parts.push(`${CERT_COLLECTION}:(${TRUST_FIELD}:(${statuses.map(quoteValue).join(' or ')}))`);
+  if (vs.includes(TRUST_UNEVALUATED)) parts.push(`not ${CERT_COLLECTION}:(exists(${TRUST_FIELD}))`);
+  return parts.length === 1 ? parts[0] : `(${parts.join(' or ')})`;
+}
+
+/** `cert:(trust_status:…)` → its values, or null for any other node. */
+function certTrustSubValues(node: Node): string[] | null {
+  if (node.kind !== 'sub' || node.collection !== CERT_COLLECTION || !node.predicate) return null;
+  const pred = node.predicate;
+  if (pred.kind === 'cmp' && pred.op === ':' && fieldPath(pred.field) === TRUST_FIELD) return [literalText(pred.value)];
+  const grouped = sameFieldOr(pred);
+  return grouped && grouped.field === TRUST_FIELD ? grouped.values : null;
+}
+
+/** `not cert:(exists(trust_status))` — the `unevaluated` arm. */
+function isCertTrustUnevaluated(node: Node): boolean {
+  if (node.kind !== 'not' || node.child.kind !== 'sub' || node.child.collection !== CERT_COLLECTION) return false;
+  const pred = node.child.predicate;
+  return !!pred && pred.kind === 'exists' && fieldPath(pred.field) === TRUST_FIELD;
+}
+
+/** Inverse of certTrustTerm: exactly the shapes it writes, nothing looser. */
+function certTrustValues(node: Node): string[] | null {
+  if (isCertTrustUnevaluated(node)) return [TRUST_UNEVALUATED];
+  const direct = certTrustSubValues(node);
+  if (direct) return direct;
+  if (node.kind !== 'or' || node.children.length !== 2) return null;
+  const [a, b] = node.children;
+  const sub = certTrustSubValues(a);
+  if (!sub || !isCertTrustUnevaluated(b)) return null;
+  return [...sub, TRUST_UNEVALUATED];
+}
+
 /**
  * Writes the rail's state as a query string, appending any terms the rail could
  * not represent (`extra`) so a hand-edited traversal survives a checkbox click.
@@ -330,7 +400,7 @@ export function facetsToQuery(f: FacetState, extra: string[] = []): string {
 
   // Ordered deliberately: clause order is preserved by the canonical form (§10),
   // so the query reads top-to-bottom in the same order as the rail's sections.
-  const plain: Exclude<FacetKey, 'class' | 'risk' | 'tag' | 'findings'>[] =
+  const plain: Exclude<FacetKey, 'class' | 'risk' | 'tag' | 'findings' | 'cert_trust'>[] =
     ['status', 'identity', 'environment', 'site', 'segment', 'owner', 'business_unit', 'provenance'];
   for (const key of plain) {
     const term = orTerm(FACET_FIELD[key], f[key]);
@@ -341,6 +411,9 @@ export function facetsToQuery(f: FacetState, extra: string[] = []): string {
 
   const risk = orTerm('risk', f.risk);
   if (risk) terms.push(risk);
+
+  const trust = certTrustTerm(f.cert_trust);
+  if (trust) terms.push(trust);
 
   // "Has open findings" is an EXISTS over the child collection, not a column.
   //
@@ -528,6 +601,11 @@ export function queryToFacets(text: string): FacetRead {
   };
 
   for (const node of conjuncts(parsed.value.root)) {
+    const trust = certTrustValues(node);
+    if (trust) {
+      push('cert_trust', trust);
+      continue;
+    }
     // `not finding:(…)` — the "no open findings" arm.
     if (node.kind === 'not' && isOpenFindings(node.child)) {
       facets.findings = false;

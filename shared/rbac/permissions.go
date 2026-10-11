@@ -92,6 +92,8 @@ const (
 	PermissionAssetsDelete = "assets.delete"
 	PermissionAssetsManage = "assets.manage"
 
+	PermissionCertificatesTrust = "certificates.trust"
+
 	PermissionSensorsCreate = "sensors.create"
 	PermissionSensorsRead   = "sensors.read"
 	PermissionSensorsUpdate = "sensors.update"

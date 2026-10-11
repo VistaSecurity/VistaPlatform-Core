@@ -2,14 +2,17 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services/certtrust"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 )
 
@@ -101,6 +104,15 @@ func (h *CertificateHandler) GetCertificates(c *gin.Context) {
 		if certID, err := uuid.Parse(certIDStr); err == nil {
 			filters.CertificateID = &certID
 		}
+	}
+
+	if raw := c.Query("trust_status"); raw != "" {
+		statuses, err := parseTrustStatusFilter(raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		filters.TrustStatus = statuses
 	}
 
 	if selfSignedStr := c.Query("self_signed"); selfSignedStr != "" {
@@ -367,4 +379,37 @@ func (h *CertificateHandler) RebuildAllCertificateChains(c *gin.Context) {
 		"completed_chains":   result.CompletedChains,
 		"errors":             result.Errors,
 	})
+}
+
+// trustStatusFilterValues are the values GET /certificates?trust_status=
+// accepts: the six statuses and "unevaluated" (trust_status NULL).
+var trustStatusFilterValues = map[string]bool{
+	certtrust.StatusPublic: true, certtrust.StatusPrivateTrusted: true, certtrust.StatusSelfSigned: true,
+	certtrust.StatusUntrusted: true, certtrust.StatusDistrusted: true, certtrust.StatusIncomplete: true,
+	services.TrustStatusUnevaluated: true,
+}
+
+// parseTrustStatusFilter splits the comma-separated trust_status parameter.
+// An unknown value is refused rather than ignored: ignoring it would answer
+// "every certificate" to a question about none.
+func parseTrustStatusFilter(raw string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		v := strings.ToLower(strings.TrimSpace(part))
+		if v == "" {
+			continue
+		}
+		if !trustStatusFilterValues[v] {
+			return nil, fmt.Errorf("trust_status %q is not one of public, private_trusted, self_signed, untrusted, distrusted, incomplete, unevaluated", v)
+		}
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("trust_status names no status")
+	}
+	return out, nil
 }

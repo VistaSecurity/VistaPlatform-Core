@@ -45,7 +45,7 @@ const SPEC_FIELDS: Record<string, string[]> = {
     'primary_address',
     'environment',
     'business_unit', 'owner_email', 'support_group', 'site', 'region', 'zone',
-    'status', 'ownership', 'stale_status', 'identity_status', 'source', 'proposed_by',
+    'status', 'ownership', 'stale_status', 'identity_status', 'source', 'proposed_by', 'cert_trust',
     'risk', 'risk_score', 'risk_assessed_by',
     'confidence_score', 'class_confidence',
     'first_seen', 'last_seen', 'last_scanned', 'created_at', 'updated_at',
@@ -61,7 +61,7 @@ const SPEC_FIELDS: Record<string, string[]> = {
   ],
   certificate: [
     'subject_dn', 'issuer_dn', 'fingerprint_sha256', 'key_algorithm', 'signature_alg',
-    'certificate_state', 'key_size', 'not_before', 'not_after', 'self_signed', 'id',
+    'certificate_state', 'key_size', 'not_before', 'not_after', 'self_signed', 'trust_status', 'id',
   ],
   // §12 contradiction 5: §4.3 gave this target no table. The three algorithm
   // fields carry §12 amendment 5's names in BOTH catalogues — they were short

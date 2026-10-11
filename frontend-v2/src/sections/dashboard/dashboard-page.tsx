@@ -7,7 +7,8 @@ import {
   DASHBOARD_CRITICAL_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_UNSCORED_ASSETS_ROUTE,
   getDashboardPqcMetric, getDiscoveryFleetMetric,
 } from './dashboard-metrics';
-import { fetchDashboardSensors, fetchDashboardDeviceAgents, fetchDashboardTicketStats } from './dashboard-queries';
+import { fetchDashboardSensors, fetchDashboardDeviceAgents, fetchDashboardTicketStats, fetchUntrustedCertificateCount } from './dashboard-queries';
+import { UNTRUSTED_CERTIFICATES_HREF } from '../inventory/builtin-views';
 // The Inventory health hero (ADR-0006 D5, workstream 3.8) — the ops half of
 // this page, beside the cryptographic-posture hero above it. Its own component
 // because it holds its own queries and its own three-valued arithmetic; this
@@ -73,6 +74,9 @@ function useRollups() {
     },
   });
   const tickets = useQuery({ queryKey: ['dashboard', 'ticket-stats'], queryFn: fetchDashboardTicketStats });
+  //: certificates chaining to a CA the organisation has not trusted (or
+  // distrusted) — the certificates list's own total under the tile's link.
+  const untrustedCerts = useQuery({ queryKey: ['dashboard', 'untrusted-certs'], queryFn: fetchUntrustedCertificateCount });
   // 30-day posture trend (ADR-0007). New tenants get a flat seeded baseline at
   // their current posture rather than a blank chart.
   const trend = useQuery({
@@ -92,12 +96,12 @@ function useRollups() {
       return data;
     },
   });
-  return { risk, sensors, deviceAgents, pqc, expiring, tickets, trend, connections, findingsSeverity };
+  return { risk, sensors, deviceAgents, pqc, expiring, tickets, trend, connections, findingsSeverity, untrustedCerts };
 }
 
 export function DashboardPage() {
   const nav = useNavigate();
-  const { risk, sensors, deviceAgents, pqc, expiring, tickets, trend, connections, findingsSeverity } = useRollups();
+  const { risk, sensors, deviceAgents, pqc, expiring, tickets, trend, connections, findingsSeverity, untrustedCerts } = useRollups();
   const s = risk.data;
   const total = s?.total_assets ?? 0;
   const high = s?.high_risk ?? 0;
@@ -191,6 +195,7 @@ export function DashboardPage() {
     { id: 'crit', count: crit, label: 'Critical findings', sub: 'all producers', icon: 'circle-alert', tone: RED, route: DASHBOARD_CRITICAL_FINDINGS_ROUTE, error: findingsSeverity.isError },
     { id: 'high', count: high, label: 'High-risk assets', sub: `risk score ≥ ${LEVEL_MIN.High}`, icon: 'server', tone: 'var(--danger-soft)', route: DASHBOARD_HIGH_RISK_ASSETS_ROUTE, error: false },
     { id: 'exp', count: expSoon, label: 'Certs expiring', sub: 'within 30 days', icon: 'file-badge', tone: ORANGE, route: '/inventory?lens=certificate', error: expiring.isError },
+    { id: 'untrusted-certs', count: untrustedCerts.data ?? 0, label: 'Untrusted certificates', sub: 'CA not trusted by your organisation', icon: 'shield-alert', tone: RED, route: UNTRUSTED_CERTIFICATES_HREF, error: untrustedCerts.isError },
     { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: DASHBOARD_UNSCORED_ASSETS_ROUTE, error: false },
     { id: 'pqc', count: pqcNeedsMigration, label: 'Not PQC-ready', sub: 'configs on classical crypto', icon: 'key-round', tone: BLUE, route: '/inventory?lens=configuration', error: pqc.isError },
     { id: 'pqc-unclassified', count: pqcUnclassified, label: 'Not yet assessed', sub: 'no algorithm data', icon: 'help-circle', tone: 'var(--app-t3)', route: '/inventory?lens=configuration', error: pqc.isError },

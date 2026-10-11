@@ -73,3 +73,21 @@ describe('B-28: fetchDashboardTicketStats', () => {
     await expect(dash.fetchDashboardTicketStats()).resolves.toEqual({ total: 4, overdue: 1 });
   });
 });
+
+describe('#2397: fetchUntrustedCertificateCount', () => {
+  const lastUrl = () => new URL((fetchStub.mock.calls[fetchStub.mock.calls.length - 1] as unknown as [Request])[0].url);
+  it('counts with the same trust_status selection the tile links to, one row', async () => {
+    nextResponse = () => json({ certificates: [{}], pagination: { total: 7, page: 1, page_size: 1 } });
+    await expect(dash.fetchUntrustedCertificateCount()).resolves.toBe(7);
+    const url = lastUrl();
+    expect(url.pathname).toMatch(/\/certificates$/);
+    expect(url.searchParams.get('trust_status')).toBe('untrusted,distrusted');
+    expect(url.searchParams.get('page_size')).toBe('1');
+  });
+  it('throws on a failure, and on a response with no total — neither is a zero', async () => {
+    nextResponse = () => json({ error: 'boom' }, 500);
+    await expect(dash.fetchUntrustedCertificateCount()).rejects.toThrow();
+    nextResponse = () => json({ certificates: [] });
+    await expect(dash.fetchUntrustedCertificateCount()).rejects.toThrow();
+  });
+});

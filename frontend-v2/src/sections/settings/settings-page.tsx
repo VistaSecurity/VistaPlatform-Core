@@ -13,6 +13,7 @@ import { MembersPage, RolesPage, SecuritySsoPage } from './pages-people';
 import { ScopesPage, FrameworksPage } from './pages-policies';
 import { CustomPoliciesPage } from './pages-custom-policies';
 import { ClassesPage, IdentificationRulesPage } from './pages-classes';
+import { TrustedCAsPage } from './pages-trusted-cas';
 import { BillingPage, UsagePage } from './pages-account';
 import { IntegrationsPage, RoutingRulesPage, AlertRulesPage } from './pages-integrations';
 import { NotificationHistoryPage } from './pages-notification-history';
@@ -86,6 +87,7 @@ export function SettingsPage() {
     case 'scopes': return <ScopesPage meta={meta} />;
     case 'classes': return <ClassesPage meta={meta} />;
     case 'identification-rules': return <IdentificationRulesPage meta={meta} />;
+    case 'trusted-cas': return <TrustedCAsPage meta={meta} />;
     case 'audit': return <AuditPage meta={meta} />;
     case 'locations': return <LocationsPage meta={meta} />;
     case 'segments': return <NetworkSegmentsPage meta={meta} />;

@@ -7,6 +7,8 @@
 // useRollups() so the throw-on-failure behavior is unit-testable without
 // mounting the page (this file has no JSX/DOM dependency).
 import { clients } from '../../lib/clients';
+import { UNTRUSTED_CERTIFICATES_VIEW } from '../inventory/builtin-views';
+import { trustFilterParam } from '../inventory/trust-status';
 
 export async function fetchDashboardSensors() {
   const { data, error } = await clients.sensors.GET('/sensors', {});
@@ -27,4 +29,24 @@ export async function fetchDashboardTicketStats() {
   const { data, error } = await clients.compliance.GET('/tickets/stats', {});
   if (error || !data) throw new Error('Failed to load ticket stats');
   return data.stats;
+}
+
+/**
+ * How many certificates chain to a CA the organisation has not trusted, or has
+ * distrusted — the Overview's "Untrusted certificates" tile.
+ *
+ * The count is the certificates list's own `pagination.total` under the SAME
+ * `trust_status` selection the tile links to (the built-in "Untrusted
+ * certificates" view), asked for one row. So the number and the list it opens
+ * are one predicate, and no second counting endpoint can disagree with it. A
+ * response without a total is not a zero; it throws, and the tile says it
+ * could not load.
+ */
+export async function fetchUntrustedCertificateCount(): Promise<number> {
+  const { data, error } = await clients.inventory.GET('/certificates', {
+    params: { query: { page: 1, page_size: 1, trust_status: trustFilterParam(UNTRUSTED_CERTIFICATES_VIEW.trust) } },
+  });
+  const total = data?.pagination?.total;
+  if (error || typeof total !== 'number') throw new Error('Failed to count untrusted certificates');
+  return total;
 }

@@ -12,7 +12,7 @@ import { check, defaultOptions, newRegistryCatalog, CVSS_LADDER, withLadder } fr
 import { OPEN_FINDINGS_QUERY } from '@vistasecurity/primitives/findings';
 import {
   applyFacetChange, cycleFindings, emptyFacets, facetCount, facetsEmpty, facetsToQuery,
-  FACET_LABEL, OPEN_FINDINGS, queryToFacets, quoteValue, setFacetClass, toggleFacetValue, UNSET_BUCKET,
+  CERT_TRUST_VALUES, FACET_LABEL, OPEN_FINDINGS, queryToFacets, quoteValue, setFacetClass, toggleFacetValue, UNSET_BUCKET,
   type FacetState,
 } from './facet-query';
 
@@ -439,4 +439,57 @@ it('preserves a tenant-defined class path when another facet changes', () => {
   const read = queryToFacets(`class:${path}`);
   const out = facetsToQuery({...read.facets, owner: ['ops@example.test']}, read.extra);
   expect(out).toContain(`class:${path}`);
+});
+
+describe('the certificate trust facet (#2397)', () => {
+  // `trust_status` arrives in the generated catalogue with the inventory
+  // service's query-language change; until that merges the validator does not
+  // know the field, so the validity check runs from the moment it does.
+  const catalogueKnowsTrust = CATALOG.fields('certificate').some((f) => f.name === 'trust_status');
+  const withTrust = (values: string[]): FacetState => ({ ...emptyFacets(), cert_trust: values });
+
+  it('offers the same values, in the same order, as the Certificates lens Trust filter', () => {
+    expect(CERT_TRUST_VALUES).toEqual(['public', 'private_trusted', 'self_signed', 'untrusted', 'distrusted', 'incomplete', 'unevaluated']);
+    expect(FACET_LABEL.cert_trust).toBe('Certificate trust');
+  });
+
+  // Canonical text (the formatter's), which is what a saved view stores.
+  it('writes one status as a cert sub-predicate and several as a group', () => {
+    expect(facetsToQuery(withTrust(['untrusted']))).toBe('cert:(trust_status:untrusted)');
+    expect(facetsToQuery(withTrust(['untrusted', 'distrusted']))).toBe('cert:(trust_status:untrusted or trust_status:distrusted)');
+  });
+
+  it('writes "Not yet evaluated" as no evaluated certificate — never as the literal word', () => {
+    const q = facetsToQuery(withTrust(['unevaluated']));
+    expect(q).toBe('not cert:(exists(trust_status))');
+    expect(q).not.toContain('trust_status:unevaluated');
+    expect(facetsToQuery(withTrust(['self_signed', 'unevaluated']))).toBe('cert:(trust_status:self_signed) or not cert:(exists(trust_status))');
+  });
+
+  it.each([[['untrusted']], [['untrusted', 'distrusted']], [['unevaluated']], [['public', 'unevaluated']]])('round-trips %j alongside other facets', (values) => {
+    const f: FacetState = { ...withTrust(values), status: ['monitoring'], risk: ['high'] };
+    const q = facetsToQuery(f);
+    const read = queryToFacets(q);
+    expect(read.extra).toEqual([]);
+    expect(read.facets.cert_trust).toEqual(values);
+    expect(read.facets.status).toEqual(['monitoring']);
+    expect(facetsToQuery(read.facets, read.extra)).toBe(q);
+  });
+
+  it('leaves a hand-written cert predicate it did not write as extra', () => {
+    const read = queryToFacets('cert:(trust_status:untrusted and key_size < 2048)');
+    expect(read.facets.cert_trust).toEqual([]);
+    expect(read.extra).toHaveLength(1);
+  });
+
+  it('counts as a filter and toggles like any multi-select', () => {
+    const f = toggleFacetValue(emptyFacets(), 'cert_trust', 'untrusted');
+    expect(f.cert_trust).toEqual(['untrusted']);
+    expect(facetCount(f)).toBe(1);
+    expect(facetsEmpty(f)).toBe(false);
+  });
+
+  it.skipIf(!catalogueKnowsTrust)('every query it writes is one the server accepts', () => {
+    for (const v of [['untrusted'], ['untrusted', 'distrusted'], ['unevaluated'], ['public', 'unevaluated']]) assertValid(facetsToQuery(withTrust(v)));
+  });
 });

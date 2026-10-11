@@ -33,11 +33,10 @@
     "cert_validity_days | unknown-key-leaf | 36(int) | certificate | common_name=parity-unknown.example.test(string)"
   ],
   "certificate_chain_valid": [
-    "certificate_chain_valid | ec-leaf | false(bool) | certificate | common_name=parity-ec.example.test(string) issuer_dn=CN=parity-ec.example.test(string)",
-    "certificate_chain_valid | expired-leaf | true(bool) | certificate | common_name=parity-expired.example.test(string) issuer_dn=CN=Parity Test CA(string)",
-    "certificate_chain_valid | pqc-leaf | true(bool) | certificate | common_name=parity-pqc.example.test(string) issuer_dn=CN=Parity Test CA(string)",
-    "certificate_chain_valid | rsa-leaf | true(bool) | certificate | common_name=parity-rsa.example.test(string) issuer_dn=CN=Parity Test CA(string)",
-    "certificate_chain_valid | unknown-key-leaf | true(bool) | certificate | common_name=parity-unknown.example.test(string) issuer_dn=CN=Parity Test CA(string)"
+    "certificate_chain_valid | ec-leaf | false(bool) | certificate | common_name=parity-ec.example.test(string) issuer_dn=CN=parity-ec.example.test(string) trust_status=self_signed(string)",
+    "certificate_chain_valid | expired-leaf | false(bool) | certificate | common_name=parity-expired.example.test(string) issuer_dn=CN=Parity Test CA(string) trust_status=distrusted(string)",
+    "certificate_chain_valid | pqc-leaf | true(bool) | certificate | common_name=parity-pqc.example.test(string) issuer_dn=CN=Parity Test CA(string) trust_status=public(string)",
+    "certificate_chain_valid | rsa-leaf | true(bool) | certificate | common_name=parity-rsa.example.test(string) issuer_dn=CN=Parity Test CA(string) trust_status=private_trusted(string)"
   ],
   "cipher_suite_name": [
     "cipher_suite_name | parity-edge.example.test | TLS_AES_256_GCM_SHA384(string) | asset | crypto_implementation_ids=[parity-edge.example.test/TLSTLS1.3] endpoint_fqdn=parity-vhost.example.test(string) hostname=parity-edge.example.test(string) port=8443(int64)",

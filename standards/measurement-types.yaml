@@ -307,20 +307,51 @@ measurement_types:
       evidence:
         - { key: common_name, from: common_name }
 
+  # Both trust measurements read the platform's trust verdict
+  # (certificates.trust_status, feature). A certificate whose trust has
+  # not been evaluated (NULL) yields NO measurement: not assessed, never a
+  # violation. The transforms enforce that, and reject any value outside the
+  # status vocabulary the same way.
   - code: certificate_chain_valid
     name: Certificate Chain Valid
-    description: Whether the certificate chain is valid and trusted
+    description: Whether the certificate chains to a CA the organisation trusts
     data_type: boolean
     category: certificate
     allowed_rule_types: [presence]
     subject: certificate
     source:
       shape: certificate
-      value: is_self_signed
-      transform: chain_valid
+      value: trust_status
+      where: exists(trust_status)
+      transform: trust_ok
       evidence:
         - { key: common_name, from: common_name }
         - { key: issuer_dn, from: issuer_dn }
+        - { key: trust_status, from: trust_status }
+        - { key: trust_anchor_certificate_id, from: trust_anchor_certificate_id }
+        - { key: trust_anchor, from: trust_anchor_subject_dn }
+
+  - code: certificate_trust_status
+    name: Certificate Trust Status
+    description: >-
+      Where the certificate's chain ends, as the platform evaluated it against
+      the public roots and the organisation's own trust decisions: public,
+      private_trusted, self_signed, untrusted, distrusted or incomplete.
+    data_type: string
+    category: certificate
+    allowed_rule_types: [pattern]
+    subject: certificate
+    source:
+      shape: certificate
+      value: trust_status
+      where: exists(trust_status)
+      transform: trust_status
+      evidence:
+        - { key: trust_status, from: trust_status, always: true }
+        - { key: common_name, from: common_name }
+        - { key: issuer_dn, from: issuer_dn }
+        - { key: trust_anchor_certificate_id, from: trust_anchor_certificate_id }
+        - { key: trust_anchor, from: trust_anchor_subject_dn }
 
   # ---------------------------------------------------------------------------
   # Crypto-configuration shape

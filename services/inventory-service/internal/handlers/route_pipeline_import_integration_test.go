@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -329,5 +330,62 @@ func TestIntegration_RoutePipelineImport_CloudHintNeedsACloudSource(t *testing.T
 	}))
 	if got := resp.Results[0].Outcome; got != "routed" {
 		t.Fatalf("a sensor finding with stray cloud keys = %q, want routed: only a cloud-API finding is classified by its cloud segment", got)
+	}
+}
+
+// routefailInstallUpsertFault makes every external_connections INSERT for this
+// tenant's destination port fail with a database error, the way a transient
+// fault would, and removes the fault when the test ends.
+func (f *routePipelineFixture) routefailInstallUpsertFault(t *testing.T, destPort int) {
+	t.Helper()
+	fn := "routefail_fault_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	stmts := []string{
+		`CREATE FUNCTION ` + fn + `() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+			IF NEW.tenant_id = '` + f.tenant.String() + `'::uuid AND NEW.dest_port = ` + strconvItoa(destPort) + ` THEN
+				RAISE EXCEPTION 'routefail injected fault';
+			END IF; RETURN NEW; END $$`,
+		`CREATE TRIGGER ` + fn + ` BEFORE INSERT ON external_connections FOR EACH ROW EXECUTE FUNCTION ` + fn + `()`,
+	}
+	for _, s := range stmts {
+		if _, err := f.raw.Exec(s); err != nil {
+			t.Fatalf("install fault: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = f.raw.Exec(`DROP TRIGGER IF EXISTS ` + fn + ` ON external_connections`)
+		_, _ = f.raw.Exec(`DROP FUNCTION IF EXISTS ` + fn + `()`)
+	})
+}
+
+func strconvItoa(n int) string { return fmt.Sprint(n) }
+
+// A failed external_connections route (here a database error on the upsert) is
+// reported as a retryable per-finding "error" outcome carrying the reason —
+// never as "rejected", which discovery-processor settles terminally (
+// WP3 follow-up). The finding beside it still routes, and a no-source finding
+// is still the permanent "dropped".
+func TestIntegration_RoutePipelineImport_FailedRouteIsRetryableError(t *testing.T) {
+	f := newRoutePipelineFixture(t)
+	f.routefailInstallUpsertFault(t, 8443)
+
+	failing := routeFinding("203.0.113.90", "fails.vendor.example", map[string]interface{}{"source_ip": "10.1.2.3"})
+	failing["port"] = 8443
+	healthy := routeFinding("203.0.113.91", "ok.vendor.example", map[string]interface{}{"source_ip": "10.1.2.3"})
+	noSource := routeFinding("203.0.113.92", "nosrc.vendor.example", nil)
+
+	resp := f.importFindings(t, failing, healthy, noSource)
+
+	got := resp.Results[0]
+	if got.Outcome != "error" || !strings.Contains(got.Reason, "routefail injected fault") {
+		t.Fatalf("failed route result = %+v, want outcome error with the cause in reason (not rejected)", got)
+	}
+	if got := resp.Results[1].Outcome; got != "routed" {
+		t.Errorf("the healthy finding's outcome = %q, want routed: one failure must not touch its neighbours", got)
+	}
+	if r := resp.Results[2]; r.Outcome != "dropped" || r.Reason != "third_party_no_source_ip" {
+		t.Errorf("no-source finding = %+v, want the permanent dropped verdict unchanged", r)
+	}
+	if n := len(f.externalRows(t)); n != 1 {
+		t.Errorf("external_connections rows = %d, want only the healthy one", n)
 	}
 }

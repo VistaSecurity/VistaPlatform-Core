@@ -37,6 +37,10 @@ import {
 import { CryptoRiskChip, cryptoRiskPresentation } from './crypto-risk-presentation';
 import { certNotCollectedHint, thirdPartyEnrichmentOff } from './cert-not-collected-hint';
 import { useSensorFleetDefaults } from '../discovery/sensor-config-queries';
+import { CertTrustChip } from './cert-trust';
+import { connectionTrustStatus, presentHygieneFlags } from './connection-trust';
+import { CertTrustFilter, CertificateViews, trustFilterVisible } from './cert-trust-filter';
+import { parseTrustFilter, trustFilterParam, type TrustFilterValue } from './trust-status';
 
 // Inventory — lens-based view. One backend dataset reshaped by angle. The active
 // lens comes from the URL (`?lens=`); the switcher lives in the LEFT SIDEBAR.
@@ -113,12 +117,15 @@ function useAssets(page: number, search: string, enabled: boolean, lastSeenBefor
   });
 }
 
-function useCerts(page: number, search: string, enabled: boolean, ownership?: 'internal' | 'third_party' | 'unknown') {
+// `trustStatus` is the pinned `trust_status` parameter: a comma list of
+// statuses plus `unevaluated`, filtered SERVER-side so the total and paging
+// cover the whole matching set.
+function useCerts(page: number, search: string, enabled: boolean, ownership?: 'internal' | 'third_party' | 'unknown', trustStatus?: string) {
   return useQuery({
-    queryKey: ['inventory', 'certs', page, search, ownership ?? ''],
+    queryKey: ['inventory', 'certs', page, search, ownership ?? '', trustStatus ?? ''],
     queryFn: async () => {
       const { data, error } = await clients.inventory.GET('/certificates', {
-        params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}), ...(ownership ? { ownership } : {}), sort_by: 'not_after', sort_order: 'asc' } },
+        params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}), ...(ownership ? { ownership } : {}), ...(trustStatus ? { trust_status: trustStatus } : {}), sort_by: 'not_after', sort_order: 'asc' } },
       });
       if (error || !data) throw new Error('Failed to load certificates');
       return data;
@@ -238,7 +245,9 @@ type DrawerEntry =
   | { kind: 'data'; app: CryptoApplication };
 
 const CFG_GRID = '22px minmax(0,1.5fr) 1fr minmax(0,1.4fr) 1fr 110px';
-const CERT_GRID = '18px minmax(0,1.6fr) minmax(0,1.2fr) 1fr 90px 120px';
+// The dot is EXPIRY (as it always was); trust is its own column beside it, so
+// a green dot is never read as "trusted".
+const CERT_GRID = '18px 124px minmax(0,1.6fr) minmax(0,1.2fr) 1fr 90px 120px';
 const KEY_GRID = '18px minmax(0,1.6fr) minmax(0,1.2fr) 100px 90px 120px';
 // The first column is the row checkbox: the Stale lens acts on its
 // rows through the same bulk action bar as All assets.
@@ -408,7 +417,17 @@ export function InventoryPage() {
   // certificate_service.go), but the filter dropdown previously only exposed
   // 3rd-party/Internal, silently hiding whichever certs matched neither.
   const certOwnership = fCertOwner === '3rd-party' ? 'third_party' : fCertOwner === 'Internal' ? 'internal' : fCertOwner === 'Unknown' ? 'unknown' : undefined;
-  const certsQ = useCerts(page, search, isCert, isCert ? certOwnership : undefined);
+  // Trust filter: in the URL, like the asset query, so the built-in
+  // "Untrusted certificates" view and the dashboard tile can link to it.
+  const certTrust = parseTrustFilter(params.get('trust'));
+  const setCertTrust = (next: TrustFilterValue[]) => {
+    const sp = new URLSearchParams(params);
+    const v = trustFilterParam(next);
+    if (v) sp.set('trust', v); else sp.delete('trust');
+    setParams(sp, { replace: true });
+    setPage(1);
+  };
+  const certsQ = useCerts(page, search, isCert, isCert ? certOwnership : undefined, isCert ? trustFilterParam(certTrust) : undefined);
   const keysQ = useKeys(isKey);
   const configsQ = useConfigs(page, search, isConfig, def.protocol);
   const connsQ = useConnections(page, search, isConn, connectionStrengthFilter(fConnectionStrength));
@@ -477,10 +496,10 @@ export function InventoryPage() {
         conns.map((cn) => [cn.dest_hostname ?? stripInetMask(cn.dest_ip), cn.dest_port, cn.source_hostname ?? stripInetMask(cn.source_ip), cn.protocol, stripEmptyParens(cn.protocol_version), cn.cipher_suite, connectionStrengthLabel(cn.strength, cn.weak_reasons), ((cn as unknown as Record<string, unknown>).weak_reasons as string[] | undefined)?.join('; '), cn.cert_hygiene_flags?.join('; '), cn.cert_not_after, cn.last_seen_at]));
     } else if (isCert) {
       downloadCsv(`vista-inventory-certificates-${stamp}.csv`,
-        ['common_name', 'subject', 'issuer', 'key_algorithm', 'key_size', 'signature_algorithm', 'not_after', 'days_remaining', 'state', 'data_source', 'deployment_count'],
+        ['common_name', 'subject', 'issuer', 'key_algorithm', 'key_size', 'signature_algorithm', 'not_after', 'days_remaining', 'state', 'trust_status', 'data_source', 'deployment_count'],
         certs.map((c) => {
           const d = daysUntil(c.not_after as string | undefined);
-          return [c.common_name, c.subject_dn, c.issuer_dn, c.public_key_algorithm, c.public_key_size, c.signature_algorithm, (c.not_after as string | undefined)?.slice(0, 10), d, c.certificate_state, c.data_source, c.deployment_count ?? 0];
+          return [c.common_name, c.subject_dn, c.issuer_dn, c.public_key_algorithm, c.public_key_size, c.signature_algorithm, (c.not_after as string | undefined)?.slice(0, 10), d, c.certificate_state, c.trust_status ?? 'unevaluated', c.data_source, c.deployment_count ?? 0];
         }));
     } else if (isKey) {
       downloadCsv(`vista-inventory-keys-${stamp}.csv`,
@@ -552,13 +571,21 @@ export function InventoryPage() {
             // missing SCT is not "weak crypto"). Shown as its own indicator
             // so the observation isn't lost, just not conflated with strength.
             const hygieneFlags = cn.cert_hygiene_flags;
-            const hygieneTitle = hygieneFlags && hygieneFlags.length > 0 ? hygieneFlags.join('; ') : undefined;
+            // The platform's trust answer for this connection, when
+            // the server sent one; presentHygieneFlags rewords the probe's
+            // unknown-CA flag, or drops it once that answer exists.
+            const trustStatus = connectionTrustStatus(cn);
+            const shownHygiene = presentHygieneFlags(hygieneFlags, trustStatus);
+            const hygieneTitle = shownHygiene.length > 0 ? shownHygiene.join('; ') : undefined;
             return (
               <div key={cn.id} className="row-hover" style={{ display: 'grid', gridTemplateColumns: CONN_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)' }}>
                 <span aria-label={connectionStrengthLabel(strength, cn.weak_reasons)} style={{ width: 7, height: 7, borderRadius: '50%', background: tone }} />
                 <div style={{ minWidth: 0 }}>
                   <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cn.dest_hostname ?? stripInetMask(cn.dest_ip)}:{cn.dest_port}</div>
-                  <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>from {cn.source_hostname ?? stripInetMask(cn.source_ip)}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                    <span className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>from {cn.source_hostname ?? stripInetMask(cn.source_ip)}</span>
+                    {trustStatus && <CertTrustChip status={trustStatus} />}
+                  </div>
                 </div>
                 <Mono v={`${cn.protocol || ''} ${stripEmptyParens(cn.protocol_version) || ''}`.trim()} />
                 <Mono v={cn.cipher_suite} small />
@@ -608,10 +635,10 @@ export function InventoryPage() {
     }
 
     if (isCert) {
-      if (certs.length === 0) return <Center icon="file-badge" tone="var(--accent)" title="No certificates" message={search ? 'Nothing matches your search.' : 'Upload a certificate or run discovery to populate this view.'} />;
+      if (certs.length === 0) return <Center icon="file-badge" tone="var(--accent)" title="No certificates" message={certTrust.length > 0 ? 'No certificates match this trust filter.' : search ? 'Nothing matches your search.' : 'Upload a certificate or run discovery to populate this view.'} />;
       return (
         <>
-          <Header grid={CERT_GRID} cols={['', 'Certificate', 'Issuer', 'Key', 'Expires', 'Deployed on']} />
+          <Header grid={CERT_GRID} cols={['', 'Trust', 'Certificate', 'Issuer', 'Key', 'Expires', 'Deployed on']} />
           {certs.map((c) => <CertRow key={c.id as string} cert={c} onClick={() => openCert(c.id as string)} />)}
         </>
       );
@@ -774,6 +801,13 @@ export function InventoryPage() {
         {isCert && (
           <FilterSelect label="Ownership" value={fCertOwner} onChange={(v) => { setFCertOwner(v); setPage(1); }} options={['All', '3rd-party', 'Internal', 'Unknown']} />
         )}
+        {/* Hidden only when the tenant has no certificates at all — a filter
+            over nothing is noise. An active selection always shows, so it can
+            be cleared. */}
+        {isCert && trustFilterVisible({ selected: certTrust, loaded: !!certsQ.data, total, narrowed: !!search || fCertOwner !== 'All' }) && (
+          <CertTrustFilter value={certTrust} onChange={setCertTrust} />
+        )}
+        {isCert && <CertificateViews trust={certTrust} onApply={setCertTrust} />}
         {isData && (
           <>
             <FilterSelect label="Resource type" value={fResourceType} onChange={(v) => { setFResourceType(v); setPage(1); }} options={RESOURCE_TYPE_OPTS} />
@@ -950,8 +984,9 @@ function CertRow({ cert, onClick }: { cert: Certificate; onClick: () => void }) 
     return m ? m[1] : dn;
   })();
   return (
-    <div className="row-hover" onClick={onClick} style={{ display: 'grid', gridTemplateColumns: CERT_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}>
-      <span style={{ width: 10, height: 10, borderRadius: '50%', background: expTone, flex: 'none' }} />
+    <div data-testid="cert-row" className="row-hover" onClick={onClick} style={{ display: 'grid', gridTemplateColumns: CERT_GRID, gap: 12, padding: '0 16px', minHeight: 46, alignItems: 'center', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}>
+      <span title={expDays == null ? 'Expiry unknown' : expDays < 0 ? 'Expired' : `Expires in ${expDays} days`} style={{ width: 10, height: 10, borderRadius: '50%', background: expTone, flex: 'none' }} />
+      <span style={{ justifySelf: 'start', minWidth: 0 }}><CertTrustChip status={c.trust_status} /></span>
       <div style={{ minWidth: 0 }}>
         <div className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{(c.common_name as string) || c.subject_dn || '—'}</div>
         {source && <div title={source.detail} style={{ fontSize: 10.5, color: source.tone }}>{source.label}</div>}

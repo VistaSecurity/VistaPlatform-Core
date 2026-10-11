@@ -11,7 +11,7 @@ PCAP analysis is **narrower than a live sensor**. A sensor sees a connection as 
 
 ## Uploading a capture
 
-1. Go to **Discovery → Sources → PCAP Upload**.
+1. Go to **Discovery → Sensors & Scanning → PCAP Upload**.
 2. Drop a `.pcap` or `.pcapng` file onto the dropzone, or click **Choose file**.
 3. The upload appears under **Recent uploads** on the same page, with its
    processing status.

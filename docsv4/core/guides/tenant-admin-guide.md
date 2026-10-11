@@ -356,8 +356,8 @@ integrate with**, grouped by kind, with each entry's real state:
   platforms);
 - a line naming where to connect it — Slack, PagerDuty, email and webhook are
   channels added with **Add connection**, cloud providers are under
-  **Discovery → Cloud**, and an SBOM is uploaded under **Discovery → Sources →
-  SBOM Upload**. In-app notifications need no setup;
+  **Discovery → Sensors & Scanning → Cloud**, and an SBOM is uploaded under
+  **Discovery → Sensors & Scanning → SBOM Upload**. In-app notifications need no setup;
 - an **Enterprise** tag — a capability that is not in Core, whether or not your
   plan holds it. When it does not, the card says *Included in Enterprise*;
 - *Configured by your platform operator* — SIEM export. It works, it is

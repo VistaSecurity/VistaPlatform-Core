@@ -1030,7 +1030,7 @@ CREATE TABLE IF NOT EXISTS audit.activity_logs (
     tags text[],
     occurred_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying])::text[]))),
+    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying, 'integration'::character varying])::text[]))),
     CONSTRAINT valid_user_type CHECK (((user_type)::text = ANY ((ARRAY['tenant'::character varying, 'platform'::character varying])::text[])))
 )
 PARTITION BY RANGE (occurred_at);
@@ -1067,7 +1067,7 @@ CREATE TABLE IF NOT EXISTS audit.activity_logs_y2026m04 (
     tags text[],
     occurred_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying])::text[]))),
+    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying, 'integration'::character varying])::text[]))),
     CONSTRAINT valid_user_type CHECK (((user_type)::text = ANY ((ARRAY['tenant'::character varying, 'platform'::character varying])::text[])))
 );
 
@@ -1100,7 +1100,7 @@ CREATE TABLE IF NOT EXISTS audit.activity_logs_y2026m05 (
     tags text[],
     occurred_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying])::text[]))),
+    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying, 'integration'::character varying])::text[]))),
     CONSTRAINT valid_user_type CHECK (((user_type)::text = ANY ((ARRAY['tenant'::character varying, 'platform'::character varying])::text[])))
 );
 
@@ -1133,7 +1133,7 @@ CREATE TABLE IF NOT EXISTS audit.activity_logs_y2026m06 (
     tags text[],
     occurred_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying])::text[]))),
+    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying, 'integration'::character varying])::text[]))),
     CONSTRAINT valid_user_type CHECK (((user_type)::text = ANY ((ARRAY['tenant'::character varying, 'platform'::character varying])::text[])))
 );
 
@@ -1166,7 +1166,7 @@ CREATE TABLE IF NOT EXISTS audit.activity_logs_y2026m07 (
     tags text[],
     occurred_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying])::text[]))),
+    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying, 'integration'::character varying])::text[]))),
     CONSTRAINT valid_user_type CHECK (((user_type)::text = ANY ((ARRAY['tenant'::character varying, 'platform'::character varying])::text[])))
 );
 
@@ -1199,7 +1199,7 @@ CREATE TABLE IF NOT EXISTS audit.activity_logs_y2026m08 (
     tags text[],
     occurred_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
-    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying])::text[]))),
+    CONSTRAINT valid_event_category CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying, 'integration'::character varying])::text[]))),
     CONSTRAINT valid_user_type CHECK (((user_type)::text = ANY ((ARRAY['tenant'::character varying, 'platform'::character varying])::text[])))
 );
 
@@ -23241,6 +23241,100 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
+-- ----------------------------------------------------------------------------
+-- Tenant-managed certificate trust (slice 1)
+-- ----------------------------------------------------------------------------
+-- Trust is a tenant decision, evaluated centrally by inventory-service rather
+-- than by whichever agent observed a chain. tenant_trust_anchors records the
+-- organisation's explicit trust / distrust of a CA certificate already in its
+-- inventory; certificates.trust_status is the platform's verdict on where each
+-- certificate's chain ends, recomputed when a decision or a chain link changes.
+-- NULL trust_status means "not yet evaluated" and must never be read as trusted.
+--
+-- decided_by carries no FK on purpose: a deleted author leaves the decision
+-- intact. varchar + CHECK, not enums, so a later value is one ALTER, not the
+-- two-edit enum hazard.
+CREATE TABLE IF NOT EXISTS public.tenant_trust_anchors (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    certificate_id uuid NOT NULL,
+    decision character varying(20) NOT NULL,
+    note text,
+    decided_by uuid,
+    decided_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tenant_trust_anchors_pkey PRIMARY KEY (id),
+    CONSTRAINT tenant_trust_anchors_tenant_certificate_key UNIQUE (tenant_id, certificate_id),
+    CONSTRAINT tenant_trust_anchors_decision_check CHECK (((decision)::text = ANY ((ARRAY['trusted'::character varying, 'distrusted'::character varying])::text[]))),
+    CONSTRAINT tenant_trust_anchors_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE,
+    CONSTRAINT tenant_trust_anchors_certificate_id_fkey FOREIGN KEY (certificate_id) REFERENCES public.certificates(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_trust_anchors_tenant
+    ON public.tenant_trust_anchors USING btree (tenant_id);
+
+CREATE OR REPLACE TRIGGER update_tenant_trust_anchors_updated_at BEFORE UPDATE ON public.tenant_trust_anchors FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+ALTER TABLE public.tenant_trust_anchors ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  CREATE POLICY tenant_trust_anchors_tenant_isolation ON public.tenant_trust_anchors
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+ALTER TABLE public.certificates
+    ADD COLUMN IF NOT EXISTS trust_status character varying(20),
+    ADD COLUMN IF NOT EXISTS trust_anchor_certificate_id uuid,
+    ADD COLUMN IF NOT EXISTS trust_evaluated_at timestamp with time zone,
+    ADD COLUMN IF NOT EXISTS chain_source character varying(20);
+
+DO $$ BEGIN
+  IF to_regclass('public.certificates') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'certificates_trust_status_check' AND conrelid = to_regclass('public.certificates')) THEN
+    ALTER TABLE public.certificates ADD CONSTRAINT certificates_trust_status_check
+        CHECK ((trust_status IS NULL) OR ((trust_status)::text = ANY ((ARRAY['public'::character varying, 'private_trusted'::character varying, 'self_signed'::character varying, 'untrusted'::character varying, 'distrusted'::character varying, 'incomplete'::character varying])::text[])));
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.certificates') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'certificates_chain_source_check' AND conrelid = to_regclass('public.certificates')) THEN
+    ALTER TABLE public.certificates ADD CONSTRAINT certificates_chain_source_check
+        CHECK ((chain_source IS NULL) OR ((chain_source)::text = ANY ((ARRAY['served'::character varying, 'aia'::character varying, 'bundle'::character varying, 'tenant_anchor'::character varying, 'upload'::character varying])::text[])));
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_certificates_tenant_trust_status
+    ON public.certificates USING btree (tenant_id, trust_status);
+CREATE INDEX IF NOT EXISTS idx_certificates_trust_anchor
+    ON public.certificates USING btree (trust_anchor_certificate_id) WHERE (trust_anchor_certificate_id IS NOT NULL);
+
+-- ----------------------------------------------------------------------------
+-- Tenant-managed certificate trust (slices 2-3)
+-- ----------------------------------------------------------------------------
+-- external_connections.trust_status: the tenant's verdict on the leaf a
+-- 3rd-party server presented (same vocabulary as certificates.trust_status),
+-- so the 3rd Party lens reads the organisation's trust decisions rather than
+-- the probing runtime's OS store. NULL = not evaluated (no certificate, or
+-- observed before this column existed).
+ALTER TABLE IF EXISTS public.external_connections
+    ADD COLUMN IF NOT EXISTS trust_status character varying(20);
+
+DO $$ BEGIN
+  IF to_regclass('public.external_connections') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'external_connections_trust_status_check' AND conrelid = to_regclass('public.external_connections')) THEN
+    ALTER TABLE public.external_connections ADD CONSTRAINT external_connections_trust_status_check
+        CHECK ((trust_status IS NULL) OR ((trust_status)::text = ANY ((ARRAY['public'::character varying, 'private_trusted'::character varying, 'self_signed'::character varying, 'untrusted'::character varying, 'distrusted'::character varying, 'incomplete'::character varying])::text[])));
+  END IF;
+END $$;
+
+-- Chain completion and 3rd-party classification look an issuer up by its
+-- subject within the tenant (certtrust inventory lookup).
+CREATE INDEX IF NOT EXISTS idx_certificates_tenant_subject_dn
+    ON public.certificates USING btree (tenant_id, subject_dn);
+
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
 -- `GRANT ... ON ALL TABLES IN SCHEMA x` is not a standing rule: Postgres
@@ -25626,3 +25720,32 @@ CREATE INDEX IF NOT EXISTS idx_assets_tenant_primary_host
 ALTER TABLE public.pcap_upload_jobs
     ADD COLUMN IF NOT EXISTS truncated_packet_count bigint DEFAULT 0 NOT NULL,
     ADD COLUMN IF NOT EXISTS snapshot_length integer;
+
+-- ----------------------------------------------------------------------------
+-- audit.activity_logs: `integration` event category
+-- ----------------------------------------------------------------------------
+-- Connector handlers audit configuration, scan-consent changes and
+-- sync undo under event_category 'integration', which the CHECK did not list;
+-- the audit middleware refuses a category the table would reject, so every one
+-- of those events was discarded (two of them security-relevant). The CREATE
+-- TABLE above carries the value for fresh installs; this rewrites the
+-- constraint on an existing database. The partitions INHERIT the parent's
+-- constraint (coninhcount = 1, conislocal = false), so dropping and re-adding
+-- it on the parent reaches every partition, including ones created after this
+-- file was written. Idempotent: it only acts when the live definition lacks
+-- the value.
+DO $audit_integration_category$
+BEGIN
+    IF to_regclass('audit.activity_logs') IS NOT NULL
+       AND EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conname = 'valid_event_category'
+              AND conrelid = 'audit.activity_logs'::regclass
+              AND pg_get_constraintdef(oid) NOT LIKE '%''integration''%')
+    THEN
+        ALTER TABLE audit.activity_logs DROP CONSTRAINT valid_event_category;
+        ALTER TABLE audit.activity_logs ADD CONSTRAINT valid_event_category
+            CHECK (((event_category)::text = ANY ((ARRAY['asset'::character varying, 'discovery'::character varying, 'compliance'::character varying, 'user'::character varying, 'tenant'::character varying, 'system'::character varying, 'report'::character varying, 'certificate'::character varying, 'data'::character varying, 'config'::character varying, 'job'::character varying, 'authentication'::character varying, 'integration'::character varying])::text[])));
+    END IF;
+END
+$audit_integration_category$;

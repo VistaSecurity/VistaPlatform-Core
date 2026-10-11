@@ -29,6 +29,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/events"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services/certtrust"
 	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/assetclasshistory"
@@ -926,6 +927,13 @@ const (
 	// ingestOutcomeDropped: the finding was recorded nowhere, for a property
 	// of its own (IngestResult.Reason says which).
 	ingestOutcomeDropped = "dropped"
+	// ingestOutcomeError: the finding could not be settled THIS time, for a
+	// reason that is not a property of the finding (a transient database
+	// error, a resolver timeout, a failed upsert). IngestResult.Reason carries
+	// the error. The caller must retry the finding, never settle it: unlike
+	// "rejected" (a decision) and "dropped" (a permanent verdict) this one
+	// records nothing and promises nothing.
+	ingestOutcomeError = "error"
 	// dropReasonThirdPartyNoSourceIP: a third-party connection with no source
 	// address ( D2). A connection record needs both ends; the upsert key
 	// (tenant, source_ip, dest_ip, dest_port, protocol) used to be filled with
@@ -1339,9 +1347,12 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 					outcomes[i] = identity.IngestResult{Outcome: ingestOutcomeDropped, Reason: dropReasonThirdPartyNoSourceIP}
 					log.Printf("[AssetService] IngestFindings: dropped third-party %s: no source address", findingLabel(f))
 				} else if err != nil {
-					// Do NOT swallow: a failed route means the finding is dropped.
-					// Surface it loudly so a vendor discovery can't vanish silently.
+					// Do NOT swallow, and do NOT leave the "rejected" the outcome
+					// was initialised to: the caller settles that terminally, so a
+					// transient failure here would permanently lose the finding.
+					// Report it as an error the caller retries ( WP3).
 					failedRoute++
+					outcomes[i] = identity.IngestResult{Outcome: ingestOutcomeError, Reason: "external_connections route failed: " + err.Error()}
 					log.Printf("[AssetService] IngestFindings: ERROR routing third-party %s to external_connections: %v", findingLabel(f), err)
 				} else {
 					routedExternal++
@@ -2397,6 +2408,14 @@ func (s *AssetService) processDiscoveryCryptoData(
 			// Propagate quality flags from RawData to leaf cert
 			if i == 0 {
 				s.applyCertQualityFlags(&certData, f.RawData)
+			}
+
+			// A certificate a server presented in a handshake: chain_source
+			// 'served'. Only a NEW row takes it — CreateCertificate
+			// writes chain_source and UpdateCertificate never does, so a CA
+			// first uploaded or copied from the bundle keeps its source.
+			if certData.ChainSource == "" {
+				certData.ChainSource = certtrust.ChainSourceServed
 			}
 
 			// Find or create certificate

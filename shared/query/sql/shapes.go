@@ -398,6 +398,13 @@ func (b *builder) derivedOver(sc scope, f ast.FieldRef, sp ast.Span, raw bool, i
 		return "(" + sc.self + ".class_source_kind IN (" + b.param("inferred") + ", " + b.param("rule") + ")" +
 			" AND " + inner(expr{alias: sc.self, sql: sc.self + ".class_source_ref"}) + ")"
 
+	case "asset.cert_trust":
+		// The worst trust status of the asset's certificates, the
+		// same expression the asset facet groups by (AssetCertTrustSQL). A
+		// value, not an EXISTS: `cert_trust:untrusted` means "the worst is
+		// untrusted", not "has an untrusted one".
+		return inner(expr{sql: AssetCertTrustSQL(sc.self, b.alias)})
+
 	case "crypto.strength":
 		// Worst-component-wins: a configuration is weak if any algorithm it
 		// negotiates is weak, which is the same rule catalogue_risk.go applies

@@ -258,22 +258,6 @@ func TestTransformPFS(t *testing.T) {
 	}
 }
 
-func TestTransformChainValid(t *testing.T) {
-	selfSigned := scannedValue{kind: scanBool}
-	selfSigned.bl.Valid, selfSigned.bl.Bool = true, true
-	if got, _ := measurementTransforms["chain_valid"](selfSigned); got != false {
-		t.Errorf("chain_valid(self-signed) = %v, want false", got)
-	}
-	notSelfSigned := scannedValue{kind: scanBool}
-	notSelfSigned.bl.Valid, notSelfSigned.bl.Bool = true, false
-	if got, _ := measurementTransforms["chain_valid"](notSelfSigned); got != true {
-		t.Errorf("chain_valid(ca-signed) = %v, want true", got)
-	}
-	if got, _ := measurementTransforms["chain_valid"](scannedValue{kind: scanBool}); got != true {
-		t.Errorf("chain_valid(NULL) = %v, want true", got)
-	}
-}
-
 // TestTransformDaysFloorVersusTrunc pins the difference the two day transforms
 // exist for: an expired certificate counts DOWN past zero, so -0.5 days is -1
 // and not "expires today", while a validity PERIOD is never negative and

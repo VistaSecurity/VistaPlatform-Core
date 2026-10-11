@@ -223,3 +223,29 @@ describe('settingsPageMeta', () => {
     expect(meta.authoringDisabled!.message.length).toBeGreaterThan(40);
   });
 });
+
+// slice 1. Trusted CAs is Core (D1) and is the home of every trust
+// decision, so it must be in the rail on every edition, beside the other pages
+// that explain how the inventory is decided. The page is readable with
+// `assets.read` — gating the ENTRY on `certificates.trust` would show viewers an
+// access notice in place of the rules their inventory is judged by; the write
+// controls inside the page carry that permission instead
+// (pages-trusted-cas.jsdom.test.tsx).
+describe('Trusted CAs entry', () => {
+  it('is a built Core page under Policies, readable with assets.read', () => {
+    const meta = settingsPageMeta('trusted-cas');
+    expect(meta.label).toBe('Trusted CAs');
+    expect(meta.section).toBe('Policies');
+    expect(meta.built).toBe(true);
+    expect(meta.permission).toBe('assets.read');
+    expect(meta.feature).toBeUndefined();
+    expect(keysOf(visibleSettingsNav(defaultFeatures))).toContain('trusted-cas');
+  });
+
+  it('sits with the other pages that explain how the inventory is decided', () => {
+    const policies = SETTINGS_NAV.find((s) => s.section === 'Policies')!.items.map((i) => i.key);
+    const at = policies.indexOf('trusted-cas');
+    expect(at).toBeGreaterThan(policies.indexOf('identification-rules'));
+    expect(policies).toContain('classes');
+  });
+});

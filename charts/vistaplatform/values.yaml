@@ -567,6 +567,15 @@ backends:
       # DISCOVERY_AUTO_SCAN_WORKER_ENABLED is: without an entry the variable does
       # not exist in the pod and the switch is unreachable.
       - {name: IDENTITY_RULE_MERGE_WORKER_ENABLED, value: "true"}
+      # Certificate trust backfill: every six hours, evaluate trust for the
+      # certificates no request reached and, at most once a day per tenant,
+      # retry incomplete chains by fetching missing issuers from their AIA
+      # caIssuers URLs (public addresses only). Default on. Here for the same
+      # reason DISCOVERY_AUTO_SCAN_WORKER_ENABLED is.
+      - {name: CERT_TRUST_BACKFILL_ENABLED, value: "true"}
+      # Fetching a missing issuer from the certificate's own caIssuers URL
+      # (public addresses only). "false" for an air-gapped cluster.
+      - {name: CERT_TRUST_AIA_ENABLED, value: "true"}
     image:
       digest: ""
 

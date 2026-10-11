@@ -18,7 +18,9 @@ import {
   STATUS_LABEL, STATUS_VALUES, cycleFindings, facetCount, setFacetClass, toggleFacetValue,
   type FacetKey, type FacetState,
 } from './facet-query';
-import { type FacetLevel, bucketMap, type FacetBuckets, type FacetData } from './asset-queries';
+import { type AssetFacetBucket, type FacetLevel, bucketMap, type FacetBuckets, type FacetData } from './asset-queries';
+import { CERT_TRUST_VALUES } from './facet-query';
+import { TRUST_TONE_COLOR, trustFilterPresentation, type TrustFilterValue } from './trust-status';
 
 export interface FacetValue { value: string; count?: number; label?: string }
 
@@ -280,9 +282,23 @@ export function levelFailed(data: FacetData | undefined, facetKey: string): bool
   return data?.failed.includes(FACET_LEVEL_FOR[facetKey] ?? facetKey) ?? false;
 }
 
-export function FacetRail({ facets, data, extra, unparsed = false, onChange, onClear, onRetry }: {
+/**
+ * Counts for the Certificate trust facet, or none. `null`/`undefined` — the
+ * server does not serve the `cert_trust` level (yet), or it failed — shows the
+ * values without numbers. When the level DID answer, a value absent from its
+ * buckets is a real zero.
+ */
+export function certTrustCounts(buckets: AssetFacetBucket[] | null | undefined): Record<string, number> | null {
+  if (!buckets) return null;
+  const m = bucketMap(buckets);
+  return Object.fromEntries(CERT_TRUST_VALUES.map((v) => [v, m[v] ?? 0]));
+}
+
+export function FacetRail({ facets, data, certTrust, extra, unparsed = false, onChange, onClear, onRetry }: {
   facets: FacetState;
   data: FacetData | undefined;
+  /** Buckets of the optional `cert_trust` level; see certTrustCounts. */
+  certTrust?: AssetFacetBucket[] | null;
   /** Terms only the editor can express, so the rail can say they are there. */
   extra: string[];
   /** The typed query does not parse. The rail cannot preserve text it could not
@@ -441,6 +457,33 @@ export function FacetRail({ facets, data, extra, unparsed = false, onChange, onC
             Provisional items were inferred from an advertisement no collector has verified directly.
           </div>
         )}
+      </Section>
+
+      {/* Certificate trust (#2397): the same words as the Certificates lens's
+          Trust filter. Counts, when the server serves them, put each asset
+          under its WORST certificate; the checkbox lists every asset that has
+          a certificate in that status — hence the note. */}
+      <Section label={FACET_LABEL.cert_trust} count={facets.cert_trust.length}>
+        {CERT_TRUST_VALUES.map((v) => {
+          const p = trustFilterPresentation(v as TrustFilterValue);
+          return (
+            <div key={v} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <span aria-hidden style={{ width: 6, height: 6, borderRadius: '50%', background: TRUST_TONE_COLOR[p.tone], flex: 'none' }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <CheckRow
+                  value={v}
+                  label={p.label}
+                  count={certTrustCounts(certTrust)?.[v]}
+                  checked={facets.cert_trust.includes(v)}
+                  onToggle={() => onChange(toggleFacetValue(facets, 'cert_trust', v))}
+                />
+              </div>
+            </div>
+          );
+        })}
+        <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 5, lineHeight: 1.45 }}>
+          Assets with a certificate in the chosen status. Counts place each asset under its least-trusted certificate.
+        </div>
       </Section>
 
       <Section label={FACET_LABEL.provenance} count={facets.provenance.length}>

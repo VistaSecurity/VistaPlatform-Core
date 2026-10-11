@@ -75,6 +75,24 @@ describe('install steps', () => {
     expect(windows).toContain('-Key KEY-1');
   });
 
+  it('offer the manual guided run on every sensor OS, with a macOS box of its own', () => {
+    const { linux, windows, macos } = buildInstallCommands('KEY-1', '10.0.0.5', 'dc01', 'v4.0.0');
+    // The operator's long-standing route: the binary's own guided setup. The
+    // installer scripts are newer and may not fit every host.
+    expect(linux).toContain('sudo ./crypto-sensor --verbose --interactive');
+    expect(windows).toContain('.\\crypto-sensor.exe --verbose --interactive');
+    expect(macos).toContain('sudo ./crypto-sensor --verbose --interactive');
+    // macOS has no installer script: the guided run is its only route.
+    expect(macos).toContain(`curl -fLo crypto-sensor ${RELEASE}/download/v4.0.0/crypto-sensor-darwin-arm64-v4.0.0`);
+    expect(macos).not.toContain('install-sensor');
+    expect(macos).toContain('quarantine');
+    // Guided setup prompts for these, so each box names what to answer.
+    for (const text of [linux, windows, macos]) {
+      expect(text).toContain('KEY-1');
+      expect(text).toContain(window.location.origin);
+    }
+  });
+
   it('download the device agent and its installer for the platform release, then install', () => {
     const { linux, windows } = buildDeviceAgentCommands('KEY-2', 'v4.0.0');
     expect(linux).toContain(`curl -fLo device-agent ${RELEASE}/download/v4.0.0/device-agent-linux-amd64-v4.0.0`);
@@ -91,8 +109,9 @@ describe('install steps', () => {
   });
 
   it('never invent a version when the platform has none', () => {
-    for (const cmds of [buildInstallCommands('K', '10.0.0.5', 'n', null), buildDeviceAgentCommands('K', null)]) {
-      for (const text of [cmds.linux, cmds.windows]) {
+    const sensor = buildInstallCommands('K', '10.0.0.5', 'n', null);
+    for (const texts of [[sensor.linux, sensor.windows, sensor.macos], Object.values(buildDeviceAgentCommands('K', null))]) {
+      for (const text of texts) {
         expect(text).toContain(RELEASE);
         expect(text).not.toContain('/download/');
         expect(text).toContain('About');

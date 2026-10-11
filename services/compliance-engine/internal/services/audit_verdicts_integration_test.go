@@ -138,20 +138,51 @@ func TestIntegration_BP004_PFS_DistinguishesECDHEFromStaticRSA(t *testing.T) {
 	}
 }
 
-// CMP-1: same pair for BP-007's certificate_chain_valid boolean.
+// CMP-1: same pair for BP-007's certificate_chain_valid boolean — which since
+// feature reads the platform's trust verdict (certificates.trust_status)
+// rather than "not self-signed". A certificate from a CA nobody trusted is now
+// flagged even though it is not self-signed, and an unevaluated certificate is
+// not assessed at all: flagging it would raise BP-007 on every certificate the
+// trust pass has not reached yet.
 func TestIntegration_BP007_Chain_DistinguishesValidFromSelfSigned(t *testing.T) {
 	f := newVerdictFixture(t)
 	future := time.Now().Add(200 * 24 * time.Hour)
-	valid := f.addCertificate(t, "valid-chain.example.test", "RSA", 2048, false, future)
-	selfSigned := f.addCertificate(t, "self-signed.example.test", "RSA", 2048, true, future)
+	withTrust := func(cn string, selfSigned bool, status string) uuid.UUID {
+		id := f.addCertificate(t, cn, "RSA", 2048, selfSigned, future)
+		if status != "" {
+			if _, err := f.db.Exec(`UPDATE certificates SET trust_status = $1 WHERE id = $2`, status, id); err != nil {
+				t.Fatalf("set trust_status on %s: %v", cn, err)
+			}
+		}
+		return id
+	}
+	public := withTrust("public.example.test", false, "public")
+	private := withTrust("private.example.test", false, "private_trusted")
+	selfSigned := withTrust("self-signed.example.test", true, "self_signed")
+	untrusted := withTrust("untrusted.example.test", false, "untrusted")
+	distrusted := withTrust("distrusted.example.test", false, "distrusted")
+	incomplete := withTrust("incomplete.example.test", false, "incomplete")
+	unevaluated := withTrust("unevaluated.example.test", false, "")
 
 	flagged := f.flaggedAssets(t, f.controlByCode(t, "best-practices", "BP-007"))
 
-	if flagged[valid] {
-		t.Error("BP-007 flagged a certificate with a valid chain")
+	for name, id := range map[string]uuid.UUID{"public": public, "private_trusted": private, "unevaluated (NULL)": unevaluated} {
+		if flagged[id] {
+			t.Errorf("BP-007 flagged a %s certificate", name)
+		}
 	}
-	if !flagged[selfSigned] {
-		t.Error("BP-007 did not flag a self-signed certificate")
+	for name, id := range map[string]uuid.UUID{"self_signed": selfSigned, "untrusted": untrusted, "distrusted": distrusted, "incomplete": incomplete} {
+		if !flagged[id] {
+			t.Errorf("BP-007 did not flag a %s certificate", name)
+		}
+	}
+
+	values, err := NewMeasurementExtractor(f.db).ExtractMeasurementsForAsset(f.tenant, unevaluated, "certificate_chain_valid")
+	if err != nil {
+		t.Fatalf("extract certificate_chain_valid: %v", err)
+	}
+	if len(values) != 0 {
+		t.Errorf("an unevaluated certificate produced %d certificate_chain_valid measurement(s): %+v", len(values), values)
 	}
 }
 

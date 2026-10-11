@@ -139,7 +139,13 @@ function InstallCommandBlock({ command }: { command: string }) {
 // platform's version (agent-downloads.ts): the binary is a release asset, the
 // installer lives in that tag's source. With no release tag (a dev build) the
 // steps point at the releases page instead of guessing a version.
-export function buildInstallCommands(key: string, ip: string, name: string, tag: string | null): { linux: string; windows: string } {
+// Every box also shows the manual route: run the binary itself with
+// `--verbose --interactive`, which walks through URL, key, interfaces and data
+// path, then saves the config and starts capturing in the foreground. That is
+// how the sensor has been run by hand all along, and it is the fallback when
+// the service installer does not fit the host. macOS has no installer script,
+// so the manual route is its only one.
+export function buildInstallCommands(key: string, ip: string, name: string, tag: string | null): { linux: string; windows: string; macos: string } {
   const origin = window.location.origin;
   const linuxDownload = tag
     ? [
@@ -164,18 +170,47 @@ export function buildInstallCommands(key: string, ip: string, name: string, tag:
         `#    version (profile menu → About): save the Windows sensor as crypto-sensor.exe`,
         `#    and scripts/install-sensor.ps1 from that tag, in the same folder.`,
       ];
+  const macosDownload = tag
+    ? [
+        `# 1) Download the sensor (macOS arm64; use -amd64 on Intel), release ${tag}:`,
+        `curl -fLo crypto-sensor ${binaryUrl(tag, 'crypto-sensor', 'darwin', 'arm64')}`,
+        `chmod +x crypto-sensor && xattr -d com.apple.quarantine crypto-sensor 2>/dev/null`,
+      ]
+    : [
+        `# 1) From ${CORE_RELEASES_URL}, take the release matching this platform's`,
+        `#    version (profile menu → About): save the macOS sensor for this Mac as`,
+        `#    ./crypto-sensor (chmod +x; xattr -d com.apple.quarantine crypto-sensor).`,
+      ];
+  const manualHint = (step: number) => [
+    `# ${step}) Or run it by hand instead: guided setup asks for the URL (${origin}),`,
+    `#    the key (${key}) and the interfaces, then captures in the foreground.`,
+  ];
   return {
     linux: [
       ...linuxDownload,
       ``,
       `# 2) Install and register (the sensor needs libpcap):`,
       `sudo bash install-sensor.sh --url ${origin} --key ${key} --ip ${ip} --name "${name}"`,
+      ``,
+      ...manualHint(3),
+      `sudo ./crypto-sensor --verbose --interactive`,
     ].join('\n'),
     windows: [
       ...windowsDownload,
       ``,
       `# 2) Install and register (the sensor needs Npcap):`,
       `.\\install-sensor.ps1 -Url ${origin} -Key ${key} -IP ${ip} -Name "${name}"`,
+      ``,
+      ...manualHint(3),
+      `.\\crypto-sensor.exe --verbose --interactive`,
+    ].join('\n'),
+    macos: [
+      ...macosDownload,
+      ``,
+      `# 2) Run it (there is no service installer for macOS): guided setup asks for`,
+      `#    the URL (${origin}), the key (${key}) and the interfaces, then captures`,
+      `#    in the foreground. Capture needs root for the BPF devices.`,
+      `sudo ./crypto-sensor --verbose --interactive`,
     ].join('\n'),
   };
 }
@@ -409,7 +444,7 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
   const [ipAddress, setIpAddress] = useState('');
   const [tags, setTags] = useState('');
   const [description, setDescription] = useState('');
-  const [result, setResult] = useState<{ kind: AgentKind; key: string; name: string; ip: string; linux: string; windows: string } | null>(null);
+  const [result, setResult] = useState<{ kind: AgentKind; key: string; name: string; ip: string; linux: string; windows: string; macos?: string } | null>(null);
   // The platform's release, so the steps download matching agent binaries.
   const releaseTag = usePlatformReleaseTag();
 
@@ -440,10 +475,10 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
       });
       if (error || !data) throw new Error(`Failed to register ${isDevice ? 'device agent' : 'sensor'}`);
       const ps = data.pending_sensor;
-      const cmds = isDevice
+      const cmds: { linux: string; windows: string; macos?: string } = isDevice
         ? buildDeviceAgentCommands(ps.registration_key, releaseTag)
         : buildInstallCommands(ps.registration_key, ps.ip_address, ps.name, releaseTag);
-      return { kind, key: ps.registration_key, name: ps.name, ip: ps.ip_address, linux: cmds.linux, windows: cmds.windows };
+      return { kind, key: ps.registration_key, name: ps.name, ip: ps.ip_address, linux: cmds.linux, windows: cmds.windows, macos: cmds.macos };
     },
     onSuccess: (r) => {
       setResult(r);
@@ -497,6 +532,11 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
         <ModalField label={deviceResult ? 'Enrollment steps — Windows' : 'Installation command — Windows'} hint="Run on the target host (PowerShell).">
           <InstallCommandBlock command={result.windows} />
         </ModalField>
+        {result.macos && (
+          <ModalField label="Installation command — macOS" hint="Run on the target host (Terminal).">
+            <InstallCommandBlock command={result.macos} />
+          </ModalField>
+        )}
         <PlatformCAPanel />
       </Modal>
     );
@@ -727,7 +767,7 @@ function DeletePendingModal({ open, pending, onClose }: {
 // modal. Copy adapts to the agent kind (sensor install vs device-agent enroll).
 function ShowPendingCommandModal({ open, pending, onClose }: {
   open: boolean;
-  pending: { name: string; linux: string; windows: string; isDevice: boolean } | null;
+  pending: { name: string; linux: string; windows: string; macos?: string; isDevice: boolean } | null;
   onClose: () => void;
 }) {
   const device = !!pending?.isDevice;
@@ -753,6 +793,11 @@ function ShowPendingCommandModal({ open, pending, onClose }: {
           <ModalField label={device ? 'Enrollment steps — Windows' : 'Installation command — Windows'} hint="Run on the target host (PowerShell).">
             <InstallCommandBlock command={pending.windows} />
           </ModalField>
+          {pending.macos && (
+            <ModalField label="Installation command — macOS" hint="Run on the target host (Terminal).">
+              <InstallCommandBlock command={pending.macos} />
+            </ModalField>
+          )}
           {/* Same panel as the register modal. This is the dialog an operator
               opens when they come back later, or when the person running the
               install is not the person who generated the code — exactly the
@@ -775,7 +820,7 @@ export function PendingRegistrationsSection() {
   const q = usePendingSensors();
   const pending = q.data ?? [];
   const [toDelete, setToDelete] = useState<{ registration_key: string; name: string } | null>(null);
-  const [toShow, setToShow] = useState<{ name: string; linux: string; windows: string; isDevice: boolean } | null>(null);
+  const [toShow, setToShow] = useState<{ name: string; linux: string; windows: string; macos?: string; isDevice: boolean } | null>(null);
   const releaseTag = usePlatformReleaseTag();
 
   if (q.isLoading || q.isError || pending.length === 0) return null; // quiet when empty
@@ -789,7 +834,7 @@ export function PendingRegistrationsSection() {
       <div className="panel" style={{ borderRadius: 14, overflow: 'hidden' }}>
         {pending.map((p, i) => {
           const isDevice = isDeviceAgentProfile(p.profile);
-          const cmds = isDevice
+          const cmds: { linux: string; windows: string; macos?: string } = isDevice
             ? buildDeviceAgentCommands(p.registration_key, releaseTag)
             : buildInstallCommands(p.registration_key, p.ip_address, p.name, releaseTag);
           return (
@@ -801,7 +846,7 @@ export function PendingRegistrationsSection() {
                   {[p.ip_address, p.profile, `key ${p.registration_key}`].filter(Boolean).join(' · ')}
                 </div>
               </div>
-              <button className="ui-btn sm ghost" title={isDevice ? 'Show enrollment steps' : 'Show install command'} onClick={() => setToShow({ name: p.name, linux: cmds.linux, windows: cmds.windows, isDevice })}>
+              <button className="ui-btn sm ghost" title={isDevice ? 'Show enrollment steps' : 'Show install command'} onClick={() => setToShow({ name: p.name, linux: cmds.linux, windows: cmds.windows, macos: cmds.macos, isDevice })}>
                 <Icon name="terminal" size={13} />{isDevice ? 'Enroll' : 'Command'}
               </button>
               <PermissionGate permission={TENANT_PERMISSIONS.sensors.delete}>

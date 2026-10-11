@@ -2,8 +2,10 @@ package network
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -39,7 +41,9 @@ import (
 // TLS is for: a bearer token or a stream of audit events sent over a connection
 // that verifies nothing is readable by whoever sits in the path. `curl -k`
 // validates nothing, and a checkbox that does the same would be the easiest
-// wrong answer on the form.
+// wrong answer on the form. ([CapturePresentedChain] skips verification for
+// one diagnostic purpose — reading a chain to SHOW a person — and abandons that
+// handshake before anything is sent; it never yields a usable connection.)
 
 // ConnectorAllowPrivateEndpointsEnv is the platform operator's kill switch for
 // private-address integration targets. Set to "false", no connection may reach
@@ -72,6 +76,40 @@ type EgressOptions struct {
 	// Empty means the system trust store alone. Validate it at save time with
 	// [ValidateCABundlePEM] so a bad paste is a form error, not a failed run.
 	CABundlePEM string
+	// TrustedRoots are further roots to trust, already parsed: the platform's
+	// embedded public bundle and the CA certificates an organisation decided to
+	// trust. Like CABundlePEM they are APPENDED to the system store. They are
+	// parsed by the caller because they do not come from a form field — they
+	// come from the platform's own trust decisions — and because a package
+	// this widely imported must not embed a root bundle every binary would
+	// then carry.
+	TrustedRoots []*x509.Certificate
+	// DistrustedFingerprintsSHA256 refuses any verified chain that passes
+	// through one of these certificates (hex SHA-256 of the DER; case, colons
+	// and spaces are ignored), even when the system store trusts it.
+	//
+	// x509.CertPool can only grow — a root cannot be removed from the system
+	// store — so distrust is enforced after verification, on the chains Go
+	// built: the connection is refused unless at least one verified chain is
+	// free of every distrusted certificate. A distrusted intermediate is in
+	// every chain through it, so it always fails; a root that is one of two
+	// cross-signed paths leaves the other path standing, which is what
+	// distrusting that ROOT means. A malformed fingerprint fails the client's
+	// construction: distrust that silently does nothing is the failure that
+	// matters here.
+	DistrustedFingerprintsSHA256 []string
+}
+
+// DistrustedCAError is the handshake failure when every chain the server's
+// certificate verified to passes through a certificate the caller distrusted.
+type DistrustedCAError struct {
+	Subject           string
+	FingerprintSHA256 string
+}
+
+func (e *DistrustedCAError) Error() string {
+	return fmt.Sprintf("the server's certificate chain passes through %q (SHA-256 %s), "+
+		"a CA this organisation has distrusted", e.Subject, e.FingerprintSHA256)
 }
 
 // PrivateEndpointsPermitted reports whether the operator allows private
@@ -314,7 +352,7 @@ func defaultLookup(ctx context.Context, host string) ([]net.IP, error) {
 }
 
 func newEgressClient(timeout time.Duration, opts EgressOptions, deps egressDeps) (*http.Client, error) {
-	certs, err := parseCABundle(opts.CABundlePEM)
+	tlsConfig, err := trustConfig(opts, deps)
 	if err != nil {
 		return nil, err
 	}
@@ -322,13 +360,113 @@ func newEgressClient(timeout time.Duration, opts EgressOptions, deps egressDeps)
 	if policy.configErr != nil {
 		return nil, policy.configErr
 	}
-	return buildEgressClient(timeout, policy, certs, deps), nil
+	return buildEgressClient(timeout, policy, tlsConfig, deps), nil
+}
+
+// trustConfig turns the options' trust settings into the TLS configuration
+// both transports carry. Nil — Go's defaults, the system store alone — when
+// the options add no root and distrust nothing.
+func trustConfig(opts EgressOptions, deps egressDeps) (*tls.Config, error) {
+	certs, err := parseCABundle(opts.CABundlePEM)
+	if err != nil {
+		return nil, err
+	}
+	distrusted, err := distrustSet(opts.DistrustedFingerprintsSHA256)
+	if err != nil {
+		return nil, err
+	}
+	extra := make([]*x509.Certificate, 0, len(opts.TrustedRoots)+len(certs))
+	for _, c := range opts.TrustedRoots {
+		if c != nil {
+			extra = append(extra, c)
+		}
+	}
+	extra = append(extra, certs...)
+	if len(extra) == 0 && len(distrusted) == 0 {
+		return nil, nil
+	}
+
+	systemRoots := deps.systemRoots
+	if systemRoots == nil {
+		systemRoots = x509.SystemCertPool
+	}
+	pool, err := systemRoots()
+	if err != nil || pool == nil {
+		// No readable system store (a scratch image without one). The
+		// bundle still applies; public endpoints then fail verification,
+		// which is the honest result on a host that trusts nothing.
+		pool = x509.NewCertPool()
+	} else {
+		pool = pool.Clone()
+	}
+	for _, c := range extra {
+		pool.AddCert(c)
+	}
+	cfg := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+	if len(distrusted) > 0 {
+		// VerifyConnection, not VerifyPeerCertificate: it also runs on a
+		// resumed session, which skips VerifyPeerCertificate.
+		cfg.VerifyConnection = refuseDistrustedChains(distrusted)
+	}
+	return cfg, nil
+}
+
+// distrustSet normalises fingerprints to lower-case hex without separators.
+func distrustSet(fingerprints []string) (map[string]struct{}, error) {
+	if len(fingerprints) == 0 {
+		return nil, nil
+	}
+	set := make(map[string]struct{}, len(fingerprints))
+	for _, raw := range fingerprints {
+		fp := strings.ToLower(strings.NewReplacer(":", "", " ", "").Replace(strings.TrimSpace(raw)))
+		if b, err := hex.DecodeString(fp); err != nil || len(b) != sha256.Size {
+			return nil, fmt.Errorf("distrusted fingerprint %q is not a hex SHA-256", raw)
+		}
+		set[fp] = struct{}{}
+	}
+	return set, nil
+}
+
+// refuseDistrustedChains accepts a connection only when at least one chain Go
+// verified contains no distrusted certificate.
+func refuseDistrustedChains(distrusted map[string]struct{}) func(tls.ConnectionState) error {
+	return func(cs tls.ConnectionState) error {
+		chains := cs.VerifiedChains
+		if len(chains) == 0 {
+			// Only reachable if verification was skipped, which this package
+			// never does; judge what the server presented instead.
+			chains = [][]*x509.Certificate{cs.PeerCertificates}
+		}
+		var first *DistrustedCAError
+		for _, chain := range chains {
+			hit := distrustedIn(chain, distrusted)
+			if hit == nil {
+				return nil
+			}
+			if first == nil {
+				first = hit
+			}
+		}
+		return first
+	}
+}
+
+func distrustedIn(chain []*x509.Certificate, distrusted map[string]struct{}) *DistrustedCAError {
+	for _, c := range chain {
+		sum := sha256.Sum256(c.Raw)
+		fp := hex.EncodeToString(sum[:])
+		if _, bad := distrusted[fp]; bad {
+			return &DistrustedCAError{Subject: c.Subject.String(), FingerprintSHA256: fp}
+		}
+	}
+	return nil
 }
 
 // buildEgressClient assembles the guarded client. It cannot fail: a policy
 // carrying a configErr produces a client that refuses every request, which is
 // what [SafeHTTPClient] — whose signature has no error to return — relies on.
-func buildEgressClient(timeout time.Duration, policy targetPolicy, certs []*x509.Certificate,
+// tlsConfig nil means Go's defaults.
+func buildEgressClient(timeout time.Duration, policy targetPolicy, tlsConfig *tls.Config,
 	deps egressDeps) *http.Client {
 
 	if deps.proxy == nil {
@@ -336,26 +474,6 @@ func buildEgressClient(timeout time.Duration, policy targetPolicy, certs []*x509
 	}
 	if deps.lookup == nil {
 		deps.lookup = defaultLookup
-	}
-	if deps.systemRoots == nil {
-		deps.systemRoots = x509.SystemCertPool
-	}
-
-	var tlsConfig *tls.Config
-	if len(certs) > 0 {
-		pool, err := deps.systemRoots()
-		if err != nil || pool == nil {
-			// No readable system store (a scratch image without one). The
-			// bundle still applies; public endpoints then fail verification,
-			// which is the honest result on a host that trusts nothing.
-			pool = x509.NewCertPool()
-		} else {
-			pool = pool.Clone()
-		}
-		for _, c := range certs {
-			pool.AddCert(c)
-		}
-		tlsConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
 
 	// Two transports, chosen per request by the proxy decision. Keeping them

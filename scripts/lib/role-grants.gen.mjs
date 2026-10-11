@@ -45,7 +45,7 @@ export const ROLE_GRANTS = [
     displayName: "Security Administrator",
     description: "Operational/security scope + read users/settings",
     grants: (p) =>
-      (['assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts'].includes(p.resource)) ||
+      (['assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts', 'certificates'].includes(p.resource)) ||
       (['users.read', 'settings.read', 'audit.read'].includes(p.name)),
   },
   // Read-only across all operational resources (no billing).

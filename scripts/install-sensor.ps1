@@ -8,7 +8,7 @@
     restarts on failure, starts it, and waits for the sensor to register itself
     with the control plane.
 
-    Ships alongside crypto-sensor.exe in the sensor release package — run it from
+    Ships alongside crypto-sensor.exe in the sensor release package - run it from
     the directory that contains crypto-sensor.exe.
 
 .EXAMPLE
@@ -67,7 +67,7 @@ if (-not (Test-Path $BinarySource)) {
     exit 1
 }
 
-# The version the platform shows is the one stamped into this binary — the
+# The version the platform shows is the one stamped into this binary - the
 # sensor reports it itself at registration and on every heartbeat.
 $SensorVersion = "unknown"
 try {
@@ -164,7 +164,7 @@ Copy-Item -Force $BinarySource (Join-Path $InstallDir "crypto-sensor.exe")
 # before the sensor could use it and recorded a made-up version.
 #
 # sensorId carries the sensor NAME until registration: the loader uses a
-# non-UUID sensorId as the registration name. Flat camelCase keys — the schema
+# non-UUID sensorId as the registration name. Flat camelCase keys - the schema
 # sensor/internal/config.ConfigFile parses (nested control_plane:/url: is NOT
 # read).
 if (-not $keepEnrolment) {
@@ -207,7 +207,7 @@ $binPath = "`"$InstallDir\crypto-sensor.exe`" --verbose -config `"$ConfigPath`""
 
 $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if ($existing) {
-    Write-Warn "Service already exists — reconfiguring."
+    Write-Warn "Service already exists - reconfiguring."
     # sc.exe is the reliable way to rewrite binPath on an existing service.
     sc.exe config $ServiceName binPath= "$binPath" start= auto | Out-Null
 } else {
@@ -262,7 +262,7 @@ try {
 
 # --- Wait for the sensor to register itself --------------------------------
 # Registration is confirmed only by the sensor: it rewrites sensorId with the
-# UUID the platform accepted. A running service is not a registered sensor — an
+# UUID the platform accepted. A running service is not a registered sensor - an
 # unregistered one captures traffic and can submit none of it.
 $timeoutSeconds = 90
 Write-Info "Waiting up to ${timeoutSeconds}s for the sensor to register..."

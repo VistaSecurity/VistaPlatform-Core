@@ -73,6 +73,7 @@ Discovery sources — how assets get into inventory:
 - [Adding Assets Manually](./features/adding-assets-manually.md) — the New asset form and the class picker
 - [Third-Party & External Connections](./features/third-party-and-external-connections.md)
 - [Certificate Chain Management](./features/certificate-chain-management.md)
+- [Certificate Trust](./features/certificate-trust.md)
 - [Operational Context](./features/operational-context.md)
 
 Posture and compliance:

@@ -13,11 +13,12 @@ import {
   type SbomResult, type SbomTarget,
 } from './sbom-upload';
 
-// Discovery → Sources → Upload SBOM (workstream 2.6b).
+// Discovery → Sensors & Scanning → Upload SBOM (workstream 2.6b).
 //
-// It sits beside PCAP Upload under the Sources group, which is where the other
-// "bring us a file" intake already lives. There is no Sources *page* — Sources
-// is a nav group — so this is a page of its own rather than a card added to one.
+// It sits beside PCAP Upload under the Sensors & Scanning group, which holds
+// every way data comes in — sensors, devices, cloud and file intake. There is
+// no "Sources" *page* (or group any more), so this is a page of its own rather
+// than a card added to one.
 //
 // The card shows every state: nothing chosen, a target chosen, uploading, the
 // counted result, the parser's warnings, and a refusal with the server's own

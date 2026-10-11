@@ -11,6 +11,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services/certtrust"
 )
 
 // ReassessBatch recomputes current ratings from persisted facts without creating
@@ -45,7 +46,8 @@ func (s *ExternalConnectionsService) ReassessBatch(ctx context.Context, tenant u
 			var current models.ExternalConnection
 			var facts models.ExternalConnectionUpsert
 			var stored struct {
-				Strength *string `json:"crypto_strength"`
+				Strength    *string `json:"crypto_strength"`
+				TrustStatus *string `json:"trust_status"`
 			}
 			if e := json.Unmarshal(payload, &current); e != nil {
 				return e
@@ -60,7 +62,7 @@ func (s *ExternalConnectionsService) ReassessBatch(ctx context.Context, tenant u
 			rating, pqcRating, _, reasons, hygiene := assessExternalCryptoTx(ctx, tx, assessmentInput)
 			rating, reasons = preserveExternalAssessment(rating, reasons, stored.Strength, priorReasons, false)
 			next := nullableStrength(rating)
-			if _, e := tx.ExecContext(ctx, `UPDATE external_connections SET crypto_strength=$1,is_pqc_resistant=$2,weak_reasons=$3,cert_hygiene_flags=$4,cert_is_expired=$5,updated_at=NOW() WHERE tenant_id=$6 AND id=$7`, next, pqcRating, pq.StringArray(reasons), pq.StringArray(appendUnique(hygiene, current.CertHygieneFlags...)), facts.CertNotAfter != nil && facts.CertNotAfter.Before(time.Now()), tenant, current.ID); e != nil {
+			if _, e := tx.ExecContext(ctx, `UPDATE external_connections SET crypto_strength=$1,is_pqc_resistant=$2,weak_reasons=$3,cert_hygiene_flags=$4,cert_is_expired=$5,updated_at=NOW() WHERE tenant_id=$6 AND id=$7`, next, pqcRating, pq.StringArray(reasons), pq.StringArray(certtrust.ApplyTrustToHygiene(appendUnique(hygiene, current.CertHygieneFlags...), stringValue(facts.CertValidationStatus), stringValue(stored.TrustStatus))), facts.CertNotAfter != nil && facts.CertNotAfter.Before(time.Now()), tenant, current.ID); e != nil {
 				return e
 			}
 			if stringValue(stored.Strength) != rating {

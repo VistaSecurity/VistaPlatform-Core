@@ -138,23 +138,26 @@ func newParityFixture(t *testing.T) *parityFixture {
 		label: "rsa-leaf", commonName: "parity-rsa.example.test",
 		issuer: "CN=Parity Test CA", keyAlg: "RSA", sigAlg: "sha256WithRSAEncryption", keySize: 2048,
 		notBefore: now.Add(-30*24*time.Hour - parityHalfDay), notAfter: now.Add(45*24*time.Hour + parityHalfDay),
+		trustStatus: "private_trusted",
 	})
 	f.certificate(t, certRow{
 		label: "ec-leaf", commonName: "parity-ec.example.test",
 		issuer: "CN=parity-ec.example.test", keyAlg: "ecdsa-with-SHA384", sigAlg: "ecdsa-with-SHA384", keySize: 256,
 		notBefore: now.Add(-10*24*time.Hour - parityHalfDay), notAfter: now.Add(200*24*time.Hour + parityHalfDay),
-		selfSigned: true,
+		selfSigned: true, trustStatus: "self_signed",
 	})
 	f.certificate(t, certRow{
 		label: "pqc-leaf", commonName: "parity-pqc.example.test",
 		issuer: "CN=Parity Test CA", keyAlg: "ML-DSA-65", sigAlg: "ML-DSA-65", keySize: 1952,
 		notBefore: now.Add(-1*24*time.Hour - parityHalfDay), notAfter: now.Add(90*24*time.Hour + parityHalfDay),
+		trustStatus: "public",
 	})
 	// Already expired: the day count counts DOWN past zero.
 	f.certificate(t, certRow{
 		label: "expired-leaf", commonName: "parity-expired.example.test",
 		issuer: "CN=Parity Test CA", keyAlg: "RSA", sigAlg: "sha1WithRSAEncryption", keySize: 1024,
 		notBefore: now.Add(-400*24*time.Hour - parityHalfDay), notAfter: now.Add(-10*24*time.Hour - parityHalfDay),
+		trustStatus: "distrusted",
 	})
 	// Nothing is known about this certificate's key. It must still be
 	// classified quantum_vulnerable (absent is not safe) and must be judged by
@@ -267,13 +270,19 @@ type certRow struct {
 	notAfter   time.Time
 	selfSigned bool
 	isCA       bool
+	// trustStatus is certificates.trust_status; "" leaves it NULL (not yet
+	// evaluated), which the trust measurements must not report at all.
+	trustStatus string
 }
 
 func (f *parityFixture) certificate(t *testing.T, r certRow) uuid.UUID {
 	t.Helper()
 	var id uuid.UUID
 	var keyAlg, sigAlg interface{}
-	var keySize interface{}
+	var keySize, trustStatus interface{}
+	if r.trustStatus != "" {
+		trustStatus = r.trustStatus
+	}
 	if r.keyAlg != "" {
 		keyAlg = r.keyAlg
 	}
@@ -286,12 +295,12 @@ func (f *parityFixture) certificate(t *testing.T, r certRow) uuid.UUID {
 	if err := f.db.QueryRow(`
 		INSERT INTO certificates (tenant_id, subject_dn, issuer_dn, common_name, signature_algorithm,
 			public_key_algorithm, public_key_size, not_before, not_after, fingerprint_sha256,
-			is_self_signed, is_ca_certificate)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			is_self_signed, is_ca_certificate, trust_status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id`,
 		f.tenant, "CN="+r.commonName, r.issuer, r.commonName, sigAlg, keyAlg, keySize,
 		r.notBefore, r.notAfter, fingerprintFor(r.label),
-		r.selfSigned, r.isCA).Scan(&id); err != nil {
+		r.selfSigned, r.isCA, trustStatus).Scan(&id); err != nil {
 		t.Fatalf("seed certificate %s: %v", r.label, err)
 	}
 	f.labels[id] = r.label

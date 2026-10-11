@@ -34,7 +34,7 @@ export function releasePageUrl(tag: string | null): string {
 }
 
 /** A published binary: `<name>-<os>-<arch>-<tag>[.exe]`. */
-export function binaryUrl(tag: string, name: 'crypto-sensor' | 'device-agent', os: 'linux' | 'windows', arch = 'amd64'): string {
+export function binaryUrl(tag: string, name: 'crypto-sensor' | 'device-agent', os: 'linux' | 'windows' | 'darwin', arch = 'amd64'): string {
   const ext = os === 'windows' ? '.exe' : '';
   return `${CORE_RELEASES_URL}/download/${tag}/${name}-${os}-${arch}-${tag}${ext}`;
 }

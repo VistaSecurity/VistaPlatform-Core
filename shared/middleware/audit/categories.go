@@ -17,6 +17,7 @@ var validEventCategories = map[string]bool{
 	EventCategoryConfig:      true,
 	EventCategoryJob:         true,
 	EventCategoryAuth:        true,
+	EventCategoryIntegration: true,
 }
 
 // ValidEventCategory reports whether audit.activity_logs will accept category.

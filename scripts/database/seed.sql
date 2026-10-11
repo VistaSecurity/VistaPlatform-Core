@@ -515,7 +515,8 @@ INSERT INTO measurement_types (code, name, description, data_type, units, valid_
 ('cert_pqc_status', 'Certificate PQC Status', 'Post-quantum readiness of a certificate public-key algorithm: quantum_vulnerable (classical RSA/ECDSA/EdDSA/DSA/DH) or quantum_safe (NIST PQC: ML-KEM/ML-DSA/SLH-DSA).', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'certificate'),
 ('cert_sig_pqc_status', 'Certificate Signature PQC Status', 'Post-quantum readiness of the algorithm a certificate was SIGNED with (the CA''s signature): quantum_vulnerable (classical RSA/ECDSA/EdDSA/DSA) or quantum_safe (NIST PQC: ML-DSA/SLH-DSA/FN-DSA).', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["quantum_vulnerable","quantum_safe"]'::jsonb, NULL, 'certificate'),
 ('cert_validity_days', 'Certificate Validity Period (days)', 'Total validity period of a certificate in days (not_after - not_before); distinct from days-until-expiry. Flags over-long certificate lifetimes (CA/Browser Forum max validity is trending toward 47 days).', 'integer', 'days', '{"min":0,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'certificate'),
-('certificate_chain_valid', 'Certificate Chain Valid', 'Whether the certificate chain is valid and trusted', 'boolean', NULL, NULL, '["presence"]'::jsonb, NULL, NULL, 'certificate'),
+('certificate_chain_valid', 'Certificate Chain Valid', 'Whether the certificate chains to a CA the organisation trusts', 'boolean', NULL, NULL, '["presence"]'::jsonb, NULL, NULL, 'certificate'),
+('certificate_trust_status', 'Certificate Trust Status', 'Where the certificate''s chain ends, as the platform evaluated it against the public roots and the organisation''s own trust decisions: public, private_trusted, self_signed, untrusted, distrusted or incomplete.', 'string', NULL, NULL, '["pattern"]'::jsonb, NULL, NULL, 'certificate'),
 ('tls_version', 'TLS Protocol Version', 'TLS protocol version (TLS1.0, TLS1.1, TLS1.2, TLS1.3)', 'enum', 'version', NULL, '["pattern","presence"]'::jsonb, '["TLS1.0","TLS1.1","TLS1.2","TLS1.3"]'::jsonb, NULL, 'tls'),
 ('key_exchange_algorithm', 'Key Exchange Algorithm', 'Key exchange algorithm used in TLS (ECDHE, DHE, RSA, ECDH, DH, NULL)', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["ECDHE","DHE","RSA","ECDH","DH","NULL"]'::jsonb, NULL, 'cipher'),
 ('symmetric_encryption', 'Symmetric Encryption Algorithm', 'Symmetric encryption algorithm (AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, etc.)', 'enum', NULL, NULL, '["pattern","presence"]'::jsonb, '["AES-128-GCM","AES-256-GCM","AES-128-CBC","AES-256-CBC","ChaCha20-Poly1305","3DES","DES","RC4"]'::jsonb, NULL, 'cipher'),
@@ -555,16 +556,17 @@ ON CONFLICT (code) DO UPDATE SET
 -- =================================================================
 -- BEGIN GENERATED: tenant permission catalogue — from standards/permissions.yaml (make generate)
 INSERT INTO tenant_permissions (name, resource, action, scope, description) VALUES
-('assets.create',     'assets',     'create', 'tenant', 'Create network assets'),
-('assets.read',       'assets',     'read',   'tenant', 'View network assets'),
-('assets.update',     'assets',     'update', 'tenant', 'Update network assets'),
-('assets.delete',     'assets',     'delete', 'tenant', 'Delete network assets'),
-('assets.manage',     'assets',     'manage', 'tenant', 'Full asset management'),
-('sensors.create',    'sensors',    'create', 'tenant', 'Create sensors'),
-('sensors.read',      'sensors',    'read',   'tenant', 'View sensors'),
-('sensors.update',    'sensors',    'update', 'tenant', 'Update sensors'),
-('sensors.delete',    'sensors',    'delete', 'tenant', 'Delete sensors'),
-('sensors.manage',    'sensors',    'manage', 'tenant', 'Full sensor management'),
+('assets.create',      'assets',       'create', 'tenant', 'Create network assets'),
+('assets.read',        'assets',       'read',   'tenant', 'View network assets'),
+('assets.update',      'assets',       'update', 'tenant', 'Update network assets'),
+('assets.delete',      'assets',       'delete', 'tenant', 'Delete network assets'),
+('assets.manage',      'assets',       'manage', 'tenant', 'Full asset management'),
+('certificates.trust', 'certificates', 'trust',  'tenant', 'Decide which certificate authorities the organisation trusts or distrusts'),
+('sensors.create',     'sensors',      'create', 'tenant', 'Create sensors'),
+('sensors.read',       'sensors',      'read',   'tenant', 'View sensors'),
+('sensors.update',     'sensors',      'update', 'tenant', 'Update sensors'),
+('sensors.delete',     'sensors',      'delete', 'tenant', 'Delete sensors'),
+('sensors.manage',     'sensors',      'manage', 'tenant', 'Full sensor management'),
 -- reports.read and reports.manage are retained because the web-ui uses
 -- them as frontend-only gates for the CBOM page (reports.read) and the
 -- scheduled-reports view (reports.manage). reports.{create,update,delete}
@@ -572,40 +574,40 @@ INSERT INTO tenant_permissions (name, resource, action, scope, description) VALU
 -- (see CLAUDE.md) — no backend handler exists and no UI references them.
 -- The retired-permission cleanup below removes any rows that may have
 -- been seeded by an older release.
-('reports.read',      'reports',    'read',   'tenant', 'View CBOM artifacts and scheduled report listings (frontend route gate)'),
-('reports.manage',    'reports',    'manage', 'tenant', 'Manage scheduled report configuration (frontend route gate)'),
-('users.create',      'users',      'create', 'tenant', 'Create tenant users'),
-('users.read',        'users',      'read',   'tenant', 'View tenant users'),
-('users.update',      'users',      'update', 'tenant', 'Update tenant users'),
-('users.delete',      'users',      'delete', 'tenant', 'Delete tenant users'),
-('users.manage',      'users',      'manage', 'tenant', 'Full user management'),
-('settings.read',     'settings',   'read',   'tenant', 'View tenant settings'),
-('settings.update',   'settings',   'update', 'tenant', 'Update tenant settings'),
-('settings.manage',   'settings',   'manage', 'tenant', 'Full settings management'),
-('billing.read',      'billing',    'read',   'tenant', 'View billing information'),
-('billing.update',    'billing',    'update', 'tenant', 'Update billing settings'),
-('compliance.read',   'compliance', 'read',   'tenant', 'View compliance data'),
-('compliance.update', 'compliance', 'update', 'tenant', 'Update compliance settings'),
-('compliance.manage', 'compliance', 'manage', 'tenant', 'Full compliance management'),
+('reports.read',       'reports',      'read',   'tenant', 'View CBOM artifacts and scheduled report listings (frontend route gate)'),
+('reports.manage',     'reports',      'manage', 'tenant', 'Manage scheduled report configuration (frontend route gate)'),
+('users.create',       'users',        'create', 'tenant', 'Create tenant users'),
+('users.read',         'users',        'read',   'tenant', 'View tenant users'),
+('users.update',       'users',        'update', 'tenant', 'Update tenant users'),
+('users.delete',       'users',        'delete', 'tenant', 'Delete tenant users'),
+('users.manage',       'users',        'manage', 'tenant', 'Full user management'),
+('settings.read',      'settings',     'read',   'tenant', 'View tenant settings'),
+('settings.update',    'settings',     'update', 'tenant', 'Update tenant settings'),
+('settings.manage',    'settings',     'manage', 'tenant', 'Full settings management'),
+('billing.read',       'billing',      'read',   'tenant', 'View billing information'),
+('billing.update',     'billing',      'update', 'tenant', 'Update billing settings'),
+('compliance.read',    'compliance',   'read',   'tenant', 'View compliance data'),
+('compliance.update',  'compliance',   'update', 'tenant', 'Update compliance settings'),
+('compliance.manage',  'compliance',   'manage', 'tenant', 'Full compliance management'),
 -- Stateful alert lifecycle. Reads are open to members;
 -- acknowledge/snooze/resolve/ticket-create sit behind alerts.manage.
-('alerts.read',       'alerts',     'read',   'tenant', 'View alerts and their evidence timeline'),
-('alerts.manage',     'alerts',     'manage', 'tenant', 'Acknowledge, snooze, resolve alerts and create tickets from them'),
-('discovery.read',    'discovery',  'read',   'tenant', 'View discovery jobs, devices, and interrogation results'),
-('discovery.create',  'discovery',  'create', 'tenant', 'Register devices for interrogation'),
-('discovery.update',  'discovery',  'update', 'tenant', 'Update device configuration and interrogation jobs'),
-('discovery.manage',  'discovery',  'manage', 'tenant', 'Manage devices for interrogation, run discovery and interrogation jobs'),
-('pcap.read',         'pcap',       'read',   'tenant', 'View PCAP upload jobs and processing status'),
-('pcap.upload',       'pcap',       'upload', 'tenant', 'Upload PCAP files for offline processing'),
-('pcap.delete',       'pcap',       'delete', 'tenant', 'Delete PCAP upload jobs'),
+('alerts.read',        'alerts',       'read',   'tenant', 'View alerts and their evidence timeline'),
+('alerts.manage',      'alerts',       'manage', 'tenant', 'Acknowledge, snooze, resolve alerts and create tickets from them'),
+('discovery.read',     'discovery',    'read',   'tenant', 'View discovery jobs, devices, and interrogation results'),
+('discovery.create',   'discovery',    'create', 'tenant', 'Register devices for interrogation'),
+('discovery.update',   'discovery',    'update', 'tenant', 'Update device configuration and interrogation jobs'),
+('discovery.manage',   'discovery',    'manage', 'tenant', 'Manage devices for interrogation, run discovery and interrogation jobs'),
+('pcap.read',          'pcap',         'read',   'tenant', 'View PCAP upload jobs and processing status'),
+('pcap.upload',        'pcap',         'upload', 'tenant', 'Upload PCAP files for offline processing'),
+('pcap.delete',        'pcap',         'delete', 'tenant', 'Delete PCAP upload jobs'),
 -- Audit trail. audit-service previously ran a private permission
 -- system: a hardcoded switch on the role NAME inventing audit.read /
 -- audit.manage / audit.security / audit.export, none of which existed
 -- here, in shared/rbac/permissions.go, or in tenant_role_permissions. No
 -- tenant could grant audit access to anyone. Two permissions replace all
 -- four — audit.security and audit.export were demanded by no route at all.
-('audit.read',        'audit',      'read',   'tenant', 'View the audit trail, retention policies and SIEM integration list'),
-('audit.manage',      'audit',      'manage', 'tenant', 'Manage retention policies, alert rules, scheduled reports and SIEM integrations')
+('audit.read',         'audit',        'read',   'tenant', 'View the audit trail, retention policies and SIEM integration list'),
+('audit.manage',       'audit',        'manage', 'tenant', 'Manage retention policies, alert rules, scheduled reports and SIEM integrations')
 ON CONFLICT (name) DO NOTHING;
 
 -- Both rows were added earlier but have no backend endpoint and no UI
@@ -2045,7 +2047,7 @@ BEGIN
         best_practices_framework_id,
         'BP-007',
         'Certificate Chain Validation',
-        'All certificates must have valid certificate chains. Self-signed certificates or broken chains indicate misconfiguration.',
+        'All certificates must chain to a CA the organisation trusts: a public root, or a CA trusted under Settings → Policies → Trusted CAs. Self-signed certificates, certificates from an untrusted or distrusted CA, and chains whose issuer is missing indicate misconfiguration.',
         'medium',
         true,
         NOW(),
@@ -2417,6 +2419,7 @@ DECLARE
     key_size_mt_id UUID;
     key_size_ec_mt_id UUID;
     cert_validity_mt_id UUID;
+    cert_trust_status_mt_id UUID;
     cert_pqc_mt_id UUID;
     cert_sig_pqc_mt_id UUID;
     config_kex_pqc_mt_id UUID;
@@ -2444,6 +2447,7 @@ BEGIN
     SELECT id INTO key_size_mt_id        FROM measurement_types WHERE code = 'key_size';
     SELECT id INTO key_size_ec_mt_id     FROM measurement_types WHERE code = 'key_size_ec';
     SELECT id INTO cert_validity_mt_id   FROM measurement_types WHERE code = 'cert_validity_days';
+    SELECT id INTO cert_trust_status_mt_id FROM measurement_types WHERE code = 'certificate_trust_status';
     SELECT id INTO cert_pqc_mt_id        FROM measurement_types WHERE code = 'cert_pqc_status';
     SELECT id INTO cert_sig_pqc_mt_id    FROM measurement_types WHERE code = 'cert_sig_pqc_status';
     SELECT id INTO config_kex_pqc_mt_id  FROM measurement_types WHERE code = 'config_kex_pqc_status';
@@ -2539,7 +2543,7 @@ BEGIN
     -- ===================== Certificate Hygiene =====================
     INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
     VALUES (gen_random_uuid(), 'cert-hygiene', 'Certificate Hygiene', '1.0',
-        'Baseline certificate cryptographic hygiene: minimum key size and maximum validity period. Activate to track certificates that fall short of modern issuance standards.',
+        'Baseline certificate hygiene: minimum key size, maximum validity period, issuance by a CA the organisation trusts, and no self-signed certificates. Activate to track certificates that fall short of modern issuance standards.',
         'Vista Platform', 'published', false, NOW(),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid), NOW(), NOW())
@@ -2577,6 +2581,36 @@ BEGIN
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=cert_validity_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
         VALUES (gen_random_uuid(), ctl_id, 'platform', cert_validity_mt_id, 'threshold', '{"operator": "<=", "value": 398}'::jsonb, 'medium', 5, NOW(), NOW());
+    END IF;
+
+    -- CH-003 / CH-004 read the platform's trust verdict (certificates.trust_status,
+    -- feature). A certificate whose trust has not been evaluated yields no
+    -- measurement, so it is not assessed rather than flagged. Self-signed is its
+    -- own control: it is a different finding (no CA at all) with a different fix,
+    -- and `incomplete` (issuer not in inventory) is judged by neither — it is not
+    -- known to be untrusted.
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'CH-003', 'Certificates are issued by a trusted CA',
+        'The certificate chains to a CA that is neither a public root nor a CA the organisation has trusted, or to a CA the organisation has explicitly distrusted. If the CA is your own, trust it under Settings → Policies → Trusted CAs; otherwise re-issue the certificate from a trusted CA.', 'high', true, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF cert_trust_status_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=cert_trust_status_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_trust_status_mt_id, 'pattern', '{"pattern": "^(untrusted|distrusted)$", "flags": "i", "match_means_violation": true}'::jsonb, 'high', 7, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'CH-004', 'Certificates are not self-signed',
+        'The certificate is its own issuer, so no CA vouches for it and clients can only trust it by pinning it individually. Re-issue it from a CA the organisation trusts (Settings → Policies → Trusted CAs lists them).', 'medium', true, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF cert_trust_status_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=cert_trust_status_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', cert_trust_status_mt_id, 'pattern', '{"pattern": "^self_signed$", "flags": "i", "match_means_violation": true}'::jsonb, 'medium', 5, NOW(), NOW());
     END IF;
 
     -- ===================== Certificate Expiry: Not Expired =====================
@@ -3193,12 +3227,12 @@ BEGIN
         USING tenant_roles tr, tenant_permissions tp
         WHERE trp.role_id = tr.id AND trp.permission_id = tp.id
           AND tr.tenant_id = tenant_record.id AND tr.name = 'security_admin' AND tr.is_system_role = true
-          AND NOT (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts')
+          AND NOT (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts', 'certificates')
                    OR tp.name IN ('users.read', 'settings.read', 'audit.read'));
         INSERT INTO tenant_role_permissions (role_id, permission_id)
         SELECT tr.id, tp.id FROM tenant_roles tr CROSS JOIN tenant_permissions tp
         WHERE tr.tenant_id = tenant_record.id AND tr.name = 'security_admin' AND tr.is_system_role = true
-          AND (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts')
+          AND (tp.resource IN ('assets', 'sensors', 'reports', 'compliance', 'pcap', 'discovery', 'alerts', 'certificates')
                OR tp.name IN ('users.read', 'settings.read', 'audit.read'))
         ON CONFLICT (role_id, permission_id) DO NOTHING;
 

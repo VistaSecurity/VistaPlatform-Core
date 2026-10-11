@@ -20,6 +20,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/jobs"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/sensorrouting"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services/certtrust"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/subscribers"
 	aiedition "github.com/vistasecurity/vistaplatform/shared/ai/edition"
 	seams "github.com/vistasecurity/vistaplatform/shared/ai/seams"
@@ -133,11 +134,23 @@ func main() {
 	assetLifecycleHandler := newAssetLifecycleHandler(lifecycleService, revalidationService, assetService, db.DB.DB)
 	assetBulkHandler := handlers.NewAssetBulkHandler(assetService, lifecycleService)
 	certificateHandler := handlers.NewCertificateHandler(certificateService)
+	// Tenant certificate trust: one evaluator shared by the ingest hook
+	// and the decision store, so both decide against the same public roots.
+	trustEvaluator := certtrust.NewEvaluator(db)
+	certificateService.SetTrustEvaluator(trustEvaluator)
+	trustStore := certtrust.NewStore(db, trustEvaluator, certificateService)
+	// A decision change asks compliance-engine for one reconcile of the
+	// tenant (the cert-hygiene control reads trust_status).
+	trustStore.SetReconcilePublisher(eventPublisher)
+	trustAnchorHandler := handlers.NewTrustAnchorHandler(trustStore)
 	algorithmHandler := handlers.NewAlgorithmHandler(algorithmService)
 	unifiedInventoryHandler := handlers.NewUnifiedInventoryHandler(unifiedInventoryService)
 	cryptoImplHandler := handlers.NewCryptoImplementationHandler(cryptoImplService)
 	cryptoRisksHandler := handlers.NewCryptoRisksHandlers(cryptoRisksService)
 	externalConnectionsService := services.NewExternalConnectionsService(db, algorithmService)
+	// 3rd-party connections classify their leaf against the tenant's trust
+	// decisions, through the same evaluator as certificates.
+	externalConnectionsService.SetTrustEvaluator(trustEvaluator)
 	externalConnectionsService.SetServiceIdentificationService(serviceIdentificationService)
 	assetService.SetExternalConnectionsService(externalConnectionsService)
 	externalConnectionsHandler := handlers.NewExternalConnectionsHandler(externalConnectionsService)
@@ -265,6 +278,7 @@ func main() {
 	mountSourceImportRoutes(r,
 		handlers.NewSourceImportHandler(services.NewSourceImportService(db, assetService).WithArchiver(lifecycleService)),
 		handlers.NewCIExportHandler(services.NewCIExportService(db, assetService)),
+		handlers.NewInternalTrustHandler(trustStore),
 		os.Getenv("INTERNAL_AUTH_SECRET"))
 
 	// The internal sightings intake (platform ADR-0003 D3 step 2): what
@@ -408,6 +422,15 @@ func main() {
 		api.GET("/inventory-service/certificates/:id/history", certificateHandler.GetCertificateHistory)
 		api.PUT("/inventory-service/certificates/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), certificateHandler.UpdateCertificate)
 		api.POST("/inventory-service/certificates/:id/rebuild-chain", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), certificateHandler.RebuildCertificateChain)
+
+		// Tenant certificate trust: reads under the tenant auth like the
+		// certificate GETs; decisions need certificates.trust.
+		api.GET("/inventory-service/trust-anchors", trustAnchorHandler.ListTrustAnchors)
+		api.GET("/inventory-service/trust-anchors/public-roots", trustAnchorHandler.GetPublicRoots)
+		api.POST("/inventory-service/trust-anchors", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionCertificatesTrust), trustAnchorHandler.CreateTrustAnchor)
+		api.POST("/inventory-service/trust-anchors/from-chain", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionCertificatesTrust), trustAnchorHandler.CreateTrustAnchorFromChain)
+		api.PUT("/inventory-service/trust-anchors/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionCertificatesTrust), trustAnchorHandler.UpdateTrustAnchor)
+		api.DELETE("/inventory-service/trust-anchors/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionCertificatesTrust), trustAnchorHandler.DeleteTrustAnchor)
 		// Algorithm endpoints
 		api.GET("/inventory-service/algorithms", algorithmHandler.ListAlgorithms)
 		api.GET("/inventory-service/algorithms/pqc", algorithmHandler.GetPQCAlgorithms)
@@ -748,6 +771,14 @@ func main() {
 		apiv2.PUT("/inventory-service/certificates/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), certificateHandler.UpdateCertificate)
 		apiv2.POST("/inventory-service/certificates/:id/rebuild-chain", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), certificateHandler.RebuildCertificateChain)
 
+		// Tenant certificate trust — mirrors the v1 block above.
+		apiv2.GET("/inventory-service/trust-anchors", trustAnchorHandler.ListTrustAnchors)
+		apiv2.GET("/inventory-service/trust-anchors/public-roots", trustAnchorHandler.GetPublicRoots)
+		apiv2.POST("/inventory-service/trust-anchors", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionCertificatesTrust), trustAnchorHandler.CreateTrustAnchor)
+		apiv2.POST("/inventory-service/trust-anchors/from-chain", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionCertificatesTrust), trustAnchorHandler.CreateTrustAnchorFromChain)
+		apiv2.PUT("/inventory-service/trust-anchors/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionCertificatesTrust), trustAnchorHandler.UpdateTrustAnchor)
+		apiv2.DELETE("/inventory-service/trust-anchors/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionCertificatesTrust), trustAnchorHandler.DeleteTrustAnchor)
+
 		// Algorithms
 		apiv2.GET("/inventory-service/algorithms", algorithmHandler.ListAlgorithms)
 		apiv2.GET("/inventory-service/algorithms/pqc", algorithmHandler.GetPQCAlgorithms)
@@ -1027,6 +1058,12 @@ func main() {
 	// place — then every six hours; promotes only, never raises a proposal.
 	// Recorded per tenant in class_floor_sweep_state.
 	go jobs.StartClassFloorSweepWorker(ctx, bypassDB, services.ClassFloorSweepTenants, assetService)
+
+	// Certificate trust backfill: every six hours, evaluate the
+	// certificates no request path reached (stored before trust evaluation
+	// existed) and, once a day per tenant, retry incomplete chains with AIA
+	// chain completion. Kill switch CERT_TRUST_BACKFILL_ENABLED=false.
+	go jobs.StartCertTrustBackfillWorker(ctx, bypassDB, jobs.CertTrustBackfillTenants, trustEvaluator)
 
 	go jobs.StartIdentityEnrichmentWorker(ctx, bypassDB, &identityenrichment.Coordinator{
 		Store: &identityenrichment.Store{DB: db}, Backend: services.NewIdentityEnrichmentBackend(assetService, discoveryService),

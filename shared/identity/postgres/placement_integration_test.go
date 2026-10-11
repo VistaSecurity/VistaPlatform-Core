@@ -129,12 +129,18 @@ func TestIntegration_SegmentPlacement(t *testing.T) {
 // TestIntegration_InheritSegmentLocation: placement from the segment the asset
 // is ALREADY in, never from anywhere else. An asset in a located segment with
 // no placement takes the segment's location and site (with history); one with
-// no segment, or in a segment without a location, gets nothing; a disagreeing
-// site is kept.
+// no segment gets nothing; one in a segment without a location gets no
+// location; a disagreeing site is kept.
+//
+// Environment rides the same path: an asset recording none takes its
+// segment's (located or not, with history), and one that already states an
+// environment keeps it — the segment never overrules a stated value.
 //
 // MUTATION: drop the a.network_segment_id fallback from projectSegmentLocation's
 // segment join and "fill" goes red; drop its disagreeing-site guard and
-// "curated" is overwritten.
+// "curated" is overwritten; drop the `currentEnv == ""` guard and
+// "stated-environment" is overwritten; make the locations join INNER again and
+// "segment-without-location" loses its environment.
 func TestIntegration_InheritSegmentLocation(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
@@ -153,38 +159,55 @@ func TestIntegration_InheritSegmentLocation(t *testing.T) {
 	}
 	source := identity.Source{Kind: identity.SourceMeasured, Ref: "inherit-test"}
 	for _, tc := range []struct {
-		name, segment, site string
-		wantSite, wantLoc   string
+		name, segment, site, env string
+		wantSite, wantLoc        string
+		wantEnv                  string
+		// wantEnvRow: the environment fill is recorded, naming the segment.
+		wantEnvRow bool
 	}{
-		{name: "fill", segment: located, wantSite: "South", wantLoc: location},
+		{name: "fill", segment: located, wantSite: "South", wantLoc: location, wantEnv: "production", wantEnvRow: true},
 		{name: "unsegmented", segment: ""},
-		{name: "segment-without-location", segment: bare},
-		{name: "curated", segment: located, site: "Curated", wantSite: "Curated"},
+		{name: "segment-without-location", segment: bare, wantEnv: "production", wantEnvRow: true},
+		{name: "curated", segment: located, site: "Curated", wantSite: "Curated", wantEnv: "production", wantEnvRow: true},
+		{name: "stated-environment", segment: located, env: "staging", wantSite: "South", wantLoc: location, wantEnv: "staging"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ref, err := repo.CreateAsset(ctx, tenant, identity.NewAsset{ClassKey: "server", Hostname: "inherit-" + tc.name, NetworkSegment: tc.segment, Source: source})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = db.Exec(`UPDATE assets SET site=NULLIF($2,'') WHERE id=$1`, ref.ID, tc.site); err != nil {
+			if _, err = db.Exec(`UPDATE assets SET site=NULLIF($2,''), environment=NULLIF($3,'')::environment_type WHERE id=$1`, ref.ID, tc.site, tc.env); err != nil {
 				t.Fatal(err)
 			}
 			if err := repo.InheritSegmentLocation(ctx, ref, source); err != nil {
 				t.Fatal(err)
 			}
-			var site, loc string
+			var site, loc, env string
 			var n int
-			if err = db.QueryRow(`SELECT coalesce(site,''),coalesce(location_id::text,'') FROM assets WHERE id=$1`, ref.ID).Scan(&site, &loc); err != nil {
+			if err = db.QueryRow(`SELECT coalesce(site,''),coalesce(location_id::text,''),coalesce(environment::text,'') FROM assets WHERE id=$1`, ref.ID).Scan(&site, &loc, &env); err != nil {
 				t.Fatal(err)
 			}
 			if site != tc.wantSite || loc != tc.wantLoc {
 				t.Fatalf("placement (%q, %s), want (%q, %s)", site, loc, tc.wantSite, tc.wantLoc)
+			}
+			if env != tc.wantEnv {
+				t.Fatalf("environment %q, want %q", env, tc.wantEnv)
 			}
 			if err = db.QueryRow(`SELECT count(*) FROM asset_history WHERE asset_id=$1 AND changes_json ? 'location_id' AND changes_json->>'network_segment_id'=$2`, ref.ID, located).Scan(&n); err != nil {
 				t.Fatal(err)
 			}
 			if want := map[bool]int{true: 1, false: 0}[tc.wantLoc != ""]; n != want {
 				t.Fatalf("history %d want %d", n, want)
+			}
+			segmentForRow := tc.segment
+			if segmentForRow == "" {
+				segmentForRow = located
+			}
+			if err = db.QueryRow(`SELECT count(*) FROM asset_history WHERE asset_id=$1 AND changes_json->'environment'->>'to'=$2 AND changes_json->>'network_segment_id'=$3`, ref.ID, tc.wantEnv, segmentForRow).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			if want := map[bool]int{true: 1, false: 0}[tc.wantEnvRow]; n != want {
+				t.Fatalf("environment history rows %d want %d", n, want)
 			}
 		})
 	}

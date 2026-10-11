@@ -157,14 +157,35 @@ SELECT
 			c.id AS subject_id,
 			c.tenant_id AS tenant_id,
 			c.updated_at AS measured_at,
-			c.is_self_signed AS col_0,
+			c.trust_status AS col_0,
 			c.common_name AS col_1,
-			c.issuer_dn AS col_2
+			c.issuer_dn AS col_2,
+			c.trust_anchor_certificate_id::text AS col_3,
+			(SELECT ta.subject_dn FROM certificates ta WHERE ta.tenant_id = c.tenant_id AND ta.id = c.trust_anchor_certificate_id) AS col_4
 		FROM certificates c
 		WHERE c.tenant_id = $1
 			AND ($2::uuid IS NULL OR c.id = $2)
 			AND c.is_ca_certificate = false
+			AND (((c.trust_status)::text IS NOT NULL))
 			AND (TRUE)
+		ORDER BY c.updated_at DESC
+
+-- ============================================================
+-- certificate_trust_status  [shape: certificate, subject: certificate]
+SELECT
+			c.id AS subject_id,
+			c.tenant_id AS tenant_id,
+			c.updated_at AS measured_at,
+			c.trust_status AS col_0,
+			c.common_name AS col_1,
+			c.issuer_dn AS col_2,
+			c.trust_anchor_certificate_id::text AS col_3,
+			(SELECT ta.subject_dn FROM certificates ta WHERE ta.tenant_id = c.tenant_id AND ta.id = c.trust_anchor_certificate_id) AS col_4
+		FROM certificates c
+		WHERE c.tenant_id = $1
+			AND ($2::uuid IS NULL OR c.id = $2)
+			AND c.is_ca_certificate = false
+			AND (((c.trust_status)::text IS NOT NULL))
 			AND (TRUE)
 		ORDER BY c.updated_at DESC
 
