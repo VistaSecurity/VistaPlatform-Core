@@ -91,6 +91,35 @@ func (s *SensorService) resolveSensorTenant(ctx context.Context, sensorID string
 	return tenantID, nil
 }
 
+// storedStatusFromReported maps the status a sensor reports on its heartbeat
+// onto the liveness vocabulary stored in sensors.status (pending, active,
+// inactive, error, offline; see sensors_status_check). Two vocabularies are in
+// play: models.SensorHealth documents "healthy"/"degraded"/"unhealthy", but the
+// column records whether the platform can reach the sensor. Writing the
+// reported value straight through violated the CHECK and 500'd the heartbeat
+//
+//
+//   - healthy   -> active: the sensor is reachable and well.
+//   - degraded  -> active: the sensor is reachable and heartbeating; how well it
+//     is running is health detail (metrics), not liveness.
+//   - unhealthy -> error: the sensor itself reports it is failing, which is the
+//     stored set's only "reachable but broken" value.
+//   - a value already in the stored set passes through unchanged.
+//   - empty or unrecognised -> nil, so the SQL keeps the current status rather
+//     than failing the heartbeat on a vocabulary this build does not know.
+func storedStatusFromReported(reported string) interface{} {
+	switch reported {
+	case "healthy", "degraded":
+		return "active"
+	case "unhealthy":
+		return "error"
+	case "pending", "active", "inactive", "error", "offline":
+		return reported
+	default:
+		return nil
+	}
+}
+
 // UpdateSensorHealth updates sensor health status and last heartbeat timestamp
 func (s *SensorService) UpdateSensorHealth(sensorID string, health *models.SensorHealth) error {
 	return s.UpdateSensorHealthWithIP(sensorID, health, nil)
@@ -121,7 +150,7 @@ func (s *SensorService) UpdateSensorHealthWithIP(sensorID string, health *models
 		SET last_heartbeat = $2,
 		    status = CASE
 		        WHEN $3 = 'offline' THEN status
-		        WHEN status = 'offline' AND $3 IN ('active', 'healthy') THEN 'active'
+		        WHEN status = 'offline' AND $3 = 'active' THEN 'active'
 		        ELSE COALESCE($3, status)
 		    END,
 		    ip_address = COALESCE($4, ip_address),
@@ -145,7 +174,7 @@ func (s *SensorService) UpdateSensorHealthWithIP(sensorID string, health *models
 		return err
 	}
 	err = shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		_, e := tx.ExecContext(ctx, query, sensorID, now, health.Status, ipAddress, availableIfaces, reportingIntervalArg, health.Version, pq.Array(normalizeSensorCapabilities(health.Capabilities)), pq.Array(normalizeDNSInterfaces(health.DNSInterfaces)))
+		_, e := tx.ExecContext(ctx, query, sensorID, now, storedStatusFromReported(health.Status), ipAddress, availableIfaces, reportingIntervalArg, health.Version, pq.Array(normalizeSensorCapabilities(health.Capabilities)), pq.Array(normalizeDNSInterfaces(health.DNSInterfaces)))
 		return e
 	})
 	if err != nil {
@@ -757,19 +786,6 @@ func sniHostnameFromRawMetadata(raw map[string]interface{}) string {
 		return s
 	}
 	return ""
-}
-
-// StoreAirGappedExport stores air-gapped export data
-func (s *SensorService) StoreAirGappedExport(export *models.AirGappedExport) error {
-	query := `
-		INSERT INTO air_gapped_exports (id, sensor_id, export_id, data, signature, checksum, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`
-
-	_, err := s.db.Exec(query,
-		uuid.New(), export.SensorID, export.ExportID,
-		export.Data, export.Signature, export.Checksum, time.Now())
-
-	return err
 }
 
 // GetSensorConfig retrieves sensor configuration
@@ -1394,14 +1410,18 @@ func (s *SensorService) GetSensor(sensorID uuid.UUID) (*models.Sensor, error) {
 	return &sensor, nil
 }
 
-// UpdateSensor updates a sensor
+// UpdateSensor writes the WHOLE sensor row, including status and
+// last_heartbeat. It exists for the registration flow, which legitimately
+// resets both. Edit paths (config, interfaces, certificate regeneration) must
+// use UpdateSensorFields / ApplySensorInterfaceChange instead: a full-row write
+// from a stale read overwrites a heartbeat that landed in between.
 func (s *SensorService) UpdateSensor(sensor *models.Sensor) error {
 	query := `
 		UPDATE sensors
 		SET name = $2, description = $3, platform = $4, version = $5, profile = $6,
 		    status = $7, network_interfaces = $8, tags = $9, last_heartbeat = $10,
 		    air_gapped = $11, updated_at = $12
-		WHERE id = $1`
+		WHERE id = $1 AND deleted_at IS NULL`
 
 	// RLS-scoped write on `sensors`: WithTenantTx sets app.tenant_id from the
 	// sensor's own tenant so the policy USING clause confines the UPDATE. Callers
@@ -1481,7 +1501,7 @@ func (s *SensorService) authorizeCommandPickup(tx *sql.Tx, tenant uuid.UUID, cmd
 		options, _ := cmd.Payload["options"].(map[string]interface{})
 		_, enrichment := options["identity_enrichment_request_id"]
 		if !enrichment && !dispatchguard.IsAutomaticScan(options) {
-			return true, nil
+			return s.authorizeLegacyManualPickup(tx, tenant, cmd)
 		}
 		if (enrichment && !s.enrichmentAvailable) || cmd.ExpiresAt == nil {
 			return false, nil
@@ -1498,4 +1518,50 @@ func (s *SensorService) authorizeCommandPickup(tx *sql.Tx, tenant uuid.UUID, cmd
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// authorizeLegacyManualPickup re-judges a person's protocols x ports scan when
+// its sensor collects it (a scan-plan payload carries no top-level targets and
+// is judged at dispatch). The command may have waited, or be a retry; a segment
+// withdrawn or an exclusion added since is honoured here. Targets no longer
+// authorized are removed from the command and named on the job; with none left
+// the command is failed, so the job ends with a reason instead of a sensor
+// scanning what the tenant no longer allows.
+func (s *SensorService) authorizeLegacyManualPickup(tx *sql.Tx, tenant uuid.UUID, cmd models.Command) (bool, error) {
+	if _, planned := cmd.Payload["plan"]; planned {
+		return true, nil
+	}
+	payload, parseErr := sensordispatch.ParsePayload(cmd.Payload)
+	if parseErr != nil {
+		return true, nil // the sensor's parser refuses it too
+	}
+	fail := func(reason string) (bool, error) {
+		_, err := tx.Exec(`UPDATE sensor_commands SET status='failed', error_message=$2, updated_at=NOW() WHERE id=$1 AND status='pending'`, cmd.ID, reason)
+		return false, err
+	}
+	if payload.TenantID != tenant.String() {
+		return fail("the command names another tenant")
+	}
+	kept, refused, err := dispatchguard.AuthorizeLegacyManualTargets(tx, payload, cmd.SensorID)
+	if err != nil {
+		return false, err
+	}
+	if len(kept) == 0 {
+		return fail("no target is still authorized: " + (&dispatchguard.RefusedTargetsError{Targets: refused}).Error())
+	}
+	if len(refused) == 0 {
+		return true, nil
+	}
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`UPDATE sensor_commands SET payload=jsonb_set(payload,'{targets}',$2::jsonb), updated_at=NOW() WHERE id=$1`, cmd.ID, string(encoded)); err != nil {
+		return false, err
+	}
+	if err := dispatchguard.RecordDroppedTargets(tx, payload.JobID, refused); err != nil {
+		return false, err
+	}
+	cmd.Payload["targets"] = kept
+	return true, nil
 }

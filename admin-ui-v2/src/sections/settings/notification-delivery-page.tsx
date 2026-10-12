@@ -154,8 +154,8 @@ function ChannelsPanel() {
               <td><StatusTag status={c.enabled ? 'active' : 'canceled'} /></td>
               <td><div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                 <button className="op-btn sm" disabled={mut.test.isPending} onClick={() => test(c)}><FlaskConical size={13} />Test</button>
-                <button className="op-btn icon sm" title="Edit" onClick={() => setModal({ kind: 'edit', channel: c })}><Pencil size={13} /></button>
-                <button className="op-btn icon sm" title="Delete" disabled={mut.remove.isPending} onClick={() => remove(c)}><Trash2 size={13} /></button>
+                <button className="op-btn icon sm" title="Edit" aria-label="Edit" onClick={() => setModal({ kind: 'edit', channel: c })}><Pencil size={13} /></button>
+                <button className="op-btn icon sm" title="Delete" aria-label="Delete" disabled={mut.remove.isPending} onClick={() => remove(c)}><Trash2 size={13} /></button>
               </div></td>
             </tr>
           ))}
@@ -318,8 +318,8 @@ function RulesPanel({ channels }: { channels: PlatformChannel[] }) {
               <td className="num t-muted">{r.priority}</td>
               <td><StatusTag status={r.enabled ? 'active' : 'canceled'} /></td>
               <td><div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                <button className="op-btn icon sm" title="Edit" onClick={() => setModal({ kind: 'edit', rule: r })}><Pencil size={13} /></button>
-                <button className="op-btn icon sm" title="Delete" disabled={mut.remove.isPending} onClick={() => remove(r)}><Trash2 size={13} /></button>
+                <button className="op-btn icon sm" title="Edit" aria-label="Edit" onClick={() => setModal({ kind: 'edit', rule: r })}><Pencil size={13} /></button>
+                <button className="op-btn icon sm" title="Delete" aria-label="Delete" disabled={mut.remove.isPending} onClick={() => remove(r)}><Trash2 size={13} /></button>
               </div></td>
             </tr>
           ))}

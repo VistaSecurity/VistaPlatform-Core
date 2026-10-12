@@ -16,7 +16,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 import type { Neighbourhood } from './relationships';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -67,6 +67,14 @@ vi.mock('./asset-queries', async (importOriginal) => ({
 
 let host: HTMLDivElement;
 let root: Root;
+
+// `map-lens` pulls in React Flow, the heaviest module graph this suite loads.
+// Import it once up front, under a generous hook timeout, so the first test is
+// not billed for the module load: on a loaded CI runner that load alone ran
+// past the 5s per-test default while the assertions themselves take milliseconds.
+beforeAll(async () => {
+  await import('./map-lens');
+}, 60_000);
 
 beforeEach(() => {
   host = document.createElement('div');

@@ -3,48 +3,24 @@
 // JetStream stream/consumer stats). Observe-only (no retry/cancel here — stuck
 // jobs are repaired from Support → Job Repair). Honest: JetStream gives depth /
 // in-flight / message counts but NOT throughput rate or p95 (no fabrication).
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Workflow, Layers } from 'lucide-react';
 import { clients } from '../../lib/clients';
+import { useAdminJobs, isForbidden, JobsReadError, JOB_STATUSES, JOBS_PAGE_SIZE } from './queries';
+import { JobsPager } from './jobs-pager';
 import { StatusTag, statusOf, num, relTime } from '../../components/ui/primitives';
 import { useScope } from '../../app/scope';
 
-/**
- * A failed read that remembers its HTTP status, so the page can tell "you may
- * not see this" (403) from "the backend could not answer". The queue panel used
- * to render every failure as "NATS/JetStream not reachable" — including the
- * 403 an operator without platform.health gets — which sent people debugging a
- * healthy message bus.
- */
-export class JobsReadError extends Error {
-  constructor(readonly status: number | undefined, message: string) {
-    super(message);
-    this.name = 'JobsReadError';
-  }
-}
+// Re-exported for callers/tests that import them from the page module.
+export { JobsReadError, isForbidden };
 
-/** True when a query failed because the operator lacks the permission. */
-export const isForbidden = (e: unknown): boolean => e instanceof JobsReadError && e.status === 403;
+// Static: chips used to be derived from the fetched page, so a status absent from
+// the newest rows had no chip at all.
+const STATUS_CHIPS = ['all', ...JOB_STATUSES];
 
 const NO_ACCESS = "You don't have access to this — it needs the platform.health permission.";
 
-function useAdminJobs(scopeId: string | null) {
-  return useQuery({
-    // scopeId is part of the key so switching the operator scope refetches the
-    // narrowed page instead of reusing the full cross-tenant cache.
-    queryKey: ['platform', 'jobs', scopeId],
-    queryFn: async () => {
-      const { data, error, response } = await clients.devices.GET('/admin/jobs', {
-        // Narrow server-side so other tenants' rows are never shipped to the client.
-        params: { query: { page_size: 100, ...(scopeId ? { tenant_id: scopeId } : {}) } },
-      });
-      if (error || !data) throw new JobsReadError(response?.status, 'Failed to load jobs');
-      return data.jobs ?? [];
-    },
-    staleTime: 20 * 1000, refetchInterval: 30 * 1000,
-  });
-}
 function useAdminQueues() {
   return useQuery({
     queryKey: ['platform', 'queues'],
@@ -59,20 +35,17 @@ function useAdminQueues() {
 
 export function JobsPage() {
   const { scopeId } = useScope();
-  const jobsQ = useAdminJobs(scopeId);
-  const queuesQ = useAdminQueues();
   const [status, setStatus] = useState('all');
-
-  // Memoised so the fallback `[]` keeps a stable identity — otherwise every
-  // render produces a fresh array and the useMemo blocks below never hit.
-  const all = useMemo(() => jobsQ.data ?? [], [jobsQ.data]);
-  const statuses = useMemo(() => ['all', ...Array.from(new Set(all.map((j) => j.status).filter(Boolean)))], [all]);
-  // Tenant scope is now applied server-side (tenant_id query param); only the
-  // status facet is filtered client-side here.
-  const rows = useMemo(
-    () => all.filter((j) => status === 'all' || j.status === status),
-    [all, status],
+  const [page, setPage] = useState(1);
+  const jobsQ = useAdminJobs(
+    { scopeId, statuses: status === 'all' ? [] : [status], page, pageSize: JOBS_PAGE_SIZE },
+    { refetchInterval: 30 * 1000 },
   );
+  const queuesQ = useAdminQueues();
+  // A changed filter or scope must not leave us on an out-of-range page.
+  useEffect(() => { setPage(1); }, [status, scopeId]);
+
+  const rows = jobsQ.data?.jobs ?? [];
 
   return (
     <div className="op-fade" style={{ padding: '20px 24px 40px', display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -109,7 +82,7 @@ export function JobsPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', borderBottom: '1px solid var(--op-border)', flexWrap: 'wrap' }}>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14, color: 'var(--op-t1)' }}><Workflow size={16} style={{ color: 'var(--op-t3)' }} />Discovery jobs</span>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-            {statuses.map((s) => <button key={s} onClick={() => setStatus(s)} className={'op-chip' + (status === s ? ' active' : '')} style={{ textTransform: s === 'all' ? 'none' : 'capitalize' }}>{s === 'all' ? 'All' : statusOf(s).label}</button>)}
+            {STATUS_CHIPS.map((s) => <button key={s} onClick={() => setStatus(s)} className={'op-chip' + (status === s ? ' active' : '')} style={{ textTransform: s === 'all' ? 'none' : 'capitalize' }}>{s === 'all' ? 'All' : statusOf(s).label}</button>)}
           </div>
         </div>
         <table className="op-table">
@@ -139,7 +112,10 @@ export function JobsPage() {
           </tbody>
         </table>
         <div style={{ padding: '9px 16px', borderTop: '1px solid var(--op-border)', fontSize: 11.5, color: 'var(--op-t3)' }}>
-          {rows.length} of {all.length} jobs · observe-only (retry a stuck job from Support → Job Repair) · queue rate/p95 need a metrics time-series (JetStream gives depth only).
+          {jobsQ.data && (
+            <JobsPager page={jobsQ.data.page} pageSize={jobsQ.data.pageSize} total={jobsQ.data.total} shown={rows.length} onPage={setPage} />
+          )}
+          {' '}· observe-only (retry a stuck job from Support → Job Repair) · queue rate/p95 need a metrics time-series (JetStream gives depth only).
         </div>
       </div>
     </div>

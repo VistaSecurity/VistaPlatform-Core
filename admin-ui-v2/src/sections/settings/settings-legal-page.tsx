@@ -9,6 +9,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { FileText, CheckCircle, XCircle, History, ClipboardCheck, AlertTriangle } from 'lucide-react';
 import { clients } from '../../lib/clients';
 import { usePlatformEdition } from '../../lib/edition';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type DocType = 'terms_of_service' | 'privacy_policy';
 
@@ -141,15 +142,14 @@ export function SettingsLegalPage() {
 
   const publish = useMutation({
     mutationFn: async (acknowledgePlaceholders: boolean) => {
-      const { error } = await clients.admin.POST('/admin/legal/documents', {
+      unwrap(await clients.admin.POST('/admin/legal/documents', {
         body: {
           doc_type: tab,
           title: title.trim(),
           body,
           acknowledge_placeholders: acknowledgePlaceholders,
         },
-      });
-      if (error) throw new Error((error as { error?: string })?.error ?? 'Publish failed');
+      }), 'Publish failed');
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: DOCS_KEY });

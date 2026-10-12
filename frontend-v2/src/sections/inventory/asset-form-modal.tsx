@@ -9,6 +9,7 @@
 // neither list is written down in this file.
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { invalidateAssetDetail } from './asset-queries';
 import toast from 'react-hot-toast';
 import type { Asset, AssetInput } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
@@ -17,6 +18,7 @@ import {
   ClassAttributeFields, ClassPicker, IdentifierEditor, attributesToValues,
   buildAttributes, isServiceBranch, type IdentifierDraft,
 } from './class-picker';
+import { unwrap } from '../../lib/api-result';
 
 const ENVIRONMENTS = ['production', 'staging', 'development', 'test'];
 
@@ -212,17 +214,16 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
         metadata: meta.value ?? {},
       };
       if (isEdit) {
-        const { data, error } = await clients.inventory.PUT('/infrastructure-assets/{id}', {
+        const { data, error, response } = await clients.inventory.PUT('/infrastructure-assets/{id}', {
           params: { path: { id: asset!.id } }, body,
         });
-        if (error || !data) throw new Error(identifierUpdateError(error));
+        if (!response.ok || error || !data) throw new Error(identifierUpdateError(error));
         // What the server DID to the identifiers, which is not always what was
         // asked. A kept identifier reported as removed would be a lie the next
         // read exposes.
         return { asset: data.asset, kept: data.identifiers?.kept ?? [] };
       }
-      const { data, error } = await clients.inventory.POST('/infrastructure-assets', { body });
-      if (error || !data) throw new Error('Failed to create asset');
+      const data = unwrap(await clients.inventory.POST('/infrastructure-assets', { body }), 'Failed to create asset', { requireData: true });
       if (!('asset' in data)) {
         if (!data.observation_id) throw new Error('The server did not return an asset or retained observation');
         return { observationID: data.observation_id, kept: [] };
@@ -239,7 +240,7 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
         return;
       }
       if (!a) return;
-      void qc.invalidateQueries({ queryKey: ['asset-detail', a.id] });
+      invalidateAssetDetail(qc, a.id);
       void qc.invalidateQueries({ queryKey: ['asset-configs', a.id] });
       if (kept.length > 0) toast(keptIdentifiersMessage(kept), { icon: 'ℹ️', duration: 7000 });
       onSaved?.(a);

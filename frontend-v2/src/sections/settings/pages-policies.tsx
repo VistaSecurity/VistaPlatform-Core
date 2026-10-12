@@ -12,6 +12,8 @@ import { Link } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { QueryChip } from '../inventory/query-editor';
 import { clients } from '../../lib/clients';
+import { unwrap } from '../../lib/api-result';
+import { SHARED_QUERY_KEYS, scopesQuery, useFrameworksAvailable } from '../../lib/shared-queries';
 import { frameworkPercentageColor, Icon } from '../../components/ui';
 import { SPage, SSection, SCard, STag, StateNote } from './kit';
 import { coverageLine, formatScore, isUnscored } from '../findings/control-status';
@@ -43,14 +45,7 @@ type ScopeModalState =
 // ungated, so the list still renders for anyone who can reach the page.
 export function ScopesPage({ meta }: { meta: SettingsNavItem }) {
   const [modal, setModal] = useState<ScopeModalState>({ kind: 'closed' });
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ['settings', 'scopes'],
-    queryFn: async () => {
-      const { data, error } = await clients.cbom.GET('/scopes', {});
-      if (error || !data) throw new Error('Failed to load scopes');
-      return data.scopes;
-    },
-  });
+  const { data, isLoading, isError } = useQuery(scopesQuery());
   const scopes = data ?? [];
   const close = () => setModal({ kind: 'closed' });
 
@@ -127,24 +122,17 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
   const queryClient = useQueryClient();
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionNote, setActionNote] = useState<string | null>(null);
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ['settings', 'frameworks-available'],
-    queryFn: async () => {
-      const { data, error } = await clients.compliance.GET('/frameworks/available', {});
-      if (error || !data) throw new Error('Failed to load frameworks');
-      return data.frameworks;
-    },
-  });
+  const { data, isLoading, isError } = useFrameworksAvailable();
   const frameworks = data ?? [];
   const licensed = frameworks.filter((f) => f.is_licensed);
   const available = frameworks.filter((f) => !f.is_licensed);
 
   const refresh = () => {
-    void queryClient.invalidateQueries({ queryKey: ['settings', 'frameworks-available'] });
+    void queryClient.invalidateQueries({ queryKey: SHARED_QUERY_KEYS.frameworksAvailable });
     void queryClient.invalidateQueries({ queryKey: ['settings', 'framework-licenses'] });
   };
-  const fail = (error: unknown, fallback: string) => {
-    setActionError(error && typeof error === 'object' && 'error' in error ? String(error.error) : fallback);
+  const fail = (e: unknown, fallback: string) => {
+    setActionError(e instanceof Error && e.message ? e.message : fallback);
   };
 
   const clear = () => { setActionError(null); setActionNote(null); };
@@ -153,32 +141,29 @@ export function FrameworksPage({ meta }: { meta: SettingsNavItem }) {
   const subscribe = useMutation({
     mutationFn: async (frameworkId: string) => {
       clear();
-      const { error, response } = await clients.compliance.POST('/frameworks/subscribe', { body: { framework_id: frameworkId } });
-      if (error || !response.ok) throw { error, fallback: 'Failed to activate' };
+      unwrap(await clients.compliance.POST('/frameworks/subscribe', { body: { framework_id: frameworkId } }), 'Failed to activate');
     },
     onSuccess: () => {
       refresh();
       setActionNote('Activated — evaluating it against your current inventory. Posture appears in Risk & Compliance shortly.');
     },
-    onError: (e: { error?: unknown; fallback?: string }) => fail(e.error, e.fallback ?? 'Failed to activate'),
+    onError: (e) => fail(e, 'Failed to activate'),
   });
   const unsubscribe = useMutation({
     mutationFn: async (frameworkId: string) => {
       clear();
-      const { error, response } = await clients.compliance.DELETE('/frameworks/subscribe/{frameworkId}', { params: { path: { frameworkId } } });
-      if (error || !response.ok) throw { error, fallback: 'Failed to deactivate' };
+      unwrap(await clients.compliance.DELETE('/frameworks/subscribe/{frameworkId}', { params: { path: { frameworkId } } }), 'Failed to deactivate');
     },
     onSuccess: refresh,
-    onError: (e: { error?: unknown; fallback?: string }) => fail(e.error, e.fallback ?? 'Failed to deactivate'),
+    onError: (e) => fail(e, 'Failed to deactivate'),
   });
   const setDefault = useMutation({
     mutationFn: async (frameworkId: string) => {
       clear();
-      const { error, response } = await clients.compliance.PUT('/frameworks/default', { body: { framework_id: frameworkId } });
-      if (error || !response.ok) throw { error, fallback: 'Failed to set the default framework' };
+      unwrap(await clients.compliance.PUT('/frameworks/default', { body: { framework_id: frameworkId } }), 'Failed to set the default framework');
     },
     onSuccess: refresh,
-    onError: (e: { error?: unknown; fallback?: string }) => fail(e.error, e.fallback ?? 'Failed to set the default framework'),
+    onError: (e) => fail(e, 'Failed to set the default framework'),
   });
   const busy = subscribe.isPending || unsubscribe.isPending || setDefault.isPending;
 

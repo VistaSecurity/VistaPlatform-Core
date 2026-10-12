@@ -48,7 +48,9 @@ func TestOpenSQL_IsOpenQueryInSQL(t *testing.T) {
 		sqlOp = "IN"
 	}
 	want := "(f.detection_state = '" + state + "'" +
-		" AND f.workflow_status " + sqlOp + " (" + strings.Join(quoted, ", ") + "))"
+		" AND (f.workflow_status " + sqlOp + " (" + strings.Join(quoted, ", ") + ")" +
+		" OR (f.workflow_status = 'SUPPRESSED' AND f.suppressed_until IS NOT NULL" +
+		" AND f.suppressed_until <= NOW())))"
 
 	if got := OpenSQL("f"); got != want {
 		t.Errorf("OpenSQL(%q) and OpenQuery are not the same predicate.\n got: %s\nwant: %s\n"+
@@ -62,6 +64,11 @@ func TestOpenSQL_IsOpenQueryInSQL(t *testing.T) {
 	sql := OpenSQL("f")
 	if !strings.Contains(sql, "f.detection_state") || !strings.Contains(sql, "f.workflow_status") {
 		t.Errorf("OpenSQL(%q) = %s; both columns must carry the alias", "f", sql)
+	}
+
+	// An expired time-boxed suppression is open again before the sweep runs.
+	if !strings.Contains(sql, "f.suppressed_until <= NOW()") {
+		t.Errorf("OpenSQL(%q) = %s; must honour suppression expiry", "f", sql)
 	}
 
 	// And it is parenthesised, because it is AND-ed into larger predicates. An
@@ -182,5 +189,21 @@ func TestAssetSubjects_ResolveTheAssetThroughConfigurationAssetSQL(t *testing.T)
 			t.Errorf("%s does not hang off a crypto configuration, so it must not COALESCE an asset id: %s",
 				s.Type, s.IDs)
 		}
+	}
+}
+
+// WorkflowOpenSQL is the half findingListWhere splices; it must count a lapsed
+// suppression as open exactly as OpenSQL does, or the findings list total
+// disagrees with the control counts until the expiry sweep runs.
+func TestWorkflowOpenSQL_HonoursSuppressionExpiry(t *testing.T) {
+	sql := WorkflowOpenSQL("cf")
+	if !strings.Contains(sql, ExpiredSuppressionSQL("cf")) {
+		t.Errorf("WorkflowOpenSQL = %s; must OR in ExpiredSuppressionSQL", sql)
+	}
+	if !strings.HasPrefix(sql, "(") || !strings.HasSuffix(sql, ")") {
+		t.Errorf("WorkflowOpenSQL = %s; contains an OR so must be parenthesised", sql)
+	}
+	if !strings.Contains(OpenSQL("cf"), sql) {
+		t.Errorf("OpenSQL must be composed from WorkflowOpenSQL")
 	}
 }

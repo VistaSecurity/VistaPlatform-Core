@@ -30,7 +30,10 @@ type Config struct {
 	// RetryAttempts for failed requests
 	RetryAttempts int
 
-	// SkipPaths are paths that should not be audited (e.g., health checks)
+	// SkipPaths are paths that should not be audited (e.g., health checks).
+	// It is a PREFIX match on the literal request path, so it cannot express
+	// a parameterised route such as /sensors/:id/heartbeat. For those, put
+	// audit.Skip() in the route's handler chain instead (see skip.go).
 	SkipPaths []string
 
 	// EventTypeMap maps HTTP method + path to event type

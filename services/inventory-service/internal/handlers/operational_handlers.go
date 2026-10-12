@@ -3,12 +3,12 @@ package handlers
 import (
 	"log"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 )
 
 // operationalStore is the slice of *services.OperationalService the operational
@@ -84,8 +84,12 @@ func (h *OperationalHandler) GetEnvironmentAssets(c *gin.Context) {
 	if env == "" {
 		env = "production"
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	pg, perr := sharedapi.ParsePaginationStrict(c)
+	if perr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+		return
+	}
+	page, pageSize := pg.Page, pg.PageSize
 	assets, total, err := h.operational.GetEnvironmentAssets(tenantID, locationID, env, page, pageSize)
 	if err != nil {
 		log.Printf("[operational] GetEnvironmentAssets: %v", err)

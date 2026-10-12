@@ -130,11 +130,8 @@ spec:
               topologyKey: kubernetes.io/hostname
         {{- end }}
       {{- end }}
-      {{- with $ctx.Values.image.pullSecrets }}
-      imagePullSecrets:
-        {{- range . }}
-        - name: {{ . }}
-        {{- end }}
+      {{- with include "vistaplatform.pullSecrets" $ctx }}
+      {{- . | nindent 6 }}
       {{- end }}
       {{- if $needs.postgres }}
       initContainers:
@@ -173,6 +170,15 @@ spec:
         old pods keep serving meanwhile, so a failed migration stalls the rollout
         instead of starting new code against a half-applied schema.
 
+        serviceRls.enabled: after the schema gate the script also waits until it
+        can log in as the app role (serviceRls.roleApp) — the role the backend
+        connects as. On a fresh install schema-migration creates that role
+        NOLOGIN and the rls-roles Job grants LOGIN + password later; without this
+        probe the backend started in that window and crash-looped with
+        "password authentication failed" until the Job finished (#1413). The
+        probe has the same timeout and fails visibly (Init:Error), not as a
+        main-container crash loop.
+
         The pod template embeds the schema hash, so a schema change rolls every
         backend (it would anyway: releases change the image tag too).
         scripts/test-chart-wait-for-schema.mjs pins all of this and executes the
@@ -198,6 +204,19 @@ spec:
                 secretKeyRef:
                   name: {{ include "vistaplatform.generatedSecretName" $ctx }}
                   key: postgres-password
+            {{- if $ctx.Values.serviceRls.enabled }}
+            # Same URL the main container gets as DATABASE_URL (app role, same
+            # host/db/sslmode), so the login probe below exercises exactly the
+            # credentials the backend will use. $(POSTGRES_PASSWORD) is expanded
+            # by kubelet from the env var declared first.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vistaplatform.generatedSecretName" $ctx }}
+                  key: postgres-password
+            - name: APP_DATABASE_URL
+              value: {{ include "vistaplatform.databaseURLForUser" (dict "ctx" $ctx "user" $ctx.Values.serviceRls.roleApp) | quote }}
+            {{- end }}
             {{- if $ctx.Values.datastores.postgres.tls.enabled }}
             # Postgres requires TLS (#87 Phase 3); the wait-for-schema psql/pg_isready
             # (libpq) verify the server using the CA from the pod's mTLS cert mount.
@@ -265,16 +284,28 @@ spec:
                 [ $((n % 10)) -eq 0 ] && echo "  still waiting for schema-migration ($(elapsed)s)..."
                 sleep 3
               done
-              echo "Schema {{ $schemaHash }} applied. Starting {{ $name }}."
+              echo "Schema {{ $schemaHash }} applied."
               {{- else }}
               echo "Postgres up. schemaMigration.enabled=false: this chart does not migrate the database, so there is no completion marker to wait for."
               echo "Waiting only for a schema to exist (sentinel: public.tenants)..."
-              until [ "$(db_query "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tenants'")" = "1" ]; do
+              until [ "$(db_query "{{ include "vistaplatform.schemaSentinelQuery" $ctx }}")" = "1" ]; do
                 [ "$(elapsed)" -ge "$WAIT_TIMEOUT_SECONDS" ] && give_up "no schema found (public.tenants is missing)" "With schemaMigration.enabled=false, apply scripts/database/schema.sql yourself before starting the backends."
                 sleep 3
               done
-              echo "Schema present. Starting {{ $name }}."
+              echo "Schema present."
               {{- end }}
+              {{- if $ctx.Values.serviceRls.enabled }}
+              echo "Waiting for the app role {{ $ctx.Values.serviceRls.roleApp }} to accept logins (granted by the rls-roles Job)..."
+              n=0
+              until psql -d "$APP_DATABASE_URL" -tAc "SELECT 1" >/dev/null 2>"$ERR"; do
+                [ "$(elapsed)" -ge "$WAIT_TIMEOUT_SECONDS" ] && give_up "app role {{ $ctx.Values.serviceRls.roleApp }} cannot log in" "Check the rls-roles Job: kubectl logs -l app.kubernetes.io/component=rls-roles"
+                n=$((n + 1))
+                [ $((n % 10)) -eq 0 ] && echo "  still waiting for rls-roles ($(elapsed)s)..."
+                sleep 3
+              done
+              echo "App role {{ $ctx.Values.serviceRls.roleApp }} can log in."
+              {{- end }}
+              echo "Starting {{ $name }}."
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -453,6 +484,18 @@ spec:
                   name: {{ include "vistaplatform.platformSecretName" $ctx }}
                   key: jwt-secret
             {{- end }}
+            {{- if eq $name "auth-service" }}
+            {{/*
+              auth-service keeps JWT_SECRET after the window closes (CSRF
+              binding, pre-cutover refresh tokens), so removing it is not what
+              stops it accepting HS256 the way it is on the other pods. This
+              switch carries the same decision (vistaplatform.jwtLegacyHmac) to
+              its verifier: closed, a token forged from a leaked JWT_SECRET is
+              refused here too. scripts/test-chart-jwt-signing.mjs pins it.
+            */}}
+            - name: JWT_ACCEPT_LEGACY_HMAC
+              value: {{ ternary "true" "false" $legacyHmac | quote }}
+            {{- end }}
             {{/*
               Where verifiers get the issuer's PUBLIC keys. Plaintext :8080 on
               purpose — under serviceMtls the API listener moves to :8443 and
@@ -483,6 +526,19 @@ spec:
                   key: jwt-secret
             {{- end }}
             {{- end }}
+            {{- if or (eq $name "auth-service") (eq $name "mcp-service") }}
+            {{- $trustedProxies := include "vistaplatform.trustedProxyCIDRs" $ctx }}
+            {{- if $trustedProxies }}
+            {{/*
+              Peers whose X-Forwarded-For auth-service and mcp-service believe when deriving the
+              client address for per-IP rate limits, audit rows and the actor IP
+              stamped on impersonation tokens. Empty would trust no one and make
+              every client look like the ingress.
+            */}}
+            - name: TRUSTED_PROXY_CIDRS
+              value: {{ $trustedProxies | quote }}
+            {{- end }}
+            {{- end }}
             {{- if $secrets.internalAuthSecret }}
             - name: INTERNAL_AUTH_SECRET
               valueFrom:
@@ -507,6 +563,16 @@ spec:
                 secretKeyRef:
                   name: {{ $ctx.Values.ai.apiKey.existingSecret }}
                   key: {{ $ctx.Values.ai.apiKey.existingSecretKey | default "api-key" }}
+            {{- end }}
+            {{- if eq $name "cbom-service" }}
+            {{/*
+              The CBOM artifact signing key (secrets-cbom-signing.yaml), a file
+              rather than an env var so the private key is not in the process
+              environment. cbom-service alone mounts it: a dedicated Ed25519
+              key, so no other pod can forge an artifact signature.
+            */}}
+            - name: CBOM_SIGNING_KEY_FILE
+              value: /etc/vistaplatform/cbom-signing/signing-key.pem
             {{- end }}
             {{- if eq $name "admin-service" }}
             {{/*
@@ -721,6 +787,11 @@ spec:
               mountPath: /app/jwt-keys
               readOnly: true
             {{- end }}
+            {{- if eq $name "cbom-service" }}
+            - name: cbom-signing
+              mountPath: /etc/vistaplatform/cbom-signing
+              readOnly: true
+            {{- end }}
             {{- if eq $name "admin-service" }}
             - name: install-signing
               mountPath: /etc/vistaplatform/install-signing
@@ -766,8 +837,17 @@ spec:
         {{- if and $ctx.Values.jwtSigning.enabled (has $name (list "auth-service" "admin-service")) }}
         - name: jwt-signing
           secret:
-            secretName: {{ include "vistaplatform.fullname" $ctx }}-jwt-signing
+            secretName: {{ include "vistaplatform.jwtSigningSecretName" $ctx }}
             defaultMode: 0400
+        {{- end }}
+        {{- if eq $name "cbom-service" }}
+        - name: cbom-signing
+          secret:
+            secretName: {{ include "vistaplatform.cbomSigningSecretName" $ctx }}
+            defaultMode: 0400
+            items:
+              - key: signing-key.pem
+                path: signing-key.pem
         {{- end }}
         {{- if eq $name "admin-service" }}
         {{/*

@@ -39,20 +39,15 @@ func platformLoginService(t *testing.T) (*AuthService, sqlmock.Sqlmock, func()) 
 
 // expectFallThroughToPlatform mocks the two lookups that run before the
 // platform lockout logic: the tenant-user lookup (miss → ErrUserNotFound) and
-// the platform-user lookup (hit).
+// the platform-account lookup (hit).
 func expectFallThroughToPlatform(mock sqlmock.Sqlmock, email string, id uuid.UUID, hash string) {
-	mock.ExpectQuery(`FROM users\s+WHERE email = \$1 AND deleted_at IS NULL`).
+	mock.ExpectQuery(`FROM users\s+WHERE lower\(email\) = \$1 AND deleted_at IS NULL`).
 		WithArgs(email).
 		WillReturnError(sql.ErrNoRows)
 
-	now := time.Now()
-	mock.ExpectQuery(`FROM platform_users pu\s+JOIN platform_roles`).
+	mock.ExpectQuery(`FROM platform_users pu\s+WHERE lower\(pu\.email\) = \$1 AND pu\.deleted_at IS NULL AND pu\.is_active = true`).
 		WithArgs(email).
-		WillReturnRows(sqlmock.NewRows([]string{
-			"id", "email", "password_hash", "first_name", "last_name",
-			"is_active", "email_verified", "force_password_change",
-			"last_login_at", "created_at", "role_name",
-		}).AddRow(id, email, hash, "Plat", "Admin", true, true, false, now, now, "platform_admin"))
+		WillReturnRows(sqlmock.NewRows([]string{"id", "password_hash"}).AddRow(id, hash))
 }
 
 // expectLockoutPolicyLookup mocks the two platform_settings reads that
@@ -154,5 +149,42 @@ func TestPlatformLoginUsesConfiguredLockoutThreshold(t *testing.T) {
 	_, loginErr := svc.Login(&models.LoginRequest{Email: email, Password: "WrongPass!"}, "ip", "ua")
 	if loginErr != ErrInvalidCredentials {
 		t.Fatalf("got %v, want ErrInvalidCredentials", loginErr)
+	}
+}
+
+// Correct platform credentials at the tenant login are refused with a
+// PlatformAccountError carrying the admin console URL -- no tokens are
+// minted, no refresh token is stored (the INSERT would violate the users FK) and
+// the failed-login counter is cleared like any successful authentication.
+func TestPlatformLoginCorrectPasswordIsRefusedWithAdminURL(t *testing.T) {
+	t.Setenv("ADMIN_UI_BASE_URL", "https://admin.example.test")
+	svc, mock, cleanup := platformLoginService(t)
+	defer cleanup()
+
+	email := "admin@vista.example"
+	id := uuid.New()
+	hash, err := svc.password.HashPassword("CorrectHorse9!")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	expectFallThroughToPlatform(mock, email, id, hash)
+	mock.ExpectQuery(`SELECT locked_until FROM platform_users WHERE id = \$1`).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"locked_until"}).AddRow(nil))
+	mock.ExpectExec(`UPDATE platform_users SET failed_login_attempts = 0`).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`FROM platform_settings WHERE setting_key = 'admin_ui_base_url'`).
+		WillReturnError(sql.ErrNoRows)
+
+	resp, loginErr := svc.Login(&models.LoginRequest{Email: email, Password: "CorrectHorse9!"}, "ip", "ua")
+	if resp != nil {
+		t.Fatalf("a platform account received a session from the tenant login: %+v", resp)
+	}
+	pe, ok := AsPlatformAccount(loginErr)
+	if !ok {
+		t.Fatalf("got %v, want *PlatformAccountError", loginErr)
+	}
+	if pe.AdminURL != "https://admin.example.test" {
+		t.Fatalf("AdminURL = %q", pe.AdminURL)
 	}
 }

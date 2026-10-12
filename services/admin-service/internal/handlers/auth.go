@@ -693,7 +693,7 @@ var accessTokenRevoker sharedmw.RevocationWriter
 func InitializeAccessTokenRevoker(w sharedmw.RevocationWriter) { accessTokenRevoker = w }
 
 // Logout revokes all platform refresh tokens for the authenticated user,
-// denylists the presented access token (when a denylist is configured) and
+// denylists the verified access token (when a denylist is configured) and
 // clears the three platform auth cookies. Route: POST /admin/auth/logout (protected).
 func Logout(db *sql.DB, refreshTokenService *auth.PlatformRefreshTokenService) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -715,7 +715,7 @@ func Logout(db *sql.DB, refreshTokenService *auth.PlatformRefreshTokenService) g
 		// service's JWT middleware already consults. Best effort, like the
 		// refresh revocation above: the user is signing out and the cookies are
 		// cleared regardless, so a denylist failure is logged, not surfaced.
-		if _, err := sharedmw.RevokeRequestAccessToken(c.Request.Context(), accessTokenRevoker, c.Request, "platform_access_token"); err != nil {
+		if _, err := sharedmw.RevokeRequestAccessToken(c.Request.Context(), accessTokenRevoker, c); err != nil {
 			fmt.Printf("[ADMIN] ERROR: failed to denylist the access token of platform user %s on logout: %v\n", userID, err)
 		}
 		clearPlatformAuthCookies(c)

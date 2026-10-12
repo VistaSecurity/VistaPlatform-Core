@@ -34,7 +34,7 @@ for the full walkthrough.
 **Manual, staged Startup** (useful when debugging a specific service):
 ```bash
 # 1. Start infrastructure
-docker compose up -d postgres redis nats influxdb
+docker compose up -d postgres redis nats
 
 # 2. Wait for infrastructure (10-30 seconds)
 sleep 10
@@ -55,7 +55,7 @@ docker compose up -d web-ui admin-ui
 ```
 
 **Service Order:**
-1. Infrastructure (postgres, redis, nats, influxdb)
+1. Infrastructure (postgres, redis, nats)
 2. Backend services (all can start in parallel after infrastructure)
 3. API Gateway
 4. Frontend applications
@@ -130,7 +130,6 @@ kubectl -n vista logs deployment/notification-service
 - **PostgreSQL**: primary datastore — required by 15 service(s): admin-service, audit-service, auth-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, discovery-processor-service, inventory-service, monitoring-service, notification-service, pcap-processor, resource-tracker-service, sensor-manager, tenant-health-service
 - **Redis**: caching, sessions, and the JWT revocation denylist — required by 13 service(s): admin-service, audit-service, auth-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, inventory-service, monitoring-service, notification-service, resource-tracker-service, sensor-manager, tenant-health-service
 - **NATS**: message queue — required by 14 service(s): admin-service, audit-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, discovery-processor-service, inventory-service, monitoring-service, notification-service, pcap-processor, resource-tracker-service, sensor-manager, tenant-health-service
-- **InfluxDB**: time-series data — required by 2 service(s): monitoring-service, sensor-manager
 
 ### Backend Service Dependencies
 
@@ -157,11 +156,11 @@ in-cluster interrogation worker.
 - **discovery-processor-service**: nats, postgres
 - **inventory-service**: nats, postgres, redis
 - **mcp-service**: _none_
-- **monitoring-service**: influxdb, nats, postgres, redis
+- **monitoring-service**: nats, postgres, redis
 - **notification-service**: nats, postgres, redis
 - **pcap-processor**: nats, postgres
 - **resource-tracker-service**: nats, postgres, redis
-- **sensor-manager**: influxdb, nats, postgres, redis
+- **sensor-manager**: nats, postgres, redis
 - **tenant-health-service**: nats, postgres, redis
 
 ### Service-to-Service Dependencies

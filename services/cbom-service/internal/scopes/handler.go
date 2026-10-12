@@ -111,7 +111,7 @@ func (h *Handler) create(c *gin.Context) {
 		sharedapi.BadRequest(c, "invalid request body")
 		return
 	}
-	if err := ValidateName(req.Name); err != nil {
+	if err := ValidateRequestText(req.Name, req.Description, req.Query); err != nil {
 		sharedapi.BadRequest(c, err.Error())
 		return
 	}
@@ -139,6 +139,10 @@ func (h *Handler) create(c *gin.Context) {
 		UpdatedBy:   userID,
 	}
 	if err := h.repo.Create(c.Request.Context(), &scope); err != nil {
+		if IsDuplicateScope(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": duplicateScopeMessage(req.Name)})
+			return
+		}
 		log.Printf("create scope: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
@@ -189,7 +193,7 @@ func (h *Handler) update(c *gin.Context) {
 		sharedapi.BadRequest(c, "invalid request body")
 		return
 	}
-	if err := ValidateName(req.Name); err != nil {
+	if err := ValidateRequestText(req.Name, req.Description, req.Query); err != nil {
 		sharedapi.BadRequest(c, err.Error())
 		return
 	}
@@ -210,6 +214,10 @@ func (h *Handler) update(c *gin.Context) {
 	scope, err := h.repo.Update(c.Request.Context(), tenantID, scopeID, userID, req)
 	if errors.Is(err, ErrNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "scope not found"})
+		return
+	}
+	if IsDuplicateScope(err) {
+		c.JSON(http.StatusConflict, gin.H{"error": duplicateScopeMessage(req.Name)})
 		return
 	}
 	if err != nil {
@@ -361,14 +369,25 @@ func writeQueryError(c *gin.Context, status int, src string, err error) bool {
 
 // bearerToken returns the caller's token, for the S2S hop to inventory-service.
 //
+// It accepts the same two places the service's auth middleware does, an
+// Authorization Bearer header and then the access_token cookie, and is the
+// same strategy artifact generation uses. Reading only the header made preview
+// report `unavailable` for browser sessions, which authenticate by cookie.
+//
 // The hop is HMAC-signed either way (serviceauth), so this is the caller's
-// identity travelling with the request rather than the authorisation for it —
-// the same thing the CBOM generation path passes.
+// identity travelling with the request rather than the authorisation for it.
 func bearerToken(c *gin.Context) string {
 	const prefix = "Bearer "
 	h := c.GetHeader("Authorization")
 	if len(h) > len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
 		return h[len(prefix):]
 	}
+	if cookie, err := c.Cookie("access_token"); err == nil && cookie != "" {
+		return cookie
+	}
 	return ""
+}
+
+func duplicateScopeMessage(name string) string {
+	return fmt.Sprintf("a scope named %q already exists; choose a different name", strings.TrimSpace(name))
 }

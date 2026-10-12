@@ -19,14 +19,10 @@ import {
   webhookModeOf, webhookOptionsError, type WebhookAuthMode, type WebhookOptions,
 } from './webhook-options';
 import type { notificationServiceComponents as NC } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
 
 type Channel = NC['schemas']['TenantNotificationChannel'];
 type Rule = NC['schemas']['TenantNotificationRule'];
-
-function legacyMessage(error: unknown, fallback: string): string {
-  if (error && typeof error === 'object' && 'error' in error) return String(error.error);
-  return fallback;
-}
 
 type ChannelTypeDef = { value: string; label: string; configKey: 'recipients' | 'webhook_url' | 'url' | 'integration_key'; configLabel: string; hint: string; csv?: boolean };
 
@@ -90,31 +86,34 @@ export function ChannelModal({ channel, open, onClose }: { channel: Channel | nu
   // The signing secret the server generated for a new webhook — shown once.
   const [createdSecret, setCreatedSecret] = useState<string | null>(null);
 
+  // The generated signing secret is shown once. It goes to local state from
+  // inside the mutationFn and is not returned, so the MutationCache never holds
+  // it; gcTime 0 drops the settled mutation once nothing observes it.
   const mutation = useMutation({
-    mutationFn: async (): Promise<string | null> => {
+    gcTime: 0,
+    mutationFn: async (): Promise<boolean> => {
       // carry through config keys the form doesn't expose
       let config = buildChannelConfig(channel?.config, typeDef, configValue, isEdit);
       if (isWebhook) config = applyWebhookOptions(config, webhook);
       if (isEdit) {
-        const { error, response } = await clients.notifications.PUT('/tenant/channels/{id}', {
+        unwrap(await clients.notifications.PUT('/tenant/channels/{id}', {
           params: { path: { id: channel.id } },
           body: { channel_name: name.trim(), config, description: description.trim() || undefined },
-        });
-        if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to update the channel'));
-        return null;
+        }), 'Failed to update the channel');
+        return false;
       }
-      const { data, error, response } = await clients.notifications.POST('/tenant/channels', {
+      const data = unwrap(await clients.notifications.POST('/tenant/channels', {
         body: { channel_name: name.trim(), channel_type: type, config, enabled: true, description: description.trim() || undefined },
-      });
-      if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to create the channel'));
-      return data?.signing_secret ?? null;
+      }), 'Failed to create the channel');
+      const generated = data?.signing_secret ?? null;
+      if (generated) setCreatedSecret(generated);
+      return generated !== null;
     },
     onSuccess: (generatedSecret) => {
       void queryClient.invalidateQueries({ queryKey: ['settings', 'channels'] });
       // A generated signing secret is returned exactly once. Keep the modal open
       // on it rather than closing over the only chance to copy it.
-      if (generatedSecret) setCreatedSecret(generatedSecret);
-      else onClose();
+      if (!generatedSecret) onClose();
     },
   });
 
@@ -192,6 +191,7 @@ function WebhookFields({ value, onChange, existing, isEdit, error }: {
     const v = auth && typeof auth === 'object' ? (auth as Record<string, unknown>)[key] : undefined;
     return sameMode && typeof v === 'string' ? `${v} (unchanged)` : undefined;
   };
+  const [showSecret, setShowSecret] = useState(false);
   const extraHeaders = storedHeaderCount(existing) > 1;
   const hasSecret = isEdit && typeof existing?.webhook_secret === 'string' && existing.webhook_secret !== '';
   return (
@@ -203,7 +203,7 @@ function WebhookFields({ value, onChange, existing, isEdit, error }: {
       </ModalField>
       {value.mode === 'bearer' && (
         <ModalField label="Bearer token" hint={keep('Sent as "Authorization: Bearer …".')}>
-          <ModalInput value={value.token} className="mono" autoComplete="off" placeholder={maskedAuth('token')} onChange={(e) => onChange('token', e.target.value)} />
+          <ModalInput value={value.token} type="password" className="mono" autoComplete="off" placeholder={maskedAuth('token')} onChange={(e) => onChange('token', e.target.value)} />
         </ModalField>
       )}
       {value.mode === 'basic' && (
@@ -222,7 +222,7 @@ function WebhookFields({ value, onChange, existing, isEdit, error }: {
             <ModalInput value={value.headerName} className="mono" autoComplete="off" onChange={(e) => onChange('headerName', e.target.value)} />
           </ModalField>
           <ModalField label="Header value" hint={keep(extraHeaders ? 'Saving replaces this connection\'s other custom headers with this one.' : '')}>
-            <ModalInput value={value.headerValue} className="mono" autoComplete="off" onChange={(e) => onChange('headerValue', e.target.value)} />
+            <ModalInput value={value.headerValue} type="password" className="mono" autoComplete="off" onChange={(e) => onChange('headerValue', e.target.value)} />
           </ModalField>
         </>
       )}
@@ -235,12 +235,14 @@ function WebhookFields({ value, onChange, existing, isEdit, error }: {
         <div style={{ display: 'flex', gap: 6 }}>
           <ModalInput
             value={value.signingSecret}
+            type={showSecret ? 'text' : 'password'}
             className="mono"
             autoComplete="off"
             placeholder={hasSecret ? `${String(existing?.webhook_secret)} (unchanged)` : undefined}
             onChange={(e) => onChange('signingSecret', e.target.value)}
           />
-          <button type="button" className="ui-btn sm" onClick={() => onChange('signingSecret', generateSigningSecret())}>Generate</button>
+          <button type="button" className="ui-btn sm" aria-pressed={showSecret} onClick={() => setShowSecret((v) => !v)}>{showSecret ? 'Hide' : 'Show'}</button>
+          <button type="button" className="ui-btn sm" onClick={() => { onChange('signingSecret', generateSigningSecret()); setShowSecret(true); }}>Generate</button>
         </div>
       </ModalField>
       {error && <div role="alert" style={{ fontSize: 11.5, color: 'var(--danger-text)' }}>{error}</div>}
@@ -283,8 +285,7 @@ export function ChannelDeleteModal({ channel, open, onClose }: { channel: Channe
   const mutation = useMutation({
     mutationFn: async () => {
       if (!channel) return;
-      const { error, response } = await clients.notifications.DELETE('/tenant/channels/{id}', { params: { path: { id: channel.id } } });
-      if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to delete the channel'));
+      unwrap(await clients.notifications.DELETE('/tenant/channels/{id}', { params: { path: { id: channel.id } } }), 'Failed to delete the channel');
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['settings', 'channels'] });
@@ -349,16 +350,14 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
         digest_window: isDigest(frequency) ? Math.max(1, parseInt(digestWindow, 10) || 60) : undefined,
       };
       if (isEdit) {
-        const { error, response } = await clients.notifications.PUT('/tenant/rules/{id}', {
+        unwrap(await clients.notifications.PUT('/tenant/rules/{id}', {
           params: { path: { id: rule.id } },
           body: common,
-        });
-        if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to update the rule'));
+        }), 'Failed to update the rule');
       } else {
-        const { error, response } = await clients.notifications.POST('/tenant/rules', {
+        unwrap(await clients.notifications.POST('/tenant/rules', {
           body: { ...common, alert_source: source, enabled: true },
-        });
-        if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to create the rule'));
+        }), 'Failed to create the rule');
       }
     },
     onSuccess: () => {
@@ -432,8 +431,7 @@ export function RuleDeleteModal({ rule, open, onClose }: { rule: Rule | null; op
   const mutation = useMutation({
     mutationFn: async () => {
       if (!rule) return;
-      const { error, response } = await clients.notifications.DELETE('/tenant/rules/{id}', { params: { path: { id: rule.id } } });
-      if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to delete the rule'));
+      unwrap(await clients.notifications.DELETE('/tenant/rules/{id}', { params: { path: { id: rule.id } } }), 'Failed to delete the rule');
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['settings', 'notification-rules'] });

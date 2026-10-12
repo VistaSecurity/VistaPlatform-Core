@@ -5,9 +5,11 @@
 // navigates to the provider's authorize endpoint carrying the invitation token,
 // which the callback consumes to bind the identity to the invited account.
 // Works identically for Google and Microsoft.
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
+import { useLocation, useNavigate } from 'react-router';
 import { Icon } from '../components/ui';
 import { clients } from '../lib/clients';
+import { unwrap } from '../lib/api-result';
 
 const ACCENT = 'var(--accent-gradient)';
 
@@ -23,7 +25,14 @@ function providerLabel(provider: string): string {
 type SsoProvider = { provider: string; provider_name: string };
 
 export function AcceptInvitePage() {
-  const token = useMemo(() => new URLSearchParams(window.location.search).get('token') ?? '', []);
+  const navigate = useNavigate();
+  const { pathname, search } = useLocation();
+  // Read the token once, then take it out of the address bar (history, shared
+  // screenshots, Referer). Held in state so the page survives the URL change.
+  const [token] = useState(() => new URLSearchParams(search).get('token') ?? '');
+  useEffect(() => {
+    if (new URLSearchParams(search).has('token')) void navigate(pathname, { replace: true });
+  }, [navigate, pathname, search]);
   const [phase, setPhase] = useState<'loading' | 'ready' | 'invalid'>('loading');
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [email, setEmail] = useState('');
@@ -31,6 +40,7 @@ export function AcceptInvitePage() {
   const [allowPassword, setAllowPassword] = useState(true);
   const [providers, setProviders] = useState<SsoProvider[]>([]);
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
   const [showPw, setShowPw] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -60,10 +70,11 @@ export function AcceptInvitePage() {
   const acceptWithPassword = async (e: FormEvent) => {
     e.preventDefault();
     setFormError(null);
+    if (password.length < 8) { setFormError('Use at least 8 characters for your password.'); return; }
+    if (confirm !== password) { setFormError('Passwords don’t match.'); return; }
     setSubmitting(true);
     try {
-      const { error, response } = await clients.auth.POST('/auth/invitations/accept', { body: { token, password } });
-      if (error || !response.ok) throw new Error(messageFrom(error, 'Could not accept the invitation.'));
+      unwrap(await clients.auth.POST('/auth/invitations/accept', { body: { token, password } }), 'Could not accept the invitation.');
       window.location.replace('/dashboard');
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Could not accept the invitation.');
@@ -121,11 +132,16 @@ export function AcceptInvitePage() {
               <form onSubmit={acceptWithPassword} style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 48, padding: '0 14px', borderRadius: 12, background: 'rgba(255,255,255,.045)', border: '1px solid rgba(255,255,255,.11)' }}>
                   <Icon name="lock" size={17} style={{ color: 'rgba(255,255,255,.42)', flex: 'none' }} />
-                  <input type={showPw ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} required placeholder="Create a password" autoComplete="new-password"
+                  <input type={showPw ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} required placeholder="Create a password (8+ characters)" aria-label="Password" autoComplete="new-password"
                     style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', outline: 'none', fontFamily: 'var(--font-body)', fontSize: 14, color: '#F1F1F2' }} />
                   <button type="button" onClick={() => setShowPw((v) => !v)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', display: 'flex', padding: 0 }}>
                     <Icon name={showPw ? 'eye-off' : 'eye'} size={16} style={{ color: 'rgba(255,255,255,.42)' }} />
                   </button>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, height: 48, padding: '0 14px', borderRadius: 12, background: 'rgba(255,255,255,.045)', border: '1px solid rgba(255,255,255,.11)' }}>
+                  <Icon name="lock" size={17} style={{ color: 'rgba(255,255,255,.42)', flex: 'none' }} />
+                  <input type={showPw ? 'text' : 'password'} value={confirm} onChange={(e) => setConfirm(e.target.value)} required placeholder="Confirm password" autoComplete="new-password" aria-label="Confirm password"
+                    style={{ flex: 1, minWidth: 0, border: 'none', background: 'transparent', outline: 'none', fontFamily: 'var(--font-body)', fontSize: 14, color: '#F1F1F2' }} />
                 </div>
                 {formError && (
                   <div style={{ fontSize: 12.5, color: 'var(--danger-soft)', background: 'color-mix(in srgb, var(--danger) 12%, transparent)', border: '1px solid color-mix(in srgb, var(--danger) 28%, transparent)', borderRadius: 10, padding: '9px 12px' }}>{formError}</div>

@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/jobs/catalogfeeds"
 )
@@ -110,7 +111,10 @@ func ListEOLCatalogue(store CatalogStore) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "kind must be one of os, software, hardware"})
 			return
 		}
-		page, pageSize := pageParams(c)
+		page, pageSize, ok := pageParams(c)
+		if !ok {
+			return
+		}
 		entries, total, err := store.ListEOL(c.Request.Context(), catalogfeeds.EOLQuery{
 			Search: c.Query("search"), Kind: kind, Page: page, PageSize: pageSize,
 		})
@@ -136,7 +140,10 @@ func ListVulnerabilityCatalogue(store CatalogStore) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "severity must be one of none, low, medium, high, critical"})
 			return
 		}
-		page, pageSize := pageParams(c)
+		page, pageSize, ok := pageParams(c)
+		if !ok {
+			return
+		}
 		vulns, total, err := store.ListVulnerabilities(c.Request.Context(), catalogfeeds.VulnQuery{
 			Search: c.Query("search"), Severity: severity, Page: page, PageSize: pageSize,
 		})
@@ -348,10 +355,21 @@ func recordBundleImportAudit(c *gin.Context, eventType string, res *catalogfeeds
 	})
 }
 
-func pageParams(c *gin.Context) (int, int) {
-	page, _ := strconv.Atoi(c.Query("page"))
-	pageSize, _ := strconv.Atoi(c.Query("page_size"))
-	return page, pageSize
+// pageParams reads page / page_size for the catalogue and rule lists. Absent
+// takes the store default; a present value must be a positive integer, else
+// the 400 is written here and ok is false. The stores clamp page_size to their
+// own maximum, and page is clamped here so (page-1)*size cannot overflow.
+func pageParams(c *gin.Context) (page, pageSize int, ok bool) {
+	if err := sharedapi.RequirePositiveIntQuery(c, "page", "page_size"); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return 0, 0, false
+	}
+	page, _ = strconv.Atoi(c.Query("page"))
+	pageSize, _ = strconv.Atoi(c.Query("page_size"))
+	if page > sharedapi.MaxPage {
+		page = sharedapi.MaxPage
+	}
+	return page, pageSize, true
 }
 
 // catalogPageEcho mirrors the store's clamping so the response reports the page

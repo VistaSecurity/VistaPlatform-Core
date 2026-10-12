@@ -43,8 +43,8 @@ function stubClient(impl?: (path: string, init: unknown) => unknown) {
   const POST = vi.fn().mockImplementation((path: string, init: unknown) => {
     const custom = impl?.(path, init);
     if (custom !== undefined) return Promise.resolve(custom);
-    if (path.endsWith('/controls')) return Promise.resolve({ data: { control: { id: 'ctrl-1' } } });
-    return Promise.resolve({ data: {} });
+    if (path.endsWith('/controls')) return Promise.resolve({ data: { control: { id: 'ctrl-1' } }, response: new Response(null, { status: 200 }) });
+    return Promise.resolve({ data: {}, response: new Response(null, { status: 200 }) });
   });
   return { client: { POST } as never, POST };
 }
@@ -98,7 +98,7 @@ describe('accept flow (tenant endpoints)', () => {
 
   it('surfaces the server’s message when the control cannot be created', async () => {
     const { client } = stubClient((path) =>
-      path.endsWith('/controls') ? { error: { error: 'Custom policies require an Enterprise subscription' } } : undefined,
+      path.endsWith('/controls') ? { error: { error: 'Custom policies require an Enterprise subscription' }, response: new Response(null, { status: 402 }) } : undefined,
     );
     const deps = buildAcceptDeps(client, 'policy-1', new Map());
     await expect(acceptDraft(draft(), 'm', deps)).rejects.toThrow('Enterprise subscription');
@@ -108,7 +108,7 @@ describe('accept flow (tenant endpoints)', () => {
   // creates a second one.
   it('keeps the created control when a rule fails', async () => {
     const { client } = stubClient((path) =>
-      path.endsWith('/measurements') ? { error: { error: 'Validation failed' } } : undefined,
+      path.endsWith('/measurements') ? { error: { error: 'Validation failed' }, response: new Response(null, { status: 400 }) } : undefined,
     );
     const deps = buildAcceptDeps(client, 'policy-1', new Map([['tls_version', 'mt-1']]));
 
@@ -196,5 +196,17 @@ describe('availability and permission gating', () => {
   it('marks a drafted control in the control list', () => {
     expect(detailSrc).toContain("ctrl.source_kind === 'inferred'");
     expect(detailSrc).toMatch(/>drafted</);
+  });
+
+  // openapi-fetch gives a falsy `error` for a bodiless 5xx; that used to count
+  // as the rule having been added.
+  it('reports a rule that failed with an empty-bodied error', async () => {
+    const { client } = stubClient((path) =>
+      path.endsWith('/measurements') ? { response: new Response(null, { status: 500 }) } : undefined,
+    );
+    const deps = buildAcceptDeps(client, 'policy-1', new Map([['tls_version', 'mt-1']]));
+    const outcome = await acceptDraft(draft(), 'm', deps);
+    expect(outcome.rulesAdded).toBe(0);
+    expect(outcome.ruleErrors).toHaveLength(1);
   });
 });

@@ -17,7 +17,8 @@
 //     own refusals ("not a trial plan", "lasts at least 28 days") rather than a
 // generic one (review of: a short length used to be silently ignored).
 //
-// Mutations run (each red, then restored green): pointing Convert at the
+// Mutations run (each red, then restored green): dropping `response.ok` from
+// shared unwrap (bodiless 500 reads as success); pointing Convert at the
 // DELETE; dropping additional_days from the extend body; accepting 0 days;
 // replacing serverError with the generic message; swapping the two
 // endTrialOutcome branches; hard-coding "Free" instead of the plan's name;
@@ -41,6 +42,7 @@ const server = {
   error: NOT_TRIAL_PLAN,
   landing: FREE,
   landingStatus: 200,
+  bodiless: false,
   calls: [] as { method: string; path: string; body: unknown }[],
 };
 const json = (body: unknown, status = 200) =>
@@ -63,6 +65,7 @@ const fetchStub = vi.fn(async (req: Request) => {
   if (path.includes('/admin/billing/trials')) {
     const text = await req.text();
     server.calls.push({ method: req.method, path: path.slice(path.indexOf('/admin/')), body: text ? JSON.parse(text) : null });
+    if (server.bodiless) return new Response(null, { status: 500 });
     if (server.status !== 200) return json({ error: server.error }, server.status);
     return req.method === 'DELETE'
       ? json({ message: 'Trial ended', tenant_id: TENANT, landing: server.landing })
@@ -105,6 +108,7 @@ beforeEach(() => {
   server.error = NOT_TRIAL_PLAN;
   server.landing = FREE;
   server.landingStatus = 200;
+  server.bodiless = false;
   server.calls = [];
   toast.success.mockReset();
   toast.error.mockReset();
@@ -158,6 +162,19 @@ describe('Billing → Trials row actions', () => {
     click('Convert');
     await settle();
     expect(server.calls).toEqual([{ method: 'POST', path: `/admin/billing/trials/tenants/${TENANT}/convert`, body: null }]);
+  });
+
+  it('Convert on a bodiless 500 shows the error toast, never the success one', async () => {
+    // A proxy 502 / bare 500 has no JSON body, so openapi-fetch's `error` is
+    // falsy; `if (error) throw` used to let it through as "converted to paid".
+    server.bodiless = true;
+    mount(<mod.TrialRowActions trial={trial} />);
+    click('Convert');
+    click('Convert');
+    await settle();
+    expect(server.calls).toHaveLength(1);
+    expect(toast.error).toHaveBeenCalledWith('Failed to convert the trial');
+    expect(toast.success).not.toHaveBeenCalled();
   });
 
   const dialogText = () => host.querySelector('[role="dialog"]')?.textContent ?? '';

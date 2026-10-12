@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/vistasecurity/vistaplatform/shared/redact"
 )
 
 // AuditEvent represents a single auditable action
@@ -80,7 +82,9 @@ func (al *AuditLogger) LogInterrogation(deviceID, deviceAddr, protocol, result s
 		Details:    details,
 	}
 	if err != nil {
-		event.ErrorMsg = err.Error()
+		// Redacted: a *url.Error prints the whole request URL, query
+		// credentials included, and this file is plain text on the host.
+		event.ErrorMsg = redact.Text(err.Error())
 	}
 	al.Log(event)
 }

@@ -88,7 +88,7 @@ func TestIntegration_ArtifactKind_ListFilters(t *testing.T) {
 		insertOfKind(t, repo, tenant, kind)
 	}
 
-	all, err := repo.List(ctx, tenant, nil, "", 50)
+	all, _, err := repo.List(ctx, tenant, nil, "", 50, 0)
 	if err != nil {
 		t.Fatalf("List(all): %v", err)
 	}
@@ -97,7 +97,7 @@ func TestIntegration_ArtifactKind_ListFilters(t *testing.T) {
 	}
 
 	for _, kind := range AllArtifactKinds {
-		got, err := repo.List(ctx, tenant, nil, kind, 50)
+		got, _, err := repo.List(ctx, tenant, nil, kind, 50, 0)
 		if err != nil {
 			t.Fatalf("List(%s): %v", kind, err)
 		}

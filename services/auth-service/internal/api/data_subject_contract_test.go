@@ -174,6 +174,7 @@ func TestContract_EraseUserData(t *testing.T) {
 	expectTenantScope(mock)
 	mock.ExpectQuery("SELECT email FROM users").
 		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
+	expectLastAdminGuardPasses(mock)
 	mock.ExpectExec("UPDATE users SET").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM api_tokens").WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectExec("UPDATE refresh_tokens").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -219,6 +220,7 @@ func TestContract_EraseUserData_RollsBackWhenVerificationFails(t *testing.T) {
 	expectTenantScope(mock)
 	mock.ExpectQuery("SELECT email FROM users").
 		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
+	expectLastAdminGuardPasses(mock)
 	mock.ExpectExec("UPDATE users SET").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM api_tokens").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("UPDATE refresh_tokens").WillReturnResult(sqlmock.NewResult(0, 0))
@@ -253,6 +255,7 @@ func TestContract_EraseUserData_ClearsRevocationWhenCommitFails(t *testing.T) {
 	expectTenantScope(mock)
 	mock.ExpectQuery("SELECT email FROM users").
 		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
+	expectLastAdminGuardPasses(mock)
 	mock.ExpectExec("UPDATE users SET").WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("DELETE FROM api_tokens").WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectExec("UPDATE refresh_tokens").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -286,6 +289,7 @@ func TestContract_EraseUserData_RollsBackWhenActiveSessionRevocationFails(t *tes
 	expectTenantScope(mock)
 	mock.ExpectQuery("SELECT email FROM users").
 		WillReturnRows(sqlmock.NewRows([]string{"email"}).AddRow("person@example.com"))
+	expectLastAdminGuardPasses(mock)
 	mock.ExpectRollback()
 
 	w := do(r, http.MethodPost, dsrBase+"/users/"+dsrSubject.String()+"/erase", nil)
@@ -351,4 +355,12 @@ func indexFold(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// expectLastAdminGuardPasses scripts guardLastTenantAdmin's two statements for a
+// target who is not the tenant's last tenant_admin.
+func expectLastAdminGuardPasses(mock sqlmock.Sqlmock) {
+	mock.ExpectExec("pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("WITH admins").
+		WillReturnRows(sqlmock.NewRows([]string{"target_is_admin", "others"}).AddRow(false, 0))
 }

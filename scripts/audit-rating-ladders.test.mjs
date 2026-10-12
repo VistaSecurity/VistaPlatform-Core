@@ -48,10 +48,11 @@ export function assertWiring(makefile, workflow) {
   const steps = Object.values(parsed.jobs).flatMap(job => job.steps ?? []);
   assert.ok(steps.some(step => /make audit/.test(step.run ?? '')));
   assert.ok(steps.some(step => /make rating-ladder-test/.test(step.run ?? '')));
+  // The gate runs on every PR and push: a paths filter is what let a
+  // change to shared/ or the ladder guard skip it, so its absence is the wiring.
   for (const event of ['push', 'pull_request']) {
-    assert.ok(parsed.on[event].paths.includes('scripts/audit-rating-*.mjs'));
-    assert.ok(parsed.on[event].paths.includes('shared/**'));
-    assert.ok(parsed.on[event].paths.includes('.github/workflows/standards.yml'));
+    assert.ok(parsed.on[event], `${event} trigger`);
+    assert.ok(!('paths' in parsed.on[event]) && !('paths-ignore' in parsed.on[event]), `${event} must not be path-filtered`);
   }
 }
 test('actual Make and CI enforcement cannot be removed silently', () => {
@@ -62,5 +63,5 @@ test('actual Make and CI enforcement cannot be removed silently', () => {
     assert.throws(() => assertWiring(makefile.replace(token, 'REMOVED'), workflow), token);
   }
   assert.throws(() => assertWiring(makefile, workflow.replace('make rating-ladder-test', 'true')));
-  assert.throws(() => assertWiring(makefile, workflow.replaceAll("      - '.github/workflows/standards.yml'\n", '')));
+  assert.throws(() => assertWiring(makefile, workflow.replace('  pull_request:\n    branches: [main]\n', "  pull_request:\n    branches: [main]\n    paths:\n      - 'services/**'\n")));
 });

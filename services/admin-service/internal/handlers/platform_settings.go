@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	"github.com/vistasecurity/vistaplatform/shared/entitlements"
 	"github.com/vistasecurity/vistaplatform/shared/rbac"
 	"github.com/vistasecurity/vistaplatform/shared/security/authpolicy"
@@ -31,7 +33,11 @@ type platformSettingKV struct {
 // unchanged.
 type platformSettingsStore interface {
 	ListSettings(ctx context.Context) ([]platformSettingKV, error)
-	UpsertSetting(ctx context.Context, key string, value []byte, updatedBy uuid.UUID) error
+	// UpsertSettings writes every given setting in ONE transaction: a save
+	// either lands whole or not at all (a half-applied policy change — say a
+	// new lockout threshold without the matching session timeout — is worse
+	// than a refused one).
+	UpsertSettings(ctx context.Context, settings []platformSettingKV, updatedBy uuid.UUID) error
 	// HasPlatformPermission reports whether the platform user holds permission.
 	// The PUT needs it per FIELD (see securityGatedSettingKeys), which a route
 	// middleware cannot express.
@@ -72,17 +78,26 @@ func (r *platformSettingsRepository) ListSettings(ctx context.Context) ([]platfo
 	return out, rows.Err()
 }
 
-func (r *platformSettingsRepository) UpsertSetting(ctx context.Context, key string, value []byte, updatedBy uuid.UUID) error {
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO platform_settings (setting_key, setting_value, updated_by, updated_at)
-		VALUES ($1, $2, $3, NOW())
-		ON CONFLICT (setting_key)
-		DO UPDATE SET
-			setting_value = EXCLUDED.setting_value,
-			updated_by = EXCLUDED.updated_by,
-			updated_at = NOW()
-	`, key, value, updatedBy)
-	return err
+func (r *platformSettingsRepository) UpsertSettings(ctx context.Context, settings []platformSettingKV, updatedBy uuid.UUID) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, kv := range settings {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO platform_settings (setting_key, setting_value, updated_by, updated_at)
+			VALUES ($1, $2, $3, NOW())
+			ON CONFLICT (setting_key)
+			DO UPDATE SET
+				setting_value = EXCLUDED.setting_value,
+				updated_by = EXCLUDED.updated_by,
+				updated_at = NOW()
+		`, kv.Key, kv.Value, updatedBy); err != nil {
+			return fmt.Errorf("upsert %s: %w", kv.Key, err)
+		}
+	}
+	return tx.Commit()
 }
 
 func (r *platformSettingsRepository) HasPlatformPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error) {
@@ -130,11 +145,12 @@ var securityGatedSettingKeys = []string{
 
 // securityGatedFieldsIn returns the security-gated keys this request would
 // write, in securityGatedSettingKeys order. "Would write" mirrors the persist
-// logic below exactly: an empty admin_ui_base_url and an absent (nil) pointer
-// are both no-ops there, so they are not writes here either.
+// logic below exactly: an absent key and an absent (nil) pointer are no-ops
+// there, so they are not writes here either; an explicit "" admin_ui_base_url
+// CLEARS the setting, which is a write.
 func securityGatedFieldsIn(s PlatformSettings) []string {
 	present := map[string]bool{
-		"admin_ui_base_url":                 s.AdminUIBaseURL != "",
+		"admin_ui_base_url":                 s.AdminUIBaseURL != "" || s.adminUIBaseURLSet,
 		"email_config":                      s.EmailConfig != nil,
 		"password_min_length":               s.PasswordMinLength != nil,
 		"session_timeout_minutes":           s.SessionTimeoutMinutes != nil,
@@ -223,6 +239,10 @@ type PlatformSettings struct {
 	// Used to build password-reset and invitation links so emails work with white-label domains.
 	AdminUIBaseURL string `json:"admin_ui_base_url"`
 	SupportEmail   string `json:"support_email"`
+	// adminUIBaseURLSet records that a PUT carried admin_ui_base_url at all, so
+	// sending "" (clear it) is still a write of a security-gated key. Set by the
+	// update handler from the raw body; never serialised.
+	adminUIBaseURLSet bool
 
 	// Tenant management
 	MaxTenants       *int `json:"max_tenants"`
@@ -457,11 +477,31 @@ func updatePlatformSettingsWithStore(store platformSettingsStore) gin.HandlerFun
 			return
 		}
 
-		var settings PlatformSettings
-		if err := c.ShouldBindJSON(&settings); err != nil {
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			if sharedapi.RequestBodyTooLarge(err) {
+				sharedapi.PayloadTooLarge(c, "The request body is too large.")
+				return
+			}
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 			return
 		}
+		var settings PlatformSettings
+		if err := json.Unmarshal(body, &settings); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+			return
+		}
+		// The four plain-string settings are cleared by sending "" and kept by
+		// leaving the key out. The struct cannot tell those apart (both decode
+		// to ""), so presence is read from the raw body. An explicit null is
+		// treated as absent.
+		var rawKeys map[string]json.RawMessage
+		_ = json.Unmarshal(body, &rawKeys)
+		present := func(key string) bool {
+			v, ok := rawKeys[key]
+			return ok && string(v) != "null"
+		}
+		settings.adminUIBaseURLSet = present("admin_ui_base_url")
 
 		// Authorize the security-gated keys BEFORE validating or writing
 		// anything: a request that mixes gated and ungated keys is refused whole,
@@ -535,115 +575,66 @@ func updatePlatformSettingsWithStore(store platformSettingsStore) gin.HandlerFun
 			}
 		}
 
-		// Persist settings to database
-		// Use upsert pattern for each setting
-		upsertSetting := func(key string, value interface{}) error {
+		// Collect every setting that was provided, then write them in one
+		// transaction below.
+		var pending []platformSettingKV
+		var marshalErr error
+		upsertSetting := func(key string, value interface{}) {
 			valueJSON, err := json.Marshal(value)
 			if err != nil {
-				return err
+				marshalErr = fmt.Errorf("%s: %w", key, err)
+				return
 			}
-			return store.UpsertSetting(c.Request.Context(), key, valueJSON, userID)
+			pending = append(pending, platformSettingKV{Key: key, Value: valueJSON})
 		}
 
-		// Update each setting that is provided
-		if settings.PlatformName != "" {
-			if err := upsertSetting("platform_name", settings.PlatformName); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update platform_name"})
-				return
-			}
+		if present("platform_name") {
+			upsertSetting("platform_name", settings.PlatformName)
 		}
-		if settings.PlatformDomain != "" {
-			if err := upsertSetting("platform_domain", settings.PlatformDomain); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update platform_domain"})
-				return
-			}
+		if present("platform_domain") {
+			upsertSetting("platform_domain", settings.PlatformDomain)
 		}
-		if settings.AdminUIBaseURL != "" {
-			if err := upsertSetting("admin_ui_base_url", settings.AdminUIBaseURL); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update admin_ui_base_url"})
-				return
-			}
+		if present("admin_ui_base_url") {
+			upsertSetting("admin_ui_base_url", settings.AdminUIBaseURL)
 		}
 		if settings.PlatformLoginLogoURL != nil {
-			if err := upsertSetting("platform_login_logo_url", *settings.PlatformLoginLogoURL); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update platform_login_logo_url"})
-				return
-			}
+			upsertSetting("platform_login_logo_url", *settings.PlatformLoginLogoURL)
 		}
-		if settings.SupportEmail != "" {
-			if err := upsertSetting("support_email", settings.SupportEmail); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update support_email"})
-				return
-			}
+		if present("support_email") {
+			upsertSetting("support_email", settings.SupportEmail)
 		}
 		if settings.EmailVerificationRequired != nil {
-			if err := upsertSetting("email_verification_required", *settings.EmailVerificationRequired); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update email_verification_required"})
-				return
-			}
+			upsertSetting("email_verification_required", *settings.EmailVerificationRequired)
 		}
 		if settings.AdminEmailVerificationRequired != nil {
-			if err := upsertSetting("admin_email_verification_required", *settings.AdminEmailVerificationRequired); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update admin_email_verification_required"})
-				return
-			}
+			upsertSetting("admin_email_verification_required", *settings.AdminEmailVerificationRequired)
 		}
 		if settings.RegistrationEnabled != nil {
-			if err := upsertSetting("registration_enabled", *settings.RegistrationEnabled); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update registration_enabled"})
-				return
-			}
+			upsertSetting("registration_enabled", *settings.RegistrationEnabled)
 		}
 		if settings.BlockPersonalEmailDomains != nil {
-			if err := upsertSetting("block_personal_email_domains", *settings.BlockPersonalEmailDomains); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update block_personal_email_domains"})
-				return
-			}
+			upsertSetting("block_personal_email_domains", *settings.BlockPersonalEmailDomains)
 		}
 		if settings.PasswordMinLength != nil {
-			if err := upsertSetting("password_min_length", *settings.PasswordMinLength); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update password_min_length"})
-				return
-			}
+			upsertSetting("password_min_length", *settings.PasswordMinLength)
 		}
 		if settings.SessionTimeoutMinutes != nil {
-			if err := upsertSetting("session_timeout_minutes", *settings.SessionTimeoutMinutes); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update session_timeout_minutes"})
-				return
-			}
+			upsertSetting("session_timeout_minutes", *settings.SessionTimeoutMinutes)
 		}
 		if settings.MaxLoginAttempts != nil {
-			if err := upsertSetting("max_login_attempts", *settings.MaxLoginAttempts); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update max_login_attempts"})
-				return
-			}
+			upsertSetting("max_login_attempts", *settings.MaxLoginAttempts)
 		}
 		if settings.LockoutDurationMinutes != nil {
-			if err := upsertSetting("lockout_duration_minutes", *settings.LockoutDurationMinutes); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update lockout_duration_minutes"})
-				return
-			}
+			upsertSetting("lockout_duration_minutes", *settings.LockoutDurationMinutes)
 		}
 		if settings.PcapMaxUploadSizeMB != nil {
-			if err := upsertSetting("pcap_max_upload_size_mb", *settings.PcapMaxUploadSizeMB); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update pcap_max_upload_size_mb"})
-				return
-			}
+			upsertSetting("pcap_max_upload_size_mb", *settings.PcapMaxUploadSizeMB)
 		}
-
-		// Update UI config if provided
 		if settings.UIConfig != nil {
-			if err := upsertSetting("ui_config", settings.UIConfig); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update ui_config"})
-				return
-			}
+			upsertSetting("ui_config", settings.UIConfig)
 		}
-
 		if settings.LogStorageConfig != nil {
-			if err := upsertSetting("log_storage_config", settings.LogStorageConfig); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update log_storage_config"})
-				return
-			}
+			upsertSetting("log_storage_config", settings.LogStorageConfig)
 		}
 
 		if settings.EmailConfig != nil {
@@ -678,8 +669,17 @@ func updatePlatformSettingsWithStore(store platformSettingsStore) gin.HandlerFun
 				FromEmail:    ec.FromEmail,
 				FromName:     ec.FromName,
 			}
-			if err := upsertSetting("email_config", toStore); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update email_config"})
+			upsertSetting("email_config", toStore)
+		}
+
+		if marshalErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update settings"})
+			return
+		}
+		if len(pending) > 0 {
+			if err := store.UpsertSettings(c.Request.Context(), pending, userID); err != nil {
+				logrus.WithError(err).Error("platform settings: save failed; nothing was written")
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update settings"})
 				return
 			}
 		}

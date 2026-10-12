@@ -193,7 +193,7 @@ func (s *UnifiedInventoryService) buildUnifiedQuery(
 		orderBy += " ASC"
 	}
 
-	combinedQuery += " " + orderBy
+	combinedQuery += " " + orderBy + ", entity_id"
 
 	// Add pagination
 	offset := (filters.Page - 1) * filters.PageSize

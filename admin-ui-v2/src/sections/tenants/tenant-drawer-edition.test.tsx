@@ -12,6 +12,7 @@
 // The Enterprise tenant fixture deliberately still carries `trial_ends_at`, as
 // a row the backend had not normalised would: the drawer must key the trial
 // row on the resolved plan block, never on the raw column.
+import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -36,6 +37,8 @@ vi.mock('./queries', async (orig) => {
     ...real,
     useTenants: () => state.tenants,
     useDeletedTenants: () => none,
+    useTenantsTruncation: () => ({ data: undefined }),
+    useDeletedTenantsTruncation: () => ({ data: undefined }),
     useTenantHealthMap: () => none,
     useTenantStats: () => none,
     useTenantCost: () => none,
@@ -82,7 +85,7 @@ const mspTrialTenant = {
 
 const drawer = (tenant: Tenant) =>
   renderToStaticMarkup(createElement(TenantDrawer, { tenant, onClose: () => {} }));
-const page = () => renderToStaticMarkup(createElement(TenantsPage));
+const page = () => renderToStaticMarkup(createElement(MemoryRouter, null, createElement(TenantsPage)));
 
 /** The tab strip's chips, by their label. */
 const tabChips = (html: string) => Array.from(html.matchAll(/class="op-chip[^"]*">([^<]+)<\/button>/g), (m) => m[1]);

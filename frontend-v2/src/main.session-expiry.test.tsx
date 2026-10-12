@@ -4,7 +4,7 @@
 // bug can still return if main.tsx stops using that matcher when registering the
 // global 401 handler. Import the real entry point with only the browser/root
 // side effects mocked, then drive the handler it registers.
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { SessionExpiryHandlers } from '@vistasecurity/api-contract';
 
 // Each case re-imports the real entry point with `vi.resetModules()`, so these
@@ -83,13 +83,24 @@ async function loadMain(pathname: string, hasSession = true, whoamiStatus = 401)
   return { assign, clearTokens, refresh, fetchStub, handler: registeredHandler };
 }
 
-afterEach(() => {
+function resetStubs() {
   vi.unstubAllGlobals();
   vi.doUnmock('react-dom/client');
   vi.doUnmock('react-hot-toast');
   vi.doUnmock('@vistasecurity/api-contract');
   vi.doUnmock('@vistasecurity/primitives/auth');
-});
+}
+
+// The first `import('./main')` transforms the whole app's module graph (~5s
+// idle, several times that on a loaded runner) and used to be billed to the
+// first case. Pay it once here under a long hook timeout; later cases hit the
+// warm transform cache.
+beforeAll(async () => {
+  await loadMain('/accept-invite');
+  resetStubs();
+}, 120_000);
+
+afterEach(resetStubs);
 
 describe('main session-expiry handler', () => {
   it.each(['/accept-invite', '/reset-password', '/register/complete', '/auth/sso/callback'])(

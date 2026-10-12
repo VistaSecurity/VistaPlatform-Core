@@ -31,7 +31,7 @@ export function GettingStartedPage() {
   const onToggleOrg = (enabled: boolean) =>
     setEnabled.mutate(enabled, {
       onSuccess: () => toast.success(enabled ? 'Onboarding enabled for your team' : 'Onboarding hidden for your team'),
-      onError: () => toast.error('Could not update setting'),
+      onError: (e) => toast.error(e instanceof Error ? e.message : 'Could not update setting'),
     });
 
   const steps = wf.data?.steps ?? [];

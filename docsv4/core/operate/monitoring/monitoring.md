@@ -149,11 +149,8 @@ Create CloudWatch dashboards to visualize:
      grafana/grafana:latest
    ```
 
-2. **Add InfluxDB Data Source**
-   - URL: `http://influxdb:8086`
-   - Database: `metrics`
-   - User: `admin`
-   - Password: `adminpass123` (change in production)
+2. **Add a Prometheus Data Source**
+   - URL: `http://prometheus:9090`
 
 3. **Import Platform Dashboards**
    - Service Health Dashboard

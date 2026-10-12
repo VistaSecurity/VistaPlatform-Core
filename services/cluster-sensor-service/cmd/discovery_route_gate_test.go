@@ -230,20 +230,14 @@ func TestDiscoveryRoutes_OriginIsServerDerived(t *testing.T) {
 			AddRow(false, nil, nil, nil, nil, nil, nil))
 	mock.ExpectCommit()
 
-	// RateLimiter.CheckRateLimit — one tenant-scoped tx for the limit row, one
-	// for the two job counts. Answer generously so the limiter passes.
+	// The tenant's limits row (DiscoveryService reads max_targets_per_job once
+	// the target list is validated). The job counts are made inside the job's
+	// own transaction, which this test never reaches. Answer generously.
 	mock.ExpectBegin()
 	mock.ExpectExec(`set_tenant_context`).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectQuery(`FROM discovery_rate_limits`).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "tenant_id", "scans_per_hour", "concurrent_jobs", "max_targets_per_job", "is_active", "created_at", "updated_at"}).
 			AddRow(uuid.New(), tenantID, 1000, 1000, 1000, true, time.Now(), time.Now()))
-	mock.ExpectCommit()
-	mock.ExpectBegin()
-	mock.ExpectExec(`set_tenant_context`).WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectQuery(`status IN \('queued', 'running'\)`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`INTERVAL '1 hour'`).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectCommit()
 
 	// The enrichment replay lookup, and the transaction it runs in. Reached

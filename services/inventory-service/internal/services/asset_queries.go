@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -314,6 +315,9 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 			&asset.Site, &asset.Region, &asset.Zone,
 		)
 	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("failed to get asset: %w: %w", ErrNotFound, err)
+		}
 		return nil, fmt.Errorf("failed to get asset: %w", err)
 	}
 	asset.RiskAssessedBy = []string(assessedBy)

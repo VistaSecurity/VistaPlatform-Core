@@ -8,6 +8,7 @@ import { PageWrap, queryNote, relTime } from './kit';
 import { useSchedules } from './queries';
 import { ScheduleFormModal, ScheduleDeleteModal } from './schedule-modals';
 import { describeCron } from './schedule-cadence';
+import { unwrap } from '../../lib/api-result';
 
 type Schedule = deviceInterrogationComponents['schemas']['InterrogationSchedule'];
 
@@ -37,8 +38,7 @@ export function ScansPage() {
   const toggle = useMutation({
     mutationFn: async ({ id, enable }: { id: string; enable: boolean }) => {
       const path = enable ? '/schedules/{id}/enable' : '/schedules/{id}/disable';
-      const { data, error } = await clients.devices.POST(path, { params: { path: { id } } });
-      if (error || !data) throw new Error(`Failed to ${enable ? 'enable' : 'disable'} schedule`);
+      const data = unwrap(await clients.devices.POST(path, { params: { path: { id } } }), `Failed to ${enable ? 'enable' : 'disable'} schedule`, { requireData: true });
       return data;
     },
     onSettled: () => qc.invalidateQueries({ queryKey: ['discovery', 'schedules'] }),
@@ -48,8 +48,7 @@ export function ScansPage() {
   // in-flight id so only that card's button shows the pending state.
   const trigger = useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await clients.devices.POST('/schedules/{id}/trigger', { params: { path: { id } } });
-      if (error || !data) throw new Error('Failed to trigger schedule');
+      const data = unwrap(await clients.devices.POST('/schedules/{id}/trigger', { params: { path: { id } } }), 'Failed to trigger schedule', { requireData: true });
       return data;
     },
     onSettled: () => qc.invalidateQueries({ queryKey: ['discovery', 'schedules'] }),

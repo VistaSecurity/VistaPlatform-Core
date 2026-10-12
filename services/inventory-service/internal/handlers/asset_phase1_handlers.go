@@ -217,14 +217,20 @@ func (h *AssetPhase1Handler) ListMergeProposals(c *gin.Context) {
 	}
 	limit, offset := services.MergeProposalPageSize, 0
 	if v := c.Query("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			limit = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit: must be an integer"})
+			return
 		}
+		limit = n
 	}
 	if v := c.Query("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			offset = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid offset: must be an integer"})
+			return
 		}
+		offset = n
 	}
 	proposals, total, err := h.proposals.ListPending(c.Request.Context(), tenantID, limit, offset)
 	if err != nil {
@@ -258,9 +264,12 @@ func (h *AssetPhase1Handler) ListAutoAcceptedMerges(c *gin.Context) {
 	}
 	limit := services.MergeProposalPageSize
 	if v := c.Query("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			limit = n
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit: must be an integer"})
+			return
 		}
+		limit = n
 	}
 	merges, err := h.proposals.ListAutoAccepted(c.Request.Context(), tenantID, limit)
 	if err != nil {

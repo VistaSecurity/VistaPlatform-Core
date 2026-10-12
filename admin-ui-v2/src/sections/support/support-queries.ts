@@ -2,13 +2,15 @@
 // goes through the generated typed client (@vistasecurity/api-contract); no
 // hand-rolled fetch/axios. Platform CSRF is automatic (see lib/clients.ts).
 //   • Tenant Health  → clients.tenantHealth  (read)
-//   • Job Repair     → clients.devices       (list + retry/cancel)
+//   • Job Repair     → clients.devices       (retry/cancel; the list is jobs/queries.ts)
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   tenantHealthServiceComponents,
   deviceInterrogationComponents,
 } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { jobsKeys } from '../jobs/queries';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export type TenantHealthSummary = tenantHealthServiceComponents['schemas']['TenantHealthSummary'];
 export type TenantHealth = tenantHealthServiceComponents['schemas']['TenantHealth'];
@@ -23,18 +25,8 @@ export function errMsg(e: unknown, fallback = 'Action failed'): string {
 
 /* --------------------------- Tenant Health ------------------------------- */
 
-/** Cross-tenant health board — GET /tenants (limit 200). */
-export function useTenantHealthList() {
-  return useQuery({
-    queryKey: ['platform', 'support', 'tenant-health'],
-    queryFn: async (): Promise<TenantHealthSummary[]> => {
-      const { data, error } = await clients.tenantHealth.GET('/tenants', { params: { query: { limit: 200 } } });
-      if (error || !data) throw new Error('Failed to load tenant health');
-      return data.tenants ?? [];
-    },
-    staleTime: 60 * 1000,
-  });
-}
+/** Cross-tenant health board — the single shared query lives in the tenants section. */
+export { useTenantHealthList } from '../tenants/queries';
 
 /** Full health record for one tenant — GET /tenants/{tenantId}. Drawer-only. */
 export function useTenantHealthDetail(id: string | null) {
@@ -68,34 +60,19 @@ export function useTenantHealthAlerts(id: string | null) {
 
 /* ------------------------------ Job Repair ------------------------------- */
 
-/** Platform-wide interrogation jobs — GET /admin/jobs (page_size 100). */
-export function useAdminJobs() {
-  return useQuery({
-    queryKey: ['platform', 'support', 'jobs'],
-    queryFn: async (): Promise<AdminInterrogationJob[]> => {
-      const { data, error } = await clients.devices.GET('/admin/jobs', { params: { query: { page_size: 100 } } });
-      if (error || !data) throw new Error('Failed to load jobs');
-      return data.jobs ?? [];
-    },
-    staleTime: 30 * 1000,
-  });
-}
-
 /** Retry (failed|cancelled) / cancel (pending|assigned|in_progress) a stuck job. */
 export function useJobRepairMutations() {
   const qc = useQueryClient();
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['platform', 'support', 'jobs'] });
+  const invalidate = () => qc.invalidateQueries({ queryKey: jobsKeys.all });
   const retry = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.devices.POST('/admin/jobs/{id}/retry', { params: { path: { id } } });
-      if (error) throw new Error('Retry failed');
+      unwrap(await clients.devices.POST('/admin/jobs/{id}/retry', { params: { path: { id } } }), 'Retry failed');
     },
     onSuccess: invalidate,
   });
   const cancel = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.devices.POST('/admin/jobs/{id}/cancel', { params: { path: { id } } });
-      if (error) throw new Error('Cancel failed');
+      unwrap(await clients.devices.POST('/admin/jobs/{id}/cancel', { params: { path: { id } } }), 'Cancel failed');
     },
     onSuccess: invalidate,
   });

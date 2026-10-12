@@ -150,6 +150,9 @@ func (i *CreateTicketInput) ApplyDefaults() {
 // Validate checks every closed-vocabulary field on a create.
 // It does NOT default anything — call ApplyDefaults first.
 func (i *CreateTicketInput) Validate() error {
+	if err := i.validateShape(); err != nil {
+		return err
+	}
 	if err := ValidateTicketCategory(i.Category); err != nil {
 		return err
 	}
@@ -173,6 +176,9 @@ func (i *CreateTicketInput) Validate() error {
 // pointer means "not being changed" and is skipped — validating an absent
 // field would reject a request that changes nothing about it.
 func (i *UpdateTicketInput) Validate() error {
+	if err := i.validateShape(); err != nil {
+		return err
+	}
 	if i.Category != nil {
 		if err := ValidateTicketCategory(*i.Category); err != nil {
 			return err

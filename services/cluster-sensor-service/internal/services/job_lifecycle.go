@@ -20,6 +20,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -29,6 +30,9 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
+	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
 // terminalJobStatuses are sticky. A late "completed" from a scan that outlived
@@ -130,8 +134,8 @@ func (s *DiscoveryService) CancelJob(jobID string) error {
 		WHERE job_id = $1 AND status = 'pending'`, jobID); err != nil {
 		return fmt.Errorf("job %s cancelled, but its unstarted hosts could not be marked: %w", jobID, err)
 	}
-	// A scan-plan job on a tenant sensor: tell the sensor ( WP2b).
-	if err := s.revokeSensorPlanDispatch(jobID); err != nil {
+	// A job on a tenant sensor, of either shape: withdraw or cancel its command.
+	if err := s.revokeSensorDispatch(jobID); err != nil {
 		return fmt.Errorf("job %s cancelled, but its sensor could not be told: %w", jobID, err)
 	}
 	return nil
@@ -162,6 +166,12 @@ func (s *DiscoveryService) RequeueJobForRetry(jobID string) error {
 		_ = tx.Rollback()
 		return s.jobStatusRefused(jobID, "queued")
 	}
+	// A person's protocols x ports scan is judged again before it is queued:
+	// a retry days later must not run targets the tenant has since withdrawn.
+	// (Dispatch judges once more and drops a target that went in between.)
+	if err := s.reauthorizeLegacyRetry(tx, jobID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`
 		UPDATE discovery_targets
 		SET status = 'pending', started_at = NULL, completed_at = NULL, error_message = NULL, updated_at = NOW()
@@ -175,6 +185,67 @@ func (s *DiscoveryService) RequeueJobForRetry(jobID string) error {
 		return fmt.Errorf("failed to reset job hosts: %w", err)
 	}
 	return tx.Commit()
+}
+
+// reauthorizeLegacyRetry refuses a Retry whose every target is no longer
+// authorized, with a *dispatchguard.RefusedTargetsError that names them. It
+// applies only to the legacy protocols x ports shape on a tenant sensor, the
+// one shape not re-judged unit by unit. tx is the retry's own transaction, so
+// the refusal rolls the requeue back and the job stays failed.
+func (s *DiscoveryService) reauthorizeLegacyRetry(tx *sqlx.Tx, jobID string) error {
+	var job struct {
+		TenantID string  `db:"tenant_id"`
+		Mode     string  `db:"execution_mode"`
+		Sensor   *string `db:"assigned_sensor_id"`
+		Planned  bool    `db:"planned"`
+		Options  []byte  `db:"options"`
+	}
+	if err := tx.Get(&job, `
+		SELECT tenant_id::text AS tenant_id, execution_mode, assigned_sensor_id::text AS assigned_sensor_id,
+		       COALESCE(metadata ? $2, false) AS planned, COALESCE(metadata -> 'options', '{}'::jsonb) AS options
+		FROM discovery_jobs WHERE id = $1`, jobID, shareddisc.ScanPlanMetadataKey); err != nil {
+		return fmt.Errorf("failed to read job for retry: %w", err)
+	}
+	if job.Planned || !isSensorExecutionMode(job.Mode) {
+		return nil
+	}
+	payload := sensordispatch.Payload{JobID: jobID, TenantID: job.TenantID}
+	if err := json.Unmarshal(job.Options, &payload.Options); err != nil {
+		return fmt.Errorf("failed to read job options for retry: %w", err)
+	}
+	if !dispatchguard.IsLegacyManualPayload(payload) {
+		return nil
+	}
+	if err := tx.Select(&payload.Targets, `SELECT DISTINCT input FROM discovery_targets WHERE job_id = $1 AND status <> 'completed'`, jobID); err != nil {
+		return fmt.Errorf("failed to read job targets for retry: %w", err)
+	}
+	if len(payload.Targets) == 0 {
+		return nil
+	}
+	sensor := uuid.Nil
+	if job.Sensor != nil {
+		sensor, _ = uuid.Parse(*job.Sensor)
+	}
+	kept, refused, err := dispatchguard.AuthorizeLegacyManualTargets(tx, payload, sensor)
+	if err != nil {
+		return fmt.Errorf("failed to re-authorize job targets for retry: %w", err)
+	}
+	if len(kept) == 0 {
+		return &dispatchguard.RefusedTargetsError{Targets: refused}
+	}
+	return nil
+}
+
+// setJobNote records a sentence about how the job ended, on metadata.note, for
+// the job's detail and listing to show.
+func (s *DiscoveryService) setJobNote(jobID, note string) error {
+	// RLS: cross-tenant — bypass role, keyed by job id, as UpdateJobStatus.
+	if _, err := s.bypassDB.Exec(`
+		UPDATE discovery_jobs SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{note}', to_jsonb($2::text)), updated_at = NOW()
+		WHERE id = $1`, jobID, note); err != nil {
+		return fmt.Errorf("failed to record the job's note: %w", err)
+	}
+	return nil
 }
 
 // JobTargetCounts reads a job's targets by status, for honest progress.

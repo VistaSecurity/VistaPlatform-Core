@@ -2,8 +2,11 @@ package devices
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/api"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/audit"
@@ -25,6 +28,16 @@ type resultSubmitter interface {
 	SubmitResult(result *models.JobResult) error
 }
 
+// DefaultJobTimeout bounds one job when the payload does not carry its own
+// timeout_seconds. A device that never answers (a TCP black hole, an SSH stall)
+// would otherwise hold the agent's single poll loop forever while the heartbeat
+// goroutine kept reporting it healthy.
+const DefaultJobTimeout = 5 * time.Minute
+
+// maxJobTimeout caps a payload-supplied timeout_seconds so a bad value cannot
+// switch the bound off.
+const maxJobTimeout = time.Hour
+
 // JobExecutor executes device interrogation jobs. The vendor/protocol logic
 // lives in the shared deviceinterrogation core; this executor is a thin agent
 // wrapper that decrypts credentials locally, runs the shared interrogator, and
@@ -34,12 +47,15 @@ type JobExecutor struct {
 	config      *config.Config
 	registry    *di.Registry
 	auditLogger *audit.AuditLogger
+	// jobTimeout is the per-job bound when the job names none; zero means
+	// DefaultJobTimeout.
+	jobTimeout time.Duration
 }
 
 // NewJobExecutor creates a new job executor.
 func NewJobExecutor(apiClient *api.OutboundClient, cfg *config.Config) *JobExecutor {
 	return &JobExecutor{
-		submitter: apiClient,
+		submitter: retryingSubmitter(apiClient),
 		config:    cfg,
 		registry:  di.NewRegistry(),
 	}
@@ -48,33 +64,115 @@ func NewJobExecutor(apiClient *api.OutboundClient, cfg *config.Config) *JobExecu
 // NewJobExecutorWithAudit creates a new job executor with audit logging enabled.
 func NewJobExecutorWithAudit(apiClient *api.OutboundClient, cfg *config.Config, auditLogger *audit.AuditLogger) *JobExecutor {
 	return &JobExecutor{
-		submitter:   apiClient,
+		submitter:   retryingSubmitter(apiClient),
 		config:      cfg,
 		registry:    di.NewRegistry(),
 		auditLogger: auditLogger,
 	}
 }
 
-// Execute executes a device interrogation job.
-func (e *JobExecutor) Execute(job *models.Job) error {
+// retryingSubmitter wraps the client so a network blip on a finished job's
+// result is retried rather than dropping the interrogation.
+func retryingSubmitter(c *api.OutboundClient) resultSubmitter {
+	return &api.RetryingSubmitter{Client: c, Policy: api.DefaultSubmitRetry}
+}
+
+// timeoutFor resolves the bound for one job: the payload's timeout_seconds when
+// it carries a positive one (capped at maxJobTimeout), else the executor's
+// default.
+func (e *JobExecutor) timeoutFor(job *models.Job) time.Duration {
+	if secs, ok := job.Parameters["timeout_seconds"].(float64); ok && secs > 0 {
+		d := time.Duration(secs * float64(time.Second))
+		if d > maxJobTimeout || d <= 0 {
+			d = maxJobTimeout
+		}
+		return d
+	}
+	if e.jobTimeout > 0 {
+		return e.jobTimeout
+	}
+	return DefaultJobTimeout
+}
+
+// Execute executes a job under a per-job timeout and converts a panic in any
+// handler into a failed job result, so one bad interrogator cannot take the
+// agent down. ctx is the agent's lifetime; the job's own deadline is derived
+// from it.
+func (e *JobExecutor) Execute(ctx context.Context, job *models.Job) (err error) {
+	timeout := e.timeoutFor(job)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	defer func() {
+		if r := recover(); r != nil {
+			// The panic text can embed whatever the handler was holding, so it
+			// goes through the same redaction as any other failure.
+			err = e.submitFailure(job, fmt.Sprintf("Job panicked: %v", r))
+		}
+	}()
+
 	switch job.Type {
 	case "device_interrogation":
-		return e.executeDeviceInterrogation(job)
+		return e.executeDeviceInterrogation(ctx, job, timeout)
 	case "cloud_discovery":
 		return e.executeCloudDiscovery(job)
 	case JobTypeHostInventory:
-		return e.executeHostInventory(job)
+		return e.executeHostInventory(ctx, job)
 	case di.JobTypeDeviceDiscovery:
-		return e.executeDeviceDiscovery(job)
+		return e.executeDeviceDiscovery(ctx, job)
 	default:
 		return fmt.Errorf("unknown job type: %s", job.Type)
 	}
 }
 
+// ReportError reports a job that could not be run or reported, redacted and
+// with the same retries as a result.
+func (e *JobExecutor) ReportError(jobID uuid.UUID, msg string) error {
+	return e.submitter.SubmitResult(&models.JobResult{
+		JobID:       jobID,
+		Success:     false,
+		Error:       redact.Text(msg),
+		CompletedAt: time.Now(),
+	})
+}
+
+// interrogateBounded runs the interrogation so that ctx's deadline frees the
+// caller even when the interrogator ignores its context (an SSH stall inside a
+// library call). The abandoned goroutine finishes or leaks on its own; what
+// matters is that the poll loop is not held. A panic is carried back to the
+// caller so Execute's recovery sees it.
+func interrogateBounded(ctx context.Context, i di.DeviceInterrogator, device di.DeviceInfo, creds di.Credentials) (*di.InterrogateResult, error) {
+	type outcome struct {
+		res      *di.InterrogateResult
+		err      error
+		panicVal any
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		var o outcome
+		defer func() {
+			if r := recover(); r != nil {
+				o = outcome{panicVal: r}
+			}
+			done <- o
+		}()
+		o.res, o.err = i.Interrogate(ctx, device, creds)
+	}()
+	select {
+	case o := <-done:
+		if o.panicVal != nil {
+			panic(o.panicVal)
+		}
+		return o.res, o.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // executeDeviceInterrogation executes a device interrogation job.
-func (e *JobExecutor) executeDeviceInterrogation(job *models.Job) error {
+func (e *JobExecutor) executeDeviceInterrogation(ctx context.Context, job *models.Job, timeout time.Duration) error {
 	// Decrypt credentials (in-memory only)
-	decryptedCreds, err := security.DecryptCredentials(job.Credentials, job.ID.String(), e.config.RegistrationKey)
+	decryptedCreds, err := security.DecryptCredentials(job.Credentials, job.ID.String(), e.config.CredentialSecrets()...)
 	if err != nil {
 		return e.submitFailure(job, fmt.Sprintf("Failed to decrypt credentials: %v", err))
 	}
@@ -99,9 +197,11 @@ func (e *JobExecutor) executeDeviceInterrogation(job *models.Job) error {
 	device := buildDeviceInfo(deviceType, job.Parameters)
 	creds := buildCredentials(decryptedCreds, job.Parameters)
 
-	ctx := context.Background()
-	result, err := interrogator.Interrogate(ctx, device, creds)
+	result, err := interrogateBounded(ctx, interrogator, device, creds)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = fmt.Errorf("timed out after %s", timeout)
+		}
 		if e.auditLogger != nil {
 			e.auditLogger.LogInterrogation(job.ID.String(), device.IPAddress, deviceType, "failure",
 				map[string]interface{}{"job_type": job.Type}, err)
@@ -155,8 +255,8 @@ const deviceDiscoveryTimeout = 45 * time.Second
 // vendor collector's own guarded client, sanitized by the Registry. What goes
 // home is the IdentificationReport allowlist or a typed failure code — never
 // the vendor's answer, and never free text a device wrote.
-func (e *JobExecutor) executeDeviceDiscovery(job *models.Job) error {
-	decryptedCreds, err := security.DecryptCredentials(job.Credentials, job.ID.String(), e.config.RegistrationKey)
+func (e *JobExecutor) executeDeviceDiscovery(ctx context.Context, job *models.Job) error {
+	decryptedCreds, err := security.DecryptCredentials(job.Credentials, job.ID.String(), e.config.CredentialSecrets()...)
 	if err != nil {
 		return e.submitDiscoveryFailure(job, di.IdentifyFailed)
 	}
@@ -172,7 +272,7 @@ func (e *JobExecutor) executeDeviceDiscovery(job *models.Job) error {
 	}
 	creds := buildCredentials(decryptedCreds, job.Parameters)
 
-	ctx, cancel := context.WithTimeout(context.Background(), deviceDiscoveryTimeout)
+	ctx, cancel := context.WithTimeout(ctx, deviceDiscoveryTimeout)
 	defer cancel()
 	identification, err := e.registry.Identify(ctx, device, creds)
 	security.ClearCredentials(decryptedCreds)

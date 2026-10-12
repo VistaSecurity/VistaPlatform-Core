@@ -24,6 +24,10 @@ import (
 // without requiring inbound firewall rules. The sensor initiates the connection.
 func (h *Handler) Heartbeat(c *gin.Context) {
 	sensorID := c.Param("sensor_id")
+	if _, err := uuid.Parse(sensorID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sensor ID"})
+		return
+	}
 
 	var health models.SensorHealth
 	if err := c.ShouldBindJSON(&health); err != nil {
@@ -158,6 +162,10 @@ func (h *Handler) Heartbeat(c *gin.Context) {
 // requiring the control plane to initiate connections.
 func (h *Handler) PollCommands(c *gin.Context) {
 	sensorID := c.Param("sensor_id")
+	if _, err := uuid.Parse(sensorID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sensor ID"})
+		return
+	}
 
 	// Get pending commands for this sensor
 	commands, err := h.sensorService.GetPendingCommands(sensorID)
@@ -205,6 +213,17 @@ func (h *Handler) AcknowledgeCommand(c *gin.Context) {
 		return
 	}
 
+	// A malformed id would reach Postgres as a uuid cast error and surface as a
+	// 500, which the sensor retries forever. Reject it as the 400 it is.
+	if _, err := uuid.Parse(commandID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid command ID"})
+		return
+	}
+	if _, err := uuid.Parse(sensorID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sensor ID"})
+		return
+	}
+
 	// Validate sensor ID
 	if response.SensorID.String() != sensorID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Sensor ID mismatch"})
@@ -229,6 +248,10 @@ func (h *Handler) AcknowledgeCommand(c *gin.Context) {
 // GetWebhookConfig returns webhook configuration for sensors
 func (h *Handler) GetWebhookConfig(c *gin.Context) {
 	sensorID := c.Param("sensor_id")
+	if _, err := uuid.Parse(sensorID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sensor ID"})
+		return
+	}
 
 	// Load webhook configuration from database
 	webhookConfig, err := h.sensorService.GetWebhookConfig(sensorID)
@@ -240,39 +263,6 @@ func (h *Handler) GetWebhookConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, webhookConfig)
-}
-
-// SubmitAirGappedExport handles air-gapped export submissions
-func (h *Handler) SubmitAirGappedExport(c *gin.Context) {
-	sensorID := c.Param("sensor_id")
-
-	var export models.AirGappedExport
-	if err := c.ShouldBindJSON(&export); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
-		return
-	}
-
-	// Validate sensor ID
-	if export.SensorID.String() != sensorID {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Sensor ID mismatch"})
-		return
-	}
-
-	// Store air-gapped export in database
-	err := h.sensorService.StoreAirGappedExport(&export)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to store air-gapped export",
-		})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"status":    "success",
-		"message":   "Air-gapped export received",
-		"export_id": export.ExportID,
-		"records":   len(export.Data),
-	})
 }
 
 const (
@@ -357,6 +347,10 @@ func (h *Handler) SubmitDiscoveries(c *gin.Context) {
 // ReportHealth handles legacy health reports from sensors
 func (h *Handler) ReportHealth(c *gin.Context) {
 	sensorID := c.Param("sensor_id")
+	if _, err := uuid.Parse(sensorID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sensor ID"})
+		return
+	}
 
 	var health models.SensorHealth
 	if err := c.ShouldBindJSON(&health); err != nil {
@@ -387,6 +381,10 @@ func (h *Handler) ReportHealth(c *gin.Context) {
 // GetSensorConfig returns configuration for a sensor (legacy endpoint)
 func (h *Handler) GetSensorConfig(c *gin.Context) {
 	sensorID := c.Param("sensor_id")
+	if _, err := uuid.Parse(sensorID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid sensor ID"})
+		return
+	}
 
 	// Load sensor-specific configuration from database
 	config, err := h.sensorService.GetSensorConfig(sensorID)

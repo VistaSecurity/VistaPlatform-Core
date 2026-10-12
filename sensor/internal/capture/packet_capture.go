@@ -74,10 +74,12 @@ type PacketCapture struct {
 	// hostObs decodes ARP/DHCP/mDNS/NetBIOS/DNS/LLDP/CDP into host
 	// observations on its own goroutine. nil when the feature is off, which
 	// is the only condition the capture path checks — see Offer.
-	hostObs     *hostObsPipeline
-	assemblerMu sync.Mutex // protects assemblers (not concurrent-safe)
-	packetCount int64      // atomic counter
-	dropCount   int64      // atomic counter
+	hostObs      *hostObsPipeline
+	assemblerMu  sync.Mutex // protects assemblers (not concurrent-safe)
+	failedMu     sync.Mutex
+	failedIfaces []string // interfaces that failed to open, failed their BPF filter, or lost their packet source
+	packetCount  int64    // atomic counter
+	dropCount    int64    // atomic counter
 }
 
 // NewPacketCapture creates a new packet capture instance
@@ -255,8 +257,13 @@ func (pc *PacketCapture) Start() error {
 	for _, iface := range pc.interfaces {
 		if err := pc.startInterfaceCapture(iface); err != nil {
 			log.Printf("Failed to start capture on interface %s: %v", iface, err)
+			pc.noteFailedInterface(iface)
 			continue
 		}
+	}
+	if failed := pc.FailedInterfaces(); len(failed) > 0 && len(pc.handles) > 0 {
+		log.Printf("WARNING: capture is DEGRADED: %d of %d configured interfaces failed to start and are not being monitored: %v",
+			len(failed), len(pc.interfaces), failed)
 	}
 
 	if len(pc.handles) == 0 {
@@ -300,35 +307,67 @@ func (pc *PacketCapture) Start() error {
 			case <-pc.ctx.Done():
 				return
 			case <-ticker.C:
-				pc.streamFactory.FlushOldSessions(30 * time.Second)
-				pc.sshStreamFactory.FlushOldSessions(30 * time.Second)
-				if pc.starttlsFactory != nil {
-					pc.starttlsFactory.FlushOldSessions(30 * time.Second)
-				}
-				if pc.modbusFactory != nil {
-					pc.modbusFactory.FlushOldSessions(30 * time.Second)
-				}
-				if pc.mmsFactory != nil {
-					pc.mmsFactory.FlushOldSessions(30 * time.Second)
-				}
-				if pc.dnp3Factory != nil {
-					pc.dnp3Factory.FlushOldSessions(30 * time.Second)
-				}
-				if pc.opcuaFactory != nil {
-					pc.opcuaFactory.FlushOldSessions(30 * time.Second)
-				}
-				if pc.enipFactory != nil {
-					pc.enipFactory.FlushOldSessions(30 * time.Second)
-				}
-				if pc.hartipFactory != nil {
-					pc.hartipFactory.FlushOldSessions(30 * time.Second)
-				}
+				pc.flushStale(assemblerMaxIdle)
 			}
 		}
 	}()
 
 	log.Printf("Packet capture started on %d interfaces with %d workers", len(pc.handles), workerCount)
 	return nil
+}
+
+// assemblerMaxIdle is how long a TCP flow may sit idle before its assembler
+// state and its factory session are evicted.
+const assemblerMaxIdle = 30 * time.Second
+
+// flushStale evicts idle state everywhere it accumulates. Each factory's
+// FlushOldSessions only trims its own session map; a flow that never sees a
+// FIN or RST stays in the tcpassembly.Assembler's connection table until
+// FlushOlderThan closes it, so both have to run. The assemblers are not safe
+// for concurrent use, hence assemblerMu.
+func (pc *PacketCapture) flushStale(maxAge time.Duration) {
+	cutoff := time.Now().Add(-maxAge)
+	pc.assemblerMu.Lock()
+	for _, a := range []*tcpassembly.Assembler{
+		pc.assembler, pc.sshAssembler, pc.starttlsAssembler, pc.smbAssembler,
+		pc.krbTCPAssembler, pc.modbusAssembler, pc.mmsAssembler, pc.dnp3Assembler,
+		pc.opcuaAssembler, pc.enipAssembler, pc.hartipAssembler,
+	} {
+		if a != nil {
+			a.FlushOlderThan(cutoff)
+		}
+	}
+	pc.assemblerMu.Unlock()
+
+	pc.streamFactory.FlushOldSessions(maxAge)
+	pc.sshStreamFactory.FlushOldSessions(maxAge)
+	if pc.starttlsFactory != nil {
+		pc.starttlsFactory.FlushOldSessions(maxAge)
+	}
+	if pc.smbFactory != nil {
+		pc.smbFactory.FlushOldSessions(maxAge)
+	}
+	if pc.kerberosTCPFactory != nil {
+		pc.kerberosTCPFactory.FlushOldSessions(maxAge)
+	}
+	if pc.modbusFactory != nil {
+		pc.modbusFactory.FlushOldSessions(maxAge)
+	}
+	if pc.mmsFactory != nil {
+		pc.mmsFactory.FlushOldSessions(maxAge)
+	}
+	if pc.dnp3Factory != nil {
+		pc.dnp3Factory.FlushOldSessions(maxAge)
+	}
+	if pc.opcuaFactory != nil {
+		pc.opcuaFactory.FlushOldSessions(maxAge)
+	}
+	if pc.enipFactory != nil {
+		pc.enipFactory.FlushOldSessions(maxAge)
+	}
+	if pc.hartipFactory != nil {
+		pc.hartipFactory.FlushOldSessions(maxAge)
+	}
 }
 
 // Stop stops packet capture
@@ -393,6 +432,27 @@ func (pc *PacketCapture) GetDiscoveries() <-chan *models.CryptoDiscovery {
 // pipeline as passive discoveries.
 func (pc *PacketCapture) GetDiscoveriesWritable() chan<- *models.CryptoDiscovery {
 	return pc.discoveries
+}
+
+// noteFailedInterface records an interface that is not being captured.
+func (pc *PacketCapture) noteFailedInterface(iface string) {
+	pc.failedMu.Lock()
+	defer pc.failedMu.Unlock()
+	for _, f := range pc.failedIfaces {
+		if f == iface {
+			return
+		}
+	}
+	pc.failedIfaces = append(pc.failedIfaces, iface)
+}
+
+// FailedInterfaces lists the configured interfaces that are not being
+// captured: they failed to open, rejected the BPF filter, or their packet
+// source closed at run time.
+func (pc *PacketCapture) FailedInterfaces() []string {
+	pc.failedMu.Lock()
+	defer pc.failedMu.Unlock()
+	return append([]string(nil), pc.failedIfaces...)
 }
 
 // GetErrors returns the errors channel
@@ -578,37 +638,11 @@ func (pc *PacketCapture) startInterfaceCapture(iface string) error {
 		return fmt.Errorf("failed to find network interfaces: %v", err)
 	}
 
-	var found bool
-	var deviceName string
-	for _, dev := range interfaces {
-		if dev.Name == iface {
-			found = true
-			deviceName = dev.Name
-			break
-		}
-		// Also check description (for Windows friendly name matching)
-		if strings.Contains(strings.ToLower(dev.Description), strings.ToLower(iface)) ||
-			strings.Contains(strings.ToLower(iface), strings.ToLower(dev.Description)) {
-			found = true
-			deviceName = dev.Name
-			break
-		}
+	deviceName, err := resolveCaptureDevice(iface, interfaces)
+	if err != nil {
+		return err
 	}
 
-	if !found {
-		// Provide helpful error with available interfaces
-		availableNames := make([]string, 0, len(interfaces))
-		for _, dev := range interfaces {
-			if dev.Description != "" {
-				availableNames = append(availableNames, fmt.Sprintf("%s (%s)", dev.Name, dev.Description))
-			} else {
-				availableNames = append(availableNames, dev.Name)
-			}
-		}
-		return fmt.Errorf("interface %s not found. Available interfaces: %v", iface, availableNames)
-	}
-
-	// Use the resolved device name
 	iface = deviceName
 
 	// Open interface for capture
@@ -619,7 +653,10 @@ func (pc *PacketCapture) startInterfaceCapture(iface string) error {
 
 	filter := buildBPFFilter(pc.config)
 	if err := handle.SetBPFFilter(filter); err != nil {
-		log.Printf("Warning: Failed to set BPF filter on %s: %v", iface, err)
+		// Capturing unfiltered would flood the workers with traffic no decoder
+		// wants and silently change what the sensor monitors; fail the interface.
+		handle.Close()
+		return fmt.Errorf("failed to set BPF filter on %s: %v", iface, err)
 	}
 
 	pc.handles = append(pc.handles, handle)
@@ -636,12 +673,31 @@ func (pc *PacketCapture) captureInterface(handle *pcap.Handle, iface string) {
 	defer pc.wg.Done()
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+	pc.pumpPackets(packetSource.Packets(), iface)
+}
 
+// pumpPackets feeds the worker pool from a packet channel until the context is
+// cancelled. gopacket closes the channel when the handle fails (read error, NIC
+// down); receiving from a closed channel returns nil forever, so the previous
+// "nil -> continue" spun at 100% CPU and reported nothing. A closed channel
+// is now reported on pc.errors and ends this interface's capture.
+func (pc *PacketCapture) pumpPackets(packets <-chan gopacket.Packet, iface string) {
 	for {
 		select {
 		case <-pc.ctx.Done():
 			return
-		case packet := <-packetSource.Packets():
+		case packet, ok := <-packets:
+			if !ok {
+				if pc.ctx.Err() != nil {
+					return // shutting down: Stop closed the handle
+				}
+				pc.noteFailedInterface(iface)
+				select {
+				case pc.errors <- fmt.Errorf("packet source for interface %s closed unexpectedly (read error or interface down); capture on it has stopped", iface):
+				case <-pc.ctx.Done():
+				}
+				return
+			}
 			if packet == nil {
 				continue
 			}
@@ -655,6 +711,41 @@ func (pc *PacketCapture) captureInterface(handle *pcap.Handle, iface string) {
 			}
 		}
 	}
+}
+
+// resolveCaptureDevice maps a configured interface name to a pcap device name.
+// An exact device Name wins across ALL devices before any description match is
+// tried: Linux devices mostly have an empty Description, and
+// strings.Contains(x, "") is true, so a single pass let the first
+// description-less device shadow an exact match further down the list. The
+// description fallback (Windows friendly names) ignores empty descriptions.
+func resolveCaptureDevice(iface string, devs []pcap.Interface) (string, error) {
+	for _, dev := range devs {
+		if dev.Name == iface {
+			return dev.Name, nil
+		}
+	}
+	want := strings.ToLower(iface)
+	if want != "" {
+		for _, dev := range devs {
+			desc := strings.ToLower(dev.Description)
+			if desc == "" {
+				continue
+			}
+			if strings.Contains(desc, want) || strings.Contains(want, desc) {
+				return dev.Name, nil
+			}
+		}
+	}
+	available := make([]string, 0, len(devs))
+	for _, dev := range devs {
+		if dev.Description != "" {
+			available = append(available, fmt.Sprintf("%s (%s)", dev.Name, dev.Description))
+		} else {
+			available = append(available, dev.Name)
+		}
+	}
+	return "", fmt.Errorf("interface %s not found. Available interfaces: %v", iface, available)
 }
 
 // runWorker is a fixed worker goroutine that processes packets from the bounded pool.

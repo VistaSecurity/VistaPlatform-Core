@@ -3,8 +3,6 @@ export POSTGRES_PASSWORD ?= crypto_pass_parity
 export REDIS_PASSWORD ?= redis_pass_parity
 export JWT_SECRET ?= parity-dev-secret-key
 export NATS_PASSWORD ?= nats_pass_parity
-export INFLUXDB_PASSWORD ?= adminpass_parity
-export INFLUXDB_TOKEN ?= dev-token-1234567890
 export NATS_USER ?= nats_user
 export POSTGRES_USER ?= crypto_user
 export POSTGRES_DB ?= crypto_inventory
@@ -318,6 +316,14 @@ GO_BUILDER_IMAGE ?= golang:1.26-alpine
 RUNTIME_IMAGE    ?= alpine:3.24.2
 BASE_IMAGE_ARGS  := --build-arg GO_BUILDER_IMAGE=$(GO_BUILDER_IMAGE) --build-arg RUNTIME_IMAGE=$(RUNTIME_IMAGE)
 
+# The frontend Dockerfiles default NODE_BUILDER to dhi.io, which needs a login
+# (a plain `docker build` 401s without one), so every frontend image build passes
+# the DHI mirror explicitly, exactly as the Go builds pass BASE_IMAGE_ARGS.
+# Public build: make build-dist NODE_BUILDER=node:24-alpine
+# `make frontend-node-builder-test` fails if a frontend build target omits it.
+NODE_BUILDER     ?= node:24-alpine
+FRONTEND_BUILD_ARGS := --build-arg NODE_BUILDER=$(NODE_BUILDER)
+
 LICENSED_TAG ?= licensed-dev
 DIST_TAG ?= dist-dev
 LICENSED_REGISTRY ?= $(IMAGE_REGISTRY)
@@ -534,14 +540,14 @@ build-dist-web-ui: ## Tenant UI (Vista) — built from frontend-v2, KEEPS the we
 	# the REPO ROOT context (needs api/ + packages/primitives). The image is still
 	# tagged web-ui:<tag> so the chart/registry/release-promote surface is unchanged
 	# — only the bits inside the web-ui image swap from the old web-ui/ to frontend-v2.
-	docker build -f frontend-v2/Dockerfile.prod \
+	docker build $(FRONTEND_BUILD_ARGS) -f frontend-v2/Dockerfile.prod \
 		--build-arg VITE_APP_VERSION=$(DIST_TAG) \
 		--build-arg VITE_GIT_SHA=$$(git rev-parse --short HEAD) \
 		--build-arg VITE_BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/web-ui:$(DIST_TAG) .
 
 build-dist-admin-ui: ## Admin console (VISTA Operations) — built from admin-ui-v2/, KEEPS the admin-ui image identity (build-and-swap, ADR-0013; mirrors web-ui). Dockerfile.prod, REPO-ROOT context (npm-workspace member: needs api/ + packages/). No license code.
-	docker build -f admin-ui-v2/Dockerfile.prod \
+	docker build $(FRONTEND_BUILD_ARGS) -f admin-ui-v2/Dockerfile.prod \
 		--build-arg VITE_APP_VERSION=$(DIST_TAG) \
 		--build-arg VITE_GIT_SHA=$$(git rev-parse --short HEAD) \
 		--build-arg VITE_BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
@@ -900,7 +906,7 @@ db-seed-content-bundle: ## Apply the Enterprise content bundle to the compose da
 
 db-reset: ## Reset database (WARNING: destroys all data) and bring all services back up
 	$(DOCKER_COMPOSE) down -v
-	$(DOCKER_COMPOSE) up -d postgres redis influxdb nats
+	$(DOCKER_COMPOSE) up -d postgres redis nats
 	@echo "Waiting for Postgres to initialize schema..."
 	sleep 15
 	$(MAKE) db-seed
@@ -910,11 +916,11 @@ db-reset: ## Reset database (WARNING: destroys all data) and bring all services 
 	$(DOCKER_COMPOSE) up -d
 
 # Infrastructure convenience targets (align with Startup Guide)
-infra-up: ## Start core infrastructure services (postgres, redis, influxdb, nats)
-	$(DOCKER_COMPOSE) up -d postgres redis influxdb nats
+infra-up: ## Start core infrastructure services (postgres, redis, nats)
+	$(DOCKER_COMPOSE) up -d postgres redis nats
 
 infra-down: ## Stop core infrastructure services
-	$(DOCKER_COMPOSE) stop postgres redis influxdb nats
+	$(DOCKER_COMPOSE) stop postgres redis nats
 
 # Development Setup
 install-deps: ## Install development dependencies
@@ -1060,7 +1066,10 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@echo "✅ Contract tests pass — live handlers conform to the spec."
 
 
-chart-lint: ## helm lint the chart against values.schema.json (catches schema/template drift the release would otherwise hit)
+chart-seed-stub: ## Stage a placeholder chart seed.sql (gitignored) so chart renders work from a bare checkout
+	@./scripts/stage-chart-seed-stub.sh
+
+chart-lint: chart-seed-stub ## helm lint the chart against values.schema.json (catches schema/template drift the release would otherwise hit)
 	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-lint"; exit 1; }
 	@# Mirrors the helm lint invocation in .github/workflows/release-customer.yml.
 	@# The --set flags satisfy the schema's required fields so lint validates the

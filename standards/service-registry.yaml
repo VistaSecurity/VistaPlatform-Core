@@ -35,7 +35,6 @@ infrastructure:
     - postgres
     - redis
     - nats
-    - influxdb
     - api-gateway
     # Observability stack
     - otel-collector
@@ -67,7 +66,6 @@ infrastructure:
     default_ports:
       postgres: 5432
       redis: 6379
-      influxdb: 8086
       otel_grpc: 4317
       otel_http: 4318
     # Environment variable names for port overrides
@@ -79,7 +77,6 @@ infrastructure:
       redis: REDIS_HOST_PORT
       nats_client: NATS_CLIENT_HOST_PORT
       nats_http: NATS_HTTP_HOST_PORT
-      influxdb: INFLUXDB_HOST_PORT
       grafana: GRAFANA_HOST_PORT
       adminer: ADMINER_HOST_PORT
       portainer: PORTAINER_HTTPS_HOST_PORT
@@ -285,12 +282,13 @@ admin_plane:
       path: /audit-service/job-execution-logs/:id/progress
     - method: POST
       path: /audit-service/job-execution-logs/:id/complete
-    # inventory-service: HMAC-only by HANDLER, not by middleware. These three
+    # inventory-service: HMAC-only by HANDLER, not by middleware. These four
     # sit in the JWT-or-HMAC group and refuse everything but a signed service
     # call themselves (`if !IsInternalCall(c) { …; return }`), so the route
     # table, not the handler, is what a browser can reach. Callers:
     # device-interrogation-service (agent-host approval, cloud keys) and
-    # discovery-processor-service (findings import), all through the
+    # discovery-processor-service (findings import), tenant-health-service
+    # (activity summary), all through the
     # in-cluster peer URL.
     - method: POST
       path: /inventory-service/assets/auto-approve/agent-host
@@ -298,6 +296,10 @@ admin_plane:
       path: /inventory-service/keys/cloud
     - method: POST
       path: /inventory-service/discovery/jobs/:id/import
+    # tenant-health-service reads a tenant's activity counts by the tenant id in
+    # the URL; the handler refuses anything but a signed service call.
+    - method: GET
+      path: /inventory-service/tenant/:id/activity-summary
 
   # Prefixes whose first URL segment does not name the Service that answers
   # them. /admin-service/status/** is historically routed to monitoring-service.
@@ -408,9 +410,8 @@ services:
         rbac_permissions: [settings.update]
       - path: /tenant/:id/activity-summary
         method: GET
-        description: "Get activity metrics for a specific tenant (for tenant health service)"
+        description: "Get activity metrics for a specific tenant (internal: HMAC-signed tenant-health-service call only)"
         auth_required: true
-        rbac_permissions: [platform.analytics, platform.health]
     v2_routes:
       description: "CMDB-aligned terminology. v2 routes point to same handlers as v1."
       renamed_paths:
@@ -477,7 +478,7 @@ services:
     required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
-      dependencies: [postgres, redis, influxdb, nats]
+      dependencies: [postgres, redis, nats]
       env_template: standard-go-service
 
   - key: cluster-sensor-service
@@ -534,7 +535,7 @@ services:
     required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
     docker:
       type: go-service
-      dependencies: [postgres, redis, nats, influxdb]
+      dependencies: [postgres, redis, nats]
       env_template: standard-go-service
     endpoints:
       - path: /platform/summary
@@ -680,13 +681,16 @@ services:
     # pcap-processor rather than the 15s default.
     gateway_timeout: 30s
     status: active
-    # No datastore: the service holds no state. It signs the PAT→JWT
-    # exchange call to auth-service with INTERNAL_AUTH_SECRET and calls
-    # other services with the exchanged user JWT.
+    # No datastore of its own: the service holds no state. It signs the
+    # PAT→JWT exchange call to auth-service with INTERNAL_AUTH_SECRET and calls
+    # other services with the exchanged user JWT. Redis is read-only here: the
+    # per-user revocation denylist/cutoff (shared/middleware) is consulted on
+    # every cached grant. Without this dependency REDIS_URL is never injected,
+    # the checker is nil and the check silently never runs (CLAUDE.md "Traps").
     required_secrets: [INTERNAL_AUTH_SECRET]
     docker:
       type: go-service
-      dependencies: []
+      dependencies: [redis]
       env_template: standard-go-service
 
 

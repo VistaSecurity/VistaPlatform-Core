@@ -20,7 +20,7 @@ describe('isPublicPath', () => {
   // The email landings are called out separately: they are the cases where a
   // wrong redirect does the most damage, because the token is in the URL and
   // bouncing loses it.
-  it.each(['/accept-invite', '/reset-password', '/register/complete', '/auth/sso/callback'])(
+  it.each(['/accept-invite', '/forgot-password', '/reset-password', '/register/complete', '/auth/sso/callback'])(
     '%s (email landing) stays reachable with a stale session',
     (path) => {
       expect(isPublicPath(path)).toBe(true);

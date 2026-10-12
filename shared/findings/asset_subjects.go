@@ -38,6 +38,17 @@ func OpenSQL(alias string) string {
 		" AND " + WorkflowOpenSQL(alias) + ")"
 }
 
+// ExpiredSuppressionSQL matches a finding whose time-boxed suppression has run
+// out but which the expiry sweep has not yet reopened: workflow_status is still
+// SUPPRESSED, yet suppressed_until has passed. OpenSQL ORs it in so every reader
+// counts the finding as open the moment the deadline passes, not up to one
+// sweep interval later. A suppression with no deadline stays in force.
+func ExpiredSuppressionSQL(alias string) string {
+	return "(" + alias + ".workflow_status = 'SUPPRESSED'" +
+		" AND " + alias + ".suppressed_until IS NOT NULL" +
+		" AND " + alias + ".suppressed_until <= NOW())"
+}
+
 // WorkflowOpenSQL is the WORKFLOW half of OpenSQL on its own: has anybody dealt
 // with this finding? It exists for the one reader that already constrains
 // `detection_state` separately and would otherwise have to re-spell this half —
@@ -52,11 +63,17 @@ func OpenSQL(alias string) string {
 // hand-written `NOT IN ('RESOLVED', 'SUPPRESSED')` is exactly how the tile and
 // the page it links to came to count different sets in the first place.
 //
+// It honours suppression expiry exactly as OpenSQL does: a SUPPRESSED finding
+// whose suppressed_until has passed is open again before the sweep flips its
+// status, so the findings list total agrees with the control counts. The result
+// is parenthesised because it contains an OR and is AND-ed into larger WHEREs.
+//
 // Not a complete definition of "open" by itself. A caller that does not
 // otherwise scope `detection_state` wants OpenSQL — this half alone counts
 // findings that have since gone away.
 func WorkflowOpenSQL(alias string) string {
-	return alias + ".workflow_status NOT IN ('RESOLVED', 'SUPPRESSED')"
+	return "(" + alias + ".workflow_status NOT IN ('RESOLVED', 'SUPPRESSED')" +
+		" OR " + ExpiredSuppressionSQL(alias) + ")"
 }
 
 // ConfigurationAssetSQL is the ONE expression that resolves the asset a crypto

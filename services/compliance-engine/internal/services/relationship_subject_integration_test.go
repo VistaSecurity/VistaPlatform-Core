@@ -77,7 +77,7 @@ func TestIntegration_OrphanRelationshipFinding_IsVisibleOnTheSurvivingAsset(t *t
 	svc, db, tenant := newFindingsServiceIT(t)
 	survivor, _, edge := seedOrphanEdge(t, db, tenant)
 
-	got, err := svc.GetFindingsByAsset(tenant, survivor)
+	got, _, err := svc.GetFindingsByAsset(tenant, survivor, 1000, 0)
 	if err != nil {
 		t.Fatalf("GetFindingsByAsset: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestIntegration_OrphanRelationshipFinding_DoesNotLeakToAnUnrelatedAsset(t *
 		t.Fatalf("seed bystander: %v", err)
 	}
 
-	got, err := svc.GetFindingsByAsset(tenant, bystander)
+	got, _, err := svc.GetFindingsByAsset(tenant, bystander, 1000, 0)
 	if err != nil {
 		t.Fatalf("GetFindingsByAsset: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestIntegration_OrphanRelationshipFinding_ReachableFromEitherEnd(t *testing
 	svc, db, tenant := newFindingsServiceIT(t)
 	_, missing, edge := seedOrphanEdge(t, db, tenant)
 
-	got, err := svc.GetFindingsByAsset(tenant, missing)
+	got, _, err := svc.GetFindingsByAsset(tenant, missing, 1000, 0)
 	if err != nil {
 		t.Fatalf("GetFindingsByAsset: %v", err)
 	}

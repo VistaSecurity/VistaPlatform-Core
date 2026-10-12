@@ -79,6 +79,8 @@ paths:
           $ref: "#/components/responses/LegacyBadRequest"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
         "500":
           $ref: "#/components/responses/LegacyServerError"
 
@@ -130,6 +132,8 @@ paths:
           $ref: "#/components/responses/LegacyUnauthorized"
         "404":
           $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          $ref: "#/components/responses/LegacyConflict"
         "500":
           $ref: "#/components/responses/LegacyServerError"
     delete:
@@ -244,6 +248,17 @@ paths:
                 $ref: "#/components/schemas/InvalidScopeQueryError"
         "500":
           $ref: "#/components/responses/LegacyServerError"
+        "503":
+          description: >
+            The request explicitly asked for `sign: true` but this deployment has
+            no signing key configured (an Enterprise build without
+            `INTERNAL_AUTH_SECRET`). No artifact is created. When signing is only
+            on by default for the tenant the artifact is still produced and the
+            202 body carries `signing_error` instead.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
         "501":
           description: >
             The requested `kind` is one this build recognises but this
@@ -262,10 +277,13 @@ paths:
       description: |
         Returns non-deleted artifacts ordered by `generated_at` DESC.
 
-        `limit` defaults to 50 and is clamped to 200. Values below 1 or
-        non-numeric are rejected with 400. `scope_id` filters server-side.
+        Paged with `page` / `page_size` (`page_size` max 100); the body carries
+        `total` and `total_pages`. `limit` predates paging and is honoured as the
+        page size when `page_size` is absent (default 50, clamped to 200). Values
+        below 1 or non-numeric are rejected with 400. `scope_id` filters
+        server-side.
       x-quirks:
-        - "List envelope is `{ \"artifacts\": [...] }` with no pagination block. Hardening to the ADR-0002 collection envelope is the documented go-forward change."
+        - "List envelope is `{ \"artifacts\": [...], page, page_size, total, total_pages }`. Hardening to the ADR-0002 collection envelope is the documented go-forward change."
       parameters:
         - name: scope_id
           in: query
@@ -285,11 +303,27 @@ paths:
             an empty list.
           schema:
             $ref: "#/components/schemas/ArtifactKind"
+        - name: page
+          in: query
+          required: false
+          description: 1-based page number.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          required: false
+          description: Artifacts per page. Values above 100 are clamped to 100.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
         - name: limit
           in: query
           required: false
           description: >
-            Maximum number of artifacts to return. Defaults to 50; values above
+            Page size, when `page_size` is absent. Maximum number of artifacts to return. Defaults to 50; values above
             200 are clamped to 200.
           schema:
             type: integer
@@ -459,6 +493,15 @@ paths:
                 $ref: "#/components/schemas/LegacyError"
         "404":
           $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          description: >
+            An artifact involved was stored before the internal view was kept, so
+            it cannot be compared or re-rendered as SPDX/PDF without producing a
+            wrong result. Regenerate it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
         "500":
           $ref: "#/components/responses/LegacyServerError"
         "501":
@@ -484,12 +527,20 @@ paths:
         artifact was signed and a signer is configured **and** the hash check
         passed, also re-derives the HMAC and compares.
 
+        A signed artifact carries an Ed25519 signature over a canonical
+        envelope (see `signed_envelope`). Verify checks the signature under the
+        key named by `signature_kid` — the current key or a retired one — and
+        recomputes every envelope field from the row, naming any that no
+        longer match in `envelope_mismatch`. An artifact signed before Ed25519
+        (shared-secret HMAC) answers `signature_valid: false` with reason
+        `legacy-hmac; regenerate`.
+
         When bytes can't be loaded (no inline content and no storage wired)
         the call still returns 200 with `hash_valid` and `signature_checked`
         false — the UI greys the result rather than erroring.
       x-quirks:
-        - "The signer is **only consulted when the hash check passed** — re-signing a body whose hash already drifted would be misleading and is treated as tamper-suspicious."
-        - "`signature_checked: false` covers three distinct cases: artifact unsigned, no verifier wired, or hash check failed. The UI must treat the result as `not asserted` rather than `asserted invalid`."
+        - "The signature is checked even when the hash check failed: the envelope carries the hash, so a tampered body or `content_hash` shows as `envelope_mismatch: [hash]` with `signature_valid: false`."
+        - "`signature_checked: false` covers: artifact unsigned, no verifier wired, or the bytes could not be read. The UI must treat the result as `not asserted` rather than `asserted invalid`."
       responses:
         "200":
           description: Verify result.
@@ -503,6 +554,30 @@ paths:
           $ref: "#/components/responses/LegacyUnauthorized"
         "404":
           $ref: "#/components/responses/LegacyNotFound"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
+  /cbom/signing-keys:
+    get:
+      operationId: listCBOMSigningKeys
+      tags: [cbom-artifacts]
+      summary: Public keys that verify artifact signatures
+      description: |
+        The Ed25519 public keys artifact signatures verify under — the active
+        key and every retired one, so an artifact signed before a rotation
+        still verifies. Hand a key to a third party and they can verify an
+        artifact offline; the recipe is in
+        docsv4/enterprise/cbom/cbom-compliance-attestation.md. Empty on a Core
+        build, which signs nothing.
+      responses:
+        "200":
+          description: The verification keys.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SigningKeysResponse"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
         "500":
           $ref: "#/components/responses/LegacyServerError"
 
@@ -556,6 +631,15 @@ paths:
                 $ref: "#/components/schemas/LegacyError"
         "404":
           $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          description: >
+            An artifact involved was stored before the internal view was kept, so
+            it cannot be compared or re-rendered as SPDX/PDF without producing a
+            wrong result. Regenerate it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
         "500":
           $ref: "#/components/responses/LegacyServerError"
 
@@ -596,6 +680,15 @@ paths:
                 $ref: "#/components/schemas/LegacyError"
         "404":
           $ref: "#/components/responses/LegacyNotFound"
+        "409":
+          description: >
+            An artifact involved was stored before the internal view was kept, so
+            it cannot be compared or re-rendered as SPDX/PDF without producing a
+            wrong result. Regenerate it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
         "500":
           $ref: "#/components/responses/LegacyServerError"
 
@@ -639,7 +732,7 @@ components:
           schema:
             $ref: "#/components/schemas/LegacyError"
     LegacyConflict:
-      description: Operation not permitted (e.g. deleting a system scope).
+      description: Conflict (e.g. deleting a system scope, or a scope name that already exists for the tenant).
       content:
         application/json:
           schema:
@@ -933,11 +1026,31 @@ components:
         signature_hmac:
           type: string
           description: >
-            Phase 4. Hex HMAC-SHA256 over `content_hash`. Empty when
-            unsigned.
+            LEGACY. Hex HMAC-SHA256 under the platform's shared internal
+            secret, present only on artifacts signed before Ed25519. No new
+            artifact carries one; `/verify` reports such a row as
+            `legacy-hmac; regenerate`.
         signature_kid:
           type: string
-          description: Phase 4. Key id used to sign. Empty when unsigned.
+          description: >
+            Id of the key that signed this artifact (first 16 hex characters of
+            the SHA-256 of the raw Ed25519 public key). Empty when unsigned.
+        signature:
+          type: string
+          description: Hex Ed25519 signature over `signed_envelope`. Empty when unsigned.
+        signature_algorithm:
+          type: string
+          enum: [ed25519]
+          description: Signature scheme. Empty when unsigned.
+        signed_envelope:
+          type: string
+          description: >
+            The canonical JSON envelope exactly as signed:
+            `{"hash","scope_id","scope_version","layers_hash","kind","generated_by"}`
+            in that key order. `hash` is the SHA-256 of the canonical bytes
+            (`content_hash`); `layers_hash` is the SHA-256 of the canonical
+            JSON of `layers`. Offline verification recipe:
+            docsv4/enterprise/cbom/cbom-compliance-attestation.md.
         provenance:
           $ref: "#/components/schemas/Provenance"
         layers:
@@ -998,12 +1111,25 @@ components:
         collection wrapped under the `artifacts` key with no pagination.
         Hardening this to the ADR-0002 collection envelope (`{ data,
         pagination }`) is the documented go-forward change.
-      required: [artifacts]
+      required: [artifacts, page, page_size, total, total_pages]
       properties:
         artifacts:
           type: array
           items:
             $ref: "#/components/schemas/CBOMArtifact"
+        page:
+          type: integer
+          minimum: 1
+        page_size:
+          type: integer
+          minimum: 1
+        total:
+          type: integer
+          format: int64
+          description: Artifacts matching the filters, across all pages.
+        total_pages:
+          type: integer
+          minimum: 0
 
     GenerateCBOMRequest:
       type: object
@@ -1077,6 +1203,12 @@ components:
             Present when a compliance-attestation layer was requested and could
             not be built. Absent means either not requested or built
             successfully — the artifact's `layers` distinguishes the two.
+        signing_error:
+          type: string
+          description: >
+            Present when signing was on by default for the tenant but the
+            deployment has no signing key, so the artifact is unsigned. An
+            explicit `sign: true` in that state is refused with 503 instead.
 
     VerifyResponse:
       type: object
@@ -1106,18 +1238,64 @@ components:
         signature_valid:
           type: boolean
           description: >
-            True when the stored HMAC matched a recomputed HMAC against the
-            platform's current signing key. Only meaningful when
-            `signature_checked` is true.
+            True when the Ed25519 signature verifies over the stored envelope
+            under `signature_kid` AND every envelope field still matches the
+            row. Only meaningful when `signature_checked` is true.
         signature_checked:
           type: boolean
           description: >
-            False covers three cases: artifact unsigned, no verifier wired,
-            or the hash check failed (in which case re-signing would be
-            misleading). Treat false as "not asserted," not "asserted invalid."
+            False covers: artifact unsigned, no verifier wired, or the bytes
+            could not be read. Treat false as "not asserted," not "asserted
+            invalid."
         signature_kid:
           type: string
           description: Key id stored on the artifact; empty for unsigned.
+        signature_algorithm:
+          type: string
+          enum: [ed25519, hmac-sha256]
+          description: Scheme of the stored signature; `hmac-sha256` marks a legacy row.
+        signature_reason:
+          type: string
+          enum: ["legacy-hmac; regenerate", envelope-mismatch, signature-invalid, unknown-kid]
+          description: Why a checked signature is not valid. Omitted when valid.
+        envelope_mismatch:
+          type: array
+          description: >
+            Signed-envelope fields whose recorded value no longer matches the
+            row.
+          items:
+            type: string
+            enum: [hash, scope_id, scope_version, layers_hash, kind, generated_by]
+    SigningKey:
+      type: object
+      additionalProperties: false
+      required: [kid, algorithm, public_key_pem, active, created_at]
+      properties:
+        kid:
+          type: string
+          description: First 16 hex characters of the SHA-256 of the raw 32-byte public key.
+        algorithm:
+          type: string
+          enum: [ed25519]
+        public_key_pem:
+          type: string
+          description: SubjectPublicKeyInfo PEM ("PUBLIC KEY").
+        active:
+          type: boolean
+          description: True for the key that signs new artifacts.
+        created_at:
+          type: string
+          format: date-time
+    SigningKeysResponse:
+      type: object
+      additionalProperties: false
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          description: Every verification key, current and retired. Empty on a Core build.
+          items:
+            $ref: "#/components/schemas/SigningKey"
 
     # ============================================================
     # CBOM Comparison (Phase 3 — current shapes)

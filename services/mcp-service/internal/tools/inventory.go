@@ -261,8 +261,8 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 			set(q, "q", in.Query)
 			set(q, "status", in.Status)
 			q.Set("limit", strconv.Itoa(clampLimit(in.Limit, 50, 200)))
-			if in.Offset > 0 {
-				q.Set("offset", strconv.Itoa(in.Offset))
+			if off := clampOffset(in.Offset); off > 0 {
+				q.Set("offset", strconv.Itoa(off))
 			}
 			return d.Client.Get(ctx, d.Client.InventoryURL, assetsPath+"/"+id+"/software", q)
 		})
@@ -470,8 +470,8 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 			set(q, "type", in.Type)
 			set(q, "status", in.Status)
 			q.Set("limit", strconv.Itoa(clampLimit(in.Limit, 50, 200)))
-			if in.Offset > 0 {
-				q.Set("offset", strconv.Itoa(in.Offset))
+			if off := clampOffset(in.Offset); off > 0 {
+				q.Set("offset", strconv.Itoa(off))
 			}
 			return d.Client.Get(ctx, d.Client.InventoryURL, assetsPath+"/"+id+"/relationships", q)
 		})
@@ -765,7 +765,7 @@ func cursorPage(cursor string) (int, error) {
 		return 0, fmt.Errorf("cursor is not a token this tool issued; omit it to start from the first page")
 	}
 	n, err := strconv.Atoi(s)
-	if err != nil || n < 1 {
+	if err != nil || n < 1 || n > maxPage {
 		return 0, fmt.Errorf("cursor is not a token this tool issued; omit it to start from the first page")
 	}
 	return n, nil

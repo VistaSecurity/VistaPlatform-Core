@@ -35,6 +35,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -68,6 +69,11 @@ type planRun struct {
 	// and so how many hosts' worth of connections it may use.
 	sweepSlots int
 	activeScan bool
+	// mirrorFailed counts the units this run failed because the sensor their
+	// findings are queued under could not be found; the job then fails (with a
+	// Retry that re-runs exactly those units) rather than completing with
+	// results inventory never saw.
+	mirrorFailed atomic.Int64
 }
 
 // processPlanJob runs a scan-plan job through its units. It returns nil when
@@ -114,6 +120,9 @@ func (jp *JobProcessor) processPlanJob(ctx context.Context, job *models.Discover
 		if alertErr := jp.alertService.SendNewFindingsAlert(job.TenantID, job.ID, findingCount); alertErr != nil {
 			log.Printf("Failed to send new-findings alert for job %s: %v", job.ID, alertErr)
 		}
+	}
+	if n := run.mirrorFailed.Load(); n > 0 {
+		return fmt.Errorf("%d host(s) were scanned but their findings could not be queued for inventory because the Platform Sensor is not registered for this tenant; Retry the job once it is (finished hosts are not scanned again)", n)
 	}
 	return nil
 }
@@ -404,7 +413,17 @@ func (r *planRun) runUnit(ctx context.Context, u jobUnit) error {
 			log.Printf("Discovery job %s: unit %s (%s) was taken over by a later run; its results here are discarded", job.ID, u.ID, u.Address)
 			return nil
 		}
-		jp.failUnit(job, u, t, unitRunning, "results could not be stored: "+err.Error())
+		reason := "results could not be stored: " + err.Error()
+		var mirror *jobunits.MirrorSensorError
+		if errors.As(err, &mirror) {
+			// Retryable: nothing was stored, and the unit is failed rather than
+			// done so Retry runs it again once the Platform Sensor is registered.
+			reason = "the Platform Sensor is not registered for this tenant, so this host's findings could not be queued for inventory; retry the scan once it is: " + mirror.Err.Error()
+		}
+		jp.failUnit(job, u, t, unitRunning, reason)
+		if mirror != nil {
+			r.mirrorFailed.Add(1)
+		}
 	}
 	return nil
 }
@@ -455,9 +474,6 @@ func (r *planRun) commitUnit(u jobUnit, t *planTarget, attempt int, out shareddi
 		return jobunits.Commit(tx, unit, out, jobunits.CommitOptions{
 			From: unitRunning, Attempt: attempt, ActiveScan: r.activeScan,
 			MirrorSensorID: func(jobunits.Tx) (string, error) { return jp.platformSensorIDTx(tx, job.TenantID) },
-			MirrorErr: func(err error) {
-				log.Printf("Discovery job %s: %v — unit %s's findings are recorded on the job but not queued for inventory", job.ID, err, u.Address)
-			},
 		})
 	})
 	if err != nil {

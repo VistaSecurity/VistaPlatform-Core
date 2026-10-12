@@ -130,7 +130,7 @@ func TestUpdateUser_403WhenRoleExceedsActorGrants(t *testing.T) {
 		c.Set("userID", aUserID)
 		c.Next()
 	})
-	grp.PUT("/users/:id", UpdateUser(db))
+	grp.PUT("/users/:id", UpdateUser(db, nil))
 
 	w := do(r, http.MethodPut, "/api/v1/auth-service/users/"+aTargetUserID, strings.NewReader(`{"role":"tenant_admin"}`))
 

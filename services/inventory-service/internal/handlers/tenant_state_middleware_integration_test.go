@@ -91,4 +91,11 @@ func TestIntegration_JWTMiddleware_RefusesSuspendedAndDeletedTenants(t *testing.
 	if code, c := get(access); code != http.StatusForbidden || c != "tenant_deleted" {
 		t.Fatalf("soft-deleted tenant = %d %q, want 403 tenant_deleted", code, c)
 	}
+	// ...but not a deleted one: an impersonation token must not enter it.
+	// Mutation: restore the impersonation exemption in
+	// sharedmw.enforceTenantState and this answers 200.
+	if code, c := get(mint("impersonation")); code != http.StatusForbidden || c != "tenant_deleted" {
+		t.Fatalf("impersonation of a soft-deleted tenant = %d %q, want 403 tenant_deleted", code, c)
+	}
+
 }

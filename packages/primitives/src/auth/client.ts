@@ -19,6 +19,48 @@ function messageFromError(error: unknown, fallback = 'Request failed'): string {
   return fallback;
 }
 
+/** Stable code auth-service answers (HTTP 403) when valid PLATFORM credentials are presented at the tenant sign-in. */
+export const PLATFORM_ACCOUNT_CODE = 'platform_account_use_admin_console';
+
+/**
+ * Thrown by `login` when the credentials belong to a platform account. The UI
+ * shows `message` and, when the server knew the admin console's address, links
+ * to `adminUrl` (only ever an http(s) URL).
+ */
+export class PlatformAccountError extends Error {
+  readonly adminUrl: string | null;
+  constructor(message: string, adminUrl: string | null) {
+    super(message);
+    this.name = 'PlatformAccountError';
+    this.adminUrl = adminUrl;
+  }
+}
+
+function platformAccountFromError(error: unknown): PlatformAccountError | null {
+  if (!error || typeof error !== 'object') return null;
+  const e = error as { code?: unknown; admin_url?: unknown; error?: unknown };
+  if (e.code !== PLATFORM_ACCOUNT_CODE) return null;
+  let adminUrl: string | null = null;
+  let host = '';
+  if (typeof e.admin_url === 'string') {
+    try {
+      const u = new URL(e.admin_url);
+      if (u.protocol === 'https:' || u.protocol === 'http:') {
+        adminUrl = u.toString();
+        host = u.host;
+      }
+    } catch {
+      // not a URL: fall through to the server's own sentence
+    }
+  }
+  const message = host
+    ? `This is a platform account. Sign in at ${host} instead.`
+    : typeof e.error === 'string' && e.error
+      ? e.error
+      : 'This is a platform account. Sign in at the admin console instead.';
+  return new PlatformAccountError(message, adminUrl);
+}
+
 export interface AuthClient {
   login(email: string, password: string): Promise<AuthResponse>;
   logout(): Promise<void>;
@@ -31,6 +73,8 @@ export function createAuthClient(baseUrl?: string): AuthClient {
   return {
     async login(email, password) {
       const { data, error } = await c.POST('/auth/login', { body: { email, password } });
+      const platform = platformAccountFromError(error);
+      if (platform) throw platform;
       if (error || !data) throw new Error(messageFromError(error, 'Sign-in failed'));
       return data;
     },

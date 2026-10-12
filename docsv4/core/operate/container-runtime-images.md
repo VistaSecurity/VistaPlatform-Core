@@ -111,7 +111,6 @@ in `INSTALL.md`.
 |---------|-----------------|
 | postgres | `postgres:17-alpine` |
 | redis | `redis:8-alpine` |
-| influxdb | `influxdb:2.8-alpine` |
 | nats | `nats:2.14-alpine` |
 | api-gateway | `traefik:v3.6.12` |
 | otel-collector | `otel/opentelemetry-collector-contrib:0.151.0` |
@@ -135,7 +134,6 @@ answering a supply-chain question, the sets are not identical:
 |-----------|-----------------|---------------------------|
 | postgres | `postgres:17-alpine` | same |
 | redis | `redis:7-alpine` | dev compose runs `8-alpine` |
-| influxdb | `influxdb:2.8-alpine` | same |
 | nats | `nats:2.14-alpine` | same |
 
 `helm test` additionally runs a short-lived pod from `curlimages/curl:8.22.0`

@@ -12,11 +12,12 @@
 #     ingress controller (Traefik in kube-system / ALB on EKS) handles
 #     routing — there is no in-cluster gateway pod to scale.
 #   - Activates PodDisruptionBudgets (the chart auto-emits a PDB whenever a
-#     workload's replicas > 1), so node drains and rolling upgrades don't take
-#     a service down.
+#     workload's replicas > 1): one per replicated backend (every backend
+#     except the three pinned to one replica below) plus web-ui and admin-ui,
+#     so node drains and rolling upgrades don't take a service down.
 #
 # What this profile does NOT do (v1 limitations):
-#   - Datastores (Postgres / Redis / InfluxDB / NATS) remain single-replica.
+#   - Datastores (Postgres / Redis / NATS) remain single-replica.
 #     True HA for those needs an operator (CloudNativePG, NATS clustering with
 #     3 replicas, etc.) or external managed services. Document this gap with
 #     the customer; it's the headline v1.1 follow-up.
@@ -24,13 +25,22 @@
 #     ReadWriteOnce PVC for PCAP file handoff; scaling either to 2 fails to
 #     schedule. Loss of the worker hosting these pods makes PCAP upload
 #     temporarily unavailable; everything else stays up.
+#   - admin-service stays at replicas: 1. On an MSP licence the README tells you
+#     to set licensing.reports.persistence.enabled=true, which mounts a
+#     ReadWriteOnce claim that only one pod can use, and the chart refuses to
+#     render two replicas against it. To run admin-service at 2 replicas
+#     instead, use a ReadWriteMany class:
+#       --set licensing.reports.persistence.accessMode=ReadWriteMany \
+#       --set licensing.reports.persistence.storageClassName=<rwx-class> \
+#       --set backends.admin-service.replicas=2
+#     (or leave persistence off; reports then live in the database only).
 #
 # Recommended cluster: 1 master + 2 workers, each worker with 6 vCPU / 16 GiB
 # RAM. Smaller workers will work but pods will run hot under load.
 
 enableSpreadAcrossNodes: true
 
-# Bumps every backend that doesn't override `replicas`. The two PVC-bound
+# Bumps every backend that doesn't override `replicas`. The PVC-bound
 # services below explicitly stay at 1.
 defaultReplicas: 2
 
@@ -39,6 +49,8 @@ backends:
     replicas: 1   # PVC pcap-uploads is RWO; cannot scale beyond 1.
   pcap-processor:
     replicas: 1   # Same constraint, already locked in the base values.yaml.
+  admin-service:
+    replicas: 1   # Licence-reports PVC is RWO (see above); a second replica fails the render.
 
 frontend:
   webUi:

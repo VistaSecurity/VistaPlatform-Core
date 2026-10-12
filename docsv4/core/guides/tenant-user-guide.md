@@ -57,8 +57,11 @@ Either way, the first thing worth doing is the setup checklist — see
 The sign-in page asks for your **work email** first, then adapts to what your
 organization allows.
 
-**Password.** Enter your email, then your password, and continue. "Forgot
-password" sends a reset link to your address.
+**Password.** Enter your email, then your password, and continue. Choose
+**Forgot password?** on the sign-in page, enter your email, and a reset link is
+sent to that address if it has an account. The page gives the same answer
+whether or not the address is registered, so check your inbox (and spam folder)
+rather than expecting an error.
 
 > Single sign-on is an Enterprise capability. On a Core deployment, email and
 > password is the only way in and the rest of this subsection does not apply.
@@ -1234,7 +1237,10 @@ Covered under [Notifications](#notifications) above.
 Every active session: device, IP address, last active, and when it was signed in.
 Your current session is marked. **Revoke** ends one session; **Revoke other
 sessions** ends every session except the one you are using — the right move after
-signing in somewhere you do not control.
+signing in somewhere you do not control. A revoked session stops working at once;
+your other devices quietly refresh their sign-in and carry on. Changing or
+resetting your password ends all your other sessions the same way, and you sign in
+again with the new password.
 
 ### Connected Accounts
 

@@ -6,16 +6,12 @@ import (
 
 // Config holds all configuration for the sensor manager
 type Config struct {
-	Port         string
-	Environment  string
-	DatabaseURL  string
-	InfluxURL    string
-	InfluxToken  string
-	InfluxOrg    string
-	InfluxBucket string
-	NATSURL      string
-	LogLevel     string
-	JWTSecret    string
+	Port        string
+	Environment string
+	DatabaseURL string
+	NATSURL     string
+	LogLevel    string
+	JWTSecret   string
 	// S3 Configuration for sensor binary storage
 	S3ArtifactsBucket  string
 	S3ArtifactsRegion  string
@@ -60,16 +56,12 @@ func Load() *Config {
 	})
 
 	return &Config{
-		Port:         sharedconfig.GetEnv("PORT", "8080"),
-		Environment:  sharedconfig.GetEnv("ENV", "development"),
-		DatabaseURL:  sharedconfig.GetEnv("DATABASE_URL", "postgres://crypto_user:crypto_pass_dev@postgres:5432/crypto_inventory?sslmode=prefer"),
-		InfluxURL:    sharedconfig.GetEnv("INFLUXDB_URL", "http://influxdb:8086"),
-		InfluxToken:  sharedconfig.GetEnv("INFLUXDB_TOKEN", "dev-token-1234567890"),
-		InfluxOrg:    sharedconfig.GetEnv("INFLUXDB_ORG", "crypto-inventory"),
-		InfluxBucket: sharedconfig.GetEnv("INFLUXDB_BUCKET", "metrics"),
-		NATSURL:      sharedconfig.GetEnv("NATS_URL", ""),
-		LogLevel:     sharedconfig.GetEnv("LOG_LEVEL", "info"),
-		JWTSecret:    sharedconfig.JWTSecret(),
+		Port:        sharedconfig.GetEnv("PORT", "8080"),
+		Environment: sharedconfig.GetEnv("ENV", "development"),
+		DatabaseURL: sharedconfig.GetEnv("DATABASE_URL", "postgres://crypto_user:crypto_pass_dev@postgres:5432/crypto_inventory?sslmode=prefer"),
+		NATSURL:     sharedconfig.GetEnv("NATS_URL", ""),
+		LogLevel:    sharedconfig.GetEnv("LOG_LEVEL", "info"),
+		JWTSecret:   sharedconfig.JWTSecret(),
 		// S3 Configuration
 		S3ArtifactsBucket:  sharedconfig.GetEnv("S3_ARTIFACTS_BUCKET", ""),
 		S3ArtifactsRegion:  sharedconfig.GetEnv("S3_ARTIFACTS_REGION", sharedconfig.GetEnv("AWS_REGION", "us-east-1")),

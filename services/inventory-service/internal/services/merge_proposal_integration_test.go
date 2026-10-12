@@ -539,6 +539,10 @@ func TestIntegration_ApprovalPromotesEdges(t *testing.T) {
 
 	t.Run("denying an asset rejects its edges", func(t *testing.T) {
 		denied := seedAsset(t, db, tenant, "vm-03.example.test", "virtual_machine", "hardware.computer.virtual_machine", "production", 0, 1)
+		// Deny acts on the approval queue only, so the asset has to be waiting in it.
+		if _, err := db.Exec(`UPDATE assets SET asset_status='pending_approval' WHERE tenant_id=$1 AND id=$2`, tenant, denied); err != nil {
+			t.Fatal(err)
+		}
 		e := edge(denied, monitored, "active")
 		if err := svc.DenyAssets(tenant, []uuid.UUID{denied}, seedUser(t, db, tenant)); err != nil {
 			t.Fatalf("deny: %v", err)

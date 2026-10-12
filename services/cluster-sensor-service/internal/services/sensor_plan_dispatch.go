@@ -150,48 +150,40 @@ func planStallReason(sensorName string, lastProgress *time.Time, lease time.Dura
 	return msg + "); hosts it finished are kept — retry to scan the rest"
 }
 
-// revokeSensorPlanDispatch tells the sensor a cancelled scan-plan job is over.
-// A command it has not collected is withdrawn, so it never starts; one it has
-// collected is followed by a cancel_discovery_job command, so an idle sensor
-// (or one between reports) stops at its next heartbeat — a reporting sensor
-// learns it sooner, from its next report's answer. Legacy jobs are untouched.
-func (s *DiscoveryService) revokeSensorPlanDispatch(jobID string) error {
+// revokeSensorDispatch tells the sensor a cancelled job is over, whatever its
+// shape (a scan plan or the legacy protocols x ports payload). A command it has
+// not collected is withdrawn, so it never starts; one it has collected is
+// followed by a cancel_discovery_job command, so an idle sensor (or one
+// between reports) stops at its next heartbeat — a reporting sensor learns it
+// sooner, from its next report's answer.
+//
+// The legacy shape used to be skipped here: its command stayed pending, the
+// stale-dispatch sweep only looks at awaiting_sensor jobs (a cancelled one is
+// not), and the sensor collected it and scanned a cancelled job's targets
+// until the command expired.
+func (s *DiscoveryService) revokeSensorDispatch(jobID string) error {
 	// RLS: cross-tenant — bypass role, keyed by job id, as CancelJob.
-	var (
-		assigned *string
-		planned  bool
-	)
-	if err := s.bypassDB.QueryRow(`SELECT assigned_sensor_id::text, COALESCE(metadata ? $2, false) FROM discovery_jobs WHERE id = $1`,
-		jobID, shareddisc.ScanPlanMetadataKey).Scan(&assigned, &planned); err != nil {
-		return err
-	}
-	if !planned || assigned == nil {
-		return nil
-	}
-	res, err := s.bypassDB.Exec(`
+	if _, err := s.bypassDB.Exec(`
 		UPDATE sensor_commands SET status = 'failed', error_message = 'job cancelled before the sensor collected it', updated_at = NOW()
-		WHERE command_type = $1 AND payload ->> 'job_id' = $2 AND status = 'pending'`, sensordispatch.CommandType, jobID)
-	if err != nil {
+		WHERE command_type = $1 AND payload ->> 'job_id' = $2 AND status = 'pending'`, sensordispatch.CommandType, jobID); err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		return nil
-	}
-	var delivered bool
-	if err := s.bypassDB.Get(&delivered, `SELECT EXISTS (SELECT 1 FROM sensor_commands WHERE command_type = $1 AND payload ->> 'job_id' = $2 AND status = 'delivered')`,
+	var collectedBy []string
+	if err := s.bypassDB.Select(&collectedBy, `
+		SELECT DISTINCT sensor_id::text FROM sensor_commands
+		WHERE command_type = $1 AND payload ->> 'job_id' = $2 AND status IN ('delivered', 'acknowledged')`,
 		sensordispatch.CommandType, jobID); err != nil {
 		return err
 	}
-	if !delivered {
-		return nil
-	}
 	now := time.Now()
-	_, err = s.bypassDB.Exec(`
-		INSERT INTO sensor_commands (id, sensor_id, command_type, payload, status, created_at, expires_at)
-		VALUES ($1, $2, $3, jsonb_build_object('job_id', $4::text), 'pending', $5, $6)`,
-		uuid.New(), *assigned, sensordispatch.CancelCommandType, jobID, now, now.Add(planProgressLease))
-	if err == nil {
-		log.Printf("Discovery job %s cancelled: told sensor %s to stop", jobID, *assigned)
+	for _, sensorID := range collectedBy {
+		if _, err := s.bypassDB.Exec(`
+			INSERT INTO sensor_commands (id, sensor_id, command_type, payload, status, created_at, expires_at)
+			VALUES ($1, $2, $3, jsonb_build_object('job_id', $4::text), 'pending', $5, $6)`,
+			uuid.New(), sensorID, sensordispatch.CancelCommandType, jobID, now, now.Add(planProgressLease)); err != nil {
+			return err
+		}
+		log.Printf("Discovery job %s cancelled: told sensor %s to stop", jobID, sensorID)
 	}
-	return err
+	return nil
 }

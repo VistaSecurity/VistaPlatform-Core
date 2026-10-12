@@ -28,8 +28,9 @@ import (
 // decides which *tenant* may use it. Both gates apply in an Enterprise build.
 type editionHooks struct {
 	// NewSigner returns the artifact signer, or nil to generate unsigned.
-	// The error is advisory (e.g. missing secret) and is logged, not fatal.
-	NewSigner func() (cbom.Signer, error)
+	// The error is advisory (e.g. no signing key) and is logged, not fatal.
+	// The database holds the history of verification keys.
+	NewSigner func(db *sql.DB) (cbom.Signer, error)
 
 	// NewAttestationBuilder returns the compliance-attestation builder, or
 	// nil to generate artifacts without an attestation layer.

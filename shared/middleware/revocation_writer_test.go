@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
 )
@@ -28,56 +29,47 @@ func (r *recordingWriter) RevokeJTI(_ context.Context, jti string, ttl time.Dura
 	return nil
 }
 
-func tokenWith(t *testing.T, jti string, exp time.Time) string {
-	t.Helper()
-	claims := jwt.RegisteredClaims{ID: jti}
+// ctxWith builds a gin context carrying the verified-token keys RequireJWTAuth
+// publishes. A zero exp / empty jti leaves that key unset.
+func ctxWith(jti string, exp time.Time) *gin.Context {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/logout", nil)
+	if jti != "" {
+		c.Set(CtxKeyTokenID, jti)
+	}
 	if !exp.IsZero() {
-		claims.ExpiresAt = jwt.NewNumericDate(exp)
+		c.Set(CtxKeyTokenExpiresAt, exp)
 	}
-	s, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("k"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return s
+	return c
 }
 
 func TestRevokeRequestAccessToken(t *testing.T) {
 	soon := time.Now().Add(30 * time.Minute)
 	cases := []struct {
 		name     string
-		build    func(r *http.Request)
+		c        *gin.Context
 		wantJTI  string
 		wantDeny bool
 	}{
-		{"bearer", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tokenWith(t, "j-bearer", soon)) }, "j-bearer", true},
-		{"cookie", func(r *http.Request) {
-			r.AddCookie(&http.Cookie{Name: "platform_access_token", Value: tokenWith(t, "j-cookie", soon)})
-		}, "j-cookie", true},
-		{"bearer wins over cookie", func(r *http.Request) {
-			r.Header.Set("Authorization", "Bearer "+tokenWith(t, "j-b", soon))
-			r.AddCookie(&http.Cookie{Name: "platform_access_token", Value: tokenWith(t, "j-c", soon)})
-		}, "j-b", true},
-		{"no token", func(r *http.Request) {}, "", false},
-		{"unparseable token", func(r *http.Request) { r.Header.Set("Authorization", "Bearer not.a.jwt") }, "", false},
-		{"no jti", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tokenWith(t, "", soon)) }, "", false},
-		{"no exp", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tokenWith(t, "j-noexp", time.Time{})) }, "", false},
-		{"already expired", func(r *http.Request) {
-			r.Header.Set("Authorization", "Bearer "+tokenWith(t, "j-old", time.Now().Add(-time.Minute)))
-		}, "", false},
+		{"verified jti and exp", ctxWith("j-verified", soon), "j-verified", true},
+		{"no jti", ctxWith("", soon), "", false},
+		{"no exp", ctxWith("j-noexp", time.Time{}), "", false},
+		{"already expired", ctxWith("j-old", time.Now().Add(-time.Minute)), "", false},
+		{"nothing set", ctxWith("", time.Time{}), "", false},
+		{"nil context", nil, "", false},
 	}
 	for _, tc := range cases {
 		w := &recordingWriter{jtis: map[string]time.Duration{}}
-		r := httptest.NewRequest(http.MethodPost, "/logout", nil)
-		tc.build(r)
-		got, err := RevokeRequestAccessToken(context.Background(), w, r, "platform_access_token")
+		got, err := RevokeRequestAccessToken(context.Background(), w, tc.c)
 		if err != nil || got != tc.wantDeny {
 			t.Errorf("%s: revoked=%v err=%v; want revoked=%v", tc.name, got, err, tc.wantDeny)
 			continue
 		}
 		if tc.wantDeny {
 			ttl, ok := w.jtis[tc.wantJTI]
-			if !ok || ttl < 25*time.Minute || ttl > 30*time.Minute {
-				t.Errorf("%s: wrote %v; want %s with the token's remaining life (~30m)", tc.name, w.jtis, tc.wantJTI)
+			if !ok || len(w.jtis) != 1 || ttl < 25*time.Minute || ttl > 30*time.Minute {
+				t.Errorf("%s: wrote %v; want only %s with the token's remaining life (~30m)", tc.name, w.jtis, tc.wantJTI)
 			}
 		} else if len(w.jtis) != 0 {
 			t.Errorf("%s: wrote %v; want nothing", tc.name, w.jtis)
@@ -85,15 +77,119 @@ func TestRevokeRequestAccessToken(t *testing.T) {
 	}
 }
 
+// The helper must not fall back to the request: a token sitting in the
+// Authorization header or a cookie, with no verified claims in the context,
+// writes nothing.
+func TestRevokeRequestAccessToken_IgnoresTheRawRequest(t *testing.T) {
+	c := ctxWith("", time.Time{})
+	c.Request.Header.Set("Authorization", "Bearer "+signAccessTokenWithJTI(t, "from-header"))
+	c.Request.AddCookie(&http.Cookie{Name: "platform_access_token", Value: signAccessTokenWithJTI(t, "from-cookie")})
+	w := &recordingWriter{jtis: map[string]time.Duration{}}
+	if got, err := RevokeRequestAccessToken(context.Background(), w, c); got || err != nil || len(w.jtis) != 0 {
+		t.Fatalf("revoked=%v err=%v wrote=%v; want nothing written from the raw request", got, err, w.jtis)
+	}
+}
+
 func TestRevokeRequestAccessToken_NilWriterAndWriteError(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/logout", nil)
-	r.Header.Set("Authorization", "Bearer "+tokenWith(t, "j", time.Now().Add(time.Hour)))
-	if got, err := RevokeRequestAccessToken(context.Background(), nil, r); got || err != nil {
+	c := ctxWith("j", time.Now().Add(time.Hour))
+	if got, err := RevokeRequestAccessToken(context.Background(), nil, c); got || err != nil {
 		t.Fatalf("nil writer => %v %v; want a quiet no-op", got, err)
 	}
 	boom := errors.New("redis down")
-	if got, err := RevokeRequestAccessToken(context.Background(), &recordingWriter{err: boom}, r); got || !errors.Is(err, boom) {
+	if got, err := RevokeRequestAccessToken(context.Background(), &recordingWriter{err: boom}, c); got || !errors.Is(err, boom) {
 		t.Fatalf("failing writer => %v %v; want the write error surfaced", got, err)
+	}
+}
+
+// newLogoutRouter wires the REAL RequireJWTAuth in front of a logout handler
+// that calls RevokeRequestAccessToken, the way admin-service registers
+// POST /admin/auth/logout. Deleting the middleware's c.Set(CtxKeyTokenID, ...)
+// makes TestRevokeRequestAccessToken_Wiring fail.
+func newLogoutRouter(w RevocationWriter) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(RequireJWTAuth(AuthConfig{
+		TenantState:       liveTenantState(),
+		JWTSecret:         testJWTSecret,
+		AccessTokenCookie: "platform_access_token",
+		CSRFCookie:        "platform_csrf_token",
+		StrictCookiePair:  true,
+	}))
+	r.POST("/logout", func(c *gin.Context) {
+		if _, err := RevokeRequestAccessToken(c.Request.Context(), w, c); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	return r
+}
+
+func TestRevokeRequestAccessToken_Wiring(t *testing.T) {
+	t.Run("bearer", func(t *testing.T) {
+		w := &recordingWriter{jtis: map[string]time.Duration{}}
+		req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+		req.Header.Set("Authorization", "Bearer "+signAccessTokenWithJTI(t, "verified-bearer-jti"))
+		rec := httptest.NewRecorder()
+		newLogoutRouter(w).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+		}
+		ttl, ok := w.jtis["verified-bearer-jti"]
+		if !ok || len(w.jtis) != 1 || ttl < 55*time.Minute || ttl > time.Hour {
+			t.Fatalf("wrote %v; want only verified-bearer-jti with ~1h TTL", w.jtis)
+		}
+	})
+	t.Run("cookie", func(t *testing.T) {
+		w := &recordingWriter{jtis: map[string]time.Duration{}}
+		jti := "verified-cookie-jti"
+		csrf := CSRFToken(testJWTSecret, jti)
+		req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+		req.AddCookie(&http.Cookie{Name: "platform_access_token", Value: signAccessTokenWithJTI(t, jti)})
+		req.AddCookie(&http.Cookie{Name: "platform_csrf_token", Value: csrf})
+		req.Header.Set("X-CSRF-Token", csrf)
+		rec := httptest.NewRecorder()
+		newLogoutRouter(w).ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+		}
+		if _, ok := w.jtis[jti]; !ok || len(w.jtis) != 1 {
+			t.Fatalf("wrote %v; want only %s", w.jtis, jti)
+		}
+	})
+}
+
+// The hole CodeQL flagged: a request carrying a valid signed cookie AND an
+// attacker-chosen Bearer token. The old helper preferred the Bearer header and
+// parsed it unverified, so it would denylist whatever jti the attacker named.
+// Now only a jti the middleware verified can ever be written.
+func TestRevokeRequestAccessToken_UnverifiedBearerNeverWritten(t *testing.T) {
+	jti := "victim-cookie-jti"
+	csrf := CSRFToken(testJWTSecret, jti)
+	claims := jwt.RegisteredClaims{ID: "attacker", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}
+
+	wrongKey, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("not-the-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsigned, err := jwt.NewWithClaims(jwt.SigningMethodNone, claims).SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for name, bearer := range map[string]string{"wrong key": wrongKey, "alg none": unsigned} {
+		t.Run(name, func(t *testing.T) {
+			w := &recordingWriter{jtis: map[string]time.Duration{}}
+			req := httptest.NewRequest(http.MethodPost, "/logout", nil)
+			req.AddCookie(&http.Cookie{Name: "platform_access_token", Value: signAccessTokenWithJTI(t, jti)})
+			req.AddCookie(&http.Cookie{Name: "platform_csrf_token", Value: csrf})
+			req.Header.Set("X-CSRF-Token", csrf)
+			req.Header.Set("Authorization", "Bearer "+bearer)
+			newLogoutRouter(w).ServeHTTP(httptest.NewRecorder(), req)
+			if _, bad := w.jtis["attacker"]; bad {
+				t.Fatalf("wrote %v; an unverified Bearer token's jti reached the denylist", w.jtis)
+			}
+		})
 	}
 }
 

@@ -427,11 +427,11 @@ func findingIsRefusedHandshake(f IngestFinding) bool {
 //     unidentified sighting says nothing about the handshake either way.
 //
 // The endpoint is looked up, never created (resolveEndpointForFinding).
-func (s *AssetService) recordHandshakeOutcome(ctx context.Context, tenantID, assetID uuid.UUID, f IngestFinding) {
+func (s *AssetService) recordHandshakeOutcome(ctx context.Context, tenantID, assetID uuid.UUID, f IngestFinding) bool {
 	refused := findingIsRefusedHandshake(f)
 	if !refused {
 		if _, verdict := resolveProtocol(f.Protocol); verdict != protocolEnum {
-			return
+			return false
 		}
 	}
 	epID, err := s.resolveEndpointForFinding(ctx, tenantID, assetID, f)
@@ -441,22 +441,30 @@ func (s *AssetService) recordHandshakeOutcome(ctx context.Context, tenantID, ass
 		if err != nil && !errors.Is(err, errEndpointNotAttached) {
 			log.Printf("[AssetService] IngestFindings: resolving the endpoint to record the handshake outcome for %s failed: %v", findingLabel(f), err)
 		}
-		return
+		return false
 	}
 	var outcome interface{}
 	if refused {
 		outcome = handshakeOutcomeRefused
 	}
+	moved := false
 	wErr := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-		_, e := tx.Exec(`
+		res, e := tx.Exec(`
 			UPDATE asset_endpoints SET tls_handshake_outcome = $1::text, updated_at = NOW()
 			WHERE id = $2 AND tenant_id = $3 AND tls_handshake_outcome IS DISTINCT FROM $1::text`,
 			outcome, epID, tenantID)
+		if e == nil {
+			if n, nErr := res.RowsAffected(); nErr == nil && n > 0 {
+				moved = true
+			}
+		}
 		return e
 	})
 	if wErr != nil {
 		log.Printf("[AssetService] IngestFindings: recording the handshake outcome on endpoint %s failed: %v", epID, wErr)
+		return false
 	}
+	return moved
 }
 
 // handshakeOutcomeRefused is the value asset_endpoints.tls_handshake_outcome
@@ -988,7 +996,10 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 	// no asset was created. Counted separately from `inserted` because nothing
 	// was inserted, and separately from a failure because nothing failed.
 	var heldByProposal int
-	var changedAssetIDs []uuid.UUID
+	// Which resolved assets get an asset.changed event is decided by what the
+	// ingest changed, not by the fact that it saw them; see
+	// assetChangeTracker for the rule.
+	changeTracker := newAssetChangeTracker()
 	var lifecycleDiscovered []struct {
 		assetID             uuid.UUID
 		classKey            string
@@ -1000,6 +1011,12 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 	var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
 	var lifecycleCertExpiring []*events.CertificateExpiringPayload
 	ctx := context.Background()
+	// A position in asset_history's append order taken before any finding is
+	// resolved: rows this call writes are above it (assetChangeTracker).
+	historyMark, historyMarkErr := s.historyWatermark(ctx, tenantID)
+	if historyMarkErr != nil {
+		log.Printf("[AssetService] IngestFindings: reading the asset_history position failed; asset.changed will be published for every resolved asset: %v", historyMarkErr)
+	}
 	// One read of the tenant's segments for the whole request, shared by
 	// classification, tags, enrichment and the identity intake ( F4).
 	segs := s.newImportSegments(tenantID)
@@ -1074,7 +1091,14 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 				return result(), fmt.Errorf("identification engine returned an unusable asset id %q: %w", res.Asset.ID, idErr)
 			}
 			logIdentityDecisions(label, res)
-			changedAssetIDs = append(changedAssetIDs, assetID)
+			// A passive host observation changes the asset only through the
+			// identity engine, which records it in asset_history; a creation is
+			// a change outright.
+			changeTracker.touch(assetID)
+			switch res.Outcome {
+			case identity.OutcomeCreated, identity.OutcomeConflict, identity.OutcomeProvisional:
+				changeTracker.changed(assetID)
+			}
 			inserted++
 			// The status the asset actually HAS, which on a conflict is not the
 			// one the segment rule asked for: ingestHostObservation declines to
@@ -1214,7 +1238,13 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 			}
 			if owned {
 				landed, landedStatus, retired, attachErr := s.attachToInterrogatedDevice(ctx, tenantID, owner, f, func(assetID uuid.UUID, of IngestFinding) error {
-					if err := s.processDiscoveryCryptoData(tenantID, assetID, of, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
+					var cryptoChanged bool
+					defer func() {
+						if cryptoChanged {
+							changeTracker.changed(assetID)
+						}
+					}()
+					if err := s.processDiscoveryCryptoDataTracked(tenantID, assetID, of, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring, &cryptoChanged); err != nil {
 						// Same posture as the resolved path: one finding's
 						// materialisation failure is logged, not fatal to
 						// the batch.
@@ -1236,7 +1266,7 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 				}
 				outcomes[i] = identity.IngestResult{Outcome: string(identity.OutcomeMatched), AssetID: landed.String()}
 				effective[i] = landedStatus
-				changedAssetIDs = append(changedAssetIDs, landed)
+				changeTracker.touch(landed)
 				inserted++
 				updatedManaged++
 				log.Printf("[AssetService] IngestFindings: %s is owned by interrogated device %s (status=%s); attached there",
@@ -1395,10 +1425,11 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 			res.Asset.ID = current.String()
 			outcomes[i] = res.IngestResult()
 			effective[i] = assetStatus
-			changedAssetIDs = append(changedAssetIDs, assetID)
+			changeTracker.touch(assetID)
 			inserted++
 			switch res.Outcome {
 			case identity.OutcomeCreated, identity.OutcomeConflict, identity.OutcomeProvisional:
+				changeTracker.changed(assetID)
 				createdManaged++
 				// Provisional is a new asset too ( F9); the outcome is in the log.
 				log.Printf("[AssetService] IngestFindings: created managed asset %s for %s (status=%s, outcome=%s)",
@@ -1452,13 +1483,23 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 					if err == nil && seg != nil {
 						// RLS-scoped write over assets.
 						_ = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-							_, _ = tx.Exec(`UPDATE assets SET environment = $1, location_id = COALESCE($2, location_id), network_segment_id = $3, updated_at = NOW() WHERE id = $4 AND tenant_id = $5`,
-								seg.Environment, seg.LocationID, seg.ID, assetID, tenantID)
+							var moved bool
+							if e := tx.QueryRow(`
+								WITH prior AS (SELECT environment, location_id, network_segment_id FROM assets WHERE id = $4 AND tenant_id = $5)
+								UPDATE assets a SET environment = $1, location_id = COALESCE($2, a.location_id), network_segment_id = $3, updated_at = NOW()
+								  FROM prior p WHERE a.id = $4 AND a.tenant_id = $5
+								RETURNING p.environment IS DISTINCT FROM a.environment OR p.location_id IS DISTINCT FROM a.location_id
+								       OR p.network_segment_id IS DISTINCT FROM a.network_segment_id`,
+								seg.Environment, seg.LocationID, seg.ID, assetID, tenantID).Scan(&moved); e == nil && moved {
+								changeTracker.changed(assetID)
+							}
 							return nil
 						})
 					}
 				} else {
-					_ = s.enrichAssetIn(segs, tenantID, assetID, effectiveIP, f.Hostname)
+					if moved, _ := s.enrichAssetInTracked(segs, tenantID, assetID, effectiveIP, f.Hostname); moved {
+						changeTracker.changed(assetID)
+					}
 				}
 			}
 			var didSegment, didService bool
@@ -1492,11 +1533,26 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 						// socket for a service name to describe.
 					default:
 						wErr := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-							_, e := tx.Exec(`
-							UPDATE asset_endpoints SET service_name = $1, service_version = NULLIF($2, ''),
+							var moved bool
+							e := tx.QueryRow(`
+							WITH prior AS (
+								SELECT service_name, service_version, service_confidence, service_identification_method
+								  FROM asset_endpoints WHERE id = $5 AND tenant_id = $6
+							)
+							UPDATE asset_endpoints ae SET service_name = $1, service_version = NULLIF($2, ''),
 								service_confidence = $3, service_identification_method = $4, updated_at = NOW()
-							WHERE id = $5 AND tenant_id = $6`,
-								hints.ServiceName, ver, hints.Confidence, hints.IdentificationMethod, epID, tenantID)
+							  FROM prior p
+							WHERE ae.id = $5 AND ae.tenant_id = $6
+							RETURNING p.service_name IS DISTINCT FROM ae.service_name OR p.service_version IS DISTINCT FROM ae.service_version
+							       OR p.service_confidence IS DISTINCT FROM ae.service_confidence
+							       OR p.service_identification_method IS DISTINCT FROM ae.service_identification_method`,
+								hints.ServiceName, ver, hints.Confidence, hints.IdentificationMethod, epID, tenantID).Scan(&moved)
+							if errors.Is(e, sql.ErrNoRows) {
+								return nil
+							}
+							if e == nil && moved {
+								changeTracker.changed(assetID)
+							}
 							return e
 						})
 						if wErr != nil {
@@ -1508,7 +1564,9 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 				}
 			}
 			if !evidenceHeld {
-				s.recordHandshakeOutcome(ctx, tenantID, assetID, f)
+				if s.recordHandshakeOutcome(ctx, tenantID, assetID, f) {
+					changeTracker.changed(assetID)
+				}
 			}
 			if s.networkSegmentService != nil {
 				didSegment = true
@@ -1577,8 +1635,14 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 			// ingest batch, and one finding whose certificates or crypto rows fail to
 			// materialize must not abort the remaining findings. Logged rather than
 			// dropped so a silently half-materialized batch is still visible.
-			if err := s.processDiscoveryCryptoData(tenantID, assetID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring); err != nil {
+			var cryptoChanged bool
+			if err := s.processDiscoveryCryptoDataTracked(tenantID, assetID, f, &lifecycleRiskChanged, &lifecycleCryptoAdded, &lifecycleCertExpiring, &cryptoChanged); err != nil {
 				log.Printf("[AssetService] IngestFindings: materializing crypto data for asset %s failed (batch continues): %v", assetID, err)
+			}
+			// Marked even when part of the pass failed: what it did write is
+			// still a change an evaluator will read.
+			if cryptoChanged {
+				changeTracker.changed(assetID)
 			}
 			return nil
 		}); err != nil {
@@ -1594,8 +1658,21 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 		}
 	}()
 
-	// Publish events for changed assets (batch if many, individual if few)
-	// Publish asynchronously to avoid blocking the import response
+	// Publish asset.changed (batch if many, individual if few) - but only for
+	// assets whose ingest changed something a compliance evaluator can read.
+	//
+	// WHAT COUNTS AS A CHANGE (full list in
+	// docsv4/internal/developer/design/asset-inventory/ASSET_EVENTS.md):
+	// the asset was created; asset_history gained a row for it (identity,
+	// attribute, endpoint, class, approval/status changes); the crypto
+	// materialisation altered a configuration, certificate, risk score or
+	// at-rest posture; segment enrichment, service identification or the TLS
+	// handshake outcome moved a stored value. A pure re-sighting - only
+	// last_seen / observation counters moved - publishes NOTHING: the
+	// evaluation it would trigger can only reproduce the stored verdict. The
+	// lifecycle events below (asset.discovered, crypto.configuration_added, ...)
+	// are unaffected. Published asynchronously to avoid blocking the import.
+	changedAssetIDs := s.changedByHistory(ctx, tenantID, changeTracker, historyMark, historyMarkErr == nil)
 	if s.eventPublisher != nil && len(changedAssetIDs) > 0 {
 		source := "discovery"
 		if len(findings) > 0 && findings[0].RawData != nil {
@@ -2297,7 +2374,32 @@ func (s *AssetService) processDiscoveryCryptoData(
 	lifecycleCryptoAdded *[]*events.CryptoConfigurationAddedPayload,
 	lifecycleCertExpiring *[]*events.CertificateExpiringPayload,
 ) error {
+	return s.processDiscoveryCryptoDataTracked(tenantID, assetID, f, lifecycleRiskChanged, lifecycleCryptoAdded, lifecycleCertExpiring, nil)
+}
+
+// processDiscoveryCryptoDataTracked is processDiscoveryCryptoData that also
+// reports, through changed (nil to ignore), whether the pass altered anything an
+// evaluator can read: a new or enriched configuration, a moved leaf
+// certificate, a new or content-changed certificate, a moved risk score, a new
+// or changed at-rest posture. A configuration or certificate merely re-observed
+// (only last-seen/evidence timestamps refreshed) is NOT a change. This is the
+// materialisation half of the asset.changed rule documented at the publish site
+// in IngestFindings.
+func (s *AssetService) processDiscoveryCryptoDataTracked(
+	tenantID uuid.UUID,
+	assetID uuid.UUID,
+	f IngestFinding,
+	lifecycleRiskChanged *[]*events.AssetRiskChangedPayload,
+	lifecycleCryptoAdded *[]*events.CryptoConfigurationAddedPayload,
+	lifecycleCertExpiring *[]*events.CertificateExpiringPayload,
+	changed *bool,
+) error {
 	var materializationErrs []error
+	markChanged := func() {
+		if changed != nil {
+			*changed = true
+		}
+	}
 
 	// AT-REST resources short-circuit here.
 	//
@@ -2307,7 +2409,11 @@ func (s *AssetService) processDiscoveryCryptoData(
 	// which is precisely the phantom TLS endpoint this replaces. Its
 	// encryption posture is at-rest, so it belongs in crypto_applications.
 	if posture, ok := atRestPostureFromFinding(f); ok {
-		return s.produceAtRestApplication(tenantID, assetID, posture, findingObservedAt(f))
+		atRestChanged, err := s.produceAtRestApplicationTracked(tenantID, assetID, posture, findingObservedAt(f))
+		if atRestChanged {
+			markChanged()
+		}
+		return err
 	}
 
 	// B-22: the same reasoning, for the at-rest resources that atRestResourceTypes
@@ -2419,7 +2525,10 @@ func (s *AssetService) processDiscoveryCryptoData(
 			}
 
 			// Find or create certificate
-			cert, err := s.certificateService.FindOrCreateCertificate(tenantID, certData)
+			cert, certChanged, err := s.certificateService.findOrCreateCertificateTracked(tenantID, certData)
+			if err == nil && certChanged {
+				markChanged()
+			}
 			if err != nil {
 				log.Printf("Warning: failed to find/create certificate (subject=%s, fingerprint=%s): %v",
 					certData.SubjectDN, certData.FingerprintSHA256, err)
@@ -2507,6 +2616,7 @@ func (s *AssetService) processDiscoveryCryptoData(
 
 	var cryptoID uuid.UUID
 	var cryptoOutcome cryptoUpsertOutcome
+	var leafMoved bool
 	var keyExchangeAdopted bool
 	// RLS-scoped write over crypto_implementations. The advisory lock
 	// serializes the find-then-write for this asset across every replica, so
@@ -2525,11 +2635,11 @@ func (s *AssetService) processDiscoveryCryptoData(
 			return e
 		}
 		keyExchangeAdopted = adopted
-		id, outcome, e := upsertCryptoImplementation(tx, tenantID, key, primaryCertID, sensor, rawJSON, findingObservedAt(f))
+		id, outcome, moved, e := upsertCryptoImplementationTracked(tx, tenantID, key, primaryCertID, sensor, rawJSON, findingObservedAt(f))
 		if e != nil {
 			return e
 		}
-		cryptoID, cryptoOutcome = id, outcome
+		cryptoID, cryptoOutcome, leafMoved = id, outcome, moved
 		return nil
 	}); err != nil {
 		// Everything below writes against cryptoID — junction links, algorithm
@@ -2538,6 +2648,13 @@ func (s *AssetService) processDiscoveryCryptoData(
 		log.Printf("[AssetService] Warning: failed to materialize crypto implementation for asset %s: %v", assetID, err)
 		materializationErrs = append(materializationErrs, fmt.Errorf("materialize crypto implementation: %w", err))
 		return errors.Join(materializationErrs...)
+	}
+
+	// Only a refresh or partial re-observation leaves the configuration as it
+	// was; every other outcome (created, enriched, version retracted) is a
+	// change, and so is a refresh that moved the leaf certificate.
+	if leafMoved || (cryptoOutcome != cryptoUpsertRefreshed && cryptoOutcome != cryptoUpsertPartialReobserved) {
+		markChanged()
 	}
 
 	// Link the CHAIN certificates to the crypto configuration.
@@ -2725,6 +2842,13 @@ func (s *AssetService) processDiscoveryCryptoData(
 	if scoreThisPass && partialAssessment && !partialAssessmentKeepsScore(cryptoRiskScore) {
 		cryptoRiskAssessed = false
 		if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+			moves, e := cryptoRiskScoreMoves(tx, cryptoID, nil)
+			if e != nil {
+				return e
+			}
+			if moves {
+				markChanged()
+			}
 			return clearCryptoRiskScore(tx, cryptoID)
 		}); err != nil {
 			materializationErrs = append(materializationErrs, fmt.Errorf("clear partially assessed crypto risk: %w", err))
@@ -2742,7 +2866,11 @@ func (s *AssetService) processDiscoveryCryptoData(
 		{
 			// RLS-scoped writes over crypto_implementations / assets.
 			if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-				return persistCryptoRiskScore(tx, cryptoID, cryptoRiskScore)
+				moved, e := persistCryptoRiskScore(tx, cryptoID, cryptoRiskScore)
+				if moved {
+					markChanged()
+				}
+				return e
 			}); err != nil {
 				materializationErrs = append(materializationErrs, fmt.Errorf("persist crypto risk: %w", err))
 			}
@@ -2792,16 +2920,76 @@ type minimalAsset struct {
 	Port      *int      `db:"port"`
 }
 
+// ErrNotFound is returned by a write that matched no row for the tenant: the
+// id is unknown, belongs to another tenant, or the row is already deleted.
+// Handlers answer it 404. A write that changed nothing must say so; reporting
+// success for it published events and wrote audit rows for things that never
+// happened.
+var ErrNotFound = errors.New("not found")
+
+// ErrInvalidInput marks an error caused by what the caller sent. Handlers
+// answer it 400; any other error is the server's and answers 500.
+var ErrInvalidInput = errors.New("invalid input")
+
+// LifecycleChangeResult reports what an approve or deny actually did. Changed
+// are the assets whose status moved; Skipped are requested ids that did not
+// move (unknown or foreign to the tenant, deleted, or already in or past the
+// target state). The count a caller shows must be len(Changed), never the
+// length of the request.
+type LifecycleChangeResult struct {
+	Changed []uuid.UUID
+	Skipped []uuid.UUID
+}
+
+// splitChanged partitions the requested ids by whether the UPDATE returned them.
+func splitChanged(requested, changed []uuid.UUID) LifecycleChangeResult {
+	moved := make(map[uuid.UUID]struct{}, len(changed))
+	for _, id := range changed {
+		moved[id] = struct{}{}
+	}
+	res := LifecycleChangeResult{Changed: []uuid.UUID{}, Skipped: []uuid.UUID{}}
+	seen := make(map[uuid.UUID]struct{}, len(requested))
+	for _, id := range requested {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, ok := moved[id]; ok {
+			res.Changed = append(res.Changed, id)
+		} else {
+			res.Skipped = append(res.Skipped, id)
+		}
+	}
+	return res
+}
+
+// ApproveAssets is ApproveAssetsReport without the report.
 func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, actorUserID uuid.UUID) error {
+	_, err := s.ApproveAssetsReport(tenantID, assetIDs, actorUserID)
+	return err
+}
+
+// ApproveAssetsReport moves assets to monitoring and reports which actually
+// moved.
+//
+// The transition is deliberate: only `pending_approval` (the queue) and
+// `denied` (a person reversing their own decision) are approvable. An asset
+// already `monitoring` is skipped, so a repeated approve is a no-op that writes
+// no history, emits no event and replays no deferred crypto. Without the
+// predicate a second approve re-ran all three for every id.
+func (s *AssetService) ApproveAssetsReport(tenantID uuid.UUID, assetIDs []uuid.UUID, actorUserID uuid.UUID) (LifecycleChangeResult, error) {
 	if len(assetIDs) == 0 {
-		return nil
+		return LifecycleChangeResult{Changed: []uuid.UUID{}, Skipped: []uuid.UUID{}}, nil
 	}
 
 	// Commit approval before materializing deferred crypto data so a failed status
 	// update cannot leave certificates/crypto rows behind for an unapproved asset.
 	// Approval is an administrative decision, not a new observation. Preserve
 	// both observation freshness and its stale classification.
-	query := `UPDATE assets SET asset_status = 'monitoring', updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL`
+	query := `UPDATE assets SET asset_status = 'monitoring', updated_at = NOW()
+		WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL
+		  AND asset_status IN ('pending_approval', 'denied')
+		RETURNING id`
 	// RLS-scoped write over assets + asset_relationships. The status change and
 	// the edge promotion are ONE transaction: an approval that promoted no edges
 	// because the second statement failed would leave a monitored asset whose
@@ -2812,38 +3000,47 @@ func (s *AssetService) ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, a
 	// asset, and it wrote nothing to `asset_history` at all. The timeline said
 	// the asset was discovered and then, with no entry in between, that it was
 	// being monitored — no record that anybody decided, and none of who.
+	var changed []uuid.UUID
 	if err := withAssetLifecycleWriteTx(context.Background(), s.db, tenantID, assetIDs, func(tx *sqlx.Tx) error {
+		changed = nil
 		if err := checkAssetLifecycleMutable(context.Background(), tx, tenantID, assetIDs); err != nil {
 			return err
 		}
-		if _, e := tx.Exec(query, tenantID, pq.Array(assetIDs)); e != nil {
+		if e := tx.Select(&changed, query, tenantID, pq.Array(assetIDs)); e != nil {
 			return e
 		}
-		for _, assetID := range assetIDs {
+		for _, assetID := range changed {
 			s.recordAssetHistoryBy(tx, tenantID, assetID, actorUserID, identity.ActionApproved,
 				identity.Source{Kind: identity.SourceDeclared, Ref: "approvals"},
 				map[string]any{"asset_status": identity.StatusMonitoring})
 		}
-		return promoteEdgesForApprovedAssets(tx, tenantID, assetIDs)
+		if len(changed) == 0 {
+			return nil
+		}
+		return promoteEdgesForApprovedAssets(tx, tenantID, changed)
 	}); err != nil {
-		return err
+		return LifecycleChangeResult{}, err
 	}
-	s.publishLifecycle(tenantID, assetIDs, actorUserID,
+	result := splitChanged(assetIDs, changed)
+	if len(result.Changed) == 0 {
+		return result, nil
+	}
+	s.publishLifecycle(tenantID, result.Changed, actorUserID,
 		events.EventTypeAssetApproved, identity.StatusMonitoring)
 
 	// The ingestion-queue rows that produced these assets are waiting on THIS
 	// decision. Settle them; see settleDiscoveryQueueRows.
-	s.settleDiscoveryQueueRows(tenantID, assetIDs, "auto_approved")
+	s.settleDiscoveryQueueRows(tenantID, result.Changed, "auto_approved")
 
 	// Replay the crypto evidence held while each asset waited
 	// (deferred_crypto.go).
 	var materializationErrs []error
-	for _, assetID := range assetIDs {
+	for _, assetID := range result.Changed {
 		if _, err := s.replayDeferredCrypto(context.Background(), tenantID, assetID); err != nil {
 			materializationErrs = append(materializationErrs, fmt.Errorf("asset %s: %w", assetID, err))
 		}
 	}
-	return errors.Join(materializationErrs...)
+	return result, errors.Join(materializationErrs...)
 }
 
 // AgentHostApprovalSourceRef is the `asset_history.source` an agent-driven
@@ -2946,9 +3143,19 @@ func (s *AssetService) AutoApproveAgentHost(tenantID, assetID, agentID uuid.UUID
 	return true, nil
 }
 
+// DenyAssets is DenyAssetsReport without the report.
 func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, userID uuid.UUID) error {
+	_, err := s.DenyAssetsReport(tenantID, assetIDs, userID)
+	return err
+}
+
+// DenyAssetsReport denies assets waiting in the approval queue and reports
+// which actually moved. Only `pending_approval` is deniable: an asset a person
+// already approved (`monitoring`) is not silently flipped to denied, and a
+// repeated deny is a no-op with no second suppression, history row or event.
+func (s *AssetService) DenyAssetsReport(tenantID uuid.UUID, assetIDs []uuid.UUID, userID uuid.UUID) (LifecycleChangeResult, error) {
 	if len(assetIDs) == 0 {
-		return nil
+		return LifecycleChangeResult{Changed: []uuid.UUID{}, Skipped: []uuid.UUID{}}, nil
 	}
 
 	// Fetch asset fingerprints.
@@ -2964,12 +3171,15 @@ func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, user
 		SELECT a.id, a.hostname, host(COALESCE(e.address, a.primary_address)) AS ip_address, e.port
 		FROM assets a
 		LEFT JOIN asset_endpoints e ON e.tenant_id = a.tenant_id AND e.asset_id = a.id
-		WHERE a.tenant_id = $1 AND a.id = ANY($2) AND a.deleted_at IS NULL`
+		WHERE a.tenant_id = $1 AND a.id = ANY($2) AND a.deleted_at IS NULL AND a.asset_status = 'pending_approval'`
 	// Mark assets as denied and default ownership to third_party.
 	// RLS-scoped write over assets + asset_relationships, in one transaction
 	// for the same reason ApproveAssets is.
-	update := `UPDATE assets SET asset_status = 'denied', asset_ownership = COALESCE(NULLIF(asset_ownership,''), 'third_party'), updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL`
+	update := `UPDATE assets SET asset_status = 'denied', asset_ownership = COALESCE(NULLIF(asset_ownership,''), 'third_party'), updated_at = NOW() WHERE tenant_id = $1 AND id = ANY($2) AND deleted_at IS NULL AND asset_status = 'pending_approval' RETURNING id`
+	var changed []uuid.UUID
 	if err := withAssetLifecycleWriteTx(context.Background(), s.db, tenantID, assetIDs, func(tx *sqlx.Tx) error {
+		changed = nil
+		assets = nil
 		if err := checkAssetLifecycleMutable(context.Background(), tx, tenantID, assetIDs); err != nil {
 			return err
 		}
@@ -2982,23 +3192,30 @@ func (s *AssetService) DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, user
 			}
 		}
 
-		if _, e := tx.Exec(update, tenantID, pq.Array(assetIDs)); e != nil {
+		if e := tx.Select(&changed, update, tenantID, pq.Array(assetIDs)); e != nil {
 			return e
 		}
 		// Same reason as the approval: a deny is a human decision, and the
 		// timeline recorded neither the decision nor the decider.
-		for _, assetID := range assetIDs {
+		for _, assetID := range changed {
 			s.recordAssetHistoryBy(tx, tenantID, assetID, userID, identity.ActionDenied,
 				identity.Source{Kind: identity.SourceDeclared, Ref: "approvals"},
 				map[string]any{"asset_status": identity.StatusDenied})
 		}
-		return rejectEdgesForDeniedAssets(tx, tenantID, assetIDs)
+		if len(changed) == 0 {
+			return nil
+		}
+		return rejectEdgesForDeniedAssets(tx, tenantID, changed)
 	}); err != nil {
-		return err
+		return LifecycleChangeResult{}, err
 	}
-	s.publishLifecycle(tenantID, assetIDs, userID, events.EventTypeAssetDenied, identity.StatusDenied)
-	s.settleDiscoveryQueueRows(tenantID, assetIDs, "suppressed")
-	return nil
+	result := splitChanged(assetIDs, changed)
+	if len(result.Changed) == 0 {
+		return result, nil
+	}
+	s.publishLifecycle(tenantID, result.Changed, userID, events.EventTypeAssetDenied, identity.StatusDenied)
+	s.settleDiscoveryQueueRows(tenantID, result.Changed, "suppressed")
+	return result, nil
 }
 
 // settleDiscoveryQueueRows closes out the ingestion-queue rows whose approval
@@ -3290,7 +3507,7 @@ func (s *AssetService) createAssetFromInput(tenantID uuid.UUID, input models.Ass
 // duplicate and missed a host whose only match was its serial.
 func (s *AssetService) createAssetResolved(tenantID uuid.UUID, input models.AssetInput, source identity.Source, assetStatus string) (*models.Asset, identity.Outcome, error) {
 	if strings.TrimSpace(input.ClassKey) == "" {
-		return nil, "", fmt.Errorf("class_key is required")
+		return nil, "", fmt.Errorf("%w: class_key is required", ErrInvalidInput)
 	}
 	if _, ok := assetclass.Get(input.ClassKey); !ok {
 		// A tenant leaf subclass is a runtime row the generated registry does
@@ -3301,7 +3518,7 @@ func (s *AssetService) createAssetResolved(tenantID uuid.UUID, input models.Asse
 			return nil, "", err
 		}
 		if !known {
-			return nil, "", fmt.Errorf("class_key %q is not a known asset class", input.ClassKey)
+			return nil, "", fmt.Errorf("%w: class_key %q is not a known asset class", ErrInvalidInput, input.ClassKey)
 		}
 	}
 
@@ -3374,8 +3591,8 @@ func (s *AssetService) createAssetResolved(tenantID uuid.UUID, input models.Asse
 		if res.ObservationID != "" {
 			return nil, res.Outcome, &identity.RetainedObservation{Result: res.IngestResult()}
 		}
-		return nil, res.Outcome, fmt.Errorf("this asset's identifiers already belong to %d existing asset(s); "+
-			"a merge proposal was opened in Approvals for review", len(res.Candidates))
+		return nil, res.Outcome, fmt.Errorf("%w: this asset's identifiers already belong to %d existing asset(s); "+
+			"a merge proposal was opened in Approvals for review", ErrInvalidInput, len(res.Candidates))
 	}
 
 	if s.eventPublisher != nil {
@@ -3753,7 +3970,7 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 				return nil, nil, err
 			}
 			if !known {
-				return nil, nil, fmt.Errorf("class_key %q is not a known asset class", input.ClassKey)
+				return nil, nil, fmt.Errorf("%w: class_key %q is not a known asset class", ErrInvalidInput, input.ClassKey)
 			}
 		}
 		// A class a person set is `declared`, which outranks a measurement in
@@ -3833,10 +4050,9 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 		// 400 naming the endpoints that DO the cascade, rather than silently
 		// ignoring the field: a client that thought it was changing status has to
 		// find out.
-		return nil, nil, fmt.Errorf(
-			"asset_status cannot be changed by an update: approving, denying and archiving each " +
-				"do more than set a column. Use POST /infrastructure-assets/approve, " +
-				"POST /infrastructure-assets/deny, or POST /infrastructure-assets/bulk-actions/archive")
+		return nil, nil, fmt.Errorf("%w: asset_status cannot be changed by an update: approving, denying and archiving each "+
+			"do more than set a column. Use POST /infrastructure-assets/approve, "+
+			"POST /infrastructure-assets/deny, or POST /infrastructure-assets/bulk-actions/archive", ErrInvalidInput)
 	}
 	if input.Tags != nil {
 		// JSONB column: marshal the map to bytes — the database/sql driver
@@ -3913,8 +4129,12 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 				return e
 			}
 		}
-		if _, e := tx.Exec(query, args...); e != nil {
+		res, e := tx.Exec(query, args...)
+		if e != nil {
 			return e
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
 		}
 		if input.ClassKey == "" {
 			return nil
@@ -4075,8 +4295,14 @@ func (s *AssetService) DeleteAsset(tenantID, assetID uuid.UUID) error {
 	query := `UPDATE assets SET deleted_at = NOW() WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`
 	// RLS-scoped write over assets.
 	if err := withAssetLifecycleWriteTx(context.Background(), s.db, tenantID, []uuid.UUID{assetID}, func(tx *sqlx.Tx) error {
-		_, e := tx.Exec(query, tenantID, assetID)
-		return e
+		res, e := tx.Exec(query, tenantID, assetID)
+		if e != nil {
+			return e
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
 	}); err != nil {
 		return fmt.Errorf("failed to delete asset: %w", err)
 	}
@@ -4098,8 +4324,25 @@ func (s *AssetService) RestoreAsset(tenantID, assetID uuid.UUID) error {
 		if err := checkAssetRestoreMutable(context.Background(), tx, tenantID, assetID); err != nil {
 			return err
 		}
-		_, e := tx.Exec(query, tenantID, assetID)
-		return e
+		res, e := tx.Exec(query, tenantID, assetID)
+		if e != nil {
+			return e
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return nil
+		}
+		// Nothing was un-deleted. An asset that exists and is simply not
+		// deleted (an archived one is hidden by status, not by deleted_at) is
+		// already in the state restore asks for: success, with nothing to
+		// report. An id that matches no row at all is a 404.
+		var exists bool
+		if e := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM assets WHERE tenant_id = $1 AND id = $2)`, tenantID, assetID).Scan(&exists); e != nil {
+			return e
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		return nil
 	}); err != nil {
 		return fmt.Errorf("failed to restore asset: %w", err)
 	}

@@ -41,6 +41,7 @@ import (
 // (build tag `ee`) supplies the Enterprise implementations.
 func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.Client, rateLimiter *middleware.RateLimiter, hooks EditionHooks) *gin.Engine {
 	router := gin.New()
+	configureTrustedProxies(router, cfg.TrustedProxies)
 
 	// SSO enumeration for the email-first login dispatcher. Never nil — Core
 	// resolves to a no-op that reports no SSO methods.
@@ -65,6 +66,13 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		logrus.Warn("no AUTH_JWT signing key configured; signing JWTs with the legacy shared HS256 secret (see #584)")
 	}
 	jwtService := auth.NewJWTServiceWithKeys(cfg.JWTSecret, jwtSigner, cfg.JWTExpiry, 7*24*time.Hour) // 7 days refresh expiry
+	// The chart closes the HS256 migration window for the OTHER services by
+	// removing JWT_SECRET from their pods; this service has to keep the secret
+	// (CSRF binding, pre-cutover refresh tokens, the no-key fallback), so the
+	// same decision reaches it as an explicit switch. Off, an HS256 token is
+	// refused here too — otherwise anyone holding JWT_SECRET could forge a
+	// platform-admin token this service accepts forever.
+	jwtService.SetAcceptLegacyHMAC(cfg.JWTAcceptLegacyHMAC)
 	// No session is minted for a suspended, canceled or deleted tenant — on any
 	// path (RC-4 /). `tenants` is global, so the app-role pool reads it.
 	jwtService.SetTenantGate(tenantstate.Gate(db))
@@ -231,6 +239,18 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			oauthGroup.POST("/token", oauthHandler.Token)
 		}
 
+		// Scoped (PAT-derived) tokens act as the user only for what their scope
+		// list names. Routes that carry RequireAuth but no permission
+		// string have nothing to intersect the scopes with, so a read-only token
+		// would otherwise drive them in full. Every SELF-SERVICE account route
+		// below -- anything that changes the caller's own profile, credentials,
+		// sessions, consents, plan, onboarding state or exports their data --
+		// therefore carries this gate, the same refusal /api-tokens has.
+		// Read-only self info (GET /auth/me, which mcp-service needs, the
+		// preference/session/connection/onboarding/legal-pending reads and the
+		// permission lookups) stays open to scoped tokens.
+		rejectScoped := middleware.RejectScopedTokens()
+
 		// Authentication routes
 		auth := authServiceGroup.Group("/auth")
 		{
@@ -239,7 +259,7 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			auth.POST("/verify-email", authHandlers.VerifyEmail)
 			auth.POST("/resend-verification", authHandlers.ResendEmailVerification)
 			auth.POST("/login", authHandlers.Login)
-			auth.POST("/logout", middleware.RequireAuth(cfg, jwtService), authHandlers.Logout)
+			auth.POST("/logout", middleware.RequireAuth(cfg, jwtService), rejectScoped, authHandlers.Logout)
 			auth.POST("/refresh", authHandlers.RefreshToken)
 			auth.POST("/forgot-password", authHandlers.ForgotPassword)
 			auth.POST("/reset-password", authHandlers.ResetPassword)
@@ -250,17 +270,17 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			// access-only —, the impersonator's audit trail cannot
 			// honestly attribute identity-mutating actions.
 			auth.GET("/me", middleware.RequireAuth(cfg, jwtService, middleware.AllowImpersonation()), authHandlers.GetMe)
-			auth.PUT("/me", middleware.RequireAuth(cfg, jwtService), authHandlers.UpdateMe)
-			auth.POST("/change-password", middleware.RequireAuth(cfg, jwtService), authHandlers.ChangePassword)
+			auth.PUT("/me", middleware.RequireAuth(cfg, jwtService), rejectScoped, authHandlers.UpdateMe)
+			auth.POST("/change-password", middleware.RequireAuth(cfg, jwtService), rejectScoped, authHandlers.ChangePassword)
 
 			// Notification preferences — GET opt-in, PUT access-only.
 			auth.GET("/me/preferences/notifications", middleware.RequireAuth(cfg, jwtService, middleware.AllowImpersonation()), authHandlers.GetNotificationPreferences)
-			auth.PUT("/me/preferences/notifications", middleware.RequireAuth(cfg, jwtService), authHandlers.UpdateNotificationPreferences)
+			auth.PUT("/me/preferences/notifications", middleware.RequireAuth(cfg, jwtService), rejectScoped, authHandlers.UpdateNotificationPreferences)
 
 			// EULA acceptance — access-only; accepting EULA on behalf
 			// of an impersonated user is exactly the kind of identity-mutating
 			// action the audit trail can't legitimately attribute.
-			auth.POST("/users/me/eula", middleware.RequireAuth(cfg, jwtService), authHandlers.AcceptEULA)
+			auth.POST("/users/me/eula", middleware.RequireAuth(cfg, jwtService), rejectScoped, authHandlers.AcceptEULA)
 
 			// Registration completion with tier selection
 			auth.POST("/register/complete", authHandlers.CompleteRegistration)
@@ -272,7 +292,7 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			auth.GET("/legal/current", GetCurrentLegalDocuments(bypassDB))
 			auth.GET("/legal/documents/:docType", GetLegalDocumentByType(bypassDB))
 			auth.GET("/legal/pending", middleware.RequireAuth(cfg, jwtService, middleware.AllowImpersonation()), GetPendingLegalAcceptances(bypassDB))
-			auth.POST("/legal/accept", middleware.RequireAuth(cfg, jwtService), AcceptLegalDocuments(bypassDB))
+			auth.POST("/legal/accept", middleware.RequireAuth(cfg, jwtService), rejectScoped, AcceptLegalDocuments(bypassDB))
 
 			// Tier selection. Choosing the tenant's plan is a billing
 			// mutation, so it is gated by `billing.update` — the one permission
@@ -286,25 +306,26 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			// gate says who may choose, the entitlement check says what.
 			auth.POST("/select-tier",
 				middleware.RequireAuth(cfg, jwtService),
+				rejectScoped,
 				middleware.RequirePermission(rbacService, "billing.update"),
 				authHandlers.SelectTier)
 
 			// Onboarding — GET opt-in, POST access-only.
 			auth.GET("/onboarding/status", middleware.RequireAuth(cfg, jwtService, middleware.AllowImpersonation()), authHandlers.GetOnboardingStatus)
-			auth.POST("/onboarding/progress", middleware.RequireAuth(cfg, jwtService), authHandlers.UpdateOnboardingProgress)
+			auth.POST("/onboarding/progress", middleware.RequireAuth(cfg, jwtService), rejectScoped, authHandlers.UpdateOnboardingProgress)
 
 			// Sessions management — GET opt-in, DELETE access-only.
 			// Revoking sessions during impersonation could log the impersonated
 			// user out of their other devices without their consent.
 			auth.GET("/sessions", middleware.RequireAuth(cfg, jwtService, middleware.AllowImpersonation()), authHandlers.ListSessions)
-			auth.DELETE("/sessions/:id", middleware.RequireAuth(cfg, jwtService), authHandlers.RevokeSession)
+			auth.DELETE("/sessions/:id", middleware.RequireAuth(cfg, jwtService), rejectScoped, authHandlers.RevokeSession)
 
 			// Connections management — GET opt-in, PUT access-only.
 			auth.GET("/connections", middleware.RequireAuth(cfg, jwtService, middleware.AllowImpersonation()), authHandlers.ListConnections)
-			auth.PUT("/connections/:id/primary", middleware.RequireAuth(cfg, jwtService), authHandlers.SetPrimaryAuth)
+			auth.PUT("/connections/:id/primary", middleware.RequireAuth(cfg, jwtService), rejectScoped, authHandlers.SetPrimaryAuth)
 
 			// Avatar upload
-			auth.POST("/upload-avatar", middleware.RequireAuth(cfg, jwtService), authHandlers.UploadAvatar)
+			auth.POST("/upload-avatar", middleware.RequireAuth(cfg, jwtService), rejectScoped, authHandlers.UploadAvatar)
 
 			// Flexible authentication flow (frontend-agnostic)
 			auth.POST("/initiate", AuthInitiate(bypassDB, redis, ssoMethods))
@@ -333,8 +354,8 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			users.GET("", middleware.RequirePermission(rbacService, "users.read"), ListUsers(db))
 			users.POST("", middleware.RequirePermission(rbacService, "users.create"), CreateUser(db, bypassDB, cfg))
 			users.GET("/:id", middleware.RequirePermission(rbacService, "users.read"), GetUser(db))
-			users.PUT("/:id", middleware.RequirePermission(rbacService, "users.update"), UpdateUser(db))
-			users.DELETE("/:id", middleware.RequirePermission(rbacService, "users.delete"), DeleteUser(db))
+			users.PUT("/:id", middleware.RequirePermission(rbacService, "users.update"), UpdateUser(db, authService))
+			users.DELETE("/:id", middleware.RequirePermission(rbacService, "users.delete"), DeleteUser(db, authService))
 
 			// Data subject requests. Both are administrative acts over
 			// one named person's data, so they sit on users.manage rather than
@@ -350,6 +371,7 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		// about them.
 		me := authServiceGroup.Group("/me")
 		me.Use(middleware.RequireAuth(cfg, jwtService))
+		me.Use(rejectScoped)
 		{
 			me.GET("/data-export", ExportMyData(db))
 		}
@@ -409,7 +431,7 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			// (platform admins set tenant design defaults) — the same pair as
 			// PUT /admin/tenants/:tenantId/ui-config. The handler re-checks the
 			// identity; neither looks at the role string in the token.
-			tenant.PUT("/ui-config", middleware.RequirePlatformIdentity(), middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSettings), UpdateTenantUIConfig(db))
+			tenant.PUT("/ui-config", middleware.RejectInternalCalls(), middleware.RequirePlatformIdentity(), middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSettings), UpdateTenantUIConfig(db))
 			// Branding updates are tenant settings.
 			tenant.PUT("/branding", middleware.RequirePermission(rbacService, "settings.update"), UpdateTenantBranding(db))
 			// Branding asset upload
@@ -430,8 +452,8 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 			// handlers additionally enforce the tenant-path-access check used by
 			// ListTenantUsers/InviteTenantMember and verify the target user
 			// belongs to :tenantId before mutating.
-			tenant.DELETE("/:tenantId/users/:userId", middleware.RequirePermission(rbacService, "users.delete"), DeleteTenantMember(db))
-			tenant.PUT("/:tenantId/users/:userId/status", middleware.RequirePermission(rbacService, "users.update"), UpdateTenantMemberStatus(db))
+			tenant.DELETE("/:tenantId/users/:userId", middleware.RequirePermission(rbacService, "users.delete"), DeleteTenantMember(db, authService))
+			tenant.PUT("/:tenantId/users/:userId/status", middleware.RequirePermission(rbacService, "users.update"), UpdateTenantMemberStatus(db, authService))
 		}
 
 		// UI themes route (public, but requires auth for tier filtering)
@@ -462,6 +484,7 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 				AuthService:           authService,
 				RequireAuth:           middleware.RequireAuth(cfg, jwtService),
 				RequireSettingsUpdate: middleware.RequirePermission(rbacService, "settings.update"),
+				RejectScopedTokens:    rejectScoped,
 				Core:                  coreSSOSupport(),
 			})
 		}
@@ -473,6 +496,9 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		apiTokenHandlers := apitokens.NewHandlers(apitokens.NewService(db, bypassDB), authService, jwtService)
 		apiTokens := authServiceGroup.Group("/api-tokens")
 		apiTokens.Use(middleware.RequireAuth(cfg, jwtService))
+		// A token minted from a PAT must not mint, list or revoke PATs: it
+		// would escape its own scope by creating a broader one.
+		apiTokens.Use(middleware.RejectScopedTokens())
 		{
 			apiTokens.GET("", apiTokenHandlers.ListTokens)
 			apiTokens.POST("", apiTokenHandlers.CreateToken)
@@ -574,6 +600,10 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		// denied it — surfacing as "Couldn't load impersonation history".
 		adminImpersonation := authServiceGroup.Group("/admin")
 		adminImpersonation.Use(middleware.RequireAuth(cfg, jwtService, middleware.PlatformCookiesFirst()))
+		// A human platform admin only. INTERNAL_AUTH_SECRET is shared by every
+		// service, so without this any compromised pod could mint a session as
+		// any user through POST /admin/impersonations.
+		adminImpersonation.Use(middleware.RejectInternalCalls())
 		adminImpersonation.Use(middleware.RequireNotRevoked(authService.Redis()))
 		// Platform permission check using shared RBAC service
 		adminImpersonation.Use(middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformImpersonate))
@@ -599,8 +629,11 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		{
 			tenantSecurity.GET("/security-summary", middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSecurity), getTenantSecuritySummaryHandler(authService))
 			// UI config endpoints for platform admins (tenant ID in path)
-			tenantSecurity.GET("/ui-config", middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSettings), GetTenantUIConfigByID(db))
-			tenantSecurity.PUT("/ui-config", middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSettings), UpdateTenantUIConfigByID(db))
+			// ...whereas ui-config is a human platform admin's console. Only
+			// security-summary above is read by a service (tenant-health-service,
+			// HMAC-signed), so only it keeps the internal-call bypass.
+			tenantSecurity.GET("/ui-config", middleware.RejectInternalCalls(), middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSettings), GetTenantUIConfigByID(db))
+			tenantSecurity.PUT("/ui-config", middleware.RejectInternalCalls(), middleware.RequirePlatformPermission(sharedRBACService, sharedrbac.PermissionPlatformSettings), UpdateTenantUIConfigByID(db))
 		}
 
 		// Onboarding workflow routes
@@ -609,16 +642,34 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		{
 			onboarding.GET("/status", GetOnboardingStatus(db, bypassDB))
 			onboarding.GET("/workflow", GetOnboardingWorkflow(db, bypassDB))
-			onboarding.POST("/steps/:id/complete", CompleteOnboardingStep(db, bypassDB))
+			onboarding.POST("/steps/:id/complete", rejectScoped, CompleteOnboardingStep(db, bypassDB))
 			onboarding.GET("/progress", GetOnboardingProgress(db, bypassDB))
-			onboarding.POST("/steps/:id/skip", SkipOnboardingStep(db, bypassDB))
+			onboarding.POST("/steps/:id/skip", rejectScoped, SkipOnboardingStep(db, bypassDB))
 			// Per-user dismiss (any authed user) + org-wide toggle (tenant admin).
-			onboarding.POST("/dismiss", DismissOnboarding(db, bypassDB))
+			onboarding.POST("/dismiss", rejectScoped, DismissOnboarding(db, bypassDB))
 			onboarding.PUT("/settings", middleware.RequirePermission(rbacService, "settings.update"), UpdateOnboardingSettings(db, bypassDB))
 		}
 	}
 
 	return router
+}
+
+// configureTrustedProxies tells gin which peers' X-Forwarded-For to believe.
+// gin's default trusts every peer, which makes ClientIP() the leftmost —
+// client-chosen — entry: per-IP rate limits, audit-log addresses and the actor
+// address stamped into impersonation tokens were all forgeable. With a list, gin
+// walks the header right-to-left past trusted hops and returns the first
+// address it does not trust; with none, ClientIP() is the TCP peer.
+//
+// An unparsable entry is fatal: silently falling back to trust-everyone would
+// turn a typo into the vulnerability this exists to close.
+func configureTrustedProxies(router *gin.Engine, cidrs []string) {
+	if len(cidrs) == 0 {
+		cidrs = nil
+	}
+	if err := router.SetTrustedProxies(cidrs); err != nil {
+		logrus.WithError(err).Fatal("TRUSTED_PROXY_CIDRS is not a list of valid IPs/CIDRs")
+	}
 }
 
 // getTenantSecuritySummaryHandler returns security metrics for a specific tenant

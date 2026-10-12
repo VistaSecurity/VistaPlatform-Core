@@ -323,6 +323,24 @@ const upsertCryptoApplicationSQL = `
 // produceAtRestApplication derives (or refreshes) the crypto_applications row
 // for an at-rest cloud resource. Errors keep retained receipts retryable.
 func (s *AssetService) produceAtRestApplication(tenantID, assetID uuid.UUID, p atRestPosture, observedAt time.Time) error {
+	_, err := s.produceAtRestApplicationTracked(tenantID, assetID, p, observedAt)
+	return err
+}
+
+// atRestApplicationUnchangedSQL is true when the live row for the resource
+// already holds exactly the posture about to be written (and the asset link).
+const atRestApplicationUnchangedSQL = `
+	SELECT EXISTS (
+		SELECT 1 FROM crypto_applications
+		 WHERE tenant_id = $1 AND resource_identifier = $2 AND encryption_context = 'at_rest' AND deleted_at IS NULL
+		   AND configuration_data = $3::jsonb
+		   AND risk_score IS NOT DISTINCT FROM $4
+		   AND ($5::uuid IS NULL OR asset_id IS NOT DISTINCT FROM $5::uuid))`
+
+// produceAtRestApplicationTracked is produceAtRestApplication that also reports
+// whether the row's posture, risk or asset link changed (or it is new) - the
+// at-rest half of "something an evaluator reads moved".
+func (s *AssetService) produceAtRestApplicationTracked(tenantID, assetID uuid.UUID, p atRestPosture, observedAt time.Time) (bool, error) {
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
@@ -344,7 +362,7 @@ func (s *AssetService) produceAtRestApplication(tenantID, assetID uuid.UUID, p a
 	}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
-		return fmt.Errorf("marshal at-rest posture: %w", err)
+		return false, fmt.Errorf("marshal at-rest posture: %w", err)
 	}
 
 	var assetArg interface{}
@@ -353,7 +371,13 @@ func (s *AssetService) produceAtRestApplication(tenantID, assetID uuid.UUID, p a
 	}
 
 	// RLS-scoped write over crypto_applications.
-	return database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+	changed := true
+	err = database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+		var unchanged bool
+		if e := tx.QueryRow(atRestApplicationUnchangedSQL, tenantID, p.ResourceIdentifier, string(configJSON), p.riskScore(), assetArg).Scan(&unchanged); e != nil {
+			return fmt.Errorf("read crypto_application before upsert: %w", e)
+		}
+		changed = !unchanged
 		_, e := tx.Exec(
 			upsertCryptoApplicationSQL,
 			tenantID, assetArg, p.ResourceType, p.ResourceIdentifier, p.ResourceName,
@@ -365,4 +389,5 @@ func (s *AssetService) produceAtRestApplication(tenantID, assetID uuid.UUID, p a
 		}
 		return nil
 	})
+	return changed, err
 }

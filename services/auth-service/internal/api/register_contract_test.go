@@ -12,6 +12,7 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +34,7 @@ func newRegisterEngine(stub *stubAuthServiceStore) *gin.Engine {
 	h := &AuthHandlers{authService: stub}
 	grp.POST("/auth/register", h.Register)
 	grp.POST("/auth/register/complete", h.CompleteRegistration)
+	grp.POST("/auth/forgot-password", h.ForgotPassword)
 	grp.POST("/auth/reset-password", h.ResetPassword)
 	return r
 }
@@ -214,14 +216,38 @@ func TestContract_Register_400_badBody(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
-func TestContract_Register_409_emailExists(t *testing.T) {
+// No account-existence oracle: an already-registered address gets the same
+// status and body shape as a new one (it must not be a 409).
+func TestContract_Register_existingEmailIndistinguishableFromNew(t *testing.T) {
 	sv := loadSpec(t)
-	stub := &stubAuthServiceStore{registerErr: auth.ErrEmailExists}
-	w := do(newRegisterEngine(stub), http.MethodPost, "/api/v1/auth-service/auth/register", strings.NewReader(validRegisterBody))
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", w.Code, w.Body.String())
+	url := "/api/v1/auth-service/auth/register"
+	fresh := do(newRegisterEngine(&stubAuthServiceStore{registerResult: sampleUser(uuid.New(), uuid.New())}), http.MethodPost, url, strings.NewReader(validRegisterBody))
+	dup := do(newRegisterEngine(&stubAuthServiceStore{registerErr: auth.ErrEmailExists}), http.MethodPost, url, strings.NewReader(validRegisterBody))
+	if dup.Code != fresh.Code || dup.Code != http.StatusCreated {
+		t.Fatalf("existing-email status = %d, new = %d, want both 201; body=%s", dup.Code, fresh.Code, dup.Body.String())
 	}
-	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	sv.assertConforms(t, "RegisterResponse", dup.Body.Bytes())
+	var f, d map[string]any
+	if err := json.Unmarshal(fresh.Body.Bytes(), &f); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(dup.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if f["message"] != d["message"] {
+		t.Fatalf("message differs: %v vs %v", f["message"], d["message"])
+	}
+	fu, du := f["user"].(map[string]any), d["user"].(map[string]any)
+	for k := range fu {
+		if _, ok := du[k]; !ok {
+			t.Fatalf("existing-email user lacks key %q present for a new signup", k)
+		}
+	}
+	for k := range du {
+		if _, ok := fu[k]; !ok {
+			t.Fatalf("existing-email user has extra key %q", k)
+		}
+	}
 }
 
 // A personal-email rejection surfaces as 400 (distinct from a malformed body
@@ -434,14 +460,68 @@ func TestContract_CompleteRegistration_400_badBody(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
-func TestContract_CompleteRegistration_409_emailExists(t *testing.T) {
+// No account-existence oracle: an already-registered address gets the same
+// status and body shape as a new one (it must not be a 409).
+func TestContract_CompleteRegistration_existingEmailIndistinguishableFromNew(t *testing.T) {
 	sv := loadSpec(t)
-	stub := &stubAuthServiceStore{registerErr: auth.ErrEmailExists}
-	w := do(newRegisterEngine(stub), http.MethodPost, "/api/v1/auth-service/auth/register/complete", strings.NewReader(validRegisterBody))
-	if w.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409; body=%s", w.Code, w.Body.String())
+	url := "/api/v1/auth-service/auth/register/complete"
+	fresh := do(newRegisterEngine(&stubAuthServiceStore{registerResult: sampleUser(uuid.New(), uuid.New())}), http.MethodPost, url, strings.NewReader(validRegisterBody))
+	dup := do(newRegisterEngine(&stubAuthServiceStore{registerErr: auth.ErrEmailExists}), http.MethodPost, url, strings.NewReader(validRegisterBody))
+	if dup.Code != fresh.Code || dup.Code != http.StatusCreated {
+		t.Fatalf("existing-email status = %d, new = %d, want both 201; body=%s", dup.Code, fresh.Code, dup.Body.String())
 	}
-	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	sv.assertConforms(t, "RegisterResponse", dup.Body.Bytes())
+	var f, d map[string]any
+	if err := json.Unmarshal(fresh.Body.Bytes(), &f); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(dup.Body.Bytes(), &d); err != nil {
+		t.Fatal(err)
+	}
+	if f["message"] != d["message"] {
+		t.Fatalf("message differs: %v vs %v", f["message"], d["message"])
+	}
+	fu, du := f["user"].(map[string]any), d["user"].(map[string]any)
+	for k := range fu {
+		if _, ok := du[k]; !ok {
+			t.Fatalf("existing-email user lacks key %q present for a new signup", k)
+		}
+	}
+	for k := range du {
+		if _, ok := fu[k]; !ok {
+			t.Fatalf("existing-email user has extra key %q", k)
+		}
+	}
+}
+
+// --- POST /auth/forgot-password ---------------------------------------------
+
+// The 200 must be identical whether the store knows the address or fails.
+func TestContract_ForgotPassword_200_sameForKnownAndFailing(t *testing.T) {
+	sv := loadSpec(t)
+	var bodies []string
+	for _, stub := range []*stubAuthServiceStore{{}, {forgotPasswordErr: io.EOF}} {
+		w := do(newRegisterEngine(stub), http.MethodPost, "/api/v1/auth-service/auth/forgot-password", strings.NewReader(`{"email":"a@example.com"}`))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+		}
+		sv.assertConforms(t, "MessageResponse", w.Body.Bytes())
+		bodies = append(bodies, w.Body.String())
+	}
+	if bodies[0] != bodies[1] {
+		t.Fatalf("forgot-password answers differ (enumeration): %q vs %q", bodies[0], bodies[1])
+	}
+}
+
+func TestContract_ForgotPassword_400_badBody(t *testing.T) {
+	sv := loadSpec(t)
+	for _, body := range []string{`{`, `{}`, `{"email":"not-an-email"}`} {
+		w := do(newRegisterEngine(&stubAuthServiceStore{}), http.MethodPost, "/api/v1/auth-service/auth/forgot-password", strings.NewReader(body))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("body %q: status = %d, want 400; body=%s", body, w.Code, w.Body.String())
+		}
+		sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	}
 }
 
 // --- POST /auth/reset-password ----------------------------------------------

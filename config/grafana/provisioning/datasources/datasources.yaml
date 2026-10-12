@@ -11,19 +11,6 @@ datasources:
     isDefault: true
     editable: false
 
-  # InfluxDB (time series metrics)
-  - name: InfluxDB
-    type: influxdb
-    access: proxy
-    url: http://influxdb:8086
-    jsonData:
-      version: Flux
-      organization: crypto-inventory
-      defaultBucket: metrics
-    secureJsonData:
-      token: $__env{INFLUXDB_TOKEN}
-    editable: false
-
   # Jaeger (distributed traces)
   - name: Jaeger
     type: jaeger

@@ -17,6 +17,7 @@
 // through the same ingestion queue the sensors feed, and the pipeline applies
 // the tenant's segment auto-approval rules.
 import { useEffect, useRef, useState } from 'react';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import { useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useFeature } from '@vistasecurity/primitives/features';
@@ -90,15 +91,6 @@ type PreviewView =
   | { kind: 'empty' }
   | { kind: 'refused'; verdict: TargetVerdict }
   | { kind: 'failed'; message: string };
-
-function useDebounced<T>(value: T, ms: number): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return v;
-}
 
 function browserStorage(): Storage | undefined {
   try {
@@ -309,7 +301,7 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
 
   // ── Preview: the same request with dry_run, once the form sits still ──
   const previewKey = valid ? JSON.stringify(buildJobRequest(effective, check, { otAvailable, dryRun: true })) : null;
-  const debouncedKey = useDebounced(previewKey, PREVIEW_DEBOUNCE_MS);
+  const debouncedKey = useDebouncedValue(previewKey, PREVIEW_DEBOUNCE_MS);
   const settled = previewKey !== null && previewKey === debouncedKey;
   const previewQ = useQuery({
     queryKey: ['discovery', 'job-preview', debouncedKey],

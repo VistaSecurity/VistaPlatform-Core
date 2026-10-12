@@ -218,7 +218,9 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 	} else {
 		orderBy += " ASC"
 	}
-	query += " " + orderBy
+	// ci.id is the unique tie-breaker: a sweep that stamps one timestamp on
+	// many rows would otherwise duplicate or drop rows across pages.
+	query += " " + orderBy + ", ci.id"
 
 	// Add pagination
 	offset := (filters.Page - 1) * filters.PageSize

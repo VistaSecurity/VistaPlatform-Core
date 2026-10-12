@@ -149,6 +149,7 @@ type stubFrameworkLicenseStore struct {
 	defaultFramework    *models.DefaultFrameworkResponse
 	defaultFrameworkErr error
 	subscribeErr        error
+	subscribeGot        *models.ProvisionFrameworkInput
 	cancelErr           error
 	setDefaultErr       error
 }
@@ -169,7 +170,8 @@ func (s *stubFrameworkLicenseStore) GetDefaultFramework(_ uuid.UUID) (*models.De
 	return s.defaultFramework, s.defaultFrameworkErr
 }
 
-func (s *stubFrameworkLicenseStore) SubscribeFramework(_ uuid.UUID, _ models.ProvisionFrameworkInput, _ uuid.UUID) error {
+func (s *stubFrameworkLicenseStore) SubscribeFramework(_ uuid.UUID, in models.ProvisionFrameworkInput, _ uuid.UUID) error {
+	s.subscribeGot = &in
 	return s.subscribeErr
 }
 
@@ -530,6 +532,34 @@ func TestContract_SubscribeFramework_201(t *testing.T) {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "MessageResponse", w.Body.Bytes())
+}
+
+// A tenant must not be able to name the commercial terms of its own licence:
+// price_cents (stored as purchase_price_cents) is admin provisioning's field.
+// Drives the real handler, so deleting the zeroing line in SubscribeFramework
+// turns this red; the service-level half is
+// TestIntegration_SelfServiceSubscribeIgnoresTenantPrice.
+func TestContract_SubscribeFramework_DropsTenantSuppliedTerms(t *testing.T) {
+	fl := &stubFrameworkLicenseStore{}
+	eng := newEngine(&stubTenantFrameworkStore{}, fl)
+	body := strings.NewReader(`{"framework_id":"` + aUUID + `","price_cents":1,"provisioned_by":"admin","expires_at":"2099-01-01T00:00:00Z","set_as_default":true}`)
+	w := do(eng, http.MethodPost, "/api/v1/compliance-engine/frameworks/subscribe", body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())
+	}
+	got := fl.subscribeGot
+	if got == nil {
+		t.Fatal("service not called")
+	}
+	if got.PriceCents != nil {
+		t.Errorf("PriceCents = %d reached the service from a self-service caller", *got.PriceCents)
+	}
+	if got.ProvisionedBy != "self_service" || got.ExpiresAt != nil {
+		t.Errorf("provenance/expiry not server-decided: %q %v", got.ProvisionedBy, got.ExpiresAt)
+	}
+	if !got.SetAsDefault {
+		t.Error("set_as_default must still be honoured (the service now clears the old default atomically)")
+	}
 }
 
 // Spec-quirk regression: subscribe failures (already subscribed, tier limit,

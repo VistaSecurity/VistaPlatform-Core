@@ -293,6 +293,9 @@ type SensorRegistration struct {
 	// (registration happens once, so there is no throttle to apply). See
 	// [HostIdentity].
 	Host *HostIdentity `json:"host,omitempty"`
+	// SupportsAgentSecret tells the platform this build stores the per-sensor
+	// secret it issues at enrolment; without it none is issued.
+	SupportsAgentSecret bool `json:"supports_agent_secret,omitempty"`
 }
 
 // DiscoveryFinding represents a single discovery finding

@@ -10,6 +10,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
+import { unwrap } from '../../lib/api-result';
 
 export type CloudIntegration = deviceInterrogationComponents['schemas']['CloudIntegration'];
 
@@ -234,10 +235,9 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
           // leaves the secrets alone.
           ...(credEntries.length || modeChanged || enumerateChanged ? { config } : {}),
         };
-        const { error } = await clients.devices.PUT('/integrations/{id}', {
+        unwrap(await clients.devices.PUT('/integrations/{id}', {
           params: { path: { id: integration!.id } }, body,
-        });
-        if (error) throw new Error(serverErrorMessage(error, 'Failed to update integration'));
+        }), 'Failed to update integration');
         return;
       }
 
@@ -252,8 +252,7 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
         description: description.trim() || undefined,
         is_enabled: isEnabled,
       };
-      const { data, error } = await clients.devices.POST('/integrations', { body });
-      if (error || !data) throw new Error(serverErrorMessage(error, 'Failed to create integration'));
+      unwrap(await clients.devices.POST('/integrations', { body }), 'Failed to create integration', { requireData: true });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['discovery', 'integrations'] });
@@ -405,8 +404,7 @@ export function CloudIntegrationDeleteModal({ open, integration, onClose, onDele
   const del = useMutation({
     mutationFn: async (): Promise<void> => {
       if (!integration) return;
-      const { error } = await clients.devices.DELETE('/integrations/{id}', { params: { path: { id: integration.id } } });
-      if (error) throw new Error('Failed to delete integration');
+      unwrap(await clients.devices.DELETE('/integrations/{id}', { params: { path: { id: integration.id } } }), 'Failed to delete integration');
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['discovery', 'integrations'] });
@@ -574,8 +572,7 @@ export function CloudIntegrationDiscoverModal({ open, integration, onClose, onSt
         // honest rather than recording a filter that was never applied.
         ...(needsRegions && regions.size > 0 ? { regions: Array.from(regions) } : {}),
       };
-      const { data, error } = await clients.devices.POST('/cloud/discover', { body });
-      if (error || !data) throw new Error('Failed to start discovery');
+      const data = unwrap(await clients.devices.POST('/cloud/discover', { body }), 'Failed to start discovery', { requireData: true });
       return data;
     },
     onSuccess: (result) => {
@@ -715,8 +712,7 @@ export function CloudIntegrationTestModal({ open, integration, onClose }: {
   const test = useMutation({
     mutationFn: async (): Promise<deviceInterrogationComponents['schemas']['TestConnectionResult']> => {
       if (!integration) throw new Error('No integration selected');
-      const { data, error } = await clients.devices.POST('/integrations/{id}/test', { params: { path: { id: integration.id } } });
-      if (error || !data) throw new Error('Connection test failed to run');
+      const data = unwrap(await clients.devices.POST('/integrations/{id}/test', { params: { path: { id: integration.id } } }), 'Connection test failed to run', { requireData: true });
       return data;
     },
     // The test records last_tested_at + status server-side; re-read the list.

@@ -9,6 +9,7 @@ import { errorMessage } from './asset-queries';
 import type { Impact, Neighbourhood, Relationship, RelationshipType } from './relationships';
 import type { TopologyPayload } from './topology-model';
 import type { NetworkMap } from './network-map-model';
+import { unwrap } from '../../lib/api-result';
 
 export const RELATIONSHIPS_PAGE_SIZE = 100;
 export const RELATIONSHIP_PROPOSALS_PAGE_SIZE = 50;
@@ -128,15 +129,14 @@ export function useCreateRelationship(assetId: string | undefined) {
       peerAssetId: string;
       direction: 'out' | 'in';
     }): Promise<Relationship> => {
-      const { data, error } = await clients.inventory.POST('/infrastructure-assets/{id}/relationships', {
+      const data = unwrap(await clients.inventory.POST('/infrastructure-assets/{id}/relationships', {
         params: { path: { id: assetId! } },
         body: {
           type: input.type,
           peer_asset_id: input.peerAssetId,
           direction: input.direction,
         },
-      });
-      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to add the relationship');
+      }), 'Failed to add the relationship', { requireData: true });
       return data.relationship;
     },
     onSuccess: (e) => toast.success(
@@ -157,10 +157,9 @@ export function useDeleteRelationship(assetId: string | undefined) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (edgeId: string) => {
-      const { error } = await clients.inventory.DELETE('/infrastructure-assets/{id}/relationships/{edgeId}', {
+      unwrap(await clients.inventory.DELETE('/infrastructure-assets/{id}/relationships/{edgeId}', {
         params: { path: { id: assetId!, edgeId } },
-      });
-      if (error) throw new Error(errorMessage(error) ?? 'Failed to remove the relationship');
+      }), 'Failed to remove the relationship');
     },
     onSuccess: () => toast.success('Relationship removed'),
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to remove the relationship'),
@@ -216,6 +215,20 @@ export function useRelationshipProposals(enabled = true, offset = 0) {
   });
 }
 
+/** Just the size of the pending relationship queue (the "awaiting review" banner). */
+export function useRelationshipProposalCount() {
+  return useQuery({
+    queryKey: ['discovery', 'relationship-proposals', 'count'],
+    queryFn: async (): Promise<number> => {
+      const { data, error } = await clients.inventory.GET('/approvals/relationships', {
+        params: { query: { status: 'pending', limit: 1, offset: 0 } },
+      });
+      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to load relationship proposals');
+      return readRelationshipProposalPage(data).total;
+    },
+  });
+}
+
 /** Accept or reject one proposal. */
 export function useDecideRelationshipProposal() {
   const qc = useQueryClient();
@@ -224,10 +237,9 @@ export function useDecideRelationshipProposal() {
       const path = input.action === 'accept'
         ? '/approvals/relationships/{edgeId}/accept' as const
         : '/approvals/relationships/{edgeId}/reject' as const;
-      const { error } = await clients.inventory.POST(path, {
+      unwrap(await clients.inventory.POST(path, {
         params: { path: { edgeId: input.id } },
-      });
-      if (error) throw new Error(errorMessage(error) ?? `Failed to ${input.action} the relationship`);
+      }), `Failed to ${input.action} the relationship`);
       return input;
     },
     onSuccess: (r) => toast.success(r.action === 'accept' ? 'Relationship accepted' : 'Relationship rejected'),

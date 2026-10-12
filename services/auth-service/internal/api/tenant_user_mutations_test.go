@@ -27,8 +27,8 @@ func newTenantMutationEngine(authenticated bool, ctxTenantID string) *gin.Engine
 		}
 		c.Next()
 	})
-	grp.DELETE("/tenant/:tenantId/users/:userId", DeleteTenantMember(nil))
-	grp.PUT("/tenant/:tenantId/users/:userId/status", UpdateTenantMemberStatus(nil))
+	grp.DELETE("/tenant/:tenantId/users/:userId", DeleteTenantMember(nil, nil))
+	grp.PUT("/tenant/:tenantId/users/:userId/status", UpdateTenantMemberStatus(nil, nil))
 	return r
 }
 

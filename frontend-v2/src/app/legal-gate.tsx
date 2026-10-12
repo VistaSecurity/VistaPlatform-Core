@@ -6,6 +6,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../lib/clients';
 import { LegalLinks } from '../components/legal-links';
+import { unwrap } from '../lib/api-result';
 
 const PENDING_KEY = ['legal', 'pending'];
 
@@ -32,8 +33,7 @@ export function LegalGate({ children }: { children: React.ReactNode }) {
 
   const accept = useMutation({
     mutationFn: async () => {
-      const { error } = await clients.auth.POST('/auth/legal/accept', { body: { accepted: true } });
-      if (error) throw new Error('Could not record your acceptance. Please try again.');
+      unwrap(await clients.auth.POST('/auth/legal/accept', { body: { accepted: true } }), 'Could not record your acceptance. Please try again.');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: PENDING_KEY }),
   });

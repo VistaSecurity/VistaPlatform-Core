@@ -412,6 +412,23 @@ a scan yourself from **Discovery → Command Center → Discover assets** or wit
 **Scan** in **Inventory**. Scans already running are not cancelled — cancel
 those from the job itself.
 
+## Cancelling and retrying a scan
+
+**Cancel** on a job in **Discovery → Discovery Jobs** stops it wherever it runs. A scan
+that is running from one of your sensors is withdrawn from the sensor if the
+sensor has not collected it yet, and the sensor is told to stop if it has.
+
+A scan you started is checked against your networks and exclusions again when
+it is handed to a sensor, when the sensor collects it and when you **Retry** it,
+not only when you created it. A target you have since excluded, or whose network
+you have since removed, is not scanned: it is marked *not scanned* with the
+reason and the job's note names it. If none of a job's targets is still allowed,
+the retry is refused (or the job fails) and nothing is scanned.
+
+A job created with active scanning off finishes as completed with the note
+"no active scanning requested; nothing probed", so it is not mistaken for a scan
+that found nothing.
+
 ## Related
 
 - [Discovery](./discovery.md) — the pipeline an automatic scan's findings join

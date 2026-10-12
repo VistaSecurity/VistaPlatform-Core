@@ -93,9 +93,10 @@ agentMtls:
 # that allow your ingress controller's namespace to reach the chart's
 # backend Services on port 8080 and the UI Services on port 80.
 #
-# See docsv4/core/operate/deployment/rke2-v1/deployment-guide.md (§ Bring-your-own
-# ingress contract) for the route table, host header expectations, CORS
-# requirements, and recommended rate-limit / body-size / HSTS values.
+# The routes the chart renders under ingress.controller=traefik (`helm template`
+# and read templates/ingress/) are the route table to reproduce in your own
+# controller, including host header expectations, CORS, rate limits, body
+# sizes and HSTS. Cluster prerequisites: docsv4/core/operate/deployment/production-checklist.md.
 # -----------------------------------------------------------------------------
 ingress:
   controller: traefik     # alternatives: none
@@ -119,7 +120,7 @@ ingress:
 # direction matches the balancer's own address and admits everyone while looking
 # like it works — so verify from an address OUTSIDE sourceRange (expect 403).
 #
-# See deployment-guide §5G.
+# See docsv4/core/releases/4.5.0.md for the admin-plane and edge rate-limit notes.
 # -----------------------------------------------------------------------------
 # adminPlane:
 #   ipAllowList:
@@ -274,12 +275,14 @@ image:
 #       # timeoutSeconds: 5         # optional, default 5
 
 # -----------------------------------------------------------------------------
-# OPTIONAL: storage class for postgres, redis, influxdb, and the pcap-uploads
-# PVCs. Default is 'longhorn'. Override if your cluster uses a different
-# CSI driver (e.g. gp3, rook-ceph-block, netapp-trident).
+# OPTIONAL: storage class for postgres, redis, nats, and the pcap-uploads
+# PVCs. Default is "" (the cluster's default StorageClass). Set it if your
+# cluster has no default, or to pick a specific CSI class (e.g. gp3, longhorn,
+# rook-ceph-block). On an existing release, pin the class it already uses
+# BEFORE upgrading: volume claim templates are immutable.
 # -----------------------------------------------------------------------------
 # datastores:
-#   storageClassName: longhorn
+#   storageClassName: <your-class>
 
 # -----------------------------------------------------------------------------
 # OPTIONAL: bump persistent volume sizes for production workloads. Defaults
@@ -288,14 +291,12 @@ image:
 # datastores:
 #   postgres:
 #     persistence: { size: 100Gi }
-#   influxdb:
-#     persistence: { size: 50Gi }
 # pcapUploads:
 #   size: 50Gi
 
 # -----------------------------------------------------------------------------
 # OPTIONAL: ingress controller namespace for NetworkPolicy. Default kube-system
-# matches the Traefik install from deployment-guide §3.5. Override if your
+# matches a cluster whose Traefik runs in kube-system (RKE2 default layout). Override if your
 # cluster runs Traefik (or another controller) in a different namespace.
 # -----------------------------------------------------------------------------
 # networkPolicy:
@@ -348,7 +349,7 @@ image:
 # upgrade; it provisions the Platform CA + per-service certs), then enable the
 # two datastore toggles in a later upgrade. Toggling postgres.tls on a live
 # release recreates the schema-migration Job (former #421 immutability bug,
-# fixed by #983). See deployment-guide §5E.
+# fixed by #983). See docsv4/core/operate/security/service-mesh-mtls.md (staged upgrade).
 #
 # Advanced — chain the mesh off your corporate root instead of the chart's
 # self-signed Platform CA (Secret must hold tls.crt+tls.key+ca.crt):

@@ -67,7 +67,10 @@ func ListClassificationRules(store ClassificationRuleStore) gin.HandlerFunc {
 			})
 			return
 		}
-		page, pageSize := pageParams(c)
+		page, pageSize, ok := pageParams(c)
+		if !ok {
+			return
+		}
 		rules, total, err := store.List(c.Request.Context(), classificationrules.Query{
 			Search: c.Query("search"), Kind: kind, Page: page, PageSize: pageSize,
 		})

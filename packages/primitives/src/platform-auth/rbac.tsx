@@ -3,13 +3,17 @@
 // current platform user's effective permission NAMES from the typed contract
 // (GET /admin/user/permissions, which returns Permission objects → map to .name).
 // Parallel to the tenant rbac module but on the admin-service contract.
-import React, { createContext, useContext } from 'react';
+import React, { createContext, useContext, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { createAdminServiceClient } from '@vistasecurity/api-contract';
 
 export interface PlatformPermissionState {
   permissions: string[];
   isLoading: boolean;
+  /** The permission load FAILED; `permissions` is then empty (fail-closed). */
+  isError: boolean;
+  /** Retry the permission load. */
+  refetch(): void;
   hasPermission(p: string): boolean;
   hasAnyPermission(ps: string[]): boolean;
   hasAllPermissions(ps: string[]): boolean;
@@ -30,7 +34,7 @@ export interface PlatformPermissionProviderProps {
 }
 
 export function PlatformPermissionProvider({ children, enabled = true }: PlatformPermissionProviderProps) {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['platform', 'user-permissions'],
     queryFn: async (): Promise<string[]> => {
       const c = createAdminServiceClient();
@@ -42,14 +46,18 @@ export function PlatformPermissionProvider({ children, enabled = true }: Platfor
     staleTime: 5 * 60 * 1000,
   });
 
-  const permissions = data ?? [];
-  const value: PlatformPermissionState = {
-    permissions,
-    isLoading,
-    hasPermission: (p) => permissions.includes(p),
-    hasAnyPermission: (ps) => ps.some((p) => permissions.includes(p)),
-    hasAllPermissions: (ps) => ps.every((p) => permissions.includes(p)),
-  };
+  const value = useMemo<PlatformPermissionState>(() => {
+    const permissions = data ?? [];
+    return {
+      permissions,
+      isLoading,
+      isError,
+      refetch: () => { void refetch(); },
+      hasPermission: (p) => permissions.includes(p),
+      hasAnyPermission: (ps) => ps.some((p) => permissions.includes(p)),
+      hasAllPermissions: (ps) => ps.every((p) => permissions.includes(p)),
+    };
+  }, [data, isLoading, isError, refetch]);
   return <PlatformPermissionContext.Provider value={value}>{children}</PlatformPermissionContext.Provider>;
 }
 

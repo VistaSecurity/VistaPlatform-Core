@@ -7,6 +7,7 @@
 // lacks the permission for is not rendered — the server checks again.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { invalidateAssetDetail } from './asset-queries';
 import toast from 'react-hot-toast';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import type { Asset, inventoryComponents } from '@vistasecurity/api-contract';
@@ -162,7 +163,7 @@ function useBulkAction() {
     },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['inventory'] });
-      void qc.invalidateQueries({ queryKey: ['asset-detail'] });
+      invalidateAssetDetail(qc);
     },
   });
 }

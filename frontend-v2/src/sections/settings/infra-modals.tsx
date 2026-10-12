@@ -2,12 +2,14 @@
 // Wired to the now-contracted inventory-service write endpoints:
 // POST/PUT/DELETE /locations and /network-segments. Per-type value validation
 // for segments mirrors the old web-ui (CIDR / IP-range / domain / cloud VPC).
+import { invalidateOnboarding } from '../onboarding/queries';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import { dhcpBody, initialDhcpChoice, segmentPosture, segmentProvenance, type DhcpChoice } from './segment-provenance';
+import { unwrap } from '../../lib/api-result';
 
 type Location = inventoryComponents['schemas']['Location'];
 type NetworkSegment = inventoryComponents['schemas']['NetworkSegment'];
@@ -111,9 +113,13 @@ export function LocationModal({ open, location, onClose }: { open: boolean; loca
       const res = isEdit
         ? await clients.inventory.PUT('/locations/{id}', { params: { path: { id: location.id } }, body })
         : await clients.inventory.POST('/locations', { body });
-      if (!res.response.ok || res.error) throw new Error('Failed to save location');
+      unwrap(res, 'Failed to save location');
     },
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['settings', 'locations'] }); onClose(); },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['settings', 'locations'] });
+      if (!isEdit) void invalidateOnboarding(qc);
+      onClose();
+    },
   });
 
   // Parent options exclude self (a location can't be its own parent).
@@ -269,7 +275,11 @@ export function NetworkSegmentModal({ open, segment, onClose }: { open: boolean;
         throw new Error(typeof msg === 'string' && msg ? msg : 'Failed to save network segment');
       }
     },
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] }); onClose(); },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] });
+      if (!isEdit) void invalidateOnboarding(qc);
+      onClose();
+    },
   });
 
   // The server refuses a DHCP answer it cannot place with a message about that
@@ -416,7 +426,7 @@ export function DeleteInfraModal({ open, kind, id, name, onClose }: {
       const res = kind === 'location'
         ? await clients.inventory.DELETE('/locations/{id}', { params: { path: { id } } })
         : await clients.inventory.DELETE('/network-segments/{id}', { params: { path: { id } } });
-      if (!res.response.ok || res.error) throw new Error('Delete failed');
+      unwrap(res, 'Delete failed');
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['settings', kind === 'location' ? 'locations' : 'network-segments'] });

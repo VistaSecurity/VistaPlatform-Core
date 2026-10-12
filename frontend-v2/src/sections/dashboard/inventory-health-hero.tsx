@@ -14,10 +14,9 @@
 // lives in `inventory-health.ts` — see there for why summing the class facet's
 // buckets would count most of the estate three times, and why a hygiene score
 // of null must never render as 100.
-import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router';
 import { Icon, PercentageGauge, hygienePercentageColor } from '../../components/ui';
-import { clients } from '../../lib/clients';
+import { useFrameworksAvailable } from '../../lib/shared-queries';
 import { useAssetFacets, type FacetLevel } from '../inventory/asset-queries';
 import { CLASS_GROUP_STYLES, classGroupOf } from '../inventory/map-model';
 import {
@@ -56,15 +55,7 @@ const PENDING_LEVELS: readonly FacetLevel[] = ['status'];
  * same tenant.
  */
 function useHygiene() {
-  return useQuery({
-    queryKey: ['posture', 'available-frameworks'],
-    queryFn: async () => {
-      const { data, error } = await clients.compliance.GET('/frameworks/available', {});
-      if (error || !data) throw new Error('Failed to load frameworks');
-      return data.frameworks ?? [];
-    },
-    staleTime: 60_000,
-  });
+  return useFrameworksAvailable();
 }
 
 export function InventoryHealthHero() {

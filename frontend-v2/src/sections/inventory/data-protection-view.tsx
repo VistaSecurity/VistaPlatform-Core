@@ -23,8 +23,9 @@ export function useCryptoApplications(
   const { page, pageSize, search, resourceType, determined, riskAtLeast } = opts;
   return useQuery({
     queryKey: ['inventory', 'crypto-applications', page, pageSize, search, resourceType ?? '', determined ?? '', riskAtLeast ?? ''],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const { data, error } = await clients.inventory.GET('/crypto-applications', {
+        signal,
         params: {
           query: {
             encryption_context: 'at_rest' as const,

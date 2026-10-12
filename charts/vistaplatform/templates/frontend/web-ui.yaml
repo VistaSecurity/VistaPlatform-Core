@@ -27,6 +27,9 @@ spec:
         app.kubernetes.io/component: web-ui
     spec:
       automountServiceAccountToken: false
+      {{- with include "vistaplatform.pullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
       {{- $antiAffinity := include "vistaplatform.podAntiAffinity" (dict "ctx" . "component" "web-ui") }}
@@ -36,7 +39,7 @@ spec:
       {{- end }}
       containers:
         - name: web-ui
-          image: {{ include "vistaplatform.image" (dict "ctx" . "repo" "web-ui" "tag" .Values.frontend.webUi.image.tag) }}
+          image: {{ include "vistaplatform.image" (dict "ctx" . "repo" "web-ui" "tag" .Values.frontend.webUi.image.tag "digest" .Values.frontend.webUi.image.digest) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
@@ -77,3 +80,18 @@ spec:
     {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "web-ui") | nindent 4 }}
   ports:
     - { name: http, port: 80, targetPort: 3001 }
+---
+{{- if gt (int (default .Values.defaultReplicas .Values.frontend.webUi.replicas)) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-ui
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web-ui
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "web-ui") | nindent 6 }}
+{{- end }}

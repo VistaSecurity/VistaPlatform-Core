@@ -20,6 +20,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import type { deviceInterrogationComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { unwrap } from '../../lib/api-result';
 
 export type DeviceDiscovery = deviceInterrogationComponents['schemas']['DeviceDiscovery'];
 export type DeviceDiscoveryStatus = DeviceDiscovery['status'];
@@ -97,8 +98,7 @@ export function useDiscoveryActions() {
   });
   const dismiss = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.devices.DELETE('/devices/discoveries/{id}', { params: { path: { id } } });
-      if (error) throw new Error('Failed to dismiss');
+      unwrap(await clients.devices.DELETE('/devices/discoveries/{id}', { params: { path: { id } } }), 'Failed to dismiss');
     },
     onError: (err: unknown) => { toast.error(err instanceof Error ? err.message : 'Failed to dismiss'); },
     onSettled: refresh,

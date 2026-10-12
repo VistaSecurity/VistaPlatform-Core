@@ -85,8 +85,6 @@ echo "📝 Generating .env from env.example with fresh secrets..."
 rotate POSTGRES_PASSWORD       crypto_pass_dev                              24
 rotate REDIS_PASSWORD          redis_pass_dev                               24
 rotate NATS_PASSWORD           nats_pass_dev                                24
-rotate INFLUXDB_PASSWORD       adminpass123                                 24
-rotate INFLUXDB_TOKEN          dev-token-1234567890                         32
 rotate JWT_SECRET              dev-secret-key-change-in-production          32
 rotate ENCRYPTION_MASTER_KEY   dev-master-key-change-in-production          32
 rotate INTERNAL_AUTH_SECRET    dev-internal-auth-secret-change-in-production 32

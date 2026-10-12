@@ -18,6 +18,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	// Aliased: the sensor has its own `certificates` package, imported above.
 	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/httpclient"
 )
 
 // SensorManagerClient handles communication with the sensor manager service
@@ -64,9 +65,7 @@ func NewSensorManagerClient(cfg *config.Config) *SensorManagerClient {
 	}
 
 	if configured {
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: tlsConfig,
-		}
+		httpClient.Transport = httpclient.NewTransport(tlsConfig)
 	}
 
 	return &SensorManagerClient{
@@ -122,6 +121,7 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 		IPAddress:           c.getRegistrationIPAddress(),
 		CSR:                 csrPEM,            // Include CSR in registration request
 		SensorID:            sensorID.String(), // Proposed sensor ID
+		SupportsAgentSecret: true,              // this build stores the per-sensor secret (#2437)
 	}
 
 	jsonData, err := json.Marshal(registration)
@@ -163,6 +163,8 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 		ReportingInterval    int                 `json:"reporting_interval"` // Top-level field from server
 		Features             map[string]bool     `json:"features"`           // Top-level field from server
 		Config               models.SensorConfig `json:"config"`             // For backward compatibility
+		AgentSecret          string              `json:"agent_secret"`
+		AgentSecretVersion   int                 `json:"agent_secret_version"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&registrationResp); err != nil {
@@ -171,6 +173,13 @@ func (c *SensorManagerClient) Register() (*models.SensorConfig, error) {
 
 	// Update sensor ID in config
 	c.config.SensorID = registrationResp.SensorID
+
+	// The per-sensor secret. Returned once; the caller persists it with
+	// the certificate, and only then does the config stop keeping the
+	// registration key.
+	if registrationResp.AgentSecret != "" {
+		c.config.SetEnrolledAgentSecret(registrationResp.AgentSecret, registrationResp.AgentSecretVersion)
+	}
 
 	// Store certificate (signed by platform)
 	if registrationResp.ClientCert != "" {

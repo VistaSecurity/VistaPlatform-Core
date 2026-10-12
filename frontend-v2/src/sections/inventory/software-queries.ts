@@ -45,8 +45,9 @@ export function useAssetSoftware(
     queryKey: ['asset-software', assetId, q, status, sort, page],
     enabled: !!assetId,
     placeholderData: keepPreviousData,
-    queryFn: async (): Promise<SoftwarePage<SoftwareInstall>> => {
+    queryFn: async ({ signal }): Promise<SoftwarePage<SoftwareInstall>> => {
       const { data, error } = await clients.inventory.GET('/infrastructure-assets/{id}/software', {
+        signal,
         params: {
           path: { id: assetId! },
           query: {
@@ -74,8 +75,9 @@ export function useSoftwareProducts(
   return useQuery({
     queryKey: ['software-products', q, sort, page],
     placeholderData: keepPreviousData,
-    queryFn: async (): Promise<SoftwarePage<SoftwareProduct>> => {
+    queryFn: async ({ signal }): Promise<SoftwarePage<SoftwareProduct>> => {
       const { data, error } = await clients.inventory.GET('/software/products', {
+        signal,
         params: { query: { ...(q ? { q } : {}), sort, limit: SOFTWARE_PAGE_SIZE, offset: page * SOFTWARE_PAGE_SIZE } },
       });
       if (error || !data) throw new Error('Failed to load software products');

@@ -18,7 +18,7 @@ import { usePlatformAuth, usePlatformPermissions, PLATFORM_PERMISSIONS } from '@
 import { Avatar, StatTile, StatusTag, initialsFromName, relTime } from '../../components/ui/primitives';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import {
-  useStaff, useRoles, useCreateUser, useInviteUser, useUpdateUser, useDeleteUser,
+  useStaff, useStaffTruncation, useRoles, useCreateUser, useInviteUser, useUpdateUser, useDeleteUser,
   useSetPassword, useSendPasswordReset, staffStatus, roleColor, errMsg,
   type PlatformUser, type Role,
 } from './queries';
@@ -38,7 +38,7 @@ function RowMenu({ onAction }: { onAction: (a: 'edit' | 'set-password' | 'send-r
   const ref = useRef<HTMLDivElement>(null);
   return (
     <div ref={ref} style={{ position: 'relative' }}>
-      <button className="op-btn icon sm" onClick={() => setOpen((v) => !v)}><MoreHorizontal size={14} /></button>
+      <button className="op-btn icon sm" aria-label="Row actions" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)}><MoreHorizontal size={14} /></button>
       {open && (
         <>
           <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
@@ -226,6 +226,7 @@ export function StaffListPage() {
   const canAssign = hasPermission(PLATFORM_PERMISSIONS.platformRoles.assign);
   const { data: staff, isLoading, isError, refetch } = useStaff();
   const { data: roles } = useRoles();
+  const cut = useStaffTruncation().data;
   const [q, setQ] = useState('');
   const [modal, setModal] = useState<ModalKind>(null);
   const [manualLink, setManualLink] = useState<{ title: string; description: string; link: string; expiry: string } | null>(null);
@@ -319,6 +320,11 @@ export function StaffListPage() {
 
   return (
     <div className="op-fade" style={{ padding: '20px 24px 40px', display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {cut?.truncated && (
+        <div role="status" style={{ fontSize: 12, color: 'var(--warn)' }}>
+          List truncated: showing {cut.shown.toLocaleString()} of {cut.total.toLocaleString()} staff. Search and the stats above cover only these.
+        </div>
+      )}
       {/* stat tiles */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12 }}>
         <StatTile label="Staff members" value={stats.total} sub={`${stats.active} active`} icon={UsersRound} />
@@ -371,6 +377,7 @@ export function StaffListPage() {
                     <button
                       className="op-btn icon sm"
                       title={isSelf ? "You can't deactivate your own account" : (u.is_active ? 'Deactivate' : 'Activate')}
+                      aria-label={u.is_active ? 'Deactivate' : 'Activate'}
                       disabled={isSelf && u.is_active}
                       onClick={() => { if (u.is_active) setModal({ kind: 'deactivate', user: u }); else doToggleActive(u); }}
                     >
@@ -381,6 +388,7 @@ export function StaffListPage() {
                     <button
                       className="op-btn icon sm"
                       title={isSelf ? "You can't delete your own account" : 'Delete'}
+                      aria-label="Delete"
                       disabled={isSelf}
                       onClick={() => setModal({ kind: 'delete', user: u })}
                     >

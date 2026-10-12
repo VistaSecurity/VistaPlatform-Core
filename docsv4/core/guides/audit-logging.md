@@ -39,6 +39,8 @@ Every logged event includes:
 - **Why**: Request ID for tracing through system
 - **Context**: Old values, new values, and changed fields
 
+Routine traffic from your sensors and discovery agents (their heartbeats and job polls) is not recorded: it happens every few seconds and would bury the actions people take. What a sensor or agent submits (discoveries, results, inventory) and certificate rotation are still recorded.
+
 ---
 
 ## Understanding Event Types
@@ -254,6 +256,9 @@ page can show:
 | `resource_type`, `resource_id` | Narrow to one kind of resource, or one resource. |
 | `compliance_tag` | Repeatable. `soc2`, `iso27001`, `gdpr`, `hipaa`, `pci_dss`. |
 | `success` | `true` or `false` — failures only, or successes only. |
+| `search` | Free-text search, as on the page. |
+| `requires_attention`, `impersonation`, `tag` | Flagged events only, impersonated actions only, or events carrying a tag. |
+| `tenant_id` | Platform operators only: scope the export to one tenant. Ignored for tenant users. |
 
 **One request returns at most 10,000 events.** Bound long periods with
 `start_date` / `end_date` and pull them in chunks rather than asking for a year

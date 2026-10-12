@@ -10,6 +10,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
@@ -40,9 +41,14 @@ type legacySensorService interface {
 	GetWebhookConfig(sensorID string) (*models.WebhookConfig, error)
 	MarkCommandsAsDelivered(sensorID string, commandIDs []string) error
 	RegisterSensor(registration *models.SensorRegistration) (*models.Sensor, error)
-	StoreAirGappedExport(export *models.AirGappedExport) error
 	StoreDiscoveries(batch *models.DiscoveryBatch) error
 	UpdateSensor(sensor *models.Sensor) error
+	// UpdateSensorFields and ApplySensorInterfaceChange are the edit paths:
+	// they write only the edited columns (never status / last_heartbeat) and
+	// the interface change is atomic. UpdateSensor is the registration flow's
+	// full-row write.
+	UpdateSensorFields(sensorID, tenantID uuid.UUID, edit models.SensorEdit) error
+	ApplySensorInterfaceChange(ctx context.Context, sensorID, tenantID uuid.UUID, add, remove []string) ([]string, error)
 	UpdateSensorHealth(sensorID string, health *models.SensorHealth) error
 	UpdateSensorHealthWithIP(sensorID string, health *models.SensorHealth, ipAddress *string) error
 	ReconcileSensorAddresses(ctx context.Context, sensorID string, addrs []sharednetwork.InterfaceAddress) error
@@ -200,5 +206,8 @@ func (h *Handler) Health(c *gin.Context) {
 		"status":  "healthy",
 		"service": "sensor-manager",
 		"version": version.Get(),
+		// Reports whether stored credentials (the per-sensor secret) can be
+		// encrypted: unset outside production they are not.
+		credentials.HealthField: credentials.EncryptionStatus(),
 	})
 }

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -182,6 +183,20 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 	ba := &batchAudit{started: time.Now(), counts: map[string]int{}}
 	defer func() { p.logBatchAudit(ctx, tenantID, batchID, ba, err) }()
 
+	// The claim this call holds, renewed as it works and checked when it stamps
+	// (claim.go). nil for an unclaimed run, which is not fenced.
+	var claim *batchClaim
+	if claimedAt != nil {
+		claim = &batchClaim{tenantID: tenantID, batchID: batchID, at: *claimedAt}
+		// Registered after the audit defer, so it runs first: when a failure
+		// leaves, it carries the claim's current stamp out to the caller.
+		defer func() {
+			if err != nil && !errors.Is(err, errClaimLost) && !claim.at.Equal(*claimedAt) {
+				err = &claimMovedError{current: claim.at, err: err}
+			}
+		}()
+	}
+
 	query := `
 		SELECT id, sensor_id, tenant_id, batch_id, protocol, dest_ip, port, confidence,
 		       metadata, timestamp, created_at, processed_at, approval_status,
@@ -190,11 +205,9 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 		WHERE batch_id = $1 AND tenant_id = $2 AND processed_at IS NULL
 		  AND ($3::timestamptz IS NULL OR claimed_at = $3::timestamptz)
 		ORDER BY created_at ASC
+		LIMIT $4
 	`
-	var claimArg interface{}
-	if claimedAt != nil {
-		claimArg = *claimedAt
-	}
+	claimArg := claim.arg()
 
 	// RLS-scoped read: sensor_discoveries is a security_invoker view over
 	// sensor_discoveries_partitioned, which carries a tenant_isolation policy.
@@ -206,7 +219,7 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 	// re-claimed every batchClaimTimeout with no attempt ever counted.
 	var scanFailures []rowFailure
 	err = shareddatabase.WithTenantTx(ctx, p.db.DB, tenantID, func(tx *sql.Tx) error {
-		rows, qErr := tx.QueryContext(ctx, query, batchID, tenantID, claimArg)
+		rows, qErr := tx.QueryContext(ctx, query, batchID, tenantID, claimArg, batchClaimRowLimit)
 		if qErr != nil {
 			return fmt.Errorf("failed to query discoveries: %w", qErr)
 		}
@@ -243,10 +256,13 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 	}
 
 	ba.counts["discoveries_read"] = len(discoveries) + len(scanFailures)
+	if claim != nil {
+		claim.rows = len(discoveries) + len(scanFailures)
+	}
 
 	if len(discoveries) == 0 {
 		if len(scanFailures) > 0 {
-			return p.settleFailures(ctx, tenantID, batchID, ba, scanFailures, nil, len(scanFailures), nil)
+			return p.settleFailures(ctx, tenantID, claim, batchID, ba, scanFailures, nil, len(scanFailures), nil)
 		}
 		return fmt.Errorf("no discoveries found for batch %s", batchID)
 	}
@@ -280,6 +296,17 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 	if n := countFollowers(foldFollowers); n > 0 {
 		ba.counts["tls_enrichment_pairs_folded"] = n
 	}
+
+	// Reverse-DNS answers for the whole batch, looked up once per distinct
+	// public destination and concurrently, BEFORE the loop. They used to be a
+	// serial lookup per row (each up to its 3 s timeout), repeated for every row
+	// sharing a destination. The renewal first: the lookups can take a while.
+	if err := p.renewClaim(ctx, claim); errors.Is(err, errClaimLost) {
+		return err
+	} else if err != nil {
+		fmt.Printf("Warning: batch %s: %v\n", batchID, err)
+	}
+	ptrAnswers := prefetchPTRs(ptrTargets(discoveries, sniIndex), lookupPTR, ptrLookupConcurrency)
 
 	for _, discovery := range discoveries {
 		// Host observations (asset-inventory ADR-0004 D2) travel through this
@@ -323,8 +350,8 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 		hostnameSourceKind := ""
 		if discovery.Hostname != nil && strings.TrimSpace(*discovery.Hostname) != "" {
 			hostnameSourceKind = string(identity.SourceMeasured)
-		} else if !hostObservation && !isInterrogationDiscovery(discovery) {
-			if resolved := resolveMissingHostname(discovery.Metadata, discovery.DestIP, sniIndex.lookup(discovery), lookupPTR); resolved.Name != "" {
+		} else if hostnameFillCandidate(discovery) {
+			if resolved := resolveMissingHostname(discovery.Metadata, discovery.DestIP, sniIndex.lookup(discovery), ptrAnswers.lookup); resolved.Name != "" {
 				name := resolved.Name
 				discovery.Hostname = &name
 				hostnameSourceKind = resolved.SourceKind
@@ -404,7 +431,7 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 	// already a permanent row failure, so record them (terminal, with the
 	// reason) and the batch is never claimed again.
 	if len(entries) == 0 {
-		return p.settleFailures(ctx, tenantID, batchID, ba, failures, foldFollowers, len(discoveries)+countFollowers(foldFollowers),
+		return p.settleFailures(ctx, tenantID, claim, batchID, ba, failures, foldFollowers, len(discoveries)+countFollowers(foldFollowers),
 			fmt.Errorf("%w for batch %s", ErrNoValidFindings, batchID))
 	}
 
@@ -419,7 +446,11 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 	// every other chunk is still imported, and the rows that landed are
 	// marked processed below ( F14).
 	importFailed := map[uuid.UUID]bool{}
-	summary, importErr := p.importInChunks(tenantID, uuid.New(), findings, rows)
+	summary, importErr := p.importInChunksRenewing(tenantID, uuid.New(), findings, rows, func() error { return p.renewClaim(ctx, claim) })
+	if errors.Is(importErr, errClaimLost) {
+		// Another worker owns the rows. Stamp nothing: its stamps stand.
+		return importErr
+	}
 	var f *importFailures
 	if errors.As(importErr, &f) {
 		for _, rf := range f.rows {
@@ -459,7 +490,9 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 		batchID, len(entries), summary.imported, summary.routed, autoApproved, len(importFailed))
 
 	// One transaction, one UPDATE per distinct outcome — see markProcessed.
-	if err := p.markProcessed(ctx, tenantID, now, marks); err != nil {
+	if err := p.markProcessed(ctx, tenantID, claim, now, marks); errors.Is(err, errClaimLost) {
+		return err
+	} else if err != nil {
 		// The work landed but the rows could not be stamped, so they would be
 		// re-imported at every claim without ever ending. Charge each an attempt
 		// instead; the retry is transient (a database fault), so it backs off.
@@ -468,7 +501,7 @@ func (p *BatchProcessor) processBatch(batchID string, tenantID uuid.UUID, claime
 	}
 
 	// Then the rows that did not land, each on its own terms.
-	return p.settleFailures(ctx, tenantID, batchID, ba, failures, foldFollowers, len(discoveries)+countFollowers(foldFollowers)+len(scanFailures), nil)
+	return p.settleFailures(ctx, tenantID, claim, batchID, ba, failures, foldFollowers, len(discoveries)+countFollowers(foldFollowers)+len(scanFailures), nil)
 }
 
 // isInterrogationDiscovery reports whether a row was written by device
@@ -724,6 +757,20 @@ const importChunkSize = 50
 // discoveries is index-aligned with findings: entry i is the row finding i was
 // converted from, and it is what adoptEffectiveStatus stamps.
 func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []converter.IngestFinding, discoveries []*models.SensorDiscovery) (importSummary, error) {
+	return p.importInChunksRenewing(tenantID, jobID, findings, discoveries, nil)
+}
+
+// importInChunksRenewing is importInChunks for a worker that holds a claim:
+// renew is called before every chunk and keeps the claim alive. When it
+// reports errClaimLost the import stops and returns that error — the rows are
+// someone else's now. Any other renewal error is logged and ignored: the claim
+// may then lapse, but the fenced stamps keep a late finish harmless.
+//
+// A chunk inventory-service refuses for its content (400/413/422) is split in
+// half and each half re-sent, down to single findings, so that one bad finding
+// costs only itself; only a finding refused ON ITS OWN is declared permanent.
+// Without it the other forty-nine rows of the chunk were rejected with it.
+func (p *BatchProcessor) importInChunksRenewing(tenantID, jobID uuid.UUID, findings []converter.IngestFinding, discoveries []*models.SensorDiscovery, renew func() error) (importSummary, error) {
 	var summary importSummary
 	failed := &importFailures{}
 	unknownOutcomes := map[string]int{}
@@ -743,15 +790,18 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 			}
 		}
 	}
-	for start := 0; start < len(findings); start += importChunkSize {
-		end := start + importChunkSize
-		if end > len(findings) {
-			end = len(findings)
-		}
+	var importRange func(start, end int)
+	importRange = func(start, end int) {
 		response, err := p.inventoryClient.ImportFindings(tenantID, jobID, findings[start:end])
 		if err != nil {
+			if end-start > 1 && isChunkRejection(err) {
+				mid := start + (end-start)/2
+				importRange(start, mid)
+				importRange(mid, end)
+				return
+			}
 			failChunk(start, end, fmt.Errorf("chunk %d-%d of %d: %w", start, end, len(findings), err))
-			continue
+			return
 		}
 		summary.imported += response.Imported
 		if end > len(discoveries) {
@@ -761,7 +811,7 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 			// is the failure this function exists to prevent. Say so.
 			fmt.Printf("Warning: %d findings were imported against only %d discovery rows; their row state was left as the rules set it\n",
 				len(findings), len(discoveries))
-			continue
+			return
 		}
 		// The rule inventory-service credited, BEFORE the effective status:
 		// a rule that matched a finding whose asset turned out archived or
@@ -774,7 +824,7 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 		if len(response.Results) != 0 {
 			if len(response.Results) != end-start {
 				failChunk(start, end, fmt.Errorf("inventory returned %d outcomes for %d findings", len(response.Results), end-start))
-				continue
+				return
 			}
 			for i, result := range response.Results {
 				d := discoveries[start+i]
@@ -816,6 +866,20 @@ func (p *BatchProcessor) importInChunks(tenantID, jobID uuid.UUID, findings []co
 				}
 			}
 		}
+	}
+	for start := 0; start < len(findings); start += importChunkSize {
+		if renew != nil {
+			if err := renew(); errors.Is(err, errClaimLost) {
+				return summary, err
+			} else if err != nil {
+				fmt.Printf("Warning: could not renew the batch claim (continuing; the stamps are fenced): %v\n", err)
+			}
+		}
+		end := start + importChunkSize
+		if end > len(findings) {
+			end = len(findings)
+		}
+		importRange(start, end)
 	}
 	if len(failed.rows) == 0 && failed.first == nil {
 		return summary, nil
@@ -1099,7 +1163,12 @@ func adoptEffectiveStatus(discoveries []*models.SensorDiscovery, statuses []stri
 	}
 }
 
-func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, now time.Time, marks *processedMarks) error {
+// With a claim (non-nil) every UPDATE is fenced on `claimed_at = <claim>` and
+// the stamps must cover every row expected; if any row no longer carries the
+// claim, another worker took the batch over, the transaction rolls back and
+// errClaimLost is returned, so a slow worker's late stamps never overwrite the
+// new owner's.
+func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, claim *batchClaim, now time.Time, marks *processedMarks) error {
 	if marks == nil || marks.empty() {
 		return nil
 	}
@@ -1114,14 +1183,23 @@ func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, 
 			if key.ruleID != "" {
 				ruleID = key.ruleID
 			}
-			if _, e := tx.ExecContext(ctx, `
+			res, e := tx.ExecContext(ctx, `
 				UPDATE sensor_discoveries
 				SET processed_at = $1, approval_status = $2, auto_approval_rule_id = $3::uuid,
 				    process_error = NULL
-				WHERE tenant_id = $4 AND id = ANY($5::uuid[])`,
-				now, key.approvalStatus, ruleID, tenantID, pq.Array(ids),
-			); e != nil {
+				WHERE tenant_id = $4 AND id = ANY($5::uuid[])
+				  AND ($6::timestamptz IS NULL OR claimed_at = $6::timestamptz)`,
+				now, key.approvalStatus, ruleID, tenantID, pq.Array(ids), claim.arg(),
+			)
+			if e != nil {
 				return e
+			}
+			if claim != nil {
+				if n, e := res.RowsAffected(); e != nil {
+					return e
+				} else if int(n) < len(ids) {
+					return fmt.Errorf("%w: batch %s, stamped %d of %d row(s)", errClaimLost, claim.batchID, n, len(ids))
+				}
 			}
 		}
 		// Which asset each row landed on. Per-row, so it cannot share the
@@ -1134,8 +1212,9 @@ func (p *BatchProcessor) markProcessed(ctx context.Context, tenantID uuid.UUID, 
 				UPDATE sensor_discoveries d
 				SET asset_id = v.asset_id
 				FROM (SELECT unnest($1::uuid[]) AS id, unnest($2::uuid[]) AS asset_id) v
-				WHERE d.tenant_id = $3 AND d.id = v.id`,
-				pq.Array(discoveryIDs), pq.Array(assetIDs), tenantID,
+				WHERE d.tenant_id = $3 AND d.id = v.id
+				  AND ($4::timestamptz IS NULL OR d.claimed_at = $4::timestamptz)`,
+				pq.Array(discoveryIDs), pq.Array(assetIDs), tenantID, claim.arg(),
 			); e != nil {
 				return e
 			}
@@ -1479,4 +1558,80 @@ func sniHostnameFromMap(m map[string]interface{}) string {
 		return s
 	}
 	return ""
+}
+
+// ptrLookupConcurrency bounds the concurrent reverse-DNS lookups of one batch.
+const ptrLookupConcurrency = 8
+
+// hostnameFillCandidate reports whether a row without a hostname of its own
+// may have one filled from the SNI or a reverse lookup: not a host observation
+// (its names are the measurement), not a device-interrogation row (its name is
+// the collector's). The batch loop and the lookup prefetch share it.
+func hostnameFillCandidate(d *models.SensorDiscovery) bool {
+	return !isHostObservationDiscovery(d) && !isInterrogationDiscovery(d)
+}
+
+// ptrTargets returns the distinct destinations of a batch whose hostname would
+// reach a reverse lookup. It runs the SAME resolveMissingHostname the batch
+// loop runs, with a recorder in place of the resolver, so the two cannot
+// disagree about which rows need a lookup.
+func ptrTargets(discoveries []*models.SensorDiscovery, sniIndex batchSNIIndex) []string {
+	seen := map[string]bool{}
+	var targets []string
+	record := func(ip string) string {
+		if !seen[ip] {
+			seen[ip] = true
+			targets = append(targets, ip)
+		}
+		return ""
+	}
+	for _, d := range discoveries {
+		if d.Hostname != nil && strings.TrimSpace(*d.Hostname) != "" {
+			continue
+		}
+		if hostnameFillCandidate(d) {
+			resolveMissingHostname(d.Metadata, d.DestIP, sniIndex.lookup(d), record)
+		}
+	}
+	return targets
+}
+
+// ptrAnswers are a batch's reverse-DNS answers, by destination.
+type ptrAnswers map[string]string
+
+// lookup is the lookupPTR the batch loop hands resolveMissingHostname: an
+// answer already fetched, "" for an address that was not (or had none).
+func (a ptrAnswers) lookup(ip string) string { return a[ip] }
+
+// prefetchPTRs resolves each target ONCE, at most concurrency at a time. A
+// batch used to look up per row, serially, each up to its 3 s timeout —
+// minutes of blocking for a batch of public destinations, repeated for every
+// row that shared one.
+func prefetchPTRs(targets []string, lookup func(string) string, concurrency int) ptrAnswers {
+	answers := make(ptrAnswers, len(targets))
+	if len(targets) == 0 {
+		return answers
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	var (
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		sem = make(chan struct{}, concurrency)
+	)
+	for _, ip := range targets {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			name := lookup(ip)
+			mu.Lock()
+			answers[ip] = name
+			mu.Unlock()
+		}(ip)
+	}
+	wg.Wait()
+	return answers
 }

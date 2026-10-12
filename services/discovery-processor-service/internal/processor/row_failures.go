@@ -15,7 +15,8 @@ package processor
 //   - while attempts remain, the row stays unprocessed and its claim is
 //     released with a backoff, so the next wake or poll retries it once the
 //     backoff has passed (and not before — the drain loop cannot spin on it);
-//   - when the failure is permanent (a 4xx from inventory-service, a row whose
+//   - when the failure is permanent (a 400/413/422-class answer from
+//     inventory-service for that row alone, a row whose
 //     own content cannot be converted or routed) or the attempts are spent, the
 //     row is terminal: processed_at is set and approval_status is `rejected`,
 //     one of the approval_status values already in use for "not accepted"
@@ -98,6 +99,13 @@ func (e *RowFailuresError) Unwrap() error { return e.Err }
 type RetryPolicy struct {
 	// MaxAttempts is how many failed attempts make a row terminal.
 	MaxAttempts int
+	// MaxTransientAttempts is the same for a failure of a TRANSIENT class — an
+	// inventory-service that could not be reached or answered 5xx, 401/403/404
+	// (HMAC skew, secret rotation, a rollout), 408/409/423/425/429. Those say
+	// nothing about the row, only about the far side's health, so they get a
+	// far larger budget: a seven-attempt ladder (about 25 minutes) turned an
+	// inventory outage of half an hour into permanently rejected evidence.
+	MaxTransientAttempts int
 	// BackoffBase is the wait after the first failure; it doubles per
 	// attempt up to BackoffCap. The knob is honoured exactly: there is no
 	// floor beneath it.
@@ -105,13 +113,15 @@ type RetryPolicy struct {
 	BackoffCap  time.Duration
 }
 
-// DefaultRetryPolicy sizes the budget for a rolling restart of
-// inventory-service, not a blip: seven attempts, backing off 30s, 1m, 2m, 4m,
-// 8m, 10m (about 25 minutes before the last attempt settles the row). Under
-// steady ingest every wake re-claims a row the moment its backoff passes, so
-// a short ladder is spent in seconds against an outage that lasts minutes.
+// DefaultRetryPolicy has two budgets. A failure that is not a known-transient
+// class (a row the database could not stamp, an outcome inventory could not
+// settle) gets seven attempts, backing off 30s, 1m, 2m, 4m, 8m, 10m (about 25
+// minutes before the last attempt settles the row). A failure of a transient
+// class gets 48 attempts on the same ladder capped at ten minutes: about
+// eight hours, long enough to outlast an inventory outage or a botched secret
+// rotation without rejecting a single row for it.
 func DefaultRetryPolicy() RetryPolicy {
-	return RetryPolicy{MaxAttempts: 7, BackoffBase: 30 * time.Second, BackoffCap: 10 * time.Minute}
+	return RetryPolicy{MaxAttempts: 7, MaxTransientAttempts: 48, BackoffBase: 30 * time.Second, BackoffCap: 10 * time.Minute}
 }
 
 // Backoff is the wait after the (failedBefore+1)th failure of a row:
@@ -131,10 +141,14 @@ func (p RetryPolicy) Backoff(failedBefore int) time.Duration {
 	return d
 }
 
-// ladderMillis is Backoff for failedBefore = 0..MaxAttempts-1, in
+// ladderMillis is Backoff for failedBefore = 0..(the larger budget)-1, in
 // milliseconds, for the SQL that indexes it by the row's attempts so far.
 func (p RetryPolicy) ladderMillis() []int64 {
-	out := make([]int64, p.MaxAttempts)
+	n := p.MaxAttempts
+	if p.MaxTransientAttempts > n {
+		n = p.MaxTransientAttempts
+	}
+	out := make([]int64, n)
 	for i := range out {
 		out[i] = p.Backoff(i).Milliseconds()
 	}
@@ -146,6 +160,12 @@ func (p *BatchProcessor) SetRetryPolicy(rp RetryPolicy) {
 	d := DefaultRetryPolicy()
 	if rp.MaxAttempts <= 0 {
 		rp.MaxAttempts = d.MaxAttempts
+	}
+	if rp.MaxTransientAttempts <= 0 {
+		rp.MaxTransientAttempts = d.MaxTransientAttempts
+	}
+	if rp.MaxTransientAttempts < rp.MaxAttempts {
+		rp.MaxTransientAttempts = rp.MaxAttempts
 	}
 	if rp.BackoffBase <= 0 {
 		rp.BackoffBase = d.BackoffBase
@@ -195,15 +215,20 @@ func truncateError(err error) string {
 //
 // Parameters: $1 now, $2 max attempts, $3 claim timeout, $4 the backoff
 // ladder (bigint[] of milliseconds, RetryPolicy.Backoff for attempts so far
-// 0..n-1). The row-specific error and permanence come from `v`.
+// 0..n-1), $5 max attempts for a transient failure. The row-specific error,
+// permanence and transience come from `v`.
 const failureSet = `
 	process_attempts = d.process_attempts + 1,
 	process_error    = v.error,
-	processed_at     = CASE WHEN v.permanent OR d.process_attempts + 1 >= $2 THEN $1::timestamptz END,
-	approval_status  = CASE WHEN v.permanent OR d.process_attempts + 1 >= $2 THEN 'rejected' ELSE d.approval_status END,
-	claimed_at       = CASE WHEN v.permanent OR d.process_attempts + 1 >= $2 THEN d.claimed_at
+	processed_at     = CASE WHEN ` + failureTerminal + ` THEN $1::timestamptz END,
+	approval_status  = CASE WHEN ` + failureTerminal + ` THEN 'rejected' ELSE d.approval_status END,
+	claimed_at       = CASE WHEN ` + failureTerminal + ` THEN d.claimed_at
 	                        ELSE $1::timestamptz - $3::interval
 	                             + ($4::bigint[])[LEAST(d.process_attempts + 1, cardinality($4::bigint[]))] * interval '1 millisecond' END`
+
+// failureTerminal is the condition under which a failure settles the row: it
+// is permanent, or the attempts its class allows are spent.
+const failureTerminal = `(v.permanent OR d.process_attempts + 1 >= CASE WHEN v.transient THEN $5::int ELSE $2::int END)`
 
 func intervalArg(d time.Duration) string {
 	return fmt.Sprintf("%d milliseconds", d.Milliseconds())
@@ -212,25 +237,35 @@ func intervalArg(d time.Duration) string {
 // recordRowFailures writes failures onto their rows (see the file comment)
 // and returns how many are now terminal.
 func (p *BatchProcessor) recordRowFailures(ctx context.Context, tenantID uuid.UUID, failures []rowFailure) (int, error) {
+	return p.recordRowFailuresFenced(ctx, tenantID, nil, failures)
+}
+
+// recordRowFailuresFenced is recordRowFailures for a worker that holds a claim:
+// it writes only to rows still carrying the claim's stamp, so a worker that lost
+// its claim cannot overwrite the new owner's bookkeeping. A nil claim is no fence.
+func (p *BatchProcessor) recordRowFailuresFenced(ctx context.Context, tenantID uuid.UUID, claim *batchClaim, failures []rowFailure) (int, error) {
 	if len(failures) == 0 {
 		return 0, nil
 	}
 	ids := make([]string, len(failures))
 	msgs := make([]string, len(failures))
 	permanent := make([]bool, len(failures))
+	transient := make([]bool, len(failures))
 	for i, f := range failures {
 		ids[i], msgs[i], permanent[i] = f.id.String(), truncateError(f.err), f.permanent
+		transient[i] = !f.permanent && isTransientError(f.err)
 	}
 	rp := p.retryPolicy()
 	terminal := 0
 	err := shareddatabase.WithTenantTx(ctx, p.db.DB, tenantID, func(tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
 			UPDATE sensor_discoveries d SET `+failureSet+`
-			FROM (SELECT unnest($5::uuid[]) AS id, unnest($6::text[]) AS error, unnest($7::bool[]) AS permanent) v
-			WHERE d.tenant_id = $8 AND d.id = v.id AND d.processed_at IS NULL
+			FROM (SELECT unnest($6::uuid[]) AS id, unnest($7::text[]) AS error, unnest($8::bool[]) AS permanent, unnest($9::bool[]) AS transient) v
+			WHERE d.tenant_id = $10 AND d.id = v.id AND d.processed_at IS NULL
+			  AND ($11::timestamptz IS NULL OR d.claimed_at = $11::timestamptz)
 			RETURNING d.processed_at IS NOT NULL`,
-			time.Now().UTC(), rp.MaxAttempts, intervalArg(batchClaimTimeout), pq.Array(rp.ladderMillis()),
-			pq.Array(ids), pq.Array(msgs), pq.Array(permanent), tenantID)
+			time.Now().UTC(), rp.MaxAttempts, intervalArg(batchClaimTimeout), pq.Array(rp.ladderMillis()), rp.MaxTransientAttempts,
+			pq.Array(ids), pq.Array(msgs), pq.Array(permanent), pq.Array(transient), tenantID, claim.arg())
 		if err != nil {
 			return err
 		}
@@ -265,11 +300,11 @@ func (p *BatchProcessor) RecordBatchFailure(ctx context.Context, tenantID uuid.U
 		// hash partition that can hold this tenant's rows.
 		rows, err := tx.QueryContext(ctx, `
 			UPDATE sensor_discoveries d SET `+failureSet+`
-			FROM (SELECT $5::text AS error, $6::bool AS permanent) v
-			WHERE d.tenant_id = $7 AND d.batch_id = $8 AND d.processed_at IS NULL AND d.claimed_at = $9
+			FROM (SELECT $6::text AS error, $7::bool AS permanent, $8::bool AS transient) v
+			WHERE d.tenant_id = $9 AND d.batch_id = $10 AND d.processed_at IS NULL AND d.claimed_at = $11
 			RETURNING d.processed_at IS NOT NULL`,
-			time.Now().UTC(), rp.MaxAttempts, intervalArg(batchClaimTimeout), pq.Array(rp.ladderMillis()),
-			truncateError(cause), isPermanentError(cause), tenantID, batchID, claimedAt)
+			time.Now().UTC(), rp.MaxAttempts, intervalArg(batchClaimTimeout), pq.Array(rp.ladderMillis()), rp.MaxTransientAttempts,
+			truncateError(cause), isPermanentError(cause), !isPermanentError(cause) && isTransientError(cause), tenantID, batchID, claimedAt)
 		if err != nil {
 			return err
 		}
@@ -323,12 +358,12 @@ func expandToFollowers(failures []rowFailure, followers tlsFoldFollowers) []rowF
 // regardless); a *RowFailuresError when some failed and were recorded; a
 // plain error only when recording them failed (the caller then falls back to
 // RecordBatchFailure, and failing that, the claim timeout).
-func (p *BatchProcessor) settleFailures(ctx context.Context, tenantID uuid.UUID, batchID string, ba *batchAudit, failures []rowFailure, followers tlsFoldFollowers, total int, cause error) error {
+func (p *BatchProcessor) settleFailures(ctx context.Context, tenantID uuid.UUID, claim *batchClaim, batchID string, ba *batchAudit, failures []rowFailure, followers tlsFoldFollowers, total int, cause error) error {
 	if len(failures) == 0 {
 		return cause
 	}
 	failures = expandToFollowers(failures, followers)
-	terminal, err := p.recordRowFailures(ctx, tenantID, failures)
+	terminal, err := p.recordRowFailuresFenced(ctx, tenantID, claim, failures)
 	if err != nil {
 		return fmt.Errorf("record %d row failure(s) for batch %s: %w", len(failures), batchID, err)
 	}

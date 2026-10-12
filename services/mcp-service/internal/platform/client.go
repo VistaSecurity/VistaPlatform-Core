@@ -166,6 +166,9 @@ func (c *Client) Post(ctx context.Context, base, path string, body any) (any, er
 	return c.do(ctx, http.MethodPost, base, path, nil, encoded)
 }
 
+// maxPlatformResponseBytes bounds what is buffered from one platform call.
+const maxPlatformResponseBytes = 16 << 20
+
 func (c *Client) do(ctx context.Context, method, base, path string, q url.Values, body []byte) (any, error) {
 	g, ok := GrantFromContext(ctx)
 	if !ok {
@@ -196,9 +199,14 @@ func (c *Client) do(ctx context.Context, method, base, path string, q url.Values
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	// Read one byte past the cap so an over-long body is reported as what it
+	// is, instead of being cut mid-document and failing later as "not JSON".
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxPlatformResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read platform response: %w", err)
+	}
+	if len(respBody) > maxPlatformResponseBytes {
+		return nil, fmt.Errorf("platform response exceeded %d MB; narrow the query or ask for a smaller page", maxPlatformResponseBytes>>20)
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {

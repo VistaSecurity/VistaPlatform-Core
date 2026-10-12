@@ -51,12 +51,21 @@ type stubTicketStore struct {
 	commentsErr    error
 	addCommentRes  *models.TicketComment
 	addCommentErr  error
+
+	// What the handler forwarded, so a test can assert a bound ARRIVED.
+	lastFilters   models.TicketFilters
+	lastLimit     int
+	lastOffset    int
+	createCalled  bool
+	commentCalled bool
 }
 
-func (s *stubTicketStore) List(_ uuid.UUID, _ models.TicketFilters) ([]models.Ticket, int, error) {
+func (s *stubTicketStore) List(_ uuid.UUID, f models.TicketFilters) ([]models.Ticket, int, error) {
+	s.lastFilters = f
 	return s.listTickets, s.listTotal, s.listErr
 }
 func (s *stubTicketStore) Create(_, _ uuid.UUID, _ models.CreateTicketInput) (*models.Ticket, error) {
+	s.createCalled = true
 	return s.createResult, s.createErr
 }
 func (s *stubTicketStore) GetByID(_, _ uuid.UUID) (*models.Ticket, error) {
@@ -74,10 +83,12 @@ func (s *stubTicketStore) GetProgress(_ uuid.UUID, _ int, _ string) (*models.Tic
 func (s *stubTicketStore) GetStats(_ uuid.UUID) (*models.TicketStats, error) {
 	return s.statsResult, s.statsErr
 }
-func (s *stubTicketStore) ListComments(_, _ uuid.UUID) ([]models.TicketComment, error) {
-	return s.commentsResult, s.commentsErr
+func (s *stubTicketStore) ListComments(_, _ uuid.UUID, limit, offset int) ([]models.TicketComment, bool, error) {
+	s.lastLimit, s.lastOffset = limit, offset
+	return s.commentsResult, false, s.commentsErr
 }
 func (s *stubTicketStore) AddComment(_, _, _ uuid.UUID, _ string) (*models.TicketComment, error) {
+	s.commentCalled = true
 	return s.addCommentRes, s.addCommentErr
 }
 

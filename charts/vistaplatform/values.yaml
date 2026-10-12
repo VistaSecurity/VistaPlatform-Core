@@ -25,8 +25,23 @@ image:
   tag: ""
   # -- Pull policy. Use IfNotPresent with digest-pinned images.
   pullPolicy: IfNotPresent
-  # -- Names of imagePullSecrets in the release namespace.
+  # -- Names of imagePullSecrets in the release namespace. Applied to EVERY pod
+  # the chart renders (backends, web-ui, admin-ui, datastores, Jobs, helm-test pod).
   pullSecrets: []
+
+# Image for the `helm test` smoke-test pod (a curl client). Rendered as
+# <registry>/<repository>:<tag> (or @<digest> when set), so a mirror or an
+# air-gapped registry can host it: set `smokeTest.image.registry`, or leave it
+# empty to follow `image.registry`.
+smokeTest:
+  image:
+    # -- Registry for the smoke-test image. Empty = use image.registry.
+    registry: ""
+    # -- Repository path under the registry (NOT prefixed with image.repoPrefix).
+    repository: curlimages/curl
+    tag: "8.22.0"
+    # -- Optional digest (sha256:...). When set it wins over the tag.
+    digest: ""
 
 # Supply-chain verification. Only ever read by NOTES.txt, to print a `cosign
 # verify` command a user can paste. Nothing in the chart enforces it.
@@ -58,9 +73,28 @@ verification:
 # Populate this Secret however your cluster does secrets — sealed-secrets,
 # External Secrets Operator against your own vault, or kubectl create secret.
 platform:
+  # -- Generate the platform and datastore Secrets in the chart (default true).
+  # The chart reads any existing Secret back with `lookup` on `helm
+  # install/upgrade` and only generates what is missing. `lookup` returns
+  # nothing under a template-only render (Argo CD, Flux, `helm template |
+  # kubectl apply`), so there every sync would write NEW random passwords and
+  # keys: a new postgres password against the old PVC, a new
+  # encryption-master-key that makes stored credentials undecryptable.
+  # GitOps: set this to false and pre-create the Secrets (below). The render
+  # then emits no generated Secret at all and fails, listing the keys, if you
+  # have not named them. See docsv4/core/operate/deployment/production-checklist.md.
+  generateSecrets: true
+  # -- With generateSecrets=false: the Secret holding the datastore credentials
+  # (keys postgres-password, redis-password, nats-token). Pre-create it; the
+  # chart then renders no `<fullname>-generated` Secret.
+  existingDatastoreSecretName: ""
   # -- Existing Secret in the release namespace holding platform secrets. If set,
   # values below are ignored. Required keys: jwt-secret, internal-auth-secret,
-  # encryption-master-key (+ database-url and redis-url when datastores are external).
+  # encryption-master-key (+ database-url when datastores.postgres.enabled=false
+  # and redis-url when datastores.redis.enabled=false). An external Postgres or
+  # Redis REQUIRES this to be set: the render fails otherwise, because the
+  # generated Secret cannot carry those URLs. datastores.nats.enabled=false is
+  # not supported (no external NATS path); the render fails.
   existingSecretName: ""
   # -- Inline platform secret values (ignored if existingSecretName is set).
   jwtSecret: ""
@@ -118,6 +152,10 @@ license:
 # from then on the DATABASE copy is authoritative, and a different value in the
 # Secret is ignored with a warning in the admin-service log.
 install:
+  # -- A pre-created Secret holding `install-id` and `signing-key.pem` (the
+  # shape of `<fullname>-install`). With platform.generateSecrets=false, name
+  # this or pin BOTH id and signingKeyPEM below. Empty = chart-managed.
+  existingSecretName: ""
   # -- Pin the install id (a UUID). Leave empty for `helm install` / `helm
   # upgrade`: the chart generates an id once and preserves it with `lookup`.
   # SET IT if you deploy with ArgoCD, Flux, or `helm template | kubectl apply`:
@@ -136,6 +174,23 @@ install:
   # secrets), never plain git. To adopt the key a running install already has:
   # `kubectl get secret <fullname>-install -o jsonpath='{.data.signing-key\.pem}' | base64 -d`.
   signingKeyPEM: ""
+
+# The CBOM artifact signing key (Enterprise: cbom-service signs artifacts with
+# it). A dedicated Ed25519 key in the Secret `<fullname>-cbom-signing`, mounted
+# into cbom-service only. Inert on Core, which signs nothing.
+cbomSigning:
+  # -- Pin the signing key: an Ed25519 private key as a PKCS#8 PEM
+  # ("BEGIN PRIVATE KEY" block). Leave empty for `helm install` / `helm
+  # upgrade`: the chart generates one on first install and preserves it with
+  # `lookup`. SET IT for ArgoCD / Flux / `helm template` renders (which cannot
+  # lookup), from an encrypted values file. Setting a DIFFERENT key rotates:
+  # new artifacts carry the new key id, and artifacts signed under the old key
+  # keep verifying (cbom-service remembers the old public key).
+  keyPEM: ""
+  # -- Name of a pre-created Secret holding the key under `signing-key.pem`.
+  # Required (or pin keyPEM) when platform.generateSecrets=false; when set the
+  # chart creates no Secret and mounts this one.
+  existingSecretName: ""
 
 # Licence usage reporting (MSP licence only; the chart cannot tell the edition
 # at render time, so these apply on every install and are inert unless the
@@ -253,9 +308,9 @@ enableSpreadAcrossNodes: false
 # volumes — kubelet only chowns the volume root if it's not already gid
 # 1001, instead of walking every file on every restart.
 #
-# Datastores (postgres, redis, influxdb) override runAsUser/fsGroup at the
+# Datastores (postgres, redis) override runAsUser/fsGroup at the
 # per-StatefulSet level with their own image-specific uids (postgres: 70,
-# redis: 999, influxdb: 1000) — those overrides take precedence here.
+# redis: 999) — those overrides take precedence here.
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1001
@@ -276,24 +331,29 @@ containerSecurityContext:
 
 # Datastores running in-cluster.
 #
-# storageClassName default is "longhorn" — the recommended production
-# storage backend for Vista Platform on RKE2. Longhorn is a native CSI driver
-# (no privileged helper-pods), provides replicated block storage across
-# nodes, scales from single-node lab to multi-rack production by
-# changing replica count, and aligns with the Rancher/SUSE RKE2
-# ecosystem. Customers who already have a CSI driver (Longhorn, EBS,
-# NetApp, Pure, Rook-Ceph, etc.) override this with their class name.
+# storageClassName defaults to "" (omit the field), so every PVC uses the
+# cluster's DEFAULT StorageClass. Verify one exists with:
+#   kubectl get storageclass     # look for "(default)"
+# A cluster with no default class leaves the PVCs Pending: set
+# `datastores.storageClassName=<class>` (or a per-datastore override).
 #
-# For lab/eval deployments without dedicated storage infrastructure,
-# install Longhorn first per the deployment guide §5. local-path-
-# provisioner is documented as a lab-only fallback in deployment guide
-# Appendix A and is NOT a recommended customer default — its hostPath
-# helper-pods conflict with restricted-tier Pod Security Admission.
+# UPGRADING AN EXISTING RELEASE: StatefulSet volumeClaimTemplates are immutable.
+# A release installed with the old default carries `longhorn` in its datastore
+# StatefulSets, and `helm upgrade` with the new empty default fails with
+# Forbidden. Pin the class the release already uses BEFORE upgrading:
+#   --set datastores.storageClassName=<class>     # e.g. longhorn
+# Find it with: kubectl -n <ns> get pvc -o custom-columns=NAME:.metadata.name,SC:.spec.storageClassName
+# The datastores need block storage; replicated block storage (Longhorn,
+# Rook-Ceph, a cloud CSI driver) is recommended for production.
+# local-path-provisioner is a lab-only fallback :
+# its hostPath helper pods conflict with restricted-tier Pod Security Admission.
 datastores:
-  # -- Global storage class for all in-cluster datastores. Override globally here
-  # or per-datastore with the storageClassName field on each datastore entry.
-  # EKS: use "gp3" (EBS CSI driver). RKE2: use "longhorn".
-  storageClassName: longhorn
+  # -- Global storage class for all in-cluster datastores and chart PVCs. ""
+  # (the default) omits storageClassName so the cluster's default StorageClass
+  # applies. Existing releases must pin their class before upgrading; see the
+  # note above. Override per datastore with the storageClassName field on each
+  # datastore entry. Examples: "gp3" (EKS EBS CSI), "longhorn".
+  storageClassName: ""
 
   postgres:
     enabled: true
@@ -337,22 +397,6 @@ datastores:
     resources:
       requests: {cpu: 50m, memory: 128Mi}
       limits: {cpu: 250m, memory: 256Mi}
-
-  influxdb:
-    enabled: true
-    image:
-      repository: influxdb
-      tag: "2.8-alpine"
-    org: vistaplatform
-    bucket: metrics
-    adminUser: admin
-    persistence:
-      size: 20Gi
-    # -- Per-datastore storage class override.
-    storageClassName: ""
-    resources:
-      requests: {cpu: 100m, memory: 256Mi}
-      limits: {cpu: 500m, memory: 512Mi}
 
   nats:
     enabled: true
@@ -615,7 +659,7 @@ backends:
       digest: ""
 
   sensor-manager:
-    needs: {postgres: true, redis: true, nats: true, influxdb: true}
+    needs: {postgres: true, redis: true, nats: true}
     secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
         true, redisUrl: true}
     resources:
@@ -666,7 +710,7 @@ backends:
     # hardcoded http://:8080 would break these calls once serviceMtls is enabled.
 
   monitoring-service:
-    needs: {postgres: true, redis: true, nats: true, influxdb: true}
+    needs: {postgres: true, redis: true, nats: true}
     secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
         true, redisUrl: true}
     resources:
@@ -806,13 +850,14 @@ backends:
       digest: ""
 
   mcp-service:
-    # Stateless MCP (Model Context Protocol) façade: no datastore. It signs
+    # Stateless MCP (Model Context Protocol) façade: no datastore of its own
+    # (redis is read only, for the per-user revocation denylist). It signs
     # the PAT→JWT exchange call to auth-service with INTERNAL_AUTH_SECRET
     # and reaches auth/inventory/compliance/cbom via peer URLs derived from
     # USE_MTLS in shared/config (PeerServiceURLAuto) — no explicit
     # *_SERVICE_URL overrides, same reasoning as tenant-health-service.
-    needs: {postgres: false, redis: false, nats: false}
-    secrets: {internalAuthSecret: true}
+    needs: {postgres: false, redis: true, nats: false}
+    secrets: {internalAuthSecret: true, redisUrl: true}
     resources:
       requests: {cpu: 50m, memory: 64Mi}
       limits: {cpu: 300m, memory: 256Mi}
@@ -909,8 +954,9 @@ gateway:
 #   none            — chart renders no ingress resources. The cluster operator
 #                       supplies their own Ingress / Gateway-API / mesh routing
 #                       against the chart's backend Services. See
-#                       docsv4/core/operate/deployment/rke2-v1/deployment-guide.md for
-#                       the Ingress contract (paths, hosts, Service names,
+#                       the routes `helm template` renders under
+#                       ingress.controller=traefik (templates/ingress/) for the
+#                       contract to reproduce (paths, hosts, Service names,
 #                       and required behaviors like CORS / rate-limit / HSTS).
 #
 # The chart is currently Traefik-aware (Middleware CRDs encode rate limits,
@@ -964,6 +1010,12 @@ ingress:
 # with the public half, fetched from auth-service's JWKS endpoint. A leak from a
 # verifier grants nothing: public keys are public.
 jwtSigning:
+  # -- A pre-created Secret holding `signing-key.pem` (an ECDSA P-256 PEM; see
+  # secrets-management.md for the multi-block rotation form). Required when
+  # platform.generateSecrets=false and jwtSigning.enabled=true. Empty =
+  # chart-managed `<fullname>-jwt-signing`.
+  existingSecretName: ""
+
   # -- Sign session tokens with ES256 + a key id instead of the shared HS256
   # secret.
   #
@@ -987,7 +1039,7 @@ jwtSigning:
   # -- How often verifiers re-fetch the JWKS, in seconds. This is also the
   # window a rotation needs: a newly promoted key must be PUBLISHED for at least
   # this long before it starts signing, or verifiers will see an unknown kid and
-  # correctly reject the tokens. See deployment-guide §5H.
+  # correctly reject the tokens. See docsv4/core/operate/security/secrets-management.md.
   jwksRefreshSeconds: 300
 
   # -- Import an existing ECDSA P-256 private key (PKCS#8 PEM) instead of
@@ -1097,6 +1149,29 @@ adminPlane:
       # -- Addresses to ignore when walking X-Forwarded-For right-to-left.
       # An alternative to depth when the proxy count varies.
       excludedIPs: []
+
+# Peers whose X-Forwarded-For auth-service and mcp-service believe (TRUSTED_PROXY_CIDRS).
+#
+# auth-service derives the caller's address from the connection, and only reads
+# X-Forwarded-For when the connection comes from one of these. That address keys
+# the per-IP login/registration rate limits, lands in audit rows and is stamped
+# on impersonation tokens, so it must not be something a client can write. Traefik
+# (as the chart configures it) does not trust a client-supplied header: it
+# replaces X-Forwarded-For with the address it saw, so the only party that talks
+# to auth-service with the header set is the ingress controller.
+#
+# The default is the private address ranges, i.e. "my ingress controller's pod
+# address". Narrow it to your ingress controller's pod CIDR if you can. An empty
+# list trusts nobody: every request then appears to come from the ingress
+# controller and the per-IP limits collapse into one shared bucket. Other
+# services still use gin's default and are not covered yet.
+# mcp-service uses the same list for the client address in its audit rows and
+# its token-exchange rate limits.
+trustedProxyCIDRs:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  - fc00::/7
 
 # Edge rate limits (Traefik `rateLimit` middlewares, per source address).
 #
@@ -1232,6 +1307,17 @@ pcapUploads:
 
 # Schema migration Job. Runs scripts/database/schema.sql via psql against
 # Postgres on every install and upgrade. The schema is idempotent.
+# Set enabled=false only if you apply schema.sql yourself. The chart then writes
+# no completion marker, so seed-data and each backend's wait-for-schema init
+# container wait only for the public.tenants table to exist instead.
+#
+# With enabled=false and serviceRls.enabled=true (the default) the rls-roles Job
+# still runs: your own schema must already have created the two roles named by
+# serviceRls.roleApp (NOLOGIN NOBYPASSRLS) and serviceRls.roleBypass (NOLOGIN
+# BYPASSRLS) with the table/sequence grants from scripts/database/schema.sql
+# ("RLS ROLE SPLIT" section and the trailing GRANTs). The Job waits for them,
+# then grants LOGIN + the password. Simplest: apply the chart's schema.sql
+# yourself, which creates all of it.
 schemaMigration:
   enabled: true
   image:
@@ -1243,6 +1329,11 @@ schemaMigration:
 # subscription tiers, measurement types, and platform frameworks. seed.sql is
 # fully idempotent (ON CONFLICT DO NOTHING / DO UPDATE) so upgrades are safe.
 # Disable only if you manage seed data entirely outside of Helm.
+#
+# The chart packages seed.sql from scripts/database/seed.sql
+# (scripts/stage-chart-sql.sh); it is NOT committed in files/schema/. Rendering
+# or installing from a bare checkout with seedData.enabled=true fails with a
+# message saying so, rather than seeding nothing (no platform admin).
 #
 # seed.sql seeds SIX compliance frameworks, all free: best-practices,
 # pqc-readiness, cert-hygiene and the three cert-expiry frameworks. The five
@@ -1435,6 +1526,19 @@ networkPolicy:
     - { protocol: UDP, port: 44818 }
     - { protocol: UDP, port: 47808 }
 
+  # CIDRs of an EXTERNAL Postgres and/or Redis (managed RDS, ElastiCache, a
+  # database VM). Used only when egressEnabled is true AND the matching bundled
+  # datastore is disabled (datastores.postgres.enabled=false /
+  # datastores.redis.enabled=false): the default egress rules select only the
+  # in-cluster datastore pods, so without an ipBlock to the external host the
+  # backends and Jobs cannot connect and the install hangs at wait-for-schema.
+  # Each CIDR is allowed on TCP 5432 (Postgres) and TCP 6379 (Redis) for the
+  # services that use that datastore. Use the narrowest range that covers the
+  # endpoint (a /32 per address, or the database subnet). The chart refuses to
+  # render when egressEnabled is true, a datastore is external and this list is
+  # empty. Ignored when egressEnabled is false.
+  externalDatastoreCIDRs: []
+
   # kube-dns / CoreDNS Service location. Used for the DNS egress allow rule.
   # Override if your cluster runs CoreDNS in a non-standard namespace.
   dnsNamespace: kube-system
@@ -1510,6 +1614,11 @@ serviceRls:
   # vistaplatform.validateRls fails the render rather than letting the toggle
   # silently no-op. See that helper for the external-Postgres path.
   enabled: true
+  # Install ordering: schema-migration creates these roles NOLOGIN; the rls-roles
+  # Job then grants them LOGIN + password. Each backend's wait-for-schema init
+  # container therefore also waits (same ~10m budget, fails visibly as Init:Error)
+  # until it can log in as roleApp, so a fresh install does not crash-loop with
+  # "password authentication failed" while rls-roles finishes.
   # Non-owner roles. Must match the role names CREATEd in schema.sql.
   roleApp: crypto_app
   roleBypass: crypto_bypass
@@ -1537,16 +1646,17 @@ serviceRls:
 #     mTLS silently breaks ~60 days in (first cert renewal) even though the
 #     install succeeds. NOTES.txt reminds you on every install/upgrade.
 #
-# OPT-OUT (clusters that cannot provide the prerequisites): set ALL THREE of
-# serviceMtls.enabled, datastores.postgres.tls.enabled, and
-# datastores.nats.tls.enabled to false. The two datastore toggles REQUIRE
+# OPT-OUT (clusters that cannot provide the prerequisites): set ALL FOUR of
+# serviceMtls.enabled, datastores.postgres.tls.enabled,
+# datastores.nats.tls.enabled and agentMtls.enabled to false (agentMtls
+# defaults true and itself requires serviceMtls). The two datastore toggles REQUIRE
 # serviceMtls.enabled — leaving a datastore TLS toggle on while serviceMtls is
 # off is a misconfiguration the chart rejects at render time.
 #
 # EXISTING RELEASES (upgrade from a pre- chart that ran all three off):
 # do NOT let a single upgrade flip all three at once. Stage it — enable
 # serviceMtls first (one helm upgrade), then the datastore toggles in a later
-# upgrade (deployment-guide §5E). Toggling postgres.tls on a live release
+# upgrade (docsv4/core/operate/security/service-mesh-mtls.md). Toggling postgres.tls on a live release
 # recreates the schema-migration Job. That used to fail, because a Job's pod
 # template is immutable; the Job name now embeds a hash of its rendered pod
 # template, so any template change creates a fresh Job instead of patching an

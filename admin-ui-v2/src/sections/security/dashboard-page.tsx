@@ -73,7 +73,7 @@ export function SecurityDashboardPage() {
         <select value={range} onChange={(e) => setRange(e.target.value)} style={{ height: 30, borderRadius: 'var(--r-btn)', border: '1px solid var(--op-border2)', background: 'var(--op-panel2)', color: 'var(--op-t1)', fontSize: 12.5, padding: '0 8px' }}>
           {TIME_RANGES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
         </select>
-        <button className="op-btn icon sm" title="Refresh" onClick={() => { statsQ.refetch(); eventsQ.refetch(); }}><RefreshCw size={14} /></button>
+        <button className="op-btn icon sm" title="Refresh" aria-label="Refresh" onClick={() => { statsQ.refetch(); eventsQ.refetch(); }}><RefreshCw size={14} /></button>
         {statsQ.isError && <span style={{ fontSize: 11.5, color: 'var(--warn)' }}>Security service unavailable — stats may be unavailable.</span>}
       </div>
 

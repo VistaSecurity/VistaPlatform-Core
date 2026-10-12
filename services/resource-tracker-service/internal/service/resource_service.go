@@ -99,7 +99,7 @@ func (s *ResourceService) RecordResourceMetrics(req *models.ResourceMetricsReque
 		"tenant_id": req.TenantID,
 		"api_calls": req.APICalls,
 		"cost_usd":  usage.CostUSD,
-	}).Info("Resource metrics recorded")
+	}).Debug("Resource metrics recorded")
 
 	return nil
 }

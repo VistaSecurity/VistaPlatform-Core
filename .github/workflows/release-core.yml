@@ -339,7 +339,7 @@ jobs:
       # SQL files without whole-line comments so Helm's release Secret stays
       # below Kubernetes' 1 MiB limit; the tracked schema mirror stays exact.
       - name: Stage schema and seed into the chart
-        run: scripts/stage-chart-sql.sh
+        run: scripts/stage-chart-sql.sh --strip-comments
 
       - name: Stamp the version from the tag
         env:

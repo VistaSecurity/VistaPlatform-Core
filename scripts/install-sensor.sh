@@ -7,7 +7,8 @@ set -e
 
 # Default values
 CONTROL_PLANE_URL="https://app.vistasecurity.io"
-REGISTRATION_KEY=""
+# The key may come from the environment so it stays out of the process list.
+REGISTRATION_KEY="${VISTA_REGISTRATION_KEY:-}"
 SENSOR_NAME=""
 INTERFACES=""
 PROFILE="datacenter_host"
@@ -24,6 +25,24 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Shows only the last 4 characters of a registration key, for any output.
+mask_key() {
+    local k=$1
+    if [[ ${#k} -le 4 ]]; then
+        printf '****'
+    else
+        printf '****%s' "${k: -4}"
+    fi
+}
+
+# Reads the registration key from the first line of stdin (--key-stdin), so it
+# never appears in the process list.
+read_key_from_stdin() {
+    local line=""
+    IFS= read -r line || true
+    REGISTRATION_KEY=${line%$'\r'}
+}
 
 # Print colored output
 print_status() {
@@ -52,7 +71,10 @@ Usage: $0 [options]
 
 Options:
     -u, --url URL              Control plane URL (default: $CONTROL_PLANE_URL)
-    -k, --key KEY              Registration key (required)
+    -k, --key KEY              Registration key (required). A key on the command line is
+                               visible to other users in the process list; prefer one of:
+    --key-stdin                Read the key from the first line of standard input
+                               (VISTA_REGISTRATION_KEY=... in the environment also works)
     -n, --name NAME            Sensor name (default: auto-detect)
     -i, --interfaces IFACES    Network interfaces (default: auto-detect)
     -p, --profile PROFILE      Deployment profile (default: $PROFILE; not yet applied —
@@ -103,6 +125,10 @@ while [[ $# -gt 0 ]]; do
         -k|--key)
             REGISTRATION_KEY="$2"
             shift 2
+            ;;
+        --key-stdin)
+            read_key_from_stdin
+            shift
             ;;
         -n|--name)
             SENSOR_NAME="$2"
@@ -208,7 +234,8 @@ run_interactive_mode() {
     # Get registration key - required for sensor authentication
     # Format: REG-{tenant_id}-{timestamp}-{checksum}
     while [[ -z "$REGISTRATION_KEY" ]]; do
-        read -p "Enter registration key: " REGISTRATION_KEY
+        read -r -s -p "Enter registration key: " REGISTRATION_KEY
+        echo ""
         if [[ -z "$REGISTRATION_KEY" ]]; then
             print_error "Registration key is required"
         fi
@@ -292,7 +319,7 @@ run_interactive_mode() {
     echo ""
     print_header "📋 Installation Configuration"
     echo "=================================="
-    echo "Registration Key: $REGISTRATION_KEY"
+    echo "Registration Key: $(mask_key "$REGISTRATION_KEY")"
     echo "IP Address: $EXPECTED_IP"
     echo "Sensor Name: $SENSOR_NAME"
     echo "Control Plane: $CONTROL_PLANE_URL"
@@ -428,6 +455,24 @@ read_config_value() {
     sed -n "s/^$1:[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}[[:space:]]*\$/\1/p" "$2" 2>/dev/null | head -1
 }
 
+# Prints the SHA-256 (hex) of its argument.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$1" | sha256sum | cut -d' ' -f1
+    else
+        printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1
+    fi
+}
+
+# True when the config at $1 records that this host enrolled with registration
+# key $2: either the key itself (a config written before the sensor stopped
+# keeping it) or its SHA-256 fingerprint, which is all it keeps once the
+# platform has issued the per-sensor secret that replaced it.
+enrolled_with_key() {
+    [[ "$(read_config_value registrationKey "$1")" == "$2" ]] && return 0
+    [[ "$(read_config_value registrationKeySha256 "$1")" == "$(sha256_of "$2")" ]]
+}
+
 # A host this key already enrolled keeps its identity. Re-running the same
 # install command (to upgrade the binary, or by mistake) must not discard the
 # certificate and UUID the sensor holds and send it back to register with a key
@@ -436,7 +481,7 @@ read_config_value() {
 KEEP_ENROLMENT=false
 if [[ -f "$CONFIG_FILE" ]] \
     && [[ "$(read_config_value sensorId "$CONFIG_FILE")" =~ $UUID_RE ]] \
-    && [[ "$(read_config_value registrationKey "$CONFIG_FILE")" == "$REGISTRATION_KEY" ]]; then
+    && enrolled_with_key "$CONFIG_FILE" "$REGISTRATION_KEY"; then
     KEEP_ENROLMENT=true
     print_status "This host is already enrolled with this key (sensor $(read_config_value sensorId "$CONFIG_FILE")); keeping its identity and configuration."
 fi
@@ -543,9 +588,11 @@ Environment=SENSOR_IP_ADDRESS=$EXPECTED_IP
 # Registers on first start with the key in the config, then runs from the
 # certificate it was issued.
 ExecStart=$INSTALL_DIR/crypto-sensor --verbose -config $CONFIG_FILE
-ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
 RestartSec=10
+# Exit status 78 (EX_CONFIG) means a person has to act: the registration key was
+# rejected, or the config file is unusable. Restarting would only repeat it.
+RestartPreventExitStatus=78
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=crypto-sensor

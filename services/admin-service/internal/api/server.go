@@ -46,6 +46,35 @@ import (
 // /admin-service/auth routes. See setupRouter.
 const maxAnonymousBodyBytes = 1 << 20
 
+// maxProtectedBodyBytes is the request-body ceiling on the authenticated
+// /admin routes: every one of them takes a JSON document of a few KiB at most.
+// The two that accept a file upload carry their own, larger, explicit bound
+// (protectedBodyCeiling).
+const maxProtectedBodyBytes = 1 << 20
+
+// protectedBodyCeiling bounds the body of every authenticated admin route at
+// maxProtectedBodyBytes, except the two upload routes, which get the bound
+// their handlers already enforce plus room for the multipart envelope. It is
+// mounted ahead of authentication so an over-size body is refused before a byte
+// of it is buffered, and as group middleware so a route added tomorrow inherits
+// the ceiling instead of having to remember it (the failure mode that left
+// these routes unbounded).
+func protectedBodyCeiling() gin.HandlerFunc {
+	const prefix = "/api/v1/admin-service/admin"
+	def := sharedmw.MaxBody(maxProtectedBodyBytes)
+	uploads := map[string]gin.HandlerFunc{
+		prefix + "/branding/upload":        sharedmw.MaxBody(handlers.MaxBrandingRequestBytes),
+		prefix + "/catalogs/import-bundle": sharedmw.MaxBody(catalogfeeds.MaxBundleBytes + 1<<20),
+	}
+	return func(c *gin.Context) {
+		if h, ok := uploads[c.FullPath()]; ok {
+			h(c)
+			return
+		}
+		def(c)
+	}
+}
+
 // Server represents the HTTP server instance with configuration,
 // database connection, and router setup.
 type Server struct {
@@ -378,6 +407,7 @@ func (s *Server) setupRouter() {
 		// Authenticated logout — revokes refresh tokens server-side and clears cookies.
 		// Registered outside the /auth group so it uses the protected middleware (JWT required).
 		adminLogoutGroup := adminGroup.Group("/admin/auth")
+		adminLogoutGroup.Use(protectedBodyCeiling())
 		adminLogoutGroup.Use(middleware.AuthMiddleware(s.config.JWTSecret))
 		adminLogoutGroup.Use(middleware.RequirePlatformIdentity())
 		adminLogoutGroup.Use(middleware.StringifyUserID())
@@ -391,6 +421,7 @@ func (s *Server) setupRouter() {
 		// Protected routes - All admin endpoints require authentication and platform permissions
 		// These routes are protected by JWT authentication and permission-based authorization
 		protected := adminGroup.Group("/admin")
+		protected.Use(protectedBodyCeiling())                        // body ceiling, ahead of authentication
 		protected.Use(middleware.AuthMiddleware(s.config.JWTSecret)) // JWT authentication
 		// Identity before permission: only a platform session may reach anything
 		// under /admin. See RequirePlatformIdentity.
@@ -467,14 +498,12 @@ func (s *Server) setupRouter() {
 			tiers := protected.Group("/tiers")
 			tiers.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformSettings))
 			{
-				tiers.GET("", handlers.ListTiers(tierMgr))                     // List all tiers
-				tiers.POST("", handlers.CreateTier(tierMgr))                   // Create new tier
-				tiers.GET("/:id", handlers.GetTier(tierMgr))                   // Get tier details
-				tiers.PUT("/:id", handlers.UpdateTier(tierMgr))                // Update tier (grandfathers)
-				tiers.DELETE("/:id", handlers.DeprecateTier(tierMgr))          // Deprecate tier
-				tiers.GET("/:id/history", handlers.GetTierHistory(tierMgr))    // Get tier change history
-				tiers.GET("/:id/impact-analysis", handlers.TierImpactAnalysis) // Tier migration impact analysis
-				tiers.POST("/:id/assign", handlers.AssignTier)                 // Assign plan to a tenant (record-only for invoice plans)
+				tiers.GET("", handlers.ListTiers(tierMgr))                  // List all tiers
+				tiers.POST("", handlers.CreateTier(tierMgr))                // Create new tier
+				tiers.GET("/:id", handlers.GetTier(tierMgr))                // Get tier details
+				tiers.PUT("/:id", handlers.UpdateTier(tierMgr))             // Update tier (grandfathers)
+				tiers.DELETE("/:id", handlers.DeprecateTier(tierMgr))       // Deprecate tier
+				tiers.GET("/:id/history", handlers.GetTierHistory(tierMgr)) // Get tier change history
 				// Entitlements composition — backs the admin-UI tier composer.
 				// GET reads catalog-enriched rows plus the composition version;
 				// PUT /:key sets one item (matrix cell edits); PUT upserts and
@@ -483,6 +512,19 @@ func (s *Server) setupRouter() {
 				tiers.GET("/:id/entitlements", handlers.GetTierEntitlements)
 				tiers.PUT("/:id/entitlements", handlers.UpdateTierEntitlements)
 				tiers.PUT("/:id/entitlements/:key", handlers.UpsertTierEntitlement)
+			}
+
+			// Assigning a plan to a tenant, and previewing what a migration would
+			// do to its tenants, are tenant-lifecycle/billing actions rather than
+			// catalogue edits, so they sit behind platform.billing (the permission
+			// that already covers invoice plans and tenant billing) instead of
+			// platform.settings. A sibling group keeps the settings gate above
+			// untouched for everything else under /tiers.
+			tierBilling := protected.Group("/tiers")
+			tierBilling.Use(rbacMiddleware.RequirePlatformPermission(rbac.PermissionPlatformBilling))
+			{
+				tierBilling.GET("/:id/impact-analysis", handlers.TierImpactAnalysis) // Tier migration impact analysis
+				tierBilling.POST("/:id/assign", handlers.AssignTier)                 // Assign plan to a tenant (record-only for invoice plans)
 			}
 
 			// Billable items catalog — every gateable/billable concept the

@@ -116,7 +116,6 @@ config/traefik/dynamic-production.rke2.yaml
 
 # Docker volumes
 postgres_data/
-influx_data/
 redis_data/
 .vite/
 
@@ -225,3 +224,7 @@ lab-fixtures.yaml
 # used to be — root `tsc -b` was broken until 2026-08-06 and only ever
 # produced the qa-platform one.
 *.tsbuildinfo
+
+# Real seed.sql is staged at package time (scripts/stage-chart-sql.sh); the render
+# tests stage a placeholder (scripts/stage-chart-seed-stub.sh). Never commit it.
+charts/vistaplatform/files/schema/seed.sql

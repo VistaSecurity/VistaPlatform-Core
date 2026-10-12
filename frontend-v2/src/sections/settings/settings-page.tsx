@@ -46,14 +46,35 @@ function EditionLock({ meta }: { meta: SettingsNavItem & { section?: string } })
   );
 }
 
+/** The permission/feature lookup itself failed — not a denial, so offer a retry. */
+function AccessCheckFailed({ meta, onRetry }: { meta: SettingsNavItem & { section?: string }; onRetry: () => void }) {
+  return (
+    <SPage eyebrow={meta.section ?? 'Settings'} title={meta.label} job={meta.job} maxWidth={1000}>
+      <SCard>
+        <div role="alert">
+          <StateNote
+            icon="alert-triangle"
+            tone="var(--danger-text)"
+            title="Couldn't verify your access"
+            message="We couldn't check what you have access to, so this page isn't shown. This is not a denial; try again."
+          />
+          <div style={{ textAlign: 'center', paddingBottom: 24 }}>
+            <button type="button" className="ui-btn sm accent" onClick={onRetry}>Retry</button>
+          </div>
+        </div>
+      </SCard>
+    </SPage>
+  );
+}
+
 export function SettingsPage() {
   const { page = '' } = useParams();
   const meta = settingsPageMeta(page);
-  const { hasPermission, isLoading } = usePermissions();
+  const { hasPermission, isLoading, isError: permsError, refetch: refetchPerms } = usePermissions();
   // Fail CLOSED while flags resolve (defaultFeatures is all-off), same posture
   // as the permission gate below: never flash an Enterprise page body — and its
   // on-mount fetches — on a deployment that may not ship the routes.
-  const { features, isLoading: featuresLoading } = useFeatures();
+  const { features, isLoading: featuresLoading, isError: featuresError, refetch: refetchFeatures } = useFeatures();
 
   // Fail CLOSED while permissions resolve: render nothing rather than flashing the
   // gated page body (and its on-mount data fetches) to a user who may lack access.
@@ -61,11 +82,17 @@ export function SettingsPage() {
   if (meta.permission && isLoading) {
     return null;
   }
+  // A failed load leaves permissions empty, which would otherwise read as a real
+  // denial. Say so and offer a retry; stay fail-closed (no page body).
+  if (meta.permission && permsError) {
+    return <AccessCheckFailed meta={meta} onRetry={refetchPerms} />;
+  }
   if (meta.permission && !hasPermission(meta.permission)) {
     return <AccessNotice meta={meta} />;
   }
   if (meta.feature) {
     if (featuresLoading) return null;
+    if (featuresError) return <AccessCheckFailed meta={meta} onRetry={refetchFeatures} />;
     if (!features[meta.feature]) return <EditionLock meta={meta} />;
   }
 

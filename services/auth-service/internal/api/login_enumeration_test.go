@@ -170,7 +170,7 @@ func expectTenantUser(mock sqlmock.Sqlmock, passwordHash string, active bool) {
 		hash = passwordHash
 	}
 	now := time.Now()
-	mock.ExpectQuery(`FROM users\s+WHERE email = \$1 AND deleted_at IS NULL`).
+	mock.ExpectQuery(`FROM users\s+WHERE lower\(email\) = \$1 AND deleted_at IS NULL`).
 		WillReturnRows(sqlmock.NewRows(enumUserColumns).AddRow(
 			uuid.New(), uuid.New(), "person@example.com", hash, "P", "Q",
 			active, true, nil, nil, nil, nil, now, now, nil))
@@ -280,7 +280,7 @@ func TestLogin_SSOOnlyAccount_IsInvalidCredentialsNotServerError(t *testing.T) {
 // not separate it from a real account.
 func TestLogin_UnknownAddress_SpendsAPasswordVerification(t *testing.T) {
 	router, mock := newEnumerationRouter(t, 0)
-	mock.ExpectQuery(`FROM users\s+WHERE email = \$1 AND deleted_at IS NULL`).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(`FROM users\s+WHERE lower\(email\) = \$1 AND deleted_at IS NULL`).WillReturnError(sql.ErrNoRows)
 	mock.ExpectQuery(`FROM platform_users pu`).WillReturnError(sql.ErrNoRows)
 
 	// What one verification costs on this machine, measured the way the handler
@@ -310,12 +310,15 @@ func TestLogin_UnknownAddress_SpendsAPasswordVerification(t *testing.T) {
 	}
 }
 
-// POST /auth/authenticate must apply the per-email limit /auth/login applies.
-func TestAuthenticate_HonoursPerEmailRateLimit(t *testing.T) {
+// POST /auth/authenticate must spend the same per-account budget /auth/login
+// does, keyed on (account, client address): it is a second way to submit a
+// password for an email, and it used to skip the limiter. The budget is per
+// ADDRESS on purpose — a counter on the email alone let anyone lock a victim out
+// by guessing from anywhere (distributed guessing is the account lockout's job).
+func TestAuthenticate_SharesLoginBudgetPerAccountAndAddress(t *testing.T) {
 	const loginLimit = 2
 	router, mock := newEnumerationRouter(t, loginLimit)
 
-	// initiate resolves the email to list its methods.
 	mock.ExpectQuery(`SELECT id, tenant_id FROM users`).WillReturnError(sql.ErrNoRows)
 	init := postJSONFrom(router, "/api/v1/auth-service/auth/initiate",
 		`{"email":"victim@example.com"}`, "198.51.100.1:5000")
@@ -328,24 +331,41 @@ func TestAuthenticate_HonoursPerEmailRateLimit(t *testing.T) {
 	if err := json.Unmarshal(init.Body.Bytes(), &session); err != nil || session.SessionID == "" {
 		t.Fatalf("no session_id in %s (%v)", init.Body.String(), err)
 	}
+	authBody := `{"session_id":"` + session.SessionID + `","method":"password","credentials":{"password":"Guess-Passw0rd!"}}`
+	loginBody := `{"email":"victim@example.com","password":"Guess-Passw0rd!"}`
+	authenticate := "/api/v1/auth-service/auth/authenticate"
+	login := "/api/v1/auth-service/auth/login"
 
-	body := `{"session_id":"` + session.SessionID + `","method":"password","credentials":{"password":"Guess-Passw0rd!"}}`
-	for i := 1; i <= loginLimit; i++ {
-		mock.ExpectQuery(`FROM users\s+WHERE email = \$1 AND deleted_at IS NULL`).WillReturnError(sql.ErrNoRows)
+	failedLookup := func() {
+		mock.ExpectQuery(`FROM users\s+WHERE lower\(email\) = \$1 AND deleted_at IS NULL`).WillReturnError(sql.ErrNoRows)
 		mock.ExpectQuery(`FROM platform_users pu`).WillReturnError(sql.ErrNoRows)
 	}
-	// A different source address each time, so only the PER-ACCOUNT limit (not the
-	// IP-keyed middleware limit) can be what stops the last attempt.
-	for i := 1; i <= loginLimit; i++ {
-		w := postJSONFrom(router, "/api/v1/auth-service/auth/authenticate", body,
-			fmt.Sprintf("203.0.113.%d:6000", i))
+
+	// Guessing from fresh addresses never trips the per-account limiter, so it
+	// cannot lock the owner out; each address has its own budget.
+	for i := 1; i <= loginLimit+3; i++ {
+		failedLookup()
+		w := postJSONFrom(router, authenticate, authBody, fmt.Sprintf("203.0.113.%d:6000", i))
 		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d => %d %s; want 401 (within the limit)", i, w.Code, w.Body.String())
+			t.Fatalf("attempt %d from a fresh address => %d %s; want 401 (a stranger's failures must not lock the account)", i, w.Code, w.Body.String())
 		}
 	}
-	w := postJSONFrom(router, "/api/v1/auth-service/auth/authenticate", body, "203.0.113.200:6000")
+
+	// One address spends ONE budget across login and authenticate: each endpoint
+	// stays under its own IP-keyed ceiling (2) while the shared account+address
+	// counter (also 2) is spent by the third attempt.
+	const addr = "198.51.100.77:6000"
+	failedLookup()
+	if w := postJSONFrom(router, login, loginBody, addr); w.Code != http.StatusUnauthorized {
+		t.Fatalf("login attempt 1 => %d %s; want 401", w.Code, w.Body.String())
+	}
+	failedLookup()
+	if w := postJSONFrom(router, authenticate, authBody, addr); w.Code != http.StatusUnauthorized {
+		t.Fatalf("authenticate attempt 1 => %d %s; want 401", w.Code, w.Body.String())
+	}
+	w := postJSONFrom(router, login, loginBody, addr)
 	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("attempt %d against one account from a fresh address => %d %s; want 429 from the per-account limiter", loginLimit+1, w.Code, w.Body.String())
+		t.Fatalf("login attempt 2 from an address that already failed once on each endpoint => %d %s; want 429 from the shared per-account limiter", w.Code, w.Body.String())
 	}
 }
 

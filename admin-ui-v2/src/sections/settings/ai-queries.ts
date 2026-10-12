@@ -4,17 +4,13 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export type PlatformAISettings = adminServiceComponents['schemas']['PlatformAISettings'];
 export type PlatformAIProviderUpdate = adminServiceComponents['schemas']['PlatformAIProviderUpdate'];
 export type PlatformAITestResult = adminServiceComponents['schemas']['PlatformAIProviderTestResult'];
 
 export const platformAIKey = ['platform', 'ai'] as const;
-
-function messageOf(error: unknown, fallback: string): string {
-  const msg = (error as { error?: unknown } | undefined)?.error;
-  return typeof msg === 'string' && msg ? msg : fallback;
-}
 
 export function usePlatformAI() {
   return useQuery({
@@ -32,8 +28,7 @@ export function useSavePlatformAIProvider() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: PlatformAIProviderUpdate): Promise<PlatformAISettings> => {
-      const { data, error } = await clients.admin.PUT('/admin/ai/provider', { body });
-      if (error || !data) throw new Error(messageOf(error, 'Could not save the provider'));
+      const data = unwrap(await clients.admin.PUT('/admin/ai/provider', { body }), 'Could not save the provider', { requireData: true });
       return data;
     },
     onSuccess: (data) => qc.setQueryData(platformAIKey, data),
@@ -44,8 +39,7 @@ export function useClearPlatformAIProvider() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (): Promise<PlatformAISettings> => {
-      const { data, error } = await clients.admin.DELETE('/admin/ai/provider', {});
-      if (error || !data) throw new Error(messageOf(error, 'Could not clear the provider'));
+      const data = unwrap(await clients.admin.DELETE('/admin/ai/provider', {}), 'Could not clear the provider', { requireData: true });
       return data;
     },
     onSuccess: (data) => qc.setQueryData(platformAIKey, data),
@@ -55,8 +49,7 @@ export function useClearPlatformAIProvider() {
 export function useTestPlatformAIProvider() {
   return useMutation({
     mutationFn: async (body: PlatformAIProviderUpdate): Promise<PlatformAITestResult> => {
-      const { data, error } = await clients.admin.POST('/admin/ai/provider/test', { body });
-      if (error || !data) throw new Error(messageOf(error, 'Could not run the test'));
+      const data = unwrap(await clients.admin.POST('/admin/ai/provider/test', { body }), 'Could not run the test', { requireData: true });
       return data;
     },
   });
@@ -66,8 +59,7 @@ export function useSavePlatformAITenantPolicy() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: { tenant_providers_allowed?: boolean; tenant_private_endpoints_allowed?: boolean }): Promise<PlatformAISettings> => {
-      const { data, error } = await clients.admin.PUT('/admin/ai/tenant-policy', { body });
-      if (error || !data) throw new Error(messageOf(error, 'Could not save the setting'));
+      const data = unwrap(await clients.admin.PUT('/admin/ai/tenant-policy', { body }), 'Could not save the setting', { requireData: true });
       return data;
     },
     onSuccess: (data) => qc.setQueryData(platformAIKey, data),

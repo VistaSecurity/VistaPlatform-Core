@@ -3,22 +3,17 @@ package handlers
 import (
 	"net/http"
 
-	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
 	"github.com/gin-gonic/gin"
 )
 
 // ComplianceHandlers contains all compliance-related handlers
-type ComplianceHandlers struct {
-	mappingsService *services.MappingsService
-}
+type ComplianceHandlers struct{}
 
 // NewComplianceHandlers creates a new instance of compliance handlers
-func NewComplianceHandlers(mappingsService *services.MappingsService) *ComplianceHandlers {
-	return &ComplianceHandlers{
-		mappingsService: mappingsService,
-	}
+func NewComplianceHandlers() *ComplianceHandlers {
+	return &ComplianceHandlers{}
 }
 
 // Health handles health check

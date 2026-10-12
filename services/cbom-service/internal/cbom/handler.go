@@ -40,8 +40,9 @@ const FeatureCBOMSigning = "cbom_signing"
 // in-memory stub, no database required. Keep this in sync with the methods
 // the handlers below actually call.
 type artifactStore interface {
-	List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid.UUID, kind ArtifactKind, limit int) ([]Artifact, error)
+	List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid.UUID, kind ArtifactKind, limit, offset int) ([]Artifact, int64, error)
 	Get(ctx context.Context, tenantID, artifactID uuid.UUID) (*Artifact, error)
+	GetDiffContent(ctx context.Context, tenantID, artifactID uuid.UUID) ([]byte, error)
 	GetInlineContent(ctx context.Context, tenantID, artifactID uuid.UUID) ([]byte, error)
 	SoftDelete(ctx context.Context, tenantID, artifactID uuid.UUID) error
 }
@@ -118,6 +119,9 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup, writeGate ...gin.HandlerFu
 	rg.GET("/cbom/artifacts/:id/download", h.download)
 	rg.DELETE("/cbom/artifacts/:id", append(append([]gin.HandlerFunc{}, writeGate...), h.softDelete)...)
 	rg.POST("/cbom/artifacts/:id/verify", append(append([]gin.HandlerFunc{}, writeGate...), h.verify)...)
+	// Public verification keys (current and retired), read-only, so a third
+	// party can verify an artifact signature offline.
+	rg.GET("/cbom/signing-keys", h.signingKeys)
 }
 
 // SetSigner wires the Phase 4 signer used by the verify endpoint.
@@ -184,6 +188,26 @@ func (h *Handler) generate(c *gin.Context) {
 		return
 	}
 	sign := BoolDefault(req.Sign, cbomSigningEntitled)
+	// Signing that cannot happen is never silent. An explicit `sign: true` with
+	// no signer wired (an Enterprise build whose INTERNAL_AUTH_SECRET is
+	// missing, or a Core build) is a request this deployment cannot honour, so
+	// it is refused with 503 rather than answered with an unsigned artifact the
+	// caller believes is signed. When signing is merely on by default for an
+	// entitled tenant, the artifact is still produced but the response carries
+	// `signing_error`, the same degraded-but-reported shape as
+	// `attestation_error` and `storage_degraded`.
+	var signingError string
+	if sign && h.signer == nil {
+		if boolPtrTrue(req.Sign) && cbomSigningEntitled {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "CBOM signing was requested but this deployment has no signing key configured; no artifact was created",
+			})
+			return
+		}
+		sign = false
+		signingError = "signing is enabled for this tenant but no signing key is configured; artifact is unsigned"
+		log.Printf("cbom generate: tenant=%s: %s", tenantID, signingError)
+	}
 	includeAttestation := BoolDefault(req.IncludeAttestation, cbomSigningEntitled)
 	if !cbomSigningEntitled && (boolPtrTrue(req.Sign) || boolPtrTrue(req.IncludeAttestation)) {
 		h.respondCBOMSigningRequired(c)
@@ -273,6 +297,10 @@ func (h *Handler) generate(c *gin.Context) {
 		IncludeAttestation: includeAttestation,
 		Sign:               sign,
 	})
+	if errors.Is(err, ErrSignerUnavailable) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "CBOM signing is unavailable on this deployment; no artifact was created"})
+		return
+	}
 	if err != nil {
 		log.Printf("persist cbom: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -288,6 +316,7 @@ func (h *Handler) generate(c *gin.Context) {
 		Status:           "ready",
 		StorageDegraded:  artifact.StorageDegraded,
 		AttestationError: artifact.AttestationError,
+		SigningError:     signingError,
 	})
 }
 
@@ -319,30 +348,47 @@ func (h *Handler) list(c *gin.Context) {
 		return
 	}
 
-	// ?limit=N, documented in the OpenAPI spec and previously ignored — the
-	// value was hardcoded at 50 with a comment claiming otherwise. Out-of-range
-	// and unparseable values fall back to the default rather than erroring; the
-	// repository clamps again as a backstop.
-	limit := defaultArtifactLimit
-	if raw := c.Query("limit"); raw != "" {
-		parsed, convErr := strconv.Atoi(raw)
-		if convErr != nil || parsed < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
-			return
+	// Paging: ?page= and ?page_size= (shared ParsePaginationStrict: malformed is
+	// 400, page_size clamps to sharedapi.MaxPageSize). ?limit= predates paging
+	// and stays as the page size when page_size is absent, so existing callers
+	// keep their page size; it is clamped to maxArtifactLimit. With neither,
+	// the page size is defaultArtifactLimit.
+	pg, pgErr := sharedapi.ParsePaginationStrict(c)
+	if pgErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": pgErr.Error()})
+		return
+	}
+	if _, hasSize := c.GetQuery("page_size"); !hasSize {
+		size := defaultArtifactLimit
+		if raw := c.Query("limit"); raw != "" {
+			parsed, convErr := strconv.Atoi(raw)
+			if convErr != nil || parsed < 1 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
+				return
+			}
+			size = min(parsed, maxArtifactLimit)
 		}
-		if parsed > maxArtifactLimit {
-			parsed = maxArtifactLimit
-		}
-		limit = parsed
+		pg.PageSize = size
+		pg.Offset = (pg.Page - 1) * size
 	}
 
-	artifacts, err := h.repo.List(c.Request.Context(), tenantID, scopeFilter, kindFilter, limit)
+	artifacts, total, err := h.repo.List(c.Request.Context(), tenantID, scopeFilter, kindFilter, pg.PageSize, pg.Offset)
 	if err != nil {
 		log.Printf("list artifacts: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"artifacts": artifacts})
+	meta := sharedapi.BuildPaginationMeta(pg, total)
+	if artifacts == nil {
+		artifacts = []Artifact{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"artifacts":   artifacts,
+		"page":        meta.Page,
+		"page_size":   meta.PageSize,
+		"total":       meta.Total,
+		"total_pages": meta.TotalPages,
+	})
 }
 
 // get — GET /cbom/artifacts/:id.
@@ -374,9 +420,9 @@ func (h *Handler) get(c *gin.Context) {
 //
 //	cyclonedx → canonical bytes verbatim. This is the format the
 //	            content_hash refers to; re-download is byte-stable.
-//	spdx      → re-rendered from the canonical bytes by the Enterprise
-//	            ArtifactFormatter. The hash on the row continues to refer to
-//	            the cyclonedx canonical form.
+//	spdx      → re-rendered from the artifact's internal view (not the
+//	            canonical bytes) by the Enterprise ArtifactFormatter. The hash
+//	            on the row continues to refer to the cyclonedx canonical form.
 //	pdf       → same projection, same renderer.
 //
 // Edition: cyclonedx is Core — it is the CBOM standard and every build must
@@ -474,16 +520,52 @@ func (h *Handler) download(c *gin.Context) {
 		tenant := tenantID
 		url, urlErr := h.storage.GetURL(c.Request.Context(), sharedstorage.ArtifactTypeCBOM, a.StorageKey, &tenant)
 		if urlErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "presign url: " + urlErr.Error()})
+			log.Printf("presign download url for artifact %s: %v", a.ID, urlErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create a download link for this artifact"})
 			return
 		}
 		c.Redirect(http.StatusFound, url)
 		return
 	}
 
-	// SPDX, PDF and OCSF need the bytes server-side to re-render. Read them
-	// from inline content or, for object-stored artifacts, by streaming from
-	// storage.
+	// SPDX and PDF are rendered from the artifact's INTERNAL view (the
+	// CBOMData document stored beside the canonical CycloneDX bytes), the same
+	// source the Enterprise comparison reads. The canonical bytes are the
+	// hash-of-record and are CycloneDX, which the renderers do not parse; an
+	// artifact with no internal view (object-stored before that column existed)
+	// is refused with 409 rather than rendered as an empty document.
+	if format == FormatSPDX || format == FormatPDF {
+		internal, ierr := h.repo.GetDiffContent(c.Request.Context(), tenantID, artifactID)
+		if errors.Is(ierr, ErrNoInternalView) {
+			c.JSON(http.StatusConflict, gin.H{"error": ErrNoInternalView.Error()})
+			return
+		}
+		if errors.Is(ierr, ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "artifact not found"})
+			return
+		}
+		if ierr != nil {
+			log.Printf("read internal view: %v", ierr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		body, contentType, rerr := h.formatter.Render(internal, string(format))
+		if errors.Is(rerr, ErrNoInternalView) {
+			c.JSON(http.StatusConflict, gin.H{"error": ErrNoInternalView.Error()})
+			return
+		}
+		if rerr != nil {
+			log.Printf("%s render: %v", format, rerr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="cbom-%s.%s"`, a.ID.String(), format.FilenameSuffix()))
+		c.Data(http.StatusOK, contentType, body)
+		return
+	}
+
+	// OCSF needs the canonical bytes server-side. Read them from inline content
+	// or, for object-stored artifacts, by streaming from storage.
 	var bytes []byte
 	if a.HasInlineContent {
 		bytes, err = h.repo.GetInlineContent(c.Request.Context(), tenantID, artifactID)
@@ -505,18 +587,7 @@ func (h *Handler) download(c *gin.Context) {
 			return
 		}
 	}
-	var (
-		body        []byte
-		contentType string
-	)
-	if format == FormatOCSF {
-		body, contentType, err = h.ocsf(bytes)
-	} else {
-		// The renderer owns unmarshalling the canonical document as well as the
-		// projection, so Core carries no knowledge of the alternate formats'
-		// shapes — only their names.
-		body, contentType, err = h.formatter.Render(bytes, string(format))
-	}
+	body, contentType, err := h.ocsf(bytes)
 	if err != nil {
 		log.Printf("%s render: %v", format, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -565,9 +636,21 @@ func (h *Handler) verify(c *gin.Context) {
 	}
 
 	resp := VerifyResponse{
-		ArtifactID:   a.ID,
-		HashStored:   a.ContentHash,
-		SignatureKID: a.SignatureKID,
+		ArtifactID:         a.ID,
+		HashStored:         a.ContentHash,
+		SignatureKID:       a.SignatureKID,
+		SignatureAlgorithm: a.SignatureAlgorithm,
+	}
+
+	// A row signed before Ed25519 carries only a shared-secret HMAC. That
+	// scheme is gone — there is deliberately no fallback that keeps the shared
+	// secret in the verification path — so the answer is a definite "no", and
+	// the remedy is to regenerate the artifact.
+	if a.Signature == "" && a.SignatureHMAC != "" {
+		resp.SignatureAlgorithm = "hmac-sha256"
+		resp.SignatureChecked = true
+		resp.SignatureValid = false
+		resp.SignatureReason = SignatureReasonLegacyHMAC
 	}
 
 	// Hash check requires the bytes — from inline content or, for object-stored
@@ -602,18 +685,77 @@ func (h *Handler) verify(c *gin.Context) {
 		resp.HashRecomputed = sum
 		resp.HashValid = sum == a.ContentHash
 
-		// Signature check — only if signed AND signer wired AND hash OK
-		// (otherwise reporting "signature valid" against a recomputed
-		// hash that differs from the stored one would be misleading).
-		if a.SignatureHMAC != "" && h.signer != nil && resp.HashValid {
-			ok, verr := h.signer.Verify(a.ContentHash, a.SignatureHMAC, a.SignatureKID)
-			if verr == nil {
-				resp.SignatureChecked = true
-				resp.SignatureValid = ok
-			}
+		// Signature check — only if Ed25519-signed AND a verifier is wired.
+		// It runs even when the hash does not match: the envelope carries the
+		// hash, so a changed content_hash/bytes shows up as a named "hash"
+		// mismatch rather than a blanket failure.
+		if a.Signature != "" && h.signer != nil {
+			h.verifySignature(c.Request.Context(), &resp, a, sum)
 		}
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// Reasons a checked signature is not valid (VerifyResponse.SignatureReason).
+const (
+	SignatureReasonLegacyHMAC = "legacy-hmac; regenerate"
+	SignatureReasonEnvelope   = "envelope-mismatch"
+	SignatureReasonInvalid    = "signature-invalid"
+	SignatureReasonUnknownKID = "unknown-kid"
+)
+
+// verifySignature checks the stored envelope's Ed25519 signature under the
+// key named by the artifact's kid, then recomputes every envelope field from
+// the row (and the bytes just hashed) and names any that no longer match.
+func (h *Handler) verifySignature(ctx context.Context, resp *VerifyResponse, a *Artifact, recomputedHash string) {
+	resp.SignatureChecked = true
+	resp.SignatureValid = false
+
+	stored, perr := ParseEnvelope([]byte(a.SignedEnvelope))
+	if perr != nil {
+		resp.SignatureReason = SignatureReasonInvalid
+		return
+	}
+	want, werr := NewEnvelope(recomputedHash, a.ScopeID, a.ScopeVersion, a.Layers, a.ArtifactKind, a.GeneratedBy)
+	if werr != nil {
+		log.Printf("verify %s: recompute envelope: %v", a.ID, werr)
+		resp.SignatureChecked = false
+		return
+	}
+	resp.EnvelopeMismatch = stored.Mismatches(want)
+
+	ok, verr := h.signer.Verify(ctx, a.SignatureKID, []byte(a.SignedEnvelope), a.Signature)
+	switch {
+	case errors.Is(verr, ErrUnknownKey):
+		resp.SignatureReason = SignatureReasonUnknownKID
+	case verr != nil:
+		log.Printf("verify %s: signature check failed to run: %v", a.ID, verr)
+		resp.SignatureChecked = false
+	case !ok:
+		resp.SignatureReason = SignatureReasonInvalid
+	case len(resp.EnvelopeMismatch) > 0:
+		resp.SignatureReason = SignatureReasonEnvelope
+	default:
+		resp.SignatureValid = true
+	}
+}
+
+// signingKeys — GET /cbom/signing-keys. The public verification keys, current
+// and retired. Empty in Core, which signs nothing.
+func (h *Handler) signingKeys(c *gin.Context) {
+	keys := []SigningKey{}
+	if h.signer != nil {
+		k, err := h.signer.PublicKeys(c.Request.Context())
+		if err != nil {
+			log.Printf("list signing keys: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		if k != nil {
+			keys = k
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"keys": keys})
 }
 
 // softDelete — DELETE /cbom/artifacts/:id. Soft-delete only.

@@ -64,12 +64,30 @@ func TestContract_UpdateCurrentTenant_200_multipleFields(t *testing.T) {
 	eng, mock := newTenantOrgEngine(t, true)
 	mock.ExpectExec(`^UPDATE tenants SET`).WillReturnResult(sqlmock.NewResult(0, 1))
 
-	body := `{"name":"Acme Corp","domain":"acme.example.com","billing_email":"[email protected]","custom_branding":{"logo_url":"https://cdn.example.com/logo.png"},"ui_config":{"theme":"dark"},"settings":{"timezone":"UTC"}}`
+	body := `{"name":"Acme Corp","domain":"acme.example.com","billing_email":"[email protected]"}`
 	w := do(eng, http.MethodPut, "/api/v1/auth-service/tenant", strings.NewReader(body))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "MessageResponse", w.Body.Bytes())
+}
+
+// PUT /tenant is name/domain/billing_email only: the other tenants columns have
+// their own, differently gated endpoints, and each refusal names the field.
+func TestContract_UpdateCurrentTenant_400_platformOnlyFields(t *testing.T) {
+	for _, field := range []string{"ui_config", "custom_branding", "settings", "slug"} {
+		t.Run(field, func(t *testing.T) {
+			eng, _ := newTenantOrgEngine(t, true) // sqlmock: any UPDATE would fail the test as unexpected
+			body := `{"name":"Acme Corp","` + field + `":{"x":1}}`
+			w := do(eng, http.MethodPut, "/api/v1/auth-service/tenant", strings.NewReader(body))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), field) {
+				t.Errorf("400 body must name the field %q: %s", field, w.Body.String())
+			}
+		})
+	}
 }
 
 func TestContract_UpdateCurrentTenant_400_badBody(t *testing.T) {

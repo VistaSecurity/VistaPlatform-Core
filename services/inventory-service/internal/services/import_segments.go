@@ -120,20 +120,22 @@ func (s *AssetService) getTagsForAssetIn(segs *importSegments, tenantID uuid.UUI
 	return set.Tags(ipAddress, hostname), nil
 }
 
-// enrichAssetIn is NetworkSegmentService.EnrichAssetByID over the request's
-// segment set.
-func (s *AssetService) enrichAssetIn(segs *importSegments, tenantID, assetID uuid.UUID, ipAddress, hostname *string) error {
+// enrichAssetInTracked is NetworkSegmentService.EnrichAssetByID over the
+// request's segment set, and also reports whether the asset's
+// segment-derived context moved.
+func (s *AssetService) enrichAssetInTracked(segs *importSegments, tenantID, assetID uuid.UUID, ipAddress, hostname *string) (bool, error) {
 	if s.networkSegmentService == nil {
-		return nil
+		return false, nil
 	}
 	if segs == nil {
-		return s.networkSegmentService.EnrichAssetByID(tenantID, assetID, ipAddress, hostname)
+		// The unscoped form loads its own segment set.
+		return s.networkSegmentService.EnrichAssetByIDInTracked(nil, tenantID, assetID, ipAddress, hostname)
 	}
 	set, err := segs.segmentSet()
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.networkSegmentService.EnrichAssetByIDIn(set, tenantID, assetID, ipAddress, hostname)
+	return s.networkSegmentService.EnrichAssetByIDInTracked(set, tenantID, assetID, ipAddress, hostname)
 }
 
 // evaluateAssetApprovalIn is evaluateAssetApproval over the request's segment

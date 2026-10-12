@@ -186,38 +186,6 @@ spec:
         - { protocol: TCP, port: 8222 }
 {{- end }}
 ---
-{{/* Backends that need InfluxDB (metrics writes + the monitoring-service
-health probe). Mirror the postgres/redis/nats pattern. */}}
-{{- $influxConsumers := list }}
-{{- range $name, $svc := .Values.backends }}
-  {{- if (default (dict) $svc.needs).influxdb }}
-    {{- $influxConsumers = append $influxConsumers $name }}
-  {{- end }}
-{{- end }}
-{{- if and $influxConsumers .Values.datastores.influxdb.enabled }}
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-backends-to-influxdb
-  labels:
-    {{- include "vistaplatform.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/component: influxdb
-  policyTypes: [Ingress]
-  ingress:
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: {{ .Release.Namespace }}
-          podSelector:
-            matchExpressions:
-              - { key: app.kubernetes.io/component, operator: In, values: [{{ $influxConsumers | join "," }}] }
-      ports:
-        - { protocol: TCP, port: 8086 }
-{{- end }}
----
 {{/* The misnamed "allow-migration-job-to-postgres" policy was deleted in
 v0.1.1. It targeted the schema-migration POD itself with empty ingress (i.e.
 allowed nothing TO the migration pod), which was both useless and misnamed.
@@ -249,4 +217,31 @@ spec:
         # TLS terminated at Traefik, then the backend dial was default-denied.)
         - { protocol: TCP, port: 3001 }
         - { protocol: TCP, port: 3007 }
+---
+{{- if eq .Values.tls.mode "certManager" }}
+{{/* cert-manager HTTP-01 solver. For each pending challenge cert-manager
+creates a short-lived pod labelled acme.cert-manager.io/http01-solver="true"
+(listening on 8089) in this namespace, and the cluster ingress controller
+routes /.well-known/acme-challenge/<token> to it. default-deny-ingress would
+otherwise drop that traffic and the challenge would time out. DNS-01 issuers
+create no solver pod, so this rule is simply unused for them. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-acme-http01-solver
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      acme.cert-manager.io/http01-solver: "true"
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - { protocol: TCP, port: 8089 }
+{{- end }}
 {{- end }}

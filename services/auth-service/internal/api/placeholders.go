@@ -87,6 +87,9 @@ func getCurrentTenantHandler(db *sql.DB) gin.HandlerFunc {
 	}
 }
 
+// tenantSelfServiceFields are the only tenants columns PUT /tenant writes.
+var tenantSelfServiceFields = map[string]bool{"name": true, "domain": true, "billing_email": true}
+
 func updateCurrentTenantHandler(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Get tenant ID from context (set by auth middleware)
@@ -102,19 +105,41 @@ func updateCurrentTenantHandler(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Parse request body
-		var req struct {
-			Name           *string                `json:"name"`
-			Domain         *string                `json:"domain"`
-			BillingEmail   *string                `json:"billing_email"`
-			CustomBranding map[string]interface{} `json:"custom_branding"`
-			UIConfig       map[string]interface{} `json:"ui_config"`
-			Settings       map[string]interface{} `json:"settings"`
-		}
-
-		if err := c.ShouldBindJSON(&req); err != nil {
+		// Parse request body. Only the organization's own identity fields are
+		// self-service here. The rest of the tenants row has dedicated, differently
+		// gated endpoints, and writing it through this one skipped those gates:
+		// ui_config (PUT /tenant/ui-config is platform-identity only),
+		// custom_branding (PUT /tenant/branding checks the plan and validates it)
+		// and settings. Refuse them by name rather than ignore them, so a client
+		// that thinks it saved branding finds out.
+		var raw map[string]json.RawMessage
+		if err := c.ShouldBindJSON(&raw); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 			return
+		}
+		for field := range raw {
+			if !tenantSelfServiceFields[field] {
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error": fmt.Sprintf("field %q cannot be updated on PUT /tenant", field),
+					"field": field,
+				})
+				return
+			}
+		}
+		var req struct {
+			Name         *string `json:"name"`
+			Domain       *string `json:"domain"`
+			BillingEmail *string `json:"billing_email"`
+		}
+		for field, dst := range map[string]**string{"name": &req.Name, "domain": &req.Domain, "billing_email": &req.BillingEmail} {
+			v, ok := raw[field]
+			if !ok {
+				continue
+			}
+			if err := json.Unmarshal(v, dst); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("field %q must be a string", field), "field": field})
+				return
+			}
 		}
 
 		// Build dynamic update query
@@ -135,24 +160,6 @@ func updateCurrentTenantHandler(db *sql.DB) gin.HandlerFunc {
 		if req.BillingEmail != nil {
 			updates = append(updates, fmt.Sprintf("billing_email = $%d", argIndex))
 			args = append(args, *req.BillingEmail)
-			argIndex++
-		}
-		if req.CustomBranding != nil {
-			brandingJSON, _ := json.Marshal(req.CustomBranding)
-			updates = append(updates, fmt.Sprintf("custom_branding = $%d", argIndex))
-			args = append(args, brandingJSON)
-			argIndex++
-		}
-		if req.UIConfig != nil {
-			uiConfigJSON, _ := json.Marshal(req.UIConfig)
-			updates = append(updates, fmt.Sprintf("ui_config = $%d", argIndex))
-			args = append(args, uiConfigJSON)
-			argIndex++
-		}
-		if req.Settings != nil {
-			settingsJSON, _ := json.Marshal(req.Settings)
-			updates = append(updates, fmt.Sprintf("settings = $%d", argIndex))
-			args = append(args, settingsJSON)
 			argIndex++
 		}
 

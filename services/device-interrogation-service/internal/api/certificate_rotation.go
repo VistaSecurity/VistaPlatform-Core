@@ -12,12 +12,18 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/certificates"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/config"
+	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 )
 
 // rotateAgentCertificateRequest is the device-agent's renewal payload: a CSR for
 // a freshly generated keypair (see device-agent/internal/api/certificate_rotation.go).
 type rotateAgentCertificateRequest struct {
 	CSR string `json:"csr" binding:"required"`
+	// SupportsAgentSecret is sent by an agent build that stores the per-agent
+	// secret. Without it rotation changes nothing about the agent's
+	// credential key: an older build would ignore a new secret the platform then
+	// sealed under, and every credentialed job would fail to open.
+	SupportsAgentSecret bool `json:"supports_agent_secret,omitempty"`
 }
 
 // rotateAgentCertificateResponse mirrors the field names the device-agent decodes.
@@ -27,6 +33,12 @@ type rotateAgentCertificateResponse struct {
 	ServerCACert         string    `json:"server_ca_cert"`
 	CertificateExpiresAt time.Time `json:"certificate_expires_at"`
 	Message              string    `json:"message"`
+	// AgentSecret is the replacement per-agent secret, present only when
+	// the request asked for one. The secret it replaces stays valid ON THE AGENT
+	// for agentcreds.PreviousSecretWindow so a job sealed just before the
+	// rotation still opens; the platform seals with this one from now on.
+	AgentSecret        string `json:"agent_secret,omitempty"`
+	AgentSecretVersion int    `json:"agent_secret_version,omitempty"`
 }
 
 // resolveAgentOutboundTenant resolves (agent_id, owning tenant) for an
@@ -91,6 +103,7 @@ func rotateAgentCertificateHandler(db, bypassDB *sql.DB) gin.HandlerFunc {
 	}
 	certService := certificates.NewCertificateService(db, bypassDB, encryptionKey)
 	caManager := certificates.NewCAManager(db, bypassDB)
+	agentService := services.NewAgentService(db, bypassDB, nil)
 
 	return func(c *gin.Context) {
 		agentID, tenantID, ok := resolveAgentOutboundTenant(c, bypassDB)
@@ -165,12 +178,30 @@ func rotateAgentCertificateHandler(db, bypassDB *sql.DB) gin.HandlerFunc {
 			expiresAt = cert.ExpiresAt
 		}
 
-		c.JSON(http.StatusOK, rotateAgentCertificateResponse{
+		resp := rotateAgentCertificateResponse{
 			AgentID:              agentID.String(),
 			ClientCert:           certPEM,
 			ServerCACert:         serverCACert,
 			CertificateExpiresAt: expiresAt,
 			Message:              "Certificate rotated successfully",
-		})
+		}
+
+		// The new per-agent secret rides on the certificate rotation.
+		// It is issued AFTER the certificate, and a failure here is not allowed
+		// to withhold the certificate: the old one is already superseded, so the
+		// agent must receive its replacement. With no secret in the response the
+		// agent keeps the one it has, which is still the one the platform seals
+		// with, so nothing is left half-switched. The next rotation retries.
+		if req.SupportsAgentSecret {
+			secret, version, serr := agentService.RotateAgentSecret(c.Request.Context(), agentID)
+			if serr != nil {
+				log.Printf("rotateAgentCertificate: agent secret NOT rotated for agent %s (certificate was): %v", agentID, serr)
+			} else {
+				resp.AgentSecret = secret
+				resp.AgentSecretVersion = version
+			}
+		}
+
+		c.JSON(http.StatusOK, resp)
 	}
 }

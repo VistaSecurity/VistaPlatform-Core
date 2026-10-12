@@ -15,6 +15,27 @@ import (
 // not visible to the current tenant under RLS).
 var ErrNotFound = errors.New("cbom artifact not found")
 
+// ErrNoInternalView is returned when an artifact exists but has no internal
+// (CBOMData) view to compare or re-render from: it was stored in the object
+// store before the internal_content column existed, so the only bytes it has
+// are canonical CycloneDX, which is a different shape. Reading those as
+// CBOMData yields a confident, empty, wrong document, so callers refuse
+// instead. The remedy is to regenerate the artifact.
+var ErrNoInternalView = errors.New("artifact predates the internal view and cannot be compared or re-rendered; regenerate it")
+
+// LooksLikeCycloneDX reports whether b is a CycloneDX document (it carries the
+// bomFormat discriminator) rather than the internal CBOMData shape. It is the
+// backstop for rows whose inline_content holds canonical bytes.
+func LooksLikeCycloneDX(b []byte) bool {
+	var probe struct {
+		BOMFormat string `json:"bomFormat"`
+	}
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return false
+	}
+	return probe.BOMFormat != ""
+}
+
 // Repository encapsulates cbom_artifacts persistence.
 type Repository struct {
 	db *database.DB
@@ -70,9 +91,14 @@ type insertParams struct {
 	Provenance           Provenance
 	// Phase 4: optional attestation layer + signature. When nil/empty the
 	// columns stay empty and the artifact is unsigned + unattested.
-	Layers        []Layer
-	SignatureHMAC string
-	SignatureKID  string
+	Layers []Layer
+	// Ed25519 signature over SignedEnvelope. SignatureHMAC is never set by new
+	// artifacts; the column survives only for rows signed before Ed25519.
+	Signature          string
+	SignatureAlgorithm string
+	SignedEnvelope     string
+	SignatureHMAC      string
+	SignatureKID       string
 }
 
 // Create inserts a new artifact row. Either StorageKey or InlineContent must
@@ -122,6 +148,9 @@ func (r *Repository) Create(ctx context.Context, p insertParams) (*Artifact, err
 	a.Layers = layers
 	a.SignatureHMAC = p.SignatureHMAC
 	a.SignatureKID = p.SignatureKID
+	a.Signature = p.Signature
+	a.SignatureAlgorithm = p.SignatureAlgorithm
+	a.SignedEnvelope = p.SignedEnvelope
 	err = r.withTenantSession(ctx, p.TenantID, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
 			INSERT INTO public.cbom_artifacts
@@ -131,14 +160,16 @@ func (r *Repository) Create(ctx context.Context, p insertParams) (*Artifact, err
 				 content_hash, size_bytes, component_count,
 				 cyclonedx_spec_version, input_data_freshness_at,
 				 generated_by, provenance, layers,
-				 signature_hmac, signature_kid)
+				 signature_hmac, signature_kid,
+				 signature, signature_algorithm, signed_envelope)
 			VALUES ($1, $2, $3, $4, $5,
 				$6,
 				$7, $8, $9,
 				$10, $11, $12,
 				$13, $14,
 				$15, $16, $17,
-				$18, $19)
+				$18, $19,
+				$20, $21, $22)
 			RETURNING id, generated_at, created_at
 		`,
 			p.TenantID, p.ScopeID, p.ScopeVersion, p.ScopeNameSnapshot, nullableString(p.Name),
@@ -148,6 +179,7 @@ func (r *Repository) Create(ctx context.Context, p insertParams) (*Artifact, err
 			p.CycloneDXSpecVersion, p.InputDataFreshnessAt,
 			p.GeneratedBy, provBytes, layersBytes,
 			nullableString(p.SignatureHMAC), nullableString(p.SignatureKID),
+			nullableString(p.Signature), nullableString(p.SignatureAlgorithm), nullableString(p.SignedEnvelope),
 		).Scan(&a.ID, &a.GeneratedAt, &a.CreatedAt)
 	})
 	if err != nil {
@@ -174,18 +206,38 @@ func (r *Repository) Create(ctx context.Context, p insertParams) (*Artifact, err
 }
 
 // List returns non-deleted artifacts for the tenant ordered by generated_at DESC.
-// Pagination is intentional follow-up — Phase 2 expects tens, not thousands.
+// limit and offset page the result; the second return value is the total
+// number of matching artifacts (ignoring limit/offset) so a caller can page.
 //
 // kind is an optional filter. An empty kind means every kind, NOT `cbom`: the
 // list page is one list of artifacts and defaulting it here would hide the
 // SBOMs a tenant just generated behind a filter they never set.
-func (r *Repository) List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid.UUID, kind ArtifactKind, limit int) ([]Artifact, error) {
+func (r *Repository) List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid.UUID, kind ArtifactKind, limit, offset int) ([]Artifact, int64, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
+	if offset < 0 {
+		offset = 0
+	}
 
-	var artifacts []Artifact
+	var (
+		artifacts []Artifact
+		total     int64
+	)
 	err := r.withTenantSession(ctx, tenantID, func(tx *sql.Tx) error {
+		where := " WHERE tenant_id = $1 AND deleted_at IS NULL"
+		args := []interface{}{tenantID}
+		if scopeID != nil {
+			args = append(args, *scopeID)
+			where += fmt.Sprintf(" AND scope_id = $%d", len(args))
+		}
+		if kind != "" {
+			args = append(args, string(kind))
+			where += fmt.Sprintf(" AND artifact_kind = $%d", len(args))
+		}
+		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM public.cbom_artifacts"+where, args...).Scan(&total); err != nil {
+			return fmt.Errorf("cbom: count list: %w", err)
+		}
 		query := `
 			SELECT id, tenant_id, scope_id, scope_version, scope_name_snapshot,
 			       COALESCE(name, ''), COALESCE(storage_key, ''),
@@ -195,20 +247,10 @@ func (r *Repository) List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid
 			       cyclonedx_spec_version, input_data_freshness_at,
 			       generated_at, generated_by,
 			       COALESCE(signature_hmac, ''), COALESCE(signature_kid, ''),
+			       COALESCE(signature, ''), COALESCE(signature_algorithm, ''), COALESCE(signed_envelope, ''),
 			       provenance, layers, created_at
-			FROM public.cbom_artifacts
-			WHERE tenant_id = $1 AND deleted_at IS NULL
-		`
-		args := []interface{}{tenantID}
-		if scopeID != nil {
-			args = append(args, *scopeID)
-			query += fmt.Sprintf(" AND scope_id = $%d", len(args))
-		}
-		if kind != "" {
-			args = append(args, string(kind))
-			query += fmt.Sprintf(" AND artifact_kind = $%d", len(args))
-		}
-		query += fmt.Sprintf(" ORDER BY generated_at DESC LIMIT %d", limit)
+			FROM public.cbom_artifacts` + where +
+			fmt.Sprintf(" ORDER BY generated_at DESC, id LIMIT %d OFFSET %d", limit, offset)
 
 		rows, err := tx.QueryContext(ctx, query, args...)
 		if err != nil {
@@ -225,7 +267,7 @@ func (r *Repository) List(ctx context.Context, tenantID uuid.UUID, scopeID *uuid
 		}
 		return rows.Err()
 	})
-	return artifacts, err
+	return artifacts, total, err
 }
 
 // Get returns one artifact by id within the tenant's scope. The tenant_id
@@ -244,6 +286,7 @@ func (r *Repository) Get(ctx context.Context, tenantID, artifactID uuid.UUID) (*
 			       cyclonedx_spec_version, input_data_freshness_at,
 			       generated_at, generated_by,
 			       COALESCE(signature_hmac, ''), COALESCE(signature_kid, ''),
+			       COALESCE(signature, ''), COALESCE(signature_algorithm, ''), COALESCE(signed_envelope, ''),
 			       provenance, layers, created_at
 			FROM public.cbom_artifacts
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
@@ -268,9 +311,11 @@ func (r *Repository) Get(ctx context.Context, tenantID, artifactID uuid.UUID) (*
 // before that column existed — for those rows inline_content IS the old
 // internal shape, so the same parse works and old artifacts stay comparable.
 //
-// Returns ErrNotFound when neither is present, which is the S3-stored,
-// pre-column case: the canonical bytes are in the bucket and there is no
-// internal view to read.
+// Returns ErrNotFound when the artifact does not exist, and ErrNoInternalView
+// when it exists but has no internal view: the S3-stored, pre-column case (the
+// canonical bytes are in the bucket and there is no internal view to read), or
+// an inline_content that is canonical CycloneDX rather than the old internal
+// shape.
 func (r *Repository) GetDiffContent(ctx context.Context, tenantID, artifactID uuid.UUID) ([]byte, error) {
 	var content []byte
 	err := r.withTenantSession(ctx, tenantID, func(tx *sql.Tx) error {
@@ -289,10 +334,10 @@ func (r *Repository) GetDiffContent(ctx context.Context, tenantID, artifactID uu
 		switch {
 		case internal != nil:
 			content = internal
-		case inline != nil:
+		case inline != nil && !LooksLikeCycloneDX(inline):
 			content = inline
 		default:
-			return ErrNotFound
+			return ErrNoInternalView
 		}
 		return nil
 	})
@@ -328,6 +373,22 @@ func (r *Repository) GetInlineContent(ctx context.Context, tenantID, artifactID 
 		return nil
 	})
 	return content, err
+}
+
+// StorageKeyReferenced reports whether any artifact row, soft-deleted ones
+// included, points at the object-store key. Storage keys are content-addressed,
+// so two artifacts with identical bytes share one object; this is the check
+// that keeps cleanup of a failed create from deleting an object another
+// artifact still needs.
+func (r *Repository) StorageKeyReferenced(ctx context.Context, tenantID uuid.UUID, key string) (bool, error) {
+	var n int
+	err := r.withTenantSession(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM public.cbom_artifacts
+			WHERE tenant_id = $1 AND storage_key = $2
+		`, tenantID, key).Scan(&n)
+	})
+	return n > 0, err
 }
 
 // SoftDelete marks an artifact deleted_at = now(). Soft delete only — we
@@ -366,6 +427,7 @@ func scanArtifact(r interface{ Scan(...interface{}) error }) (Artifact, error) {
 		&a.CycloneDXSpecVersion, &a.InputDataFreshnessAt,
 		&a.GeneratedAt, &a.GeneratedBy,
 		&a.SignatureHMAC, &a.SignatureKID,
+		&a.Signature, &a.SignatureAlgorithm, &a.SignedEnvelope,
 		&provBytes, &layersBytes, &a.CreatedAt,
 	)
 	if err != nil {

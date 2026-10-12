@@ -9,7 +9,7 @@ This guide covers how secrets are managed in Vista Platform, including the encry
 ## Overview
 
 The platform uses various secrets for different purposes:
-- **Database credentials**: PostgreSQL, Redis, InfluxDB
+- **Database credentials**: PostgreSQL, Redis
 - **JWT secrets**: Token signing keys
 - **Service secrets**: API keys, webhook secrets
 - **Platform integration credentials**: AWS, cloud providers, SaaS integrations (encrypted)
@@ -122,6 +122,14 @@ install and upgrade:
 The window closes **at an upgrade**, not on a timer: an install that is not
 upgraded after the window passes keeps the secret until its next
 `helm upgrade`. The install and upgrade notes print which way it went and why.
+
+`auth-service` keeps `JWT_SECRET` regardless (it uses it for CSRF binding and for
+pre-cutover refresh tokens), so removing the variable is not what stops it
+accepting HS256. The chart sets `JWT_ACCEPT_LEGACY_HMAC` on `auth-service` from
+the same decision: when the window is closed it is `false`, and a token signed
+with the shared secret is refused there too. Outside the chart the variable
+defaults to `true`; it is ignored (with a warning) while no ES256 signing key is
+configured, since the service then signs HS256 itself.
 
 **GitOps and `helm template`.** `auto` reads the signing Secret with Helm's
 `lookup`, which returns nothing when Helm is not talking to a cluster
@@ -277,6 +285,36 @@ When moving to a 3rd party secrets management service:
   4. Or implement a key rotation mechanism
 
 **Prevention**: Use a key management service that handles key rotation automatically (AWS KMS, HashiCorp Vault, etc.)
+
+## Client address behind a proxy (`auth-service`)
+
+`auth-service` keys its per-address sign-in and registration limits on the
+caller's address, and writes it to audit rows and impersonation tokens. It takes
+that address from the TCP connection, and reads `X-Forwarded-For` only when the
+connection comes from a peer listed in `TRUSTED_PROXY_CIDRS` (comma-separated
+IPs or CIDRs); it then uses the first address in the header that is not itself a
+trusted proxy. With the variable unset it trusts no one.
+
+The chart sets it from `trustedProxyCIDRs`, which defaults to the private address
+ranges (where an in-cluster ingress controller lives). Narrow it to your ingress
+controller's pod CIDR if you can. Setting it to an empty list trusts nobody, so
+every request appears to come from the ingress controller and the per-address
+limits share one bucket. A Docker Compose install does not set it, with the same
+effect.
+
+Failed sign-ins are counted per account and client address, and only failures
+count: signing in correctly never moves an account toward a lockout, and a
+stranger's failures from their own address cannot lock the owner out. When a
+lockout expires the account's failure count starts again from zero, so one typo
+afterwards does not lock it a second time.
+
+Deactivating or deleting a user, resetting or changing a password, and revoking a
+session each write a per-user "tokens issued before this moment are invalid" entry
+to Redis, which every service's JWT middleware consults. It expires on its own once
+every older access token has (JWT_EXPIRY plus a few minutes). Because the check
+needs Redis, a service without `REDIS_URL` skips it and the token stays valid until
+it expires; `make audit` fails a JWT-verifying service whose registry entry omits
+Redis. If Redis is unreachable the check fails open.
 
 ## Related Documentation
 

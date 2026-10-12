@@ -127,7 +127,7 @@ func (s *AssetService) ListCryptoApplications(tenantID uuid.UUID, f CryptoApplic
 	}
 
 	listSQL := `SELECT ` + cryptoApplicationColumns + join + whereSQL +
-		` ORDER BY COALESCE(ca.risk_score, 0) DESC, ca.last_verified_at DESC NULLS LAST` +
+		` ORDER BY COALESCE(ca.risk_score, 0) DESC, ca.last_verified_at DESC NULLS LAST, ca.id` +
 		` LIMIT ` + next(limit) + ` OFFSET ` + next(offset)
 	countSQL := `SELECT COUNT(*)` + join + whereSQL
 

@@ -34,6 +34,7 @@ import type { complianceEngineComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { Tag } from '../../components/ui/primitives';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type MeasurementType = complianceEngineComponents['schemas']['MeasurementType'];
 
@@ -97,21 +98,18 @@ export function buildAcceptDeps(
 ): AcceptDeps {
   return {
     createControl: async (body) => {
-      const { data, error } = await compliance.POST('/admin/frameworks/{id}/controls', {
+      const data = unwrap(await compliance.POST('/admin/frameworks/{id}/controls', {
         params: { path: { id: frameworkId } },
         body,
-      });
-      if (error || !data?.control?.id) {
-        throw new Error((error as { error?: string } | undefined)?.error ?? 'Create control failed');
-      }
+      }), 'Create control failed', { requireData: true });
+      if (!data.control?.id) throw new Error('Create control failed');
       return data.control.id;
     },
     addMeasurement: async (controlId, body) => {
-      const { error } = await compliance.POST('/admin/controls/{id}/measurements', {
+      unwrap(await compliance.POST('/admin/controls/{id}/measurements', {
         params: { path: { id: controlId } },
         body,
-      });
-      if (error) throw new Error((error as { error?: string } | undefined)?.error ?? 'Add rule failed');
+      }), 'Add rule failed');
     },
     measurementTypeId: (code) => typeIdByCode.get(code),
   };
@@ -137,17 +135,11 @@ export function DraftControlsModal({
 
   const run = useMutation({
     mutationFn: async (text: string): Promise<DraftControlsResponse> => {
-      const { data, error, response } = await clients.compliance.POST('/admin/frameworks/{id}/draft-controls', {
+      const result = await clients.compliance.POST('/admin/frameworks/{id}/draft-controls', {
         params: { path: { id: framework.id } },
         body: { text },
       });
-      if (error || !data) {
-        throw new Error(
-          (error as { error?: string } | undefined)?.error ??
-            `Drafting failed (HTTP ${response.status}).`,
-        );
-      }
-      return data;
+      return unwrap(result, `Drafting failed (HTTP ${result.response.status}).`, { requireData: true });
     },
   });
 

@@ -82,6 +82,30 @@ func ValidateName(name string) error {
 	return nil
 }
 
+// Input size limits. A scope is stored, echoed on every artifact row and parsed
+// by the query language on each write, so unbounded text is unbounded work.
+const (
+	// MaxQueryBytes bounds a scope's query text.
+	MaxQueryBytes = 16 * 1024
+	// MaxDescriptionBytes bounds a scope's description.
+	MaxDescriptionBytes = 2 * 1024
+)
+
+// ValidateRequestText applies the name rule and the length limits to the
+// free-text fields of a create or update request.
+func ValidateRequestText(name, description, query string) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	if len(description) > MaxDescriptionBytes {
+		return fmt.Errorf("scope description exceeds %d bytes", MaxDescriptionBytes)
+	}
+	if len(query) > MaxQueryBytes {
+		return fmt.Errorf("scope query exceeds %d bytes", MaxQueryBytes)
+	}
+	return nil
+}
+
 // AssetTarget is the query-language target a scope is a predicate over: a scope
 // selects ASSETS, and the artifact is assembled from what those assets carry.
 const AssetTarget = "asset"

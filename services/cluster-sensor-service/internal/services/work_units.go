@@ -206,6 +206,34 @@ type unitAuthorizer struct {
 	mu     sync.Mutex
 	scope  dispatchguard.TargetScope
 	loaded time.Time
+
+	// auto is the automatic-scan policy, restrictions and segments, read once
+	// per unitScopeTTL like scope above rather than for every unit (a 1,000
+	// target job paid for it 1,000+ times).
+	auto       *dispatchguard.AutomaticScope
+	autoLoaded time.Time
+}
+
+// automaticScope returns the cached automatic-scan scope, re-reading it when it
+// is older than unitScopeTTL. A refusal (paused, disabled, invalid policy) is
+// not cached: it is returned and the next unit asks again.
+func (a *unitAuthorizer) automaticScope() (*dispatchguard.AutomaticScope, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.auto != nil && time.Since(a.autoLoaded) < unitScopeTTL {
+		return a.auto, nil
+	}
+	var scope *dispatchguard.AutomaticScope
+	if err := a.jp.withTenantTxx(context.Background(), a.tenantID, func(tx *sqlx.Tx) error {
+		var err error
+		scope, err = dispatchguard.LoadAutomaticScope(tx, a.tenantID)
+		return err
+	}); err != nil {
+		a.auto = nil
+		return nil, err
+	}
+	a.auto, a.autoLoaded = scope, time.Now()
+	return scope, nil
 }
 
 func (a *unitAuthorizer) current() (dispatchguard.TargetScope, error) {
@@ -266,8 +294,13 @@ func (a *unitAuthorizer) authorizeUnit(t *planTarget, addr string) error {
 			Target: addr, Depth: t.depth, TCPPorts: t.tcp.String(), UDPPorts: udp.String(),
 		}}},
 	}}
+	scope, err := a.automaticScope()
+	if err != nil {
+		return err
+	}
+	// Asset protection is read fresh for every address.
 	return a.jp.withTenantTxx(context.Background(), a.tenantID, func(tx *sqlx.Tx) error {
-		return dispatchguard.AuthorizeAutomaticScan(tx, payload)
+		return scope.Authorize(tx, payload)
 	})
 }
 
@@ -287,19 +320,35 @@ func refusalReason(err error) string {
 // record. Re-running this adds nothing ((job_id, target_id, address) is
 // unique).
 func (jp *JobProcessor) ensureUnits(job *models.DiscoveryJob, targets []*planTarget, auth *unitAuthorizer) error {
-	for _, t := range targets {
-		var has bool
-		if err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
-			g, err := loadJobTargetGrant(tx, job.ID, t.input)
-			if err != nil {
-				return err
-			}
-			t.grant = g
-			return tx.Get(&has, `SELECT EXISTS (SELECT 1 FROM discovery_job_units WHERE target_id = $1)`, t.rowID)
-		}); err != nil {
-			return fmt.Errorf("read units of %s: %w", t.input, err)
+	// One read for the whole job: every target's grant (from the job's
+	// metadata) and which targets already have units. They were read per target,
+	// each in its own transaction — thousands of round trips for a big job.
+	inputs := make([]string, len(targets))
+	for i, t := range targets {
+		inputs[i] = t.input
+	}
+	var grants map[string]jobTargetGrant
+	hasUnits := map[string]bool{}
+	if err := jp.withTenantTxx(context.Background(), job.TenantID, func(tx *sqlx.Tx) error {
+		g, err := loadJobTargetGrants(tx, job.ID, inputs)
+		if err != nil {
+			return err
 		}
-		if has {
+		grants = g
+		var withUnits []string
+		if err := tx.Select(&withUnits, `SELECT DISTINCT target_id::text FROM discovery_job_units WHERE job_id = $1`, job.ID); err != nil {
+			return err
+		}
+		for _, id := range withUnits {
+			hasUnits[id] = true
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("read units of job: %w", err)
+	}
+	for _, t := range targets {
+		t.grant = grants[t.input]
+		if hasUnits[t.rowID] {
 			continue
 		}
 		addresses := jp.expandTarget(t.input, t.grant.pinned)

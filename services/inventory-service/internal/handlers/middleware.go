@@ -3,10 +3,10 @@ package handlers
 import (
 	"encoding/base64"
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
@@ -84,14 +84,21 @@ func extractActorClaims(c *gin.Context, token string) {
 }
 
 // internalVerifier validates HMAC-signed internal service calls.
-var internalVerifier *serviceauth.Verifier
+var (
+	internalVerifier     *serviceauth.Verifier
+	internalVerifierOnce sync.Once
+)
 
+// getInternalVerifier builds the verifier lazily. Requests run on many
+// goroutines, so the first-use assignment goes through sync.Once; an unsynchronised
+// nil-check-then-assign is a data race. The secret is process-static
+// configuration, so resolving it once is equivalent to resolving it per call.
 func getInternalVerifier() *serviceauth.Verifier {
-	if internalVerifier == nil {
+	internalVerifierOnce.Do(func() {
 		if secret := os.Getenv("INTERNAL_AUTH_SECRET"); secret != "" {
 			internalVerifier = serviceauth.NewVerifier(secret)
 		}
-	}
+	})
 	return internalVerifier
 }
 
@@ -240,9 +247,7 @@ func JWTMiddleware(cfg *config.Config, db *database.DB) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if userRevocation, ok := revocation.(sharedmw.UserRevocationChecker); ok &&
-			claims.UserID != uuid.Nil &&
-			userRevocation.IsUserRevoked(c.Request.Context(), claims.UserID) {
+		if sharedmw.IsUserTokenRevoked(c.Request.Context(), revocation, claims.UserID, sharedmw.NumericDateTime(claims.IssuedAt)) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
 			c.Abort()
 			return
@@ -263,24 +268,14 @@ func JWTMiddleware(cfg *config.Config, db *database.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Validate tenant ID exists in database — only for tenant tokens. Platform
-		// tokens (admin-service) carry no tenant_id; they reach the global,
-		// non-tenant-scoped routes (gated per-route by RequirePlatformPermission)
-		// and must not be rejected by a tenant lookup on an empty id.
-		if db != nil && claims.TenantID != uuid.Nil {
-			var tenantExists bool
-			query := `SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1 AND deleted_at IS NULL)`
-			err := db.DB.QueryRow(query, claims.TenantID).Scan(&tenantExists)
-			if err != nil {
-				log.Printf("[JWTMiddleware] Error checking tenant ID %s: %v", claims.TenantID, err)
-				// Don't fail on DB errors, just log them
-			} else if !tenantExists {
-				log.Printf("[JWTMiddleware] Invalid tenant ID in token: %s (tenant does not exist)", claims.TenantID)
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid tenant"})
-				c.Abort()
-				return
-			}
-		}
+		// There is deliberately no separate "does this tenant row exist" query
+		// here. EnforceTenantSession above already resolves tenant state through
+		// the cached checker, treats a missing or soft-deleted tenant as blocked
+		// (tenant_deleted), and fails CLOSED when the lookup errors. The query
+		// this replaced ran uncached on every authenticated request and failed
+		// OPEN on a database error, so a DB fault let a token for a deleted
+		// tenant through. Impersonation tokens are exempt from the checker by
+		// design (an administrator acting on a tenant); that is unchanged.
 
 		// Set context with structured claims
 		c.Set("userID", claims.UserID)

@@ -3,6 +3,7 @@ package cbom
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -11,6 +12,11 @@ import (
 	"github.com/vistasecurity/vistaplatform/cbom-service/internal/scopes"
 	sharedstorage "github.com/vistasecurity/vistaplatform/shared/storage"
 )
+
+// ErrSignerUnavailable is returned by Persist when signing was requested and
+// no signer is wired. It is checked before anything is written, so a refusal
+// leaves no orphan object or row behind.
+var ErrSignerUnavailable = errors.New("cbom persister: signing requested but no signer is configured")
 
 // Persister writes a freshly-built CBOM to storage (S3 if enabled, inline
 // JSONB if not), optionally attaches a compliance-attestation layer, optionally
@@ -71,6 +77,10 @@ func (p *Persister) Persist(ctx context.Context, in PersistInput) (*Artifact, er
 		return nil, fmt.Errorf("cbom persister: empty build output")
 	}
 
+	if in.Sign && p.signer == nil {
+		return nil, ErrSignerUnavailable
+	}
+
 	// The kind rides on the build, not on PersistInput: it is a property of the
 	// bytes that were assembled, and taking it from a separate field would let
 	// a row claim to be a kind its content is not.
@@ -111,12 +121,28 @@ func (p *Persister) Persist(ctx context.Context, in PersistInput) (*Artifact, er
 		// to attest, which is a legitimate outcome and not worth a log line.
 	}
 
-	// Phase 4: sign the canonical bytes if requested and signer is wired.
-	// HMAC over the SHA-256 content hash — equivalent to HMAC over the
-	// bytes by HMAC's length-extension resistance, but constant-cost.
-	if in.Sign && p.signer != nil {
-		params.SignatureHMAC = p.signer.Sign(in.Build.CanonicalBytes)
+	// Sign a canonical envelope that binds the content hash to the scope
+	// claim, the attestation layers, the kind and the author (envelope.go) —
+	// not the bytes alone, which would leave all of those editable behind a
+	// still-valid signature. The envelope is stored verbatim so /verify checks
+	// the signature over the exact bytes signed.
+	if in.Sign {
+		env, err := NewEnvelope(in.Build.ContentHash, in.Scope.ID, in.Scope.Version, params.Layers, in.Build.Kind, in.GeneratedBy)
+		if err != nil {
+			return nil, err
+		}
+		envBytes, err := env.Bytes()
+		if err != nil {
+			return nil, err
+		}
+		sig, err := p.signer.Sign(envBytes)
+		if err != nil {
+			return nil, fmt.Errorf("cbom persister: sign envelope: %w", err)
+		}
+		params.Signature = sig
+		params.SignatureAlgorithm = p.signer.Algorithm()
 		params.SignatureKID = p.signer.KID()
+		params.SignedEnvelope = string(envBytes)
 	}
 
 	// The private diff view rides along regardless of where the canonical bytes
@@ -170,10 +196,37 @@ func (p *Persister) Persist(ctx context.Context, in PersistInput) (*Artifact, er
 
 	artifact, err := p.repo.Create(ctx, params)
 	if err != nil {
+		// The object was uploaded but no row will ever point at it. Remove it so
+		// failed creates do not accumulate orphans in the bucket. Best-effort:
+		// the create error is what the caller needs, and a failed delete is
+		// logged with the key so an operator can sweep it.
+		if params.StorageKey != "" {
+			p.removeOrphan(ctx, in.Scope.TenantID, params.StorageKey)
+		}
 		return nil, err
 	}
 	// Transient, generation-time only — see Artifact.StorageDegraded.
 	artifact.StorageDegraded = storageDegraded
 	artifact.AttestationError = attestationError
 	return artifact, nil
+}
+
+// removeOrphan deletes an object uploaded for an artifact whose row insert
+// failed. Keys are content-addressed, so the object is left alone if any row
+// (even a soft-deleted one) references it; if that cannot be determined it is
+// also left alone, since a stray object is recoverable and a deleted live one
+// is not. Best-effort and logged: it never changes the caller's error.
+func (p *Persister) removeOrphan(ctx context.Context, tenant uuid.UUID, key string) {
+	ctx = context.WithoutCancel(ctx)
+	referenced, err := p.repo.StorageKeyReferenced(ctx, tenant, key)
+	if err != nil {
+		log.Printf("[cbom-persister] orphaned object %q after failed artifact insert (tenant %s): cannot tell whether it is referenced, leaving it: %v", key, tenant, err)
+		return
+	}
+	if referenced {
+		return
+	}
+	if delErr := p.storage.Delete(ctx, sharedstorage.ArtifactTypeCBOM, key, &tenant); delErr != nil {
+		log.Printf("[cbom-persister] orphaned object %q after failed artifact insert (tenant %s): delete failed: %v", key, tenant, delErr)
+	}
 }

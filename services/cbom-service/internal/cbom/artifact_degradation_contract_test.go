@@ -57,6 +57,7 @@ func TestContract_GenerateCBOMArtifact_ReportsDegradations(t *testing.T) {
 		builder:   &stubBuilder{out: &BuildOutput{CanonicalBytes: []byte("{}"), ContentHash: "deadbeef"}},
 		persister: &stubPersister{out: &persisted},
 		features:  &stubFeatureChecker{allowed: true},
+		signer:    stubSigner{},
 	})
 	body := strings.NewReader(`{"scope_id":"` + scope.ID.String() + `"}`)
 	w := do(eng, http.MethodPost, "/api/v1/cbom-service/cbom/generate", body)
@@ -114,8 +115,8 @@ type limitCapturingStore struct {
 	limit int
 }
 
-func (s *limitCapturingStore) List(_ context.Context, _ uuid.UUID, _ *uuid.UUID, kind ArtifactKind, limit int) ([]Artifact, error) {
+func (s *limitCapturingStore) List(_ context.Context, _ uuid.UUID, _ *uuid.UUID, kind ArtifactKind, limit, _ int) ([]Artifact, int64, error) {
 	s.limit = limit
 	s.lastKindFilter = kind
-	return nil, nil
+	return nil, 0, nil
 }

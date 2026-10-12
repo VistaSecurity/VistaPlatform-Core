@@ -5,7 +5,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -77,29 +76,11 @@ func (h *Handler) UpdateSensorInterfaces(c *gin.Context) {
 		return
 	}
 
-	// Update interfaces
-	currentInterfaces := sensor.NetworkInterfaces
-	newInterfaces := make([]string, 0, len(currentInterfaces))
-
-	// Add new interfaces
-	for _, iface := range req.Add {
-		if !slices.Contains(currentInterfaces, iface) {
-			newInterfaces = append(newInterfaces, iface)
-		}
-	}
-
-	// Keep existing interfaces that aren't being removed
-	for _, iface := range currentInterfaces {
-		if !slices.Contains(req.Remove, iface) {
-			newInterfaces = append(newInterfaces, iface)
-		}
-	}
-
-	// Update sensor
-	sensor.NetworkInterfaces = newInterfaces
-	sensor.UpdatedAt = time.Now()
-
-	err := h.sensorService.UpdateSensor(sensor)
+	// Atomic add/remove under the sensor row lock: a concurrent edit can no
+	// longer replace this one with a list built from a stale read.
+	ictx, icancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer icancel()
+	newInterfaces, err := h.sensorService.ApplySensorInterfaceChange(ictx, sensorID, sensor.TenantID, req.Add, req.Remove)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update sensor interfaces"})
 		return
@@ -153,23 +134,29 @@ func (h *Handler) UpdateSensorConfig(c *gin.Context) {
 		return
 	}
 
-	// Update fields if provided
+	// Update fields if provided. Only the edited columns are written (never
+	// status / last_heartbeat), so a heartbeat landing after the read above is
+	// not overwritten.
+	var edit models.SensorEdit
 	if req.AirGapped != nil {
 		sensor.AirGapped = *req.AirGapped
+		edit.AirGapped = req.AirGapped
 	}
 	if req.Description != nil {
 		sensor.Description = req.Description
+		edit.Description = req.Description
 	}
 	if req.Tags != nil {
 		// A tenant may retag its sensor, but not add or remove a platform
 		// marker (models.ReservedPlatformTags) — that is how a tenant sensor
 		// used to pass as the platform's own.
 		sensor.Tags = models.ReplaceTenantTags(sensor.Tags, req.Tags)
+		edit.Tags = sensor.Tags
 	}
 
 	sensor.UpdatedAt = time.Now()
 
-	err := h.sensorService.UpdateSensor(sensor)
+	err := h.sensorService.UpdateSensorFields(sensor.ID, sensor.TenantID, edit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update sensor config"})
 		return
@@ -261,7 +248,7 @@ func (h *Handler) RegenerateSensorCertificates(c *gin.Context) {
 	// is persisted as active, avoid any later fail-fast work that could prevent
 	// the caller from receiving the replacement bundle.
 	sensor.UpdatedAt = time.Now()
-	err = h.sensorService.UpdateSensor(sensor)
+	err = h.sensorService.UpdateSensorFields(sensor.ID, sensor.TenantID, models.SensorEdit{})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update sensor"})
 		return

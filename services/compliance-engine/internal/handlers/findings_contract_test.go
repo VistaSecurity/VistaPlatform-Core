@@ -40,21 +40,22 @@ type stubFindingsStore struct {
 	// case can assert the filter ARRIVED rather than only that the request
 	// returned 200 — a parameter the handler drops is invisible from the
 	// status code.
-	lastFilters   *services.FindingListFilters
-	byAsset       []models.ComplianceFinding
-	byAssetErr    error
-	history       []models.ComplianceFindingHistory
-	historyErr    error
-	assignErr     error
-	unassignErr   error
-	evidenceID    string
-	evidenceRef   string
-	evidenceErr   error
-	finding       *models.ComplianceFinding
-	findingErr    error
-	updWorkflowEr error
-	byControl     []services.FindingsByControlGroup
-	byControlErr  error
+	lastFilters    *services.FindingListFilters
+	byAsset        []models.ComplianceFinding
+	byAssetErr     error
+	history        []models.ComplianceFindingHistory
+	historyErr     error
+	assignErr      error
+	unassignErr    error
+	evidenceID     string
+	evidenceRef    string
+	evidenceErr    error
+	finding        *models.ComplianceFinding
+	findingErr     error
+	updWorkflowEr  error
+	lastAssetLimit int
+	byControl      []services.FindingsByControlGroup
+	byControlErr   error
 }
 
 func (s *stubFindingsStore) ListFindings(_ uuid.UUID, f services.FindingListFilters, _, _ int) ([]models.ComplianceFinding, int, error) {
@@ -71,8 +72,9 @@ func (s *stubFindingsStore) UnassignFindingOwner(_, _ uuid.UUID) error { return 
 func (s *stubFindingsStore) GetFinding(_, _ uuid.UUID) (*models.ComplianceFinding, error) {
 	return s.finding, s.findingErr
 }
-func (s *stubFindingsStore) GetFindingsByAsset(_, _ uuid.UUID) ([]models.ComplianceFinding, error) {
-	return s.byAsset, s.byAssetErr
+func (s *stubFindingsStore) GetFindingsByAsset(_, _ uuid.UUID, limit, _ int) ([]models.ComplianceFinding, bool, error) {
+	s.lastAssetLimit = limit
+	return s.byAsset, false, s.byAssetErr
 }
 func (s *stubFindingsStore) GetFindingStatistics(_ uuid.UUID) (*services.FindingStatistics, error) {
 	return s.stats, s.statsErr
@@ -292,6 +294,20 @@ func TestContract_ListFindings_400_badFrameworkID(t *testing.T) {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+}
+
+// A malformed page/page_size is refused, not silently read as page 1 / 50 — a
+// client paging with a typo would otherwise loop on the first page forever.
+func TestContract_ListFindings_400_badPaging(t *testing.T) {
+	sv := loadSpec(t)
+	eng := newFindingsEngine(&stubFindingsStore{})
+	for _, q := range []string{"page=abc", "page_size=xyz", "page=0", "page_size=-1"} {
+		w := do(eng, http.MethodGet, cBase+"/findings?"+q, nil)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("?%s: status = %d, want 400; body=%s", q, w.Code, w.Body.String())
+		}
+		sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	}
 }
 
 // Every producer, and the per-producer tally beside the page.

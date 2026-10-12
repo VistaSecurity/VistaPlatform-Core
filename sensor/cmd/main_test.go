@@ -389,10 +389,19 @@ func TestReinitCaptureBuffersDiscoveriesLeftInStoppedCaptureChannel(t *testing.T
 		config:        cfg,
 		packetCapture: packetCapture,
 		discoveries:   make([]*models.CryptoDiscovery, 0),
+		// The replacement comes up; only then is the old capture stopped and
+		// its leftover discoveries flushed into the send buffer.
+		captureFactory: func(c *config.Config) (*capture.PacketCapture, error) {
+			return capture.NewPacketCapture(c), nil
+		},
 	}
 
-	if err := s.reinitCapture(); err == nil {
-		t.Fatal("reinitCapture succeeded with no configured interfaces; test requires Start to stop before replacing packetCapture")
+	if err := s.reinitCapture(); err != nil {
+		t.Fatalf("reinitCapture: %v", err)
+	}
+	t.Cleanup(func() { s.tlsEnricher.Stop() })
+	if s.packetCapture == packetCapture {
+		t.Fatal("capture was not swapped for the replacement")
 	}
 
 	if len(s.discoveries) != 1 || s.discoveries[0].ID != "reinit-flushed-1" {

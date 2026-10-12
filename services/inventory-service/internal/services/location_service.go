@@ -186,7 +186,7 @@ func (s *LocationService) List(tenantID uuid.UUID, filters models.LocationFilter
 	}
 	countArgs := append([]interface{}{}, args...)
 	args = append(args, pageSize, (page-1)*pageSize)
-	query := `SELECT * ` + baseQuery + fmt.Sprintf(` ORDER BY name LIMIT $%d OFFSET $%d`, argIdx, argIdx+1)
+	query := `SELECT * ` + baseQuery + fmt.Sprintf(` ORDER BY name, id LIMIT $%d OFFSET $%d`, argIdx, argIdx+1)
 
 	var total int
 	var list []models.Location

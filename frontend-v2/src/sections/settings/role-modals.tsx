@@ -14,6 +14,8 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@vistasecurity/primitives/auth';
 import { clients } from '../../lib/clients';
+import { invalidateEntitlements } from '../../lib/shared-queries';
+import { rolesKey } from './roles-query';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect, DrawerShell, DrawerCloseBtn } from '../../components/ui';
 import { StateNote, STag, GREEN } from './kit';
 import {
@@ -23,7 +25,6 @@ import {
   type MatrixRow, type TenantRole, type DeleteStep,
 } from './role-logic';
 
-const rolesKey = (tenantId?: string) => ['settings', 'roles', tenantId];
 
 // There is no `.ui-btn.danger` class — destructive primaries carry the tone
 // inline, matching api-tokens.tsx and infra-modals.tsx.
@@ -31,7 +32,11 @@ const DANGER_BTN = { background: 'var(--danger)', color: '#fff', borderColor: 'v
 
 function useInvalidateRoles(tenantId?: string) {
   const qc = useQueryClient();
-  return () => { void qc.invalidateQueries({ queryKey: rolesKey(tenantId) }); };
+  // A role edit may be to the viewer's own role, so their permissions refresh too.
+  return () => {
+    void qc.invalidateQueries({ queryKey: rolesKey(tenantId) });
+    void invalidateEntitlements(qc);
+  };
 }
 
 // --- permission matrix drawer -------------------------------------------------

@@ -84,7 +84,7 @@ func TestIntegration_InvitationAccept_FailClosedUnderAppRole(t *testing.T) {
 	// Accept: materialize the invited user under crypto_app. Its existence check,
 	// user INSERT, role assignment, and mark-accepted all run tenant-scoped via
 	// WithTenantTx — they must succeed under the NOBYPASSRLS role.
-	userID, gotRole, err := materializeInvitedUser(context.Background(), app, inv, nil)
+	userID, gotRole, err := materializeInvitedUser(context.Background(), app, bypass, inv, nil)
 	if err != nil {
 		t.Fatalf("materializeInvitedUser under crypto_app: %v", err)
 	}

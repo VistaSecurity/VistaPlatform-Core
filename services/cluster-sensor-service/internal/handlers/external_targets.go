@@ -7,6 +7,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -104,15 +105,15 @@ func writeTargetAuthorizationError(c *gin.Context, err error) bool {
 // because the request line says "POST /discovery/jobs 202" and not what was
 // scanned.
 //
-// Best-effort like every other explicit audit call: the job exists and the
-// scan will run; refusing it now because the audit sink hiccupped would be
-// worse. The failure is logged loudly instead.
-func auditExternalTargets(c *gin.Context, tenantID, userID string, job *models.DiscoveryJob) {
+// NOT best-effort: scanning addresses the tenant does not own on a person's
+// say-so is the one act whose record must exist, so the caller cancels the
+// job when this returns an error (CreateJob), before it is announced.
+func auditExternalTargets(c *gin.Context, tenantID, userID string, job *models.DiscoveryJob) error {
 	mwAny, ok := c.Get("audit_middleware")
 	mw, typed := mwAny.(*auditmiddleware.Middleware)
 	if !ok || !typed || mw == nil {
 		log.Printf("[DiscoveryHandler] AUDIT NOT WRITTEN: job %s scans %d external target(s) but no audit middleware is wired", job.ID, len(job.ExternalTargets))
-		return
+		return errAuditUnavailable
 	}
 	resourceType := "discovery_job"
 	var resourceID *uuid.UUID
@@ -158,5 +159,11 @@ func auditExternalTargets(c *gin.Context, tenantID, userID string, job *models.D
 	}
 	if err := mw.LogActivity(context.Background(), entry); err != nil {
 		log.Printf("[DiscoveryHandler] AUDIT NOT WRITTEN for job %s external targets: %v", job.ID, err)
+		return fmt.Errorf("record external-target consent: %w", err)
 	}
+	return nil
 }
+
+// errAuditUnavailable is auditExternalTargets' answer when the service has no
+// audit middleware on the request's context.
+var errAuditUnavailable = errors.New("no audit middleware is wired")

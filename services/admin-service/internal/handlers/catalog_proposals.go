@@ -260,7 +260,10 @@ func ListEOLProposals(store CatalogProposalStore) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "status must be one of pending, accepted, rejected"})
 			return
 		}
-		page, pageSize := pageParams(c)
+		page, pageSize, ok := pageParams(c)
+		if !ok {
+			return
+		}
 		proposals, total, err := store.ListProposals(c.Request.Context(), catalogs.ProposalQuery{
 			Status: status, Page: page, PageSize: pageSize,
 		})
@@ -343,7 +346,10 @@ func RejectEOLProposal(store CatalogProposalStore) gin.HandlerFunc {
 // ListCatalogMisses serves GET /admin/catalogs/eol/misses — the gap list.
 func ListCatalogMisses(store CatalogProposalStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		page, pageSize := pageParams(c)
+		page, pageSize, ok := pageParams(c)
+		if !ok {
+			return
+		}
 		misses, total, err := store.ListMisses(c.Request.Context(), catalogs.MissQuery{
 			Page: page, PageSize: pageSize,
 		})

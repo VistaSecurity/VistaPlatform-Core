@@ -45,6 +45,9 @@ func TestIDOR_ListArtifactsTenantScoped(t *testing.T) {
 	// Listing is also an IDOR surface: artifact metadata includes tenant IDs,
 	// storage keys, hashes, and optional attestation layers. The service DB user
 	// owns the table, so RLS is not the isolation boundary here.
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*)")).
+		WithArgs(callerTenant).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(regexp.QuoteMeta("tenant_id = $1")).
 		WithArgs(callerTenant).
 		WillReturnRows(sqlmock.NewRows([]string{
@@ -56,7 +59,7 @@ func TestIDOR_ListArtifactsTenantScoped(t *testing.T) {
 		}))
 	mock.ExpectCommit()
 
-	artifacts, err := repo.List(context.Background(), callerTenant, nil, "", 50)
+	artifacts, _, err := repo.List(context.Background(), callerTenant, nil, "", 50, 0)
 	if err != nil {
 		t.Fatalf("List tenant-scoped = %v", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -124,6 +125,18 @@ func (s *FindingsService) AssignFindingOwner(tenantID, findingID, assignedTo, as
 		}
 		if !visible {
 			return ErrFindingNotFound
+		}
+		// The assignee must be a user of THIS tenant. Without the check any
+		// well-formed UUID was stored, and a finding could be "owned" by a user
+		// of another tenant or by nobody at all.
+		var isMember bool
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)`,
+			assignedTo, tenantID).Scan(&isMember); err != nil {
+			return fmt.Errorf("failed to check assignee: %w", err)
+		}
+		if !isMember {
+			return missingReference("assigned_to")
 		}
 		res, err := tx.ExecContext(ctx, query, assignedTo, now, assignedBy, notes, now, findingID, tenantID)
 		if err != nil {
@@ -305,7 +318,7 @@ func (s *FindingsService) GetTicketCountForFinding(tenantID, findingID uuid.UUID
 // control — every other producer's — has no such question to answer. Applying
 // it unconditionally would have hidden every EOL and vulnerability finding the
 // moment those producers ship, which is failure-by-omission in a security view.
-func (s *FindingsService) GetFindingsByAsset(tenantID, assetID uuid.UUID) ([]models.ComplianceFinding, error) {
+func (s *FindingsService) GetFindingsByAsset(tenantID, assetID uuid.UUID, limit, offset int) ([]models.ComplianceFinding, bool, error) {
 	subjects := sharedfindings.AssetSubjectClause("cf", "a", newAliasCounter(), quoteSubjectType)
 	query := `
 		SELECT cf.id, cf.tenant_id, cf.producer, cf.kind, cf.control_id,
@@ -327,12 +340,15 @@ func (s *FindingsService) GetFindingsByAsset(tenantID, assetID uuid.UUID) ([]mod
 		  AND (` + subjects + `)
 		  AND ` + sharedfindings.OpenSQL("cf") + `
 		  AND (cf.producer <> '` + sharedfindings.ProducerCompliance + `' OR ` + licensedFindingScopeSQL("cf", "$1") + `)
-		ORDER BY ` + severityRankSQL("cf.severity") + ` DESC, cf.last_seen DESC
+		ORDER BY ` + severityRankSQL("cf.severity") + ` DESC, cf.last_seen DESC, cf.id
+		LIMIT $3 OFFSET $4
 	`
 	// Scan manually to handle JSONB evidence field
 	var results []models.ComplianceFinding
 	err := shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(context.Background(), query, tenantID, assetID)
+		// One row past the page tells the caller whether there is a next page
+		// without a second COUNT over the subject clause.
+		rows, err := tx.QueryContext(context.Background(), query, tenantID, assetID, limit+1, offset)
 		if err != nil {
 			return fmt.Errorf("failed to query findings by asset: %w", err)
 		}
@@ -413,7 +429,12 @@ func (s *FindingsService) GetFindingsByAsset(tenantID, assetID uuid.UUID) ([]mod
 		return rows.Err()
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
+	}
+
+	hasMore := len(results) > limit
+	if hasMore {
+		results = results[:limit]
 	}
 
 	// Get ticket counts for each finding
@@ -422,15 +443,16 @@ func (s *FindingsService) GetFindingsByAsset(tenantID, assetID uuid.UUID) ([]mod
 		results[i].TicketCount = ticketCount
 	}
 
-	return results, nil
+	return results, hasMore, nil
 }
 
 // FindingListFilters narrows ListFindings. Zero values mean "no filter".
 type FindingListFilters struct {
 	WorkflowStatus string // NEW / NOTIFIED / RESOLVED / SUPPRESSED (case-insensitive)
 	// WorkflowOpen narrows to findings nobody has dealt with yet — the house
-	// definition of open, `workflow_status NOT IN ('RESOLVED', 'SUPPRESSED')`,
-	// spliced from sharedfindings.WorkflowOpenSQL so it is the registry's
+	// definition of open, `workflow_status NOT IN ('RESOLVED', 'SUPPRESSED')`
+	// plus a SUPPRESSED finding whose suppressed_until has passed (open again
+	// before the expiry sweep flips it), spliced from sharedfindings.WorkflowOpenSQL so it is the registry's
 	// definition rather than a third spelling of it.
 	//
 	// It is what the Dashboard's "Critical findings" tile counts. The tile is an
@@ -1373,7 +1395,7 @@ func (s *FindingsService) GetEvidenceID(tenantID, findingID uuid.UUID) (string, 
 // service in v3.1.0. Tenant-wide reconcile still exists for framework-change and
 // manual triggers (EvaluateTenantFrameworks via the reconcile worker).
 func (s *FindingsService) OnAssetChanged(ctx context.Context, event events.AssetChangedEvent) error {
-	log.Printf("[FindingsService] Processing asset changed event: tenant=%s, asset=%s, change=%s",
+	passLogf(ctx, "[FindingsService] Processing asset changed event: tenant=%s, asset=%s, change=%s",
 		event.TenantID, event.AssetID, event.ChangeType)
 
 	summary, err := s.EvaluateAsset(ctx, event.TenantID, event.AssetID)
@@ -1381,8 +1403,12 @@ func (s *FindingsService) OnAssetChanged(ctx context.Context, event events.Asset
 		return fmt.Errorf("per-asset evaluation failed: %w", err)
 	}
 
-	log.Printf("[FindingsService] INFO: Completed asset change reconcile: event_id=%s, asset_id=%s, controls=%d, activated=+%d, inactivated=%d",
+	passLogf(ctx, "[FindingsService] INFO: Completed asset change reconcile: event_id=%s, asset_id=%s, controls=%d, activated=+%d, inactivated=%d",
 		event.EventID, event.AssetID, summary.ControlsEvaluated, summary.FindingsActivated, summary.FindingsInactivated)
+	// A pass that measured its writes and made none is a no-op (created=0
+	// updated=0 inactivated=0): its log collapses to one line.
+	notePassOutcome(ctx, summary.WritesMeasured && summary.FindingsWritten == 0 && summary.FindingsInactivated == 0,
+		fmt.Sprintf("controls=%d", summary.ControlsEvaluated))
 	return nil
 }
 
@@ -2124,7 +2150,21 @@ func (s *FindingsService) UpdateWorkflowStatus(tenantID, findingID, changedBy uu
 		"SUPPRESSED": true,
 	}
 	if !validStatuses[workflowStatus] {
-		return fmt.Errorf("invalid workflow status: %s", workflowStatus)
+		return invalidInput("workflow_status", "must be one of NEW, NOTIFIED, RESOLVED, SUPPRESSED")
+	}
+	if workflowStatus == "SUPPRESSED" {
+		// A suppression is a decision to stop counting a finding. It has to say
+		// why, or the audit trail records that something was silenced and not
+		// on whose reasoning.
+		if suppressionReason == nil || strings.TrimSpace(*suppressionReason) == "" {
+			return invalidInput("suppression_reason", "is required when suppressing a finding")
+		}
+		if utf8.RuneCountInString(*suppressionReason) > MaxSuppressionReasonLen {
+			return invalidInput("suppression_reason", "must be at most %d characters", MaxSuppressionReasonLen)
+		}
+		if suppressedUntil != nil && !suppressedUntil.After(time.Now()) {
+			return invalidInput("suppressed_until", "must be in the future")
+		}
 	}
 
 	// Get current finding to record history
@@ -2216,4 +2256,104 @@ func (s *FindingsService) GetFindingHistory(tenantID, findingID uuid.UUID) ([]mo
 	}
 
 	return history, nil
+}
+
+// ExpiredSuppression is one finding the expiry sweep reopened.
+type ExpiredSuppression struct {
+	FindingID uuid.UUID
+	TenantID  uuid.UUID
+	// RestoredStatus is the workflow_status the finding went back to.
+	RestoredStatus string
+}
+
+// suppressionSweepBatch bounds one UPDATE so a backlog (a sweep that was down
+// for a week) is worked off in steps rather than one long table lock.
+const suppressionSweepBatch = 500
+
+// ExpireSuppressions reopens every finding whose time-boxed suppression has
+// run out: SUPPRESSED with suppressed_until in the past goes back to the status
+// it held before it was suppressed (NEW when the history does not say), and the
+// deadline and reason are cleared. It returns what it changed so the caller can
+// ask the affected tenants to reconcile.
+//
+// suppressed_until was stored since the field existed and read by nothing, so a
+// "suppress for 30 days" was a permanent suppression. The open-finding
+// predicate (openFindingPredicate) also reads the deadline, so counts are right
+// the moment it passes; this sweep is what makes the stored status, the
+// Findings page filter and the history agree.
+//
+// Cross-tenant by nature, so it runs on the bypass pool like
+// AutoCloseInactiveFindings. The prior status is the old_value of the most
+// recent history row that moved the finding INTO suppression.
+func (s *FindingsService) ExpireSuppressions(ctx context.Context) ([]ExpiredSuppression, error) {
+	const query = `
+		WITH expired AS (
+			SELECT f.id, f.tenant_id, f.suppression_reason,
+			       COALESCE((
+			           SELECT h.old_value
+			           FROM compliance_finding_history h
+			           WHERE h.finding_id = f.id
+			             AND h.field_name = 'workflow_status'
+			             AND h.new_value = 'SUPPRESSED'
+			             AND h.old_value IN ('NEW', 'NOTIFIED', 'RESOLVED')
+			           ORDER BY h.changed_at DESC
+			           LIMIT 1
+			       ), 'NEW') AS prior
+			FROM findings f
+			WHERE f.workflow_status = 'SUPPRESSED'
+			  AND f.suppressed_until IS NOT NULL
+			  AND f.suppressed_until < NOW()
+			ORDER BY f.suppressed_until
+			LIMIT $1
+		)
+		UPDATE findings
+		SET workflow_status = expired.prior,
+		    suppressed_until = NULL,
+		    suppression_reason = NULL,
+		    updated_at = NOW()
+		FROM expired
+		WHERE findings.id = expired.id
+		  AND findings.workflow_status = 'SUPPRESSED'
+		  AND findings.suppressed_until < NOW()
+		RETURNING findings.id, findings.tenant_id, expired.prior, expired.suppression_reason
+	`
+	var all []ExpiredSuppression
+	for {
+		type row struct {
+			id, tenant uuid.UUID
+			prior      string
+			reason     sql.NullString
+		}
+		var batch []row
+		rows, err := s.bypassDB.QueryContext(ctx, query, suppressionSweepBatch)
+		if err != nil {
+			return all, fmt.Errorf("failed to expire suppressions: %w", err)
+		}
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.id, &r.tenant, &r.prior, &r.reason); err != nil {
+				_ = rows.Close()
+				return all, fmt.Errorf("failed to scan expired suppression: %w", err)
+			}
+			batch = append(batch, r)
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return all, fmt.Errorf("failed to read expired suppressions: %w", err)
+		}
+
+		for _, r := range batch {
+			why := "Suppression expired"
+			if r.reason.Valid && r.reason.String != "" {
+				why = fmt.Sprintf("Suppression expired (was: %s)", r.reason.String)
+			}
+			s.recordFindingHistory(ctx, s.bypassDB, r.id, nil, "workflow_status", "SUPPRESSED", r.prior, why)
+			all = append(all, ExpiredSuppression{FindingID: r.id, TenantID: r.tenant, RestoredStatus: r.prior})
+		}
+		if len(batch) < suppressionSweepBatch {
+			break
+		}
+	}
+	return all, nil
 }

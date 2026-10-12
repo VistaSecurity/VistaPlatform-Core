@@ -14,6 +14,10 @@ import (
 type Grant struct {
 	AccessToken string    `json:"access_token"`
 	ExpiresAt   time.Time `json:"expires_at"`
+	// IssuedAt is when this service obtained the JWT (the JWT's own iat, to
+	// within the exchange round trip). The per-user revocation cutoff compares
+	// against it.
+	IssuedAt    time.Time `json:"issued_at"`
 	TenantID    string    `json:"tenant_id"`
 	UserID      string    `json:"user_id"`
 	Email       string    `json:"email"`

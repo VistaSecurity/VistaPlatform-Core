@@ -4,6 +4,7 @@
 // (the responses are cast to them) so the JSX stays readable.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
+import { useFrameworksAvailable } from '../../lib/shared-queries';
 import type { complianceEngineComponents } from '@vistasecurity/api-contract';
 
 // ---- Algorithm Reference -------------------------------------------------
@@ -94,15 +95,7 @@ export interface AvailableFrameworkRow {
  * default (filter is_licensed) and the "Explore all published" toggle.
  */
 export function useAvailableFrameworks() {
-  return useQuery({
-    queryKey: ['posture', 'available-frameworks'],
-    queryFn: async () => {
-      const { data, error } = await clients.compliance.GET('/frameworks/available', {});
-      if (error || !data) throw new Error('Failed to load frameworks');
-      return (data.frameworks ?? []) as AvailableFrameworkRow[];
-    },
-    staleTime: 60_000,
-  });
+  return useFrameworksAvailable((rows) => rows as unknown as AvailableFrameworkRow[]);
 }
 
 // ---- Manual re-evaluation (cooldown-gated) --------------------------------
@@ -117,6 +110,21 @@ export type ReevaluationState = complianceEngineComponents['schemas']['Reevaluat
  * Refetched on an interval short enough that the button re-enables on its own
  * when the hour is up, without the user reloading the page.
  */
+/**
+ * Poll only while the cooldown is running (a run was accepted and the next is
+ * not yet allowed). When a run is allowed there is nothing to wait for, so the
+ * Posture page stops polling; focus-refetch and the mutation's invalidation
+ * still refresh it. The countdown itself ticks on a local clock.
+ */
+export function reevaluationRefetchInterval(
+  query: { state: { data?: { allowed: boolean; next_allowed_at: string | null } } },
+  now: number = Date.now(),
+): number | false {
+  const st = query.state.data;
+  if (!st || st.allowed || !st.next_allowed_at) return false;
+  return new Date(st.next_allowed_at).getTime() > now ? 30_000 : false;
+}
+
 export function useReevaluationState() {
   return useQuery({
     queryKey: ['posture', 'reevaluation'],
@@ -126,7 +134,7 @@ export function useReevaluationState() {
       return data;
     },
     staleTime: 15_000,
-    refetchInterval: 30_000,
+    refetchInterval: reevaluationRefetchInterval,
   });
 }
 

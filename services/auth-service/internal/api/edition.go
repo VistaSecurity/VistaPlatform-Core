@@ -141,6 +141,9 @@ type SSORouteDeps struct {
 	// config is sensitive tenant auth infrastructure; the gate is Core policy
 	// and is passed in rather than re-derived.
 	RequireSettingsUpdate gin.HandlerFunc
+	// RejectScopedTokens refuses PAT-derived tokens; self-service account
+	// mutations (SSO link/unlink) must carry it after RequireAuth.
+	RejectScopedTokens gin.HandlerFunc
 
 	// Core is the set of Core helpers the Enterprise package must reuse.
 	Core CoreSSOSupport

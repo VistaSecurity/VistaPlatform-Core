@@ -67,6 +67,8 @@ func (f *dispatchFixture) otAudit(t *testing.T, jobID string) []string {
 func TestIntegration_OTOnlyRequest_IsPlannedOnItsStandardPorts(t *testing.T) {
 	f := newDispatchFixture(t)
 	f.otSwitchOn(t)
+	// Six queued jobs on one tenant: CreateJob enforces concurrent_jobs now.
+	f.setLimits(t, 1000, 1000, 1000)
 	for name, tc := range map[string]struct {
 		protocols []string
 		tcp, udp  string

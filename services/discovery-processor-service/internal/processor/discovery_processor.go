@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -228,10 +231,101 @@ func (p *DiscoveryProcessor) Stop() {
 // batchClaimTimeout is how long a claim on a batch is honoured before another
 // worker may take it over. It bounds the damage from a worker that crashes
 // mid-batch: without a timeout, its claim would strand the batch forever.
-// Comfortably longer than a normal batch. A row that fails has its claim
-// released early, with a backoff (see recordRowFailures), so this bounds only
-// a worker that dies mid-batch.
-const batchClaimTimeout = 10 * time.Minute
+// A worker that is alive renews the claim before every import chunk (see
+// claim.go), so the timeout only ever releases a dead one. A row that fails
+// has its claim released early, with a backoff (see recordRowFailures).
+// A var only so a test can use a short one.
+var batchClaimTimeout = 10 * time.Minute
+
+// batchClaimRowLimit bounds how many rows one claim takes, and so how many one
+// read pulls into memory. A batch with more is claimed in several consecutive
+// claims, oldest rows first: the unclaimed remainder stays claimable, and the
+// drain loop takes it next. A var so a test can use a small bound.
+var batchClaimRowLimit = 1000
+
+// claimAttempts is how many times processNextBatch re-runs the claim after
+// losing a race for its candidate before deciding there is nothing to do.
+const claimAttempts = 3
+
+// claimNextBatchQuery picks the batch holding the OLDEST claimable row and
+// claims up to $2 of that batch's oldest claimable rows, in one statement. The
+// final SELECT returns the candidate even when the claim took nothing (another
+// worker won the race for it): batch_id comes back with a NULL stamp, which is
+// how "lost the race" is told apart from "nothing claimable" (no row at all).
+//
+// Candidates were once `GROUP BY ... LIMIT 1` with no ORDER BY, so which batch
+// was picked was arbitrary and a busy tenant could starve an old one; and a
+// lost race returned no rows, which drain read as an empty queue and stopped.
+const claimNextBatchQuery = `
+	WITH candidate AS (
+		SELECT batch_id, tenant_id
+		FROM sensor_discoveries
+		WHERE processed_at IS NULL
+		  AND (claimed_at IS NULL OR claimed_at < now() - $1::interval)
+		GROUP BY batch_id, tenant_id
+		ORDER BY min(created_at), batch_id
+		LIMIT 1
+	),
+	taken AS (
+		SELECT x.tenant_id, x.id
+		FROM sensor_discoveries x
+		JOIN candidate c ON x.tenant_id = c.tenant_id AND x.batch_id = c.batch_id
+		WHERE x.processed_at IS NULL
+		  AND (x.claimed_at IS NULL OR x.claimed_at < now() - $1::interval)
+		ORDER BY x.created_at, x.id
+		LIMIT $2
+	),
+	claimed AS (
+		UPDATE sensor_discoveries d
+		SET claimed_at = now()
+		FROM taken t
+		WHERE d.tenant_id = t.tenant_id
+		  AND d.id = t.id
+		  AND d.processed_at IS NULL
+		  AND (d.claimed_at IS NULL OR d.claimed_at < now() - $1::interval)
+		RETURNING d.batch_id, d.tenant_id, d.claimed_at
+	)
+	-- Every row the UPDATE took carries the same claimed_at (now() is the
+	-- statement's transaction timestamp); it is the claim's identity, and
+	-- ProcessClaimedBatch reads exactly the rows that carry it.
+	SELECT c.batch_id, c.tenant_id, max(k.claimed_at)
+	FROM candidate c
+	LEFT JOIN claimed k ON k.batch_id = c.batch_id AND k.tenant_id = c.tenant_id
+	GROUP BY c.batch_id, c.tenant_id
+`
+
+// claimNextBatch claims the next batch. found is false only when no batch is
+// claimable at all; a lost race is retried, so it never reads as an empty queue.
+//
+// RLS: cross-tenant — runs on the bypass role (Phase 4). This is the batch
+// poller: it scans sensor_discoveries (security_invoker view) across ALL
+// tenants for any unprocessed batch, grouping by (batch_id, tenant_id). It
+// cannot set app.tenant_id because the tenant is the query OUTPUT — the very
+// thing we are discovering. The resolved tenantID is then threaded into the
+// per-tenant ProcessBatch, which is RLS-scoped. Run on the BYPASSRLS handle
+// (crypto_bypass) directly — no WithTenantTx; under the enforcing crypto_app
+// role this query would fail closed (RLS hides every row with no app.tenant_id).
+func (p *DiscoveryProcessor) claimNextBatch() (batchID string, tenantID uuid.UUID, claimedAt time.Time, found bool, err error) {
+	claimInterval := fmt.Sprintf("%d seconds", int(batchClaimTimeout.Seconds()))
+	for attempt := 0; attempt < claimAttempts; attempt++ {
+		var stamp sql.NullTime
+		scanErr := p.bypassDB.QueryRow(claimNextBatchQuery, claimInterval, batchClaimRowLimit).Scan(&batchID, &tenantID, &stamp)
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return "", uuid.Nil, time.Time{}, false, nil // nothing claimable
+		}
+		if scanErr != nil {
+			return "", uuid.Nil, time.Time{}, false, fmt.Errorf("failed to claim unprocessed batch: %w", scanErr)
+		}
+		if stamp.Valid {
+			return batchID, tenantID, stamp.Time, true, nil
+		}
+		// Another worker claimed the candidate between our pick and our update.
+		// Pick again: the next candidate is whatever is still claimable.
+	}
+	// Every attempt lost a race: work exists and other workers are taking it.
+	// Not an empty queue; the next wake or poll continues.
+	return "", uuid.Nil, time.Time{}, false, nil
+}
 
 // processNextBatch claims and processes the next unprocessed batch.
 //
@@ -241,62 +335,17 @@ const batchClaimTimeout = 10 * time.Minute
 // replica, every replica's drain runs this concurrently. Selecting on `processed_at IS NULL`
 // alone let two of those pick the same batch and run it twice — duplicate
 // imports and double-incremented observation counts, because rows are only
-// stamped processed at the END of ProcessBatch.
+// stamped processed at the END of ProcessBatch. The claim is one statement:
+// two workers racing on the same candidate serialize on the row locks, the
+// loser re-evaluates the WHERE against the winner's committed claimed_at,
+// matches nothing, and picks again.
 func (p *DiscoveryProcessor) processNextBatch() (bool, error) {
-	// Pick one unprocessed, unclaimed (or stale-claimed) batch and claim it in a
-	// single statement. Two workers racing on the same candidate serialize on
-	// the row locks; the loser re-evaluates the WHERE against the winner's
-	// committed claimed_at, matches nothing, and gets an empty result — so
-	// exactly one worker proceeds.
-	//
-	// RLS: cross-tenant — runs on the bypass role (Phase 4). This is the batch
-	// poller: it scans sensor_discoveries (security_invoker view) across ALL
-	// tenants for any unprocessed batch, grouping by (batch_id, tenant_id). It
-	// cannot set app.tenant_id because the tenant is the query OUTPUT — the very
-	// thing we are discovering. The resolved tenantID is then threaded into the
-	// per-tenant ProcessBatch, which is RLS-scoped.
-	query := `
-		WITH candidate AS (
-			SELECT batch_id, tenant_id
-			FROM sensor_discoveries
-			WHERE processed_at IS NULL
-			  AND (claimed_at IS NULL OR claimed_at < now() - $1::interval)
-			GROUP BY batch_id, tenant_id
-			LIMIT 1
-		),
-		claimed AS (
-			UPDATE sensor_discoveries d
-			SET claimed_at = now()
-			FROM candidate c
-			WHERE d.batch_id = c.batch_id
-			  AND d.tenant_id = c.tenant_id
-			  AND d.processed_at IS NULL
-			  AND (d.claimed_at IS NULL OR d.claimed_at < now() - $1::interval)
-			RETURNING d.batch_id, d.tenant_id, d.claimed_at
-		)
-		-- Every row the UPDATE took carries the same claimed_at (now() is the
-		-- statement's transaction timestamp); it is the claim's identity, and
-		-- ProcessClaimedBatch reads exactly the rows that carry it.
-		SELECT batch_id, tenant_id, max(claimed_at) FROM claimed GROUP BY batch_id, tenant_id
-	`
-
-	var batchID string
-	var tenantID uuid.UUID
-
-	// Run on the BYPASSRLS handle (crypto_bypass) directly — no WithTenantTx,
-	// since this scan deliberately crosses tenants to discover which tenant the
-	// next unprocessed batch belongs to. Under the enforcing crypto_app role this
-	// query would fail closed (RLS hides every row with no app.tenant_id set).
-	claimInterval := fmt.Sprintf("%d seconds", int(batchClaimTimeout.Seconds()))
-	var claimedAt time.Time
-	err := p.bypassDB.QueryRow(query, claimInterval).Scan(&batchID, &tenantID, &claimedAt)
+	batchID, tenantID, claimedAt, found, err := p.claimNextBatch()
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// No unprocessed batches, or another worker already claimed the one
-			// there was - both normal.
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to claim unprocessed batch: %w", err)
+		return false, err
+	}
+	if !found {
+		return false, nil
 	}
 
 	fmt.Printf("Processing batch %s for tenant %s\n", batchID, tenantID)
@@ -310,11 +359,22 @@ func (p *DiscoveryProcessor) processNextBatch() (bool, error) {
 	if err == nil {
 		return true, nil
 	}
+	if errors.Is(err, errClaimLost) {
+		// Another worker owns these rows now and will settle them; writing
+		// anything back would only overwrite its bookkeeping.
+		fmt.Printf("Batch %s: %v; leaving it to the new owner\n", batchID, err)
+		return true, nil
+	}
 	var settled *RowFailuresError
 	if errors.As(err, &settled) {
 		// The rows that did not land are already recorded; everything else
 		// in the batch was processed.
 		return true, nil
+	}
+	// Renewal moves the claim's stamp; the failure record is fenced on it.
+	var moved *claimMovedError
+	if errors.As(err, &moved) {
+		claimedAt = moved.current
 	}
 
 	// The batch failed before any row could be settled on its own (it could
@@ -342,14 +402,19 @@ func (p *DiscoveryProcessor) processNextBatch() (bool, error) {
 //
 // Two classifiers remain, both exact:
 //   - client.HTTPStatusError carries the status code inventory-service actually
-//     returned. 4xx is permanent (the request is wrong and will stay wrong),
-//     except 408/425/429 which explicitly invite a retry.
+//     returned. A 4xx is permanent (the request is wrong and will stay wrong)
+//     EXCEPT the transient statuses (isTransientStatus): 401/403 are HMAC clock
+//     skew or a secret mid-rotation, 404 is a route that does not exist yet
+//     during an inventory rollout, 409/423 are a conflict or lock that clears,
+//     408/425/429 explicitly invite a retry. None of them says anything about
+//     the rows, and rejecting every chunk's rows for one made an auth blip
+//     destroy evidence.
 //   - ErrNoValidFindings is raised locally for a batch where every discovery was
 //     skipped for missing data; nothing about a retry can change that.
 //
 // Anything else is treated as transient. That is the safe default: a transient
-// classification costs at most MaxRetries attempts, after which the poller marks
-// the batch failed anyway — whereas a wrong "permanent" verdict destroys data.
+// classification costs at most the retry budget, whereas a wrong "permanent"
+// verdict destroys data.
 func isPermanentError(err error) bool {
 	if err == nil {
 		return false
@@ -357,8 +422,7 @@ func isPermanentError(err error) bool {
 
 	var statusErr *client.HTTPStatusError
 	if errors.As(err, &statusErr) {
-		switch statusErr.StatusCode {
-		case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		if isTransientStatus(statusErr.StatusCode) {
 			return false
 		}
 		return statusErr.StatusCode >= 400 && statusErr.StatusCode < 500
@@ -367,4 +431,49 @@ func isPermanentError(err error) bool {
 	// An empty/unimportable batch (every finding skipped) will never become
 	// importable on retry — fail fast instead of exhausting the retry budget.
 	return errors.Is(err, ErrNoValidFindings)
+}
+
+// isTransientStatus reports whether an inventory-service status says the far
+// side is unwell or unready rather than that the request is wrong.
+func isTransientStatus(code int) bool {
+	switch code {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+		http.StatusRequestTimeout, http.StatusConflict, http.StatusLocked,
+		http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	}
+	return code >= 500
+}
+
+// isTransientError reports whether a failure is of a class that clears by
+// itself — a transient inventory-service status, or a transport failure
+// reaching it. Such a failure is charged against the generous
+// RetryPolicy.MaxTransientAttempts, not the ordinary budget.
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr *client.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return isTransientStatus(statusErr.StatusCode)
+	}
+	var netErr net.Error
+	var urlErr *url.Error
+	return errors.As(err, &netErr) || errors.As(err, &urlErr) ||
+		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// isChunkRejection reports whether inventory-service refused a whole chunk for
+// its content (400, 413, 422). The chunk's other findings may be fine, so the
+// importer splits it and re-sends before declaring any row permanent.
+func isChunkRejection(err error) bool {
+	var statusErr *client.HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	switch statusErr.StatusCode {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
 }

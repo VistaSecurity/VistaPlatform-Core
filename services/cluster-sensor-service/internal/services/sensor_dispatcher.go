@@ -27,6 +27,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
@@ -208,6 +209,24 @@ func (jp *JobProcessor) dispatchToSensor(job *models.DiscoveryJob) error {
 		// Before, it was judged on a payload with no targets at all.
 		if err := authorizeEnrichmentDispatch(tx, payload, sensor.ID); err != nil {
 			return err
+		}
+		// A person's protocols x ports scan is judged again here, against the
+		// scope as it is NOW: this job may be a retry days after it was
+		// created, and a segment withdrawn or an exclusion added since must be
+		// honoured. Targets no longer authorized are dropped and named on the
+		// job; with none left the dispatch fails.
+		if dispatchguard.IsLegacyManualPayload(payload) {
+			kept, refused, e := dispatchguard.AuthorizeLegacyManualTargets(tx, payload, sensor.ID)
+			if e != nil {
+				return e
+			}
+			if len(kept) == 0 {
+				return &dispatchguard.RefusedTargetsError{Targets: refused}
+			}
+			if e := dispatchguard.RecordDroppedTargets(tx, job.ID, refused); e != nil {
+				return e
+			}
+			payload.Targets = kept
 		}
 		payloadJSON, e := json.Marshal(payload.ToMap())
 		if e != nil {

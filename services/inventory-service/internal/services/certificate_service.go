@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -512,7 +513,9 @@ func (s *CertificateService) GetCertificates(tenantID uuid.UUID, filters models.
 	} else {
 		orderBy += " ASC NULLS LAST"
 	}
-	query += " " + orderBy
+	// id is the unique tie-breaker: without it, rows sharing a sort value
+	// (batch-issued certificates) can repeat or vanish across LIMIT/OFFSET pages.
+	query += " " + orderBy + ", id"
 
 	// Add pagination
 	offset := (filters.Page - 1) * filters.PageSize
@@ -938,6 +941,49 @@ func (s *CertificateService) FindOrCreateCertificate(
 	tenantID uuid.UUID,
 	certData models.CertificateData,
 ) (*models.Certificate, error) {
+	cert, _, err := s.findOrCreateCertificateTracked(tenantID, certData)
+	return cert, err
+}
+
+// certificateMaterial is the part of a certificate row a compliance evaluator
+// can read: identity, validity, algorithms, chain/trust position and the
+// quality flags. Timestamps that move on every observation (updated_at,
+// last_data_update) are deliberately absent.
+type certificateMaterial struct {
+	Serial, CommonName, SigAlg, PubAlg, SCTSource, KnownBadCA, OCSPStatus, OCSPDetail, TrustStatus *string
+	Subject, Issuer, Fingerprint, State, Completeness                                              string
+	SANs                                                                                           []string
+	PubSize                                                                                        *int
+	NotBefore, NotAfter, RevokedAt                                                                 *time.Time
+	SelfSigned, CA                                                                                 bool
+	HasSCT, IsEV                                                                                   *bool
+	IssuerCert, SupersededBy, TrustAnchor                                                          *uuid.UUID
+}
+
+func materialOfCertificate(c *models.Certificate) certificateMaterial {
+	return certificateMaterial{
+		Serial: c.SerialNumber, CommonName: c.CommonName, SigAlg: c.SignatureAlgorithm, PubAlg: c.PublicKeyAlgorithm,
+		SCTSource: c.SCTSource, KnownBadCA: c.KnownBadCA, OCSPStatus: c.OCSPStatus, OCSPDetail: c.OCSPDetail, TrustStatus: c.TrustStatus,
+		Subject: c.SubjectDN, Issuer: c.IssuerDN, Fingerprint: c.FingerprintSHA256, State: c.CertificateState, Completeness: c.DataCompleteness,
+		SANs: c.SubjectAlternativeNames, PubSize: c.PublicKeySize, NotBefore: c.NotBefore, NotAfter: c.NotAfter, RevokedAt: c.RevokedAt,
+		SelfSigned: c.IsSelfSigned, CA: c.IsCACertificate, HasSCT: c.HasSCT, IsEV: c.IsEV,
+		IssuerCert: c.IssuerCertificateID, SupersededBy: c.SupersededByCertificateID, TrustAnchor: c.TrustAnchorCertificateID,
+	}
+}
+
+// updateCertificateTracked is UpdateCertificate that also reports whether the
+// stored certificate's evaluator-readable content moved.
+func (s *CertificateService) updateCertificateTracked(tenantID, certID uuid.UUID, certData models.CertificateData) (*models.Certificate, bool, error) {
+	return s.updateCertificate(tenantID, certID, certData)
+}
+
+// findOrCreateCertificateTracked is FindOrCreateCertificate that also reports
+// whether anything an evaluator can read changed: true for a new certificate,
+// and for an existing one only when its stored content moved.
+func (s *CertificateService) findOrCreateCertificateTracked(
+	tenantID uuid.UUID,
+	certData models.CertificateData,
+) (*models.Certificate, bool, error) {
 	// Try to calculate fingerprint if not provided
 	fingerprintSHA256 := certData.FingerprintSHA256
 	if fingerprintSHA256 == "" {
@@ -971,7 +1017,7 @@ func (s *CertificateService) FindOrCreateCertificate(
 		})
 		if err == nil {
 			// Found existing certificate, update it with new data if needed
-			return s.UpdateCertificate(tenantID, existingID, certData)
+			return s.updateCertificateTracked(tenantID, existingID, certData)
 		}
 	}
 
@@ -980,7 +1026,7 @@ func (s *CertificateService) FindOrCreateCertificate(
 		existing, err := s.FindByCompositeKey(tenantID, fingerprintSHA256, certData.SerialNumber, certData.IssuerDN)
 		if err == nil && existing != nil {
 			// Found existing, update it
-			return s.UpdateCertificate(tenantID, existing.ID, certData)
+			return s.updateCertificateTracked(tenantID, existing.ID, certData)
 		}
 	}
 
@@ -996,7 +1042,7 @@ func (s *CertificateService) FindOrCreateCertificate(
 	// Create new certificate
 	newCert, err := s.CreateCertificate(tenantID, certData)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// If we detected a renewal, link the old certificate to the new one
@@ -1020,7 +1066,7 @@ func (s *CertificateService) FindOrCreateCertificate(
 		})
 	}
 
-	return newCert, nil
+	return newCert, true, nil
 }
 
 // detectCertificateRenewal detects if a certificate is a renewal of an existing certificate
@@ -1265,6 +1311,23 @@ func (s *CertificateService) UpdateCertificate(
 	tenantID, certID uuid.UUID,
 	certData models.CertificateData,
 ) (*models.Certificate, error) {
+	cert, _, err := s.updateCertificate(tenantID, certID, certData)
+	return cert, err
+}
+
+// updateCertificate is UpdateCertificate that also reports whether the stored
+// row's evaluator-readable content (certificateMaterial) differs from before the
+// write. compliance.certificate.changed is published only when it does:
+// every passive or active observation of an unchanged certificate comes through
+// here, and each used to cost a compliance evaluation that wrote nothing. The
+// decision compares the rows as stored, not what the caller meant to write. An
+// unreadable "before" counts as changed: a spurious event costs one evaluation,
+// a hidden change costs a stale verdict.
+func (s *CertificateService) updateCertificate(
+	tenantID, certID uuid.UUID,
+	certData models.CertificateData,
+) (*models.Certificate, bool, error) {
+	before, bErr := s.GetCertificateByID(tenantID, certID)
 	updateQuery, args := s.buildCertificateUpdateQuery(tenantID, certID, certData)
 
 	var updatedID uuid.UUID
@@ -1274,7 +1337,7 @@ func (s *CertificateService) UpdateCertificate(
 		return tx.QueryRow(updateQuery, args...).Scan(&updatedID, &updatedAt)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to update certificate: %w", err)
+		return nil, false, fmt.Errorf("failed to update certificate: %w", err)
 	}
 
 	// Persist certificate quality flags on re-discovery too. They were written
@@ -1288,13 +1351,21 @@ func (s *CertificateService) UpdateCertificate(
 		s.evaluateTrust(tenantID, certID)
 	}
 
-	// Record update history (args carries the trailing certID + tenantID)
-	_ = s.RecordCertificateHistory(tenantID, certID, "data_enriched", map[string]interface{}{
-		"fields_updated": len(args) - 2,
-	})
+	after, aErr := s.GetCertificateByID(tenantID, certID)
+	changed := bErr != nil || before == nil || aErr != nil || after == nil ||
+		!reflect.DeepEqual(materialOfCertificate(before), materialOfCertificate(after))
 
-	// Publish certificate updated event
-	if s.eventPublisher != nil {
+	// Record update history only when the write changed something: a re-sighting
+	// of an unchanged certificate used to add a data_enriched row per observation
+	//burying the real events. Reuses the verdict above; args carries
+	// the trailing certID + tenantID.
+	if changed {
+		_ = s.RecordCertificateHistory(tenantID, certID, "data_enriched", map[string]interface{}{
+			"fields_updated": len(args) - 2,
+		})
+	}
+
+	if changed && s.eventPublisher != nil {
 		ctx := context.Background()
 		source := "discovery"
 		if err := s.eventPublisher.PublishCertificateChanged(ctx, tenantID, certID, events.ChangeTypeUpdated, source); err != nil {
@@ -1302,7 +1373,7 @@ func (s *CertificateService) UpdateCertificate(
 		}
 	}
 
-	return s.GetCertificateByID(tenantID, certID)
+	return after, changed, aErr
 }
 
 // buildCertificateUpdateQuery assembles the dynamic enrichment UPDATE for a

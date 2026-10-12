@@ -2,7 +2,9 @@ package identityenrichment
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/autoscan"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
+	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -460,5 +464,109 @@ func TestIntegration_EnrichmentRechecksExecutorAuthorizationBeforeDispatch(t *te
 	}
 	if advanced.State != "blocked" || advanced.Reason != "authorization_changed_before_dispatch" {
 		t.Fatalf("job=%s/%s, want blocked/authorization_changed_before_dispatch", advanced.State, advanced.Reason)
+	}
+}
+
+// TestIntegration_EnrichmentNeverPlansACollectorAddress pins the parity between
+// the planner's exclusions and the dispatch guard's refusals. The observer is a
+// sensor with NO reported DNS interface (a Windows sensor) whose own address
+// sits on a non-DNS interface; the executor has a docker-bridge-style address
+// in the same segment. Neither passes the DNS-interface filter, and both must
+// still be excluded, because the guard refuses any agent_addresses row of
+// either sensor.
+func TestIntegration_EnrichmentNeverPlansACollectorAddress(t *testing.T) {
+	s, tenant, o := enrichmentFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	observer, executor, segment := uuid.New(), uuid.New(), uuid.New()
+	o.Evidence.Source.Ref = "sensor:" + observer.String()
+	o.Evidence.Network.SegmentID = segment.String()
+	o.Evidence.Identifiers = []identity.Identifier{{Kind: identity.KindIPAddress, Value: "192.0.2.173", Scope: segment.String()}}
+	evidence, err := json.Marshal(o.Evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := s.DB.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`UPDATE identity_observations SET evidence=$3,source_ref=$4,network_scope=$5 WHERE tenant_id=$1 AND id=$2`, tenant, o.ID, string(evidence), o.Evidence.Source.Ref, segment.String())
+	exec(`UPDATE tenant_admin_settings SET config='{"identity_enrichment":{"enabled":true},"identity_admission":{"mode":"enforce"},"discovery_auto_scan":{"enabled":true,"protocols":["TLS"],"ports":[443]}}' WHERE tenant_id=$1`, tenant)
+	exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'Test network','cidr','192.0.2.0/24',true,'production')`, segment, tenant)
+	// The observer reports no DNS interface at all.
+	exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,reported_capabilities) VALUES($1,$2,'observer','windows','1.0','datacenter_host','active',$3,ARRAY['identity_dns_v1'])`, observer, tenant, now)
+	exec(`INSERT INTO agent_addresses(sensor_id,interface_name,address,prefix_length,last_seen_at) VALUES($1,'Ethernet 2','192.0.2.173',24,$2)`, observer, now)
+	exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,reported_capabilities,reported_dns_interfaces) VALUES($1,$2,'executor','linux','1.0','datacenter_host','active',$3,ARRAY['identity_dns_v1'],ARRAY['eth0'])`, executor, tenant, now)
+	exec(`INSERT INTO agent_addresses(sensor_id,interface_name,address,prefix_length,last_seen_at) VALUES($1,'eth0','192.0.2.9',24,$2),($1,'docker0','192.0.2.172',24,$2)`, executor, now)
+
+	scope, excluded, err := s.Scope(ctx, tenant, o, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.SensorID != executor {
+		t.Fatalf("executor=%s want %s (scope=%+v)", scope.SensorID, executor, scope)
+	}
+	policy, err := s.Policy(ctx, tenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, reason := NetworkPlan(o, policy, scope, nil, excluded)
+	if reason != ReasonTargetIsCollector || len(plan.Addresses) != 0 {
+		t.Fatalf("plan=%+v reason=%q, want %s with no addresses", plan, reason, ReasonTargetIsCollector)
+	}
+
+	// The sweep settles the observation: terminal, not blocked/retrying.
+	backend := newProbeBackend()
+	c := &Coordinator{Store: s, Backend: backend, Enabled: true, Now: func() time.Time { return now }}
+	if err := c.Sweep(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	var state, why string
+	var next time.Time
+	if err := s.DB.QueryRow(`SELECT enrichment_state,enrichment_reason,next_attempt_at FROM identity_observations WHERE tenant_id=$1 AND id=$2`, tenant, o.ID).Scan(&state, &why, &next); err != nil {
+		t.Fatal(err)
+	}
+	if state != "completed" || why != ReasonTargetIsCollector || !next.After(now.Add(time.Hour)) {
+		t.Fatalf("observation=%s/%s next=%s, want completed/%s well in the future", state, why, next, ReasonTargetIsCollector)
+	}
+	var jobs int
+	if err := s.DB.QueryRow(`SELECT count(*) FROM identity_enrichment_jobs WHERE tenant_id=$1 AND action<>'configured_source'`, tenant).Scan(&jobs); err != nil || jobs != 0 || backend.dispatches() != 0 {
+		t.Fatalf("jobs=%d dispatches=%d err=%v, want none", jobs, backend.dispatches(), err)
+	}
+
+	// Parity: an observation mixing a collector address with a real target
+	// plans only the real one, and the guard authorizes that plan.
+	o.Evidence.Identifiers = append(o.Evidence.Identifiers,
+		identity.Identifier{Kind: identity.KindIPAddress, Value: "192.0.2.172", Scope: segment.String()},
+		identity.Identifier{Kind: identity.KindIPAddress, Value: "192.0.2.50", Scope: segment.String()})
+	evidence, err = json.Marshal(o.Evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec(`UPDATE identity_observations SET evidence=$3 WHERE tenant_id=$1 AND id=$2`, tenant, o.ID, string(evidence))
+	plan, reason = NetworkPlan(o, policy, scope, nil, excluded)
+	if reason != "" || len(plan.Addresses) != 1 || plan.Addresses[0] != "192.0.2.50" {
+		t.Fatalf("plan=%+v reason=%q, want only 192.0.2.50", plan, reason)
+	}
+	for _, target := range plan.Addresses {
+		testdb.AsTenant(t, s.DB.DB.DB, tenant, func(tx *sql.Tx) {
+			err = dispatchguard.AuthorizeProbe(tx, sensordispatch.Payload{TenantID: tenant.String(), Targets: []string{target}, Protocols: []string{"TLS"}, Ports: []int{443},
+				Options: map[string]interface{}{"identity_enrichment_request_id": uuid.NewString(), "identity_observation_id": o.ID.String(), "identity_network_scope": segment.String()}}, plan.SensorID)
+		})
+		if err != nil {
+			t.Fatalf("guard refused the planned target %s: %v", target, err)
+		}
+	}
+	// And the guard still refuses every collector address the planner skipped.
+	for _, target := range []string{"192.0.2.173", "192.0.2.172"} {
+		testdb.AsTenant(t, s.DB.DB.DB, tenant, func(tx *sql.Tx) {
+			err = dispatchguard.AuthorizeProbe(tx, sensordispatch.Payload{TenantID: tenant.String(), Targets: []string{target}, Protocols: []string{"TLS"}, Ports: []int{443},
+				Options: map[string]interface{}{"identity_enrichment_request_id": uuid.NewString(), "identity_observation_id": o.ID.String(), "identity_network_scope": segment.String()}}, executor)
+		})
+		if !errors.Is(err, dispatchguard.ErrDenied) {
+			t.Fatalf("guard on collector address %s: %v, want denied", target, err)
+		}
 	}
 }

@@ -115,6 +115,19 @@ sudo ./install-sensor.sh --url https://<your-platform-host> --key <registration-
 .\install-sensor.ps1 -Url https://<your-platform-host> -Key <registration-code> -IP 10.0.0.50 -Name sensor-dc01
 ```
 
+A `--key` on the command line is visible to other users in the process list. On
+Linux and macOS, set `VISTA_REGISTRATION_KEY` in the environment or pipe the key
+to `install-sensor.sh --key-stdin` instead. The installer shows only the last four
+characters of the key in its output.
+
+A sensor that cannot start because only a person can fix it (the control plane
+rejected the registration key, or the config file cannot be parsed) exits with
+status `78` (`EX_CONFIG`). The Linux systemd unit sets
+`RestartPreventExitStatus=78`, so it stops instead of retrying every 10 seconds;
+generate a new key and re-run the installer. The Windows installer already
+disables the service after a rejected key; neither Windows services nor launchd
+can exclude an exit status from restart.
+
 The installer checks the packet-capture runtime (libpcap on Linux, Npcap on
 Windows), installs the binary as a service, and starts it. The sensor then
 enrolls itself with the registration code — the certificate enrollment
@@ -258,6 +271,33 @@ the private key never crosses the network and the platform never holds it.
 - Revoking a certificate takes effect immediately; the sensor must re-register
   to get a new one.
 - All sensor-to-platform communication is mutually authenticated.
+
+### What a sensor keeps after enrolling
+
+The registration code is single-use and is **not kept** once the sensor is
+enrolled. At enrollment the platform issues the sensor a random **sensor
+secret**, once, alongside its certificate. The platform keeps only an encrypted
+copy and cannot show it again.
+
+- The sensor keeps the secret in `<data path>/certs/agent-secret.json`
+  (owner-only), written together with its certificate so a rotation replaces
+  both or neither.
+- Its config file no longer contains `registrationKey`. It records
+  `registrationKeySha256`, a fingerprint, in its place, so re-running the
+  installer with the same code is still recognised as "this host is already
+  enrolled" and keeps the sensor's identity. The code is removed from the config
+  only once the secret is safely on disk; if the platform did not issue a secret
+  or the save failed, the code stays where it was.
+- Every certificate rotation issues a **new** secret. The one it replaces stays
+  valid for **24 hours** (so anything sealed just before the rotation still
+  opens) and is then discarded from the file.
+- A sensor enrolled before this existed keeps working with no re-enrollment: it
+  receives its first secret at its next certificate rotation and drops the
+  registration code from its config then. A sensor build that predates the
+  feature is never issued a secret.
+- A sensor run from environment variables alone (no config file) cannot have the
+  code removed from its environment; it still stores the secret next to its
+  certificate, and a restart needs the same environment as before.
 
 ### Trusting a privately-signed platform
 
@@ -463,7 +503,9 @@ Registration and management are available over the API for automation.
 
 The registration response returns the signed certificate and the platform CA.
 It never contains a private key — that stays on the sensor's host and is never
-transmitted.
+transmitted. When the request sets `supports_agent_secret: true` it also returns
+`agent_secret` and `agent_secret_version`, once; the rotation response does the
+same, with a new secret that replaces the old one.
 
 A sensor reports the version it was built as. A binary built from source without
 a stamped version reports `dev`; the console shows whatever it reported.

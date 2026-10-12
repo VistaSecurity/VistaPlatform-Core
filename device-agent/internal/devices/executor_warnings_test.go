@@ -1,6 +1,7 @@
 package devices
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +50,7 @@ func TestExecute_PostsCollectionWarnings(t *testing.T) {
 		Credentials: map[string]interface{}{"username": "readonly", "password": "readonly-password"},
 		Parameters:  map[string]interface{}{"management_url": srv.URL, "hostname": "fw-branch-01.corp.example.test"},
 	}
-	if err := exec.Execute(job); err != nil {
+	if err := exec.Execute(context.Background(), job); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 

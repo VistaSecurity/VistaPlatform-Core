@@ -15,6 +15,7 @@ import { claimChipText, isClaimableSegment, segmentClaim, segmentPosture, segmen
 import type { SettingsNavItem } from './nav';
 import { GATEWAY_NOT_RECORDED_TITLE } from '../inventory/segment-gateway';
 import { CoverageText, GatewayLink } from '../inventory/segment-gateway-view';
+import { unwrap } from '../../lib/api-result';
 
 type Location = inventoryComponents['schemas']['Location'];
 type NetworkSegment = inventoryComponents['schemas']['NetworkSegment'];
@@ -287,10 +288,9 @@ function DriftBaselineForm({ settings }: { settings: DriftSettings }) {
 
   const save = useMutation({
     mutationFn: async () => {
-      const { data, error, response } = await clients.inventory.PUT('/settings/drift', {
+      const data = unwrap(await clients.inventory.PUT('/settings/drift', {
         body: { baseline_days: n },
-      });
-      if (!response.ok || error || !data) throw new Error('Failed to save the drift baseline');
+      }), 'Failed to save the drift baseline', { requireData: true });
       return data.drift;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settings', 'drift'] }),
@@ -347,10 +347,9 @@ function LifecycleForm({ policy }: { policy: LifecyclePolicy }) {
 
   const save = useMutation({
     mutationFn: async () => {
-      const { data, error, response } = await clients.inventory.PUT('/lifecycle/policy', {
+      const data = unwrap(await clients.inventory.PUT('/lifecycle/policy', {
         body: { stale_warning_days: wn, stale_archived_days: an, auto_archive_enabled: autoArchive, notifications_enabled: notifications },
-      });
-      if (!response.ok || error || !data) throw new Error('Failed to save the policy');
+      }), 'Failed to save the policy', { requireData: true });
       return data.policy;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settings', 'lifecycle-policy'] }),

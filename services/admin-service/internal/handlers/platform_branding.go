@@ -31,6 +31,10 @@ const (
 	// advertised maximum would be refused before the handler saw it.
 	maxBrandingRequestBytes = maxBrandingBytes + (1 << 16)
 
+	// MaxBrandingRequestBytes exports the transport ceiling so the router's
+	// body-ceiling middleware can give this one route its bound.
+	MaxBrandingRequestBytes = maxBrandingRequestBytes
+
 	brandingTooLargeMessage = "File too large. Maximum size is 5MB"
 )
 

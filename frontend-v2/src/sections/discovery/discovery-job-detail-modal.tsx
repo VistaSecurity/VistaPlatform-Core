@@ -176,6 +176,7 @@ export function DiscoveryJobDetailModal({ job: listed, onClose }: { job: ScanJob
         <Row label="Targets" value={targets.length} mono />
         <Row label="Created" value={relTime(job.created_at)} />
         <Row label="Job ID" value={job.id} mono />
+        <Row label="Note" value={job.note} />
         {job.error_message && <Row label="Error" value={job.error_message} color={DANGER} />}
       </Section>
 

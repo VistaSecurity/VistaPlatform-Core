@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -24,6 +23,7 @@ type impersonationService interface {
 	RecordImpersonationStart(ctx context.Context, p auth.ImpersonationStartParams) error
 	RevokeJTI(ctx context.Context, jti string, ttl time.Duration) error
 	RemainingImpersonationTTL(ctx context.Context, jti string) (time.Duration, bool, error)
+	ImpersonationActor(ctx context.Context, jti string) (string, bool, error)
 	RecordImpersonationStop(ctx context.Context, actorID, jti, ip, ua string) error
 	ListImpersonationEvents(ctx context.Context) ([]auth.ImpersonationEvent, error)
 }
@@ -40,18 +40,6 @@ func impersonationSvc(c *gin.Context) impersonationService {
 		return nil
 	}
 	return svc
-}
-
-// impersonationConfig holds feature flags for impersonation
-type impersonationConfig struct {
-	RequireMFA bool
-}
-
-// getImpersonationConfig reads impersonation feature flags from environment
-func getImpersonationConfig() impersonationConfig {
-	return impersonationConfig{
-		RequireMFA: os.Getenv("IMPERSONATION_REQUIRE_MFA") == "true",
-	}
 }
 
 // AdminImpersonationRequest represents the initiation payload
@@ -106,20 +94,6 @@ func InitiateAdminImpersonation(c *gin.Context) {
 	if !targetUser.IsActive {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Target user is inactive"})
 		return
-	}
-
-	// Check MFA requirement (feature-flagged)
-	cfg := getImpersonationConfig()
-	if cfg.RequireMFA {
-		mfaVerified, _ := c.Get("mfa_verified")
-		if mfaVerified != true {
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":        "MFA verification required for impersonation",
-				"mfa_required": true,
-				"message":      "Please complete multi-factor authentication to proceed with impersonation",
-			})
-			return
-		}
 	}
 
 	// Determine TTL
@@ -219,6 +193,29 @@ func StopAdminImpersonation(c *gin.Context) {
 		return
 	}
 
+	// The jti is caller-supplied and the denylist is global, so without this any
+	// platform user holding the impersonate permission could revoke ANY session
+	// (a tenant admin's, another admin's) just by naming its jti. Only the admin
+	// who started an impersonation may stop it, as recorded in its start audit
+	// entry. A jti with no start entry is refused too: nothing proves it is an
+	// impersonation token at all.
+	actorIDVal, _ := c.Get("userID")
+	actorID, _ := actorIDVal.(string)
+	owner, found, err := svc.ImpersonationActor(c.Request.Context(), jti)
+	if err != nil {
+		logrus.WithError(err).WithField("jti", jti).Error("Failed to look up the impersonation start record")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify impersonation session"})
+		return
+	}
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Impersonation session not found"})
+		return
+	}
+	if actorID == "" || owner != actorID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Impersonation session belongs to another administrator"})
+		return
+	}
+
 	// Add to the denylist with a TTL equal to the token's REAL remaining
 	// lifetime, derived from the impersonation-start audit record. Fall
 	// back to the maximum impersonation lifetime (30m, the cap enforced at
@@ -242,8 +239,6 @@ func StopAdminImpersonation(c *gin.Context) {
 
 	// Audit stop. Best-effort (the token is already denylisted), but logged
 	// rather than discarded — see RecordImpersonationStart above.
-	actorIDVal, _ := c.Get("userID")
-	actorID, _ := actorIDVal.(string)
 	if auditErr := svc.RecordImpersonationStop(c.Request.Context(), actorID, jti, c.ClientIP(), c.Request.UserAgent()); auditErr != nil {
 		logrus.WithError(auditErr).WithFields(logrus.Fields{
 			"actor_id": actorID,

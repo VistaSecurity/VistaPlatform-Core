@@ -127,6 +127,12 @@ func (m *Middleware) LogRequest() gin.HandlerFunc {
 		// body. A handler that needs to re-read its own body buffers it itself.
 		c.Next()
 
+		// A route that opted out with Skip() records nothing. Read AFTER Next
+		// because the marker is set by a handler in the route's own chain.
+		if skipped, _ := c.Get(skipContextKey); skipped == true {
+			return
+		}
+
 		// Extract user context
 		userID, _ := c.Get("userID")
 		tenantID, _ := c.Get("tenantID")

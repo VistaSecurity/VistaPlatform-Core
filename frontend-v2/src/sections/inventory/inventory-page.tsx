@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tansta
 import toast from 'react-hot-toast';
 import type { Asset } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, RiskChip, levelFromScore, type RiskLevel } from '../../components/ui';
 import { findLens, resolveLensAlias, type InventoryLens } from './lenses';
@@ -11,9 +12,9 @@ import { connectionStrengthFilter, connectionStrengthLabel, connectionStrengthTo
 import { STALE_DAYS } from './stale-threshold';
 import { certSourceBadge } from './certificate-source';
 import { AssetsLens } from './assets-lens';
-import { useMergeProposals } from './asset-queries';
-import { useRelationshipProposals } from './relationship-queries';
-import { useClassProposals } from '../discovery/class-proposal-queries';
+import { useMergeProposalCount } from './asset-queries';
+import { useRelationshipProposalCount } from './relationship-queries';
+import { useClassProposalCount } from '../discovery/class-proposal-queries';
 import { assetIdentity, assetRisk, classLabel, primaryAddressPort } from './asset-shape';
 import { ASSET_CSV_HEADER, assetCsvRow } from './asset-csv';
 import { AssetDrawer, CertDrawer, ConfigDrawer, KeyDrawer, type Certificate, type CryptoConfig, type Key, type OpenAsset, type OpenCert, type OpenConfig, type OpenKey } from './drawers';
@@ -41,6 +42,7 @@ import { CertTrustChip } from './cert-trust';
 import { connectionTrustStatus, presentHygieneFlags } from './connection-trust';
 import { CertTrustFilter, CertificateViews, trustFilterVisible } from './cert-trust-filter';
 import { parseTrustFilter, trustFilterParam, type TrustFilterValue } from './trust-status';
+import { unwrap } from '../../lib/api-result';
 
 // Inventory — lens-based view. One backend dataset reshaped by angle. The active
 // lens comes from the URL (`?lens=`); the switcher lives in the LEFT SIDEBAR.
@@ -87,27 +89,28 @@ function usePendingApprovalCount() {
       return data.pagination?.total ?? (data.assets?.length ?? 0);
     },
   });
-  const proposalsQ = useMergeProposals();
+  const proposalsQ = useMergeProposalCount();
   // The third row kind (ADR-0006 D6). The banner claims to count what is
   // "awaiting review", so leaving a kind out of it makes the number quietly
   // smaller than the queue it points at.
-  const relProposalsQ = useRelationshipProposals();
+  const relProposalsQ = useRelationshipProposalCount();
   // And the fourth (workstream 2.10b): a class the rules argued about an asset
   // that already has one. Same reason again — a banner that counted three of
   // four kinds sends a user to a page with more work on it than the banner
   // admitted.
-  const classProposalsQ = useClassProposals();
+  const classProposalsQ = useClassProposalCount();
   // `total`, not the page length: each list stops at the server's limit, so a
   // tenant with 132 proposals was told its queue held 50.
-  return (assetsQ.data ?? 0) + (proposalsQ.data?.total ?? 0)
-    + (relProposalsQ.data?.total ?? 0) + (classProposalsQ.data?.total ?? 0);
+  return (assetsQ.data ?? 0) + (proposalsQ.data ?? 0)
+    + (relProposalsQ.data ?? 0) + (classProposalsQ.data ?? 0);
 }
 
 function useAssets(page: number, search: string, enabled: boolean, lastSeenBefore?: string) {
   return useQuery({
     queryKey: ['inventory', 'assets', page, search, lastSeenBefore ?? ''],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const { data, error } = await clients.inventory.GET('/infrastructure-assets', {
+        signal,
         params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}), ...(lastSeenBefore ? { last_seen_before: lastSeenBefore } : {}) } },
       });
       if (error || !data) throw new Error('Failed to load assets');
@@ -123,8 +126,9 @@ function useAssets(page: number, search: string, enabled: boolean, lastSeenBefor
 function useCerts(page: number, search: string, enabled: boolean, ownership?: 'internal' | 'third_party' | 'unknown', trustStatus?: string) {
   return useQuery({
     queryKey: ['inventory', 'certs', page, search, ownership ?? '', trustStatus ?? ''],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const { data, error } = await clients.inventory.GET('/certificates', {
+        signal,
         params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}), ...(ownership ? { ownership } : {}), ...(trustStatus ? { trust_status: trustStatus } : {}), sort_by: 'not_after', sort_order: 'asc' } },
       });
       if (error || !data) throw new Error('Failed to load certificates');
@@ -158,8 +162,9 @@ function useKeys(enabled: boolean) {
 function useConfigs(page: number, search: string, enabled: boolean, protocol?: string) {
   return useQuery({
     queryKey: ['inventory', 'configs', page, search, protocol ?? ''],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const { data, error } = await clients.inventory.GET('/crypto-configurations', {
+        signal,
         params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}), ...(protocol ? { protocol: [protocol] } : {}) } },
       });
       if (error || !data) throw new Error('Failed to load crypto configurations');
@@ -172,8 +177,9 @@ function useConfigs(page: number, search: string, enabled: boolean, protocol?: s
 function useConnections(page: number, search: string, enabled: boolean, strength: ConnectionStrengthFilter) {
   return useQuery({
     queryKey: ['inventory', 'connections', page, search, strength],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const { data, error } = await clients.inventory.GET('/external-connections', {
+        signal,
         params: { query: { page, page_size: PAGE_SIZE, ...(search ? { search } : {}), ...(strength ? { strength } : {}) } },
       });
       if (error || !data) throw new Error('Failed to load external connections');
@@ -190,16 +196,14 @@ function useElevateConnection() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await clients.inventory.POST('/external-connections/{id}/elevate', {
+      const data = unwrap(await clients.inventory.POST('/external-connections/{id}/elevate', {
         params: { path: { id } },
-      });
-      if (error || !data) throw new Error('Failed to elevate connection');
+      }), 'Failed to elevate connection', { requireData: true });
       return data;
     },
     onSuccess: () => toast.success('Connection elevated to managed inventory'),
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Elevation failed'),
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: ['inventory', 'connections'] });
       qc.invalidateQueries({ queryKey: ['inventory'] });
     },
   });
@@ -411,7 +415,11 @@ export function InventoryPage() {
   // because that clause silently stopped covering it.
   const usesAssetDataset = def.anchor === 'asset' && !isConn && !def.placeholder
     && lens !== 'assets' && lens !== 'map' && lens !== 'software';
-  const assetsQ = useAssets(page, search, usesAssetDataset, staleCutoff);
+  // The raw `search` drives the input and the client-side key filter; the
+  // DEBOUNCED value reaches the server-backed query keys, so a burst of
+  // keystrokes is one request.
+  const serverSearch = useDebouncedValue(search);
+  const assetsQ = useAssets(page, serverSearch, usesAssetDataset, staleCutoff);
   // #H-6: "Unknown" must be offered — the server already partitions the whole
   // set into internal / third_party / unknown (see effectiveOwnershipExpr in
   // certificate_service.go), but the filter dropdown previously only exposed
@@ -427,15 +435,15 @@ export function InventoryPage() {
     setParams(sp, { replace: true });
     setPage(1);
   };
-  const certsQ = useCerts(page, search, isCert, isCert ? certOwnership : undefined, isCert ? trustFilterParam(certTrust) : undefined);
+  const certsQ = useCerts(page, serverSearch, isCert, isCert ? certOwnership : undefined, isCert ? trustFilterParam(certTrust) : undefined);
   const keysQ = useKeys(isKey);
-  const configsQ = useConfigs(page, search, isConfig, def.protocol);
-  const connsQ = useConnections(page, search, isConn, connectionStrengthFilter(fConnectionStrength));
+  const configsQ = useConfigs(page, serverSearch, isConfig, def.protocol);
+  const connsQ = useConnections(page, serverSearch, isConn, connectionStrengthFilter(fConnectionStrength));
   // Data Protection: at-rest crypto applications (buckets, databases). The risk
   // filter is pushed to the server as `risk_at_least`, built from the SHARED
   // band minimums (LEVEL_MIN) rather than a hand-typed threshold.
   const appsQ = useCryptoApplications(isData, {
-    page, pageSize: PAGE_SIZE, search,
+    page, pageSize: PAGE_SIZE, search: serverSearch,
     resourceType: resourceTypeParam(fResourceType),
     determined: determinedParam(fAssessment),
     riskAtLeast: effectiveRisk !== 'All' ? (effectiveRisk as RiskLevel) : undefined,

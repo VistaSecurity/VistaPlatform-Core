@@ -350,6 +350,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/forgot-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Request a password-reset email
+         * @description Unauthenticated. Emails a password-reset link to the address if it has an account. The answer is the same 200 whether or not the address is known (and when the per-email limit is exceeded), so the endpoint cannot be used to discover which addresses are registered.
+         */
+        post: operations["forgotPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/reset-password": {
         parameters: {
             query?: never;
@@ -703,7 +723,7 @@ export interface paths {
         put?: never;
         /**
          * Stop an active impersonation
-         * @description Adds the impersonation token's JTI to the revocation denylist. Returns 204 with no body.
+         * @description Adds the impersonation token's JTI to the revocation denylist. Returns 204 with no body. Only the administrator who started the impersonation may stop it (403 for anyone else, 404 when no impersonation with that JTI was started).
          */
         post: operations["stopAdminImpersonation"];
         delete?: never;
@@ -742,7 +762,7 @@ export interface paths {
         get?: never;
         /**
          * Update the current tenant's organization details (partial)
-         * @description Partial update of the current tenant row — only the fields present in the body are written (name, domain, billing_email, custom_branding, ui_config, settings); omitted fields are left untouched. The tenant is resolved from the auth context, never from the body. Sending a body with none of the updatable fields returns 400 ("No fields to update"). Gated by settings.update. UI consumer: frontend-v2 Settings → Organization → Overview.
+         * @description Partial update of the current tenant row — only the fields present in the body are written (name, domain, billing_email); omitted fields are left untouched. The tenant is resolved from the auth context, never from the body. Sending a body with none of the updatable fields returns 400 ("No fields to update"). Gated by settings.update. UI consumer: frontend-v2 Settings → Organization → Overview.
          */
         put: operations["updateCurrentTenant"];
         post?: never;
@@ -2437,11 +2457,13 @@ export interface components {
         PublicTiersResponse: {
             tiers: components["schemas"]["PublicTier"][];
         };
-        /** @description Refusal for a user of an organization that is not usable (owner decision, RC-4 /). `code` is stable and machine-readable; `error` is a sentence for the sign-in page. `tenant_status_unavailable` accompanies HTTP 503 when the organization's state could not be read — enforcement fails closed. */
+        /** @description Refusal for a user of an organization that is not usable (owner decision, RC-4 /). `code` is stable and machine-readable; `error` is a sentence for the sign-in page. `tenant_status_unavailable` accompanies HTTP 503 when the organization's state could not be read — enforcement fails closed. `sso_required` (HTTP 403, login only) is not a tenant-state block: the organization's authentication policy refuses a local password for this user (sso_only for everyone, enforce_sso for non-admins); the user must sign in through the identity provider. `platform_account_use_admin_console` (HTTP 403, login/authenticate/refresh) means the credentials are valid but belong to a platform account, which this service does not sign in; `admin_url` points at the admin console. It is only returned to a caller who proved the password -- a wrong password answers 401 like any other account. */
         TenantBlockedError: {
             error: string;
             /** @enum {string} */
-            code: "tenant_suspended" | "tenant_deleted" | "tenant_status_unavailable";
+            code: "tenant_suspended" | "tenant_deleted" | "tenant_status_unavailable" | "sso_required" | "platform_account_use_admin_console";
+            /** @description Only with `platform_account_use_admin_console`, and only when the service knows the admin console's address. */
+            admin_url?: string;
         };
         /** @description CURRENT error shape returned by these endpoints today: a single human-readable string under `error`. Some 400s carry extra sibling keys (e.g. `details`, `required_permission`), so additionalProperties is permitted here. Unstructured — cannot be branched on safely. Superseded by the ADR-0002 `Error` envelope below as endpoints are hardened. */
         LegacyError: {
@@ -2508,6 +2530,11 @@ export interface components {
             /** @description Number of current documents the user is now on record as accepting. */
             accepted_count: number;
         };
+        /** @description Forgot-password body (models.ForgotPasswordRequest). email is required and must be a syntactically valid address. */
+        ForgotPasswordRequest: {
+            /** Format: email */
+            email: string;
+        };
         /** @description Password-reset body (models.ResetPasswordRequest). token, password and new_password are all required (the two password fields are min 8). */
         ResetPasswordRequest: {
             token: string;
@@ -2528,7 +2555,7 @@ export interface components {
         MessageResponse: {
             message: string;
         };
-        /** @description Partial current-tenant update — every field optional; only present fields are written. The handler applies no per-field validation beyond JSON binding (billing_email is a plain string, not format-checked), so the spec types match the handler, not an aspiration. The three JSONB blobs (custom_branding / ui_config / settings) are replaced wholesale when present, not merged — prefer the dedicated /tenant/branding and /tenant/ui-config endpoints for those. */
+        /** @description Partial current-tenant update — every field optional; only present fields are written. The handler applies no per-field validation beyond JSON binding (billing_email is a plain string, not format-checked), so the spec types match the handler, not an aspiration. Any other field (custom_branding, ui_config, settings, ...) is refused with 400 naming it: branding and UI config have their own endpoints (/tenant/branding, /tenant/ui-config) with their own gates. */
         UpdateTenantRequest: {
             /** @description Organization display name. */
             name?: string;
@@ -2536,18 +2563,6 @@ export interface components {
             domain?: string;
             /** @description Billing contact email. Not format-validated server-side. */
             billing_email?: string;
-            /** @description Replaces the stored custom_branding JSONB wholesale. */
-            custom_branding?: {
-                [key: string]: unknown;
-            };
-            /** @description Replaces the stored ui_config JSONB wholesale. */
-            ui_config?: {
-                [key: string]: unknown;
-            };
-            /** @description Replaces the stored settings JSONB wholesale. */
-            settings?: {
-                [key: string]: unknown;
-            };
         };
         UpdateMeRequest: {
             first_name?: string;
@@ -3230,7 +3245,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
-            /** @description A user with this email already exists, OR (MSP installs only) the install is past its licensed tenant limit and grace period — `error` then reads "This platform is not accepting new organisations right now. Please contact the platform operator." and is meant to be shown as-is. The refusal deliberately carries no tenant counts and no licensing detail (the caller is unauthenticated); those are recorded in the audit trail as `tenant.create_refused_license_limit`. */
+            /** @description (MSP installs only) the install is past its licensed tenant limit and grace period — `error` then reads "This platform is not accepting new organisations right now. Please contact the platform operator." and is meant to be shown as-is. The refusal deliberately carries no tenant counts and no licensing detail (the caller is unauthenticated); those are recorded in the audit trail as `tenant.create_refused_license_limit`. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3265,7 +3280,7 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
-            /** @description A user with this email already exists, OR (MSP installs only) the install is past its licensed tenant limit and grace period — `error` then reads "This platform is not accepting new organisations right now. Please contact the platform operator." and is meant to be shown as-is. The refusal deliberately carries no tenant counts and no licensing detail (the caller is unauthenticated); those are recorded in the audit trail as `tenant.create_refused_license_limit`. */
+            /** @description (MSP installs only) the install is past its licensed tenant limit and grace period — `error` then reads "This platform is not accepting new organisations right now. Please contact the platform operator." and is meant to be shown as-is. The refusal deliberately carries no tenant counts and no licensing detail (the caller is unauthenticated); those are recorded in the audit trail as `tenant.create_refused_license_limit`. */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3421,6 +3436,49 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             500: components["responses"]["LegacyServerError"];
+        };
+    };
+    forgotPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ForgotPasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Request accepted (identical for known and unknown addresses). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            /** @description Per-IP login-class rate limit exceeded (`Retry-After` header). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            /** @description The per-email rate limiter is unavailable; the endpoint fails closed. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
         };
     };
     resetPassword: {
@@ -4044,6 +4102,8 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["LegacyBadRequest"];
+            403: components["responses"]["LegacyForbidden"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };

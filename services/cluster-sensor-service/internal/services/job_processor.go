@@ -618,6 +618,10 @@ func (jp *JobProcessor) getJobOptions(tenantID, jobID string) (map[string]interf
 	return nil, nil
 }
 
+// noActiveScanningNote is the note of a job that asked for no active scanning:
+// it completes having probed nothing.
+const noActiveScanningNote = "no active scanning requested; nothing probed"
+
 func (jp *JobProcessor) processDiscoveryJob(ctx context.Context, job *models.DiscoveryJob) error {
 	// Check execution mode - cloud jobs should be handled by device-interrogation-service
 	if job.ExecutionMode == "cloud" {
@@ -651,7 +655,10 @@ func (jp *JobProcessor) processDiscoveryJob(ctx context.Context, job *models.Dis
 	// If active scanning is explicitly disabled, skip all scanning
 	if activeScanning, ok := opts["active_scanning"].(bool); ok && !activeScanning {
 		log.Printf("Active scanning disabled for job %s, skipping all probes", job.ID)
-		return nil
+		// The job still ends completed (nothing failed and nobody cancelled
+		// it), but it must not read as a scan that found nothing: the note is
+		// surfaced on the job (models.DiscoveryJob.Note).
+		return jp.discoveryService.setJobNote(job.ID, noActiveScanningNote)
 	}
 
 	// A scan-plan job runs on the shared engine, one durable unit per

@@ -1,4 +1,7 @@
 {{- if .Values.seedData.enabled }}
+{{- if not (trim (.Files.Get "files/schema/seed.sql")) }}
+{{- fail "seedData.enabled=true but files/schema/seed.sql is empty or missing: the chart in this checkout was not staged, so the seed Job would run an empty script, psql would exit 0 and no platform admin, roles or frameworks would exist. Install the published OCI chart, or run scripts/stage-chart-sql.sh first (it copies scripts/database/seed.sql into the chart), or set seedData.enabled=false if you manage seed data yourself." }}
+{{- end }}
 {{/*
 Applies scripts/database/seed.sql on every install and upgrade.
 
@@ -12,6 +15,11 @@ can log in). To prevent that, schema-migration records a completion marker
 schema is fully applied, and this Job blocks until the marker for the current
 schema hash is present before seeding. Keying on the hash makes it correct for
 upgrades too (it waits for THIS schema version, not a stale prior marker).
+
+With schemaMigration.enabled=false nothing in this chart writes that marker, so
+the Job instead waits only for the operator's own schema to exist (the
+public.tenants sentinel, vistaplatform.schemaSentinelQuery — the same check the
+backends' wait-for-schema init container makes in that mode).
 
 seed.sql is idempotent — every INSERT uses ON CONFLICT DO NOTHING or
 ON CONFLICT DO UPDATE — so re-running on upgrades is safe and ensures new seed
@@ -116,6 +124,9 @@ spec:
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
+      {{- with include "vistaplatform.pullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
       {{- if .Values.enterprise.contentBundle.enabled }}
@@ -259,6 +270,7 @@ spec:
               until pg_isready -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE"; do
                 sleep 2
               done
+              {{- if .Values.schemaMigration.enabled }}
               echo "Waiting for schema-migration (hash {{ $schemaHash }}) to finish..."
               i=0
               until psql -tAc "{{ include "vistaplatform.schemaMarkerQuery" . }}" 2>/dev/null | grep -q 1; do
@@ -269,6 +281,19 @@ spec:
                 fi
                 sleep 3
               done
+              {{- else }}
+              echo "schemaMigration.enabled=false: this chart does not migrate the database, so there is no completion marker to wait for."
+              echo "Waiting only for a schema to exist (sentinel: public.tenants)..."
+              i=0
+              until psql -tAc "{{ include "vistaplatform.schemaSentinelQuery" . }}" 2>/dev/null | grep -q 1; do
+                i=$((i + 1))
+                if [ "$i" -gt 200 ]; then
+                  echo "ERROR: no schema found (public.tenants is missing) after ~10m; aborting seed. With schemaMigration.enabled=false, apply scripts/database/schema.sql yourself before the seed Job runs."
+                  exit 1
+                fi
+                sleep 3
+              done
+              {{- end }}
               echo "Applying seed data..."
               psql -f /seed/seed.sql
               {{- if .Values.enterprise.contentBundle.enabled }}
@@ -280,6 +305,7 @@ spec:
               until pg_isready -d "$DATABASE_URL"; do
                 sleep 2
               done
+              {{- if .Values.schemaMigration.enabled }}
               echo "Waiting for schema-migration (hash {{ $schemaHash }}) to finish..."
               i=0
               until psql -d "$DATABASE_URL" -tAc "{{ include "vistaplatform.schemaMarkerQuery" . }}" 2>/dev/null | grep -q 1; do
@@ -290,6 +316,19 @@ spec:
                 fi
                 sleep 3
               done
+              {{- else }}
+              echo "schemaMigration.enabled=false: this chart does not migrate the database, so there is no completion marker to wait for."
+              echo "Waiting only for a schema to exist (sentinel: public.tenants)..."
+              i=0
+              until psql -d "$DATABASE_URL" -tAc "{{ include "vistaplatform.schemaSentinelQuery" . }}" 2>/dev/null | grep -q 1; do
+                i=$((i + 1))
+                if [ "$i" -gt 200 ]; then
+                  echo "ERROR: no schema found (public.tenants is missing) after ~10m; aborting seed. With schemaMigration.enabled=false, apply scripts/database/schema.sql yourself before the seed Job runs."
+                  exit 1
+                fi
+                sleep 3
+              done
+              {{- end }}
               echo "Applying seed data..."
               psql -d "$DATABASE_URL" -f /seed/seed.sql
               {{- if .Values.enterprise.contentBundle.enabled }}

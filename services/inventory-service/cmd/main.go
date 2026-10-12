@@ -164,6 +164,9 @@ func main() {
 	r := gin.Default()
 	r.Use(sharedmw.SecurityHeaders())
 
+	// Bound every request body before anything reads it (see body_limit.go).
+	r.Use(requestBodyLimit())
+
 	// CORS middleware - allow requests from frontend origins
 	// This is needed when requests bypass Traefik API gateway (e.g., direct service access)
 	// In production, CORS_ORIGINS env var should be set to allowed domains
@@ -1058,6 +1061,11 @@ func main() {
 	// place — then every six hours; promotes only, never raises a proposal.
 	// Recorded per tenant in class_floor_sweep_state.
 	go jobs.StartClassFloorSweepWorker(ctx, bypassDB, services.ClassFloorSweepTenants, assetService)
+
+	// Keeps the persisted crypto risk judgement (crypto_risk_judgments) warm and
+	// back-fills the rows a schema upgrade creates stale. Readers
+	// re-judge anything stale themselves; this only keeps requests free of it.
+	go jobs.StartCryptoRiskJudgmentWorker(ctx, bypassDB, services.ClassFloorSweepTenants, cryptoRisksService)
 
 	// Certificate trust backfill: every six hours, evaluate the
 	// certificates no request path reached (stored before trust evaluation

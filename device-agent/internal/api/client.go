@@ -23,6 +23,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig"
 	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/shared/httpclient"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 )
 
@@ -121,9 +122,7 @@ func NewOutboundClient(cfg *config.Config) *OutboundClient {
 	}
 
 	if configured {
-		httpClient.Transport = &http.Transport{
-			TLSClientConfig: tlsConfig,
-		}
+		httpClient.Transport = httpclient.NewTransport(tlsConfig)
 	}
 
 	return &OutboundClient{
@@ -179,6 +178,9 @@ func (c *OutboundClient) Register(version string) error {
 		"version":          version,
 		"csr":              csrPEM,           // Include CSR in registration request
 		"agent_id":         agentID.String(), // Proposed agent ID
+		// This build stores the per-agent secret the platform issues at
+		// enrolment; without the flag the platform issues none.
+		"supports_agent_secret": true,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
@@ -213,6 +215,8 @@ func (c *OutboundClient) Register(version string) error {
 		ServerCACert         string `json:"server_ca_cert"`    // CA certificate for trust
 		ControlPlaneURL      string `json:"control_plane_url"` // mTLS passthrough URL to switch to (#1033)
 		CertificateExpiresAt string `json:"certificate_expires_at"`
+		AgentSecret          string `json:"agent_secret"`
+		AgentSecretVersion   int    `json:"agent_secret_version"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("failed to decode registration response: %w", err)
@@ -224,6 +228,13 @@ func (c *OutboundClient) Register(version string) error {
 	}
 	c.agentID = parsedID
 	c.config.AgentID = result.AgentID
+
+	// The per-agent secret the platform will seal job credentials under.
+	// It is returned once; the caller persists it with the certificate, and only
+	// then does the config stop keeping the registration key.
+	if result.AgentSecret != "" {
+		c.config.SetEnrolledAgentSecret(result.AgentSecret, result.AgentSecretVersion)
+	}
 
 	// Store certificate (signed by platform)
 	if result.ClientCert != "" {
@@ -383,7 +394,7 @@ func (c *OutboundClient) SubmitResult(result *models.JobResult) error {
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to submit result: %s (status: %d)", string(body), resp.StatusCode)
+		return &SubmitStatusError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 
 	return nil

@@ -11,9 +11,12 @@
 import { useEffect, useLayoutEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { Icon } from '../components/ui';
+import { socialSignInErrorMessage } from './social-sign-in-errors';
 
 const ACCENT = 'var(--accent-gradient)';
 const LEGACY_TOKEN_PARAMS = ['access_token', 'refresh_token', 'id_token'] as const;
+
+const GENERIC_SSO_ERROR = 'We couldn’t complete single sign-on. Please try again, or sign in with your email and password.';
 
 export function getSsoCallbackError(params: URLSearchParams): string | null {
   // Tokens must only arrive in httpOnly cookies set by auth-service. Fail
@@ -22,10 +25,14 @@ export function getSsoCallbackError(params: URLSearchParams): string | null {
   if (LEGACY_TOKEN_PARAMS.some((name) => params.has(name))) {
     return 'This sign-in link uses an obsolete and insecure format. Please start sign-in again.';
   }
+  // The query string is attacker-controllable (anyone can link to this route),
+  // so nothing from it is rendered: a known code maps to our own wording, and
+  // anything else - an unknown code, or a bare error_description - gets the
+  // generic message.
   const error = params.get('error');
-  if (error) return error;
-  const description = params.get('error_description');
-  return description ?? null;
+  if (error) return socialSignInErrorMessage(error) ?? GENERIC_SSO_ERROR;
+  if (params.has('error_description')) return GENERIC_SSO_ERROR;
+  return null;
 }
 
 export function SsoCallbackPage() {

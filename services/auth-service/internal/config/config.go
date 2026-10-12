@@ -9,12 +9,25 @@ import (
 
 // Config holds all configuration for the auth service
 type Config struct {
-	Port             string
-	Environment      string
-	DatabaseURL      string
-	RedisURL         string
-	JWTSecret        string
-	JWTExpiry        time.Duration
+	Port        string
+	Environment string
+	DatabaseURL string
+	RedisURL    string
+	JWTSecret   string
+	JWTExpiry   time.Duration
+
+	// JWTAcceptLegacyHMAC says whether this service still verifies HS256
+	// tokens signed with JWT_SECRET (env JWT_ACCEPT_LEGACY_HMAC, default true so
+	// a non-chart deployment keeps working across an upgrade). The chart sets it
+	// false once jwtSigning.acceptLegacyHmac closes the migration window.
+	// JWT_SECRET itself stays required: CSRF binding and the no-signing-key HS256
+	// fallback still use it. See auth.JWTService.SetAcceptLegacyHMAC.
+	JWTAcceptLegacyHMAC bool
+
+	// TrustedProxies are the CIDRs/IPs of reverse proxies whose X-Forwarded-For
+	// is believed (env TRUSTED_PROXY_CIDRS, comma separated). Empty trusts no
+	// one, so ClientIP() is the TCP peer. See api.SetupRouter.
+	TrustedProxies   []string
 	LogLevel         string
 	CORSOrigins      []string
 	RateLimitDefault int
@@ -61,6 +74,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	config.JWTExpiry = jwtExpiry
+	config.JWTAcceptLegacyHMAC = sharedconfig.GetEnvAsBool("JWT_ACCEPT_LEGACY_HMAC", true)
+	for _, cidr := range strings.Split(sharedconfig.GetEnv("TRUSTED_PROXY_CIDRS", ""), ",") {
+		if cidr = strings.TrimSpace(cidr); cidr != "" {
+			config.TrustedProxies = append(config.TrustedProxies, cidr)
+		}
+	}
 
 	// Parse CORS origins - supports multiple origins for development and production
 	// Default includes both standard port 3000 and Vite dev server port 5174

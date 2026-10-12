@@ -115,8 +115,11 @@ export interface paths {
          * List CBOM artifacts for the current tenant
          * @description Returns non-deleted artifacts ordered by `generated_at` DESC.
          *
-         *     `limit` defaults to 50 and is clamped to 200. Values below 1 or
-         *     non-numeric are rejected with 400. `scope_id` filters server-side.
+         *     Paged with `page` / `page_size` (`page_size` max 100); the body carries
+         *     `total` and `total_pages`. `limit` predates paging and is honoured as the
+         *     page size when `page_size` is absent (default 50, clamped to 200). Values
+         *     below 1 or non-numeric are rejected with 400. `scope_id` filters
+         *     server-side.
          */
         get: operations["listCBOMArtifacts"];
         put?: never;
@@ -235,11 +238,44 @@ export interface paths {
          *     artifact was signed and a signer is configured **and** the hash check
          *     passed, also re-derives the HMAC and compares.
          *
+         *     A signed artifact carries an Ed25519 signature over a canonical
+         *     envelope (see `signed_envelope`). Verify checks the signature under the
+         *     key named by `signature_kid` — the current key or a retired one — and
+         *     recomputes every envelope field from the row, naming any that no
+         *     longer match in `envelope_mismatch`. An artifact signed before Ed25519
+         *     (shared-secret HMAC) answers `signature_valid: false` with reason
+         *     `legacy-hmac; regenerate`.
+         *
          *     When bytes can't be loaded (no inline content and no storage wired)
          *     the call still returns 200 with `hash_valid` and `signature_checked`
          *     false — the UI greys the result rather than erroring.
          */
         post: operations["verifyCBOMArtifact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cbom/signing-keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Public keys that verify artifact signatures
+         * @description The Ed25519 public keys artifact signatures verify under — the active
+         *     key and every retired one, so an artifact signed before a rotation
+         *     still verifies. Hand a key to a third party and they can verify an
+         *     artifact offline; the recipe is in
+         *     docsv4/enterprise/cbom/cbom-compliance-attestation.md. Empty on a Core
+         *     build, which signs nothing.
+         */
+        get: operations["listCBOMSigningKeys"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -439,10 +475,19 @@ export interface components {
             generated_at: string;
             /** Format: uuid */
             generated_by: string;
-            /** @description Phase 4. Hex HMAC-SHA256 over `content_hash`. Empty when unsigned. */
+            /** @description LEGACY. Hex HMAC-SHA256 under the platform's shared internal secret, present only on artifacts signed before Ed25519. No new artifact carries one; `/verify` reports such a row as `legacy-hmac; regenerate`. */
             signature_hmac?: string;
-            /** @description Phase 4. Key id used to sign. Empty when unsigned. */
+            /** @description Id of the key that signed this artifact (first 16 hex characters of the SHA-256 of the raw Ed25519 public key). Empty when unsigned. */
             signature_kid?: string;
+            /** @description Hex Ed25519 signature over `signed_envelope`. Empty when unsigned. */
+            signature?: string;
+            /**
+             * @description Signature scheme. Empty when unsigned.
+             * @enum {string}
+             */
+            signature_algorithm?: "ed25519";
+            /** @description The canonical JSON envelope exactly as signed: `{"hash","scope_id","scope_version","layers_hash","kind","generated_by"}` in that key order. `hash` is the SHA-256 of the canonical bytes (`content_hash`); `layers_hash` is the SHA-256 of the canonical JSON of `layers`. Offline verification recipe: docsv4/enterprise/cbom/cbom-compliance-attestation.md. */
+            signed_envelope?: string;
             provenance: components["schemas"]["Provenance"];
             /** @description Optional attestation/annotation layers (e.g. compliance_attestation). Emitted as `null` when generation ran with `include_attestation: false`, when the attestation builder is unwired, or when the build produced no attestable findings — `Layers []Layer` in Go lacks `omitempty`, so a nil slice serializes as `null` rather than `[]`. Consumers must tolerate both. */
             layers: components["schemas"]["Layer"][] | null;
@@ -473,6 +518,14 @@ export interface components {
         /** @description CURRENT list envelope for GET /cbom/artifacts. Pre-ADR-0002 — a collection wrapped under the `artifacts` key with no pagination. Hardening this to the ADR-0002 collection envelope (`{ data, pagination }`) is the documented go-forward change. */
         CBOMArtifactListResponse: {
             artifacts: components["schemas"]["CBOMArtifact"][];
+            page: number;
+            page_size: number;
+            /**
+             * Format: int64
+             * @description Artifacts matching the filters, across all pages.
+             */
+            total: number;
+            total_pages: number;
         };
         GenerateCBOMRequest: {
             /** Format: uuid */
@@ -503,6 +556,8 @@ export interface components {
             storage_degraded?: string;
             /** @description Present when a compliance-attestation layer was requested and could not be built. Absent means either not requested or built successfully — the artifact's `layers` distinguishes the two. */
             attestation_error?: string;
+            /** @description Present when signing was on by default for the tenant but the deployment has no signing key, so the artifact is unsigned. An explicit `sign: true` in that state is refused with 503 instead. */
+            signing_error?: string;
         };
         VerifyResponse: {
             /** Format: uuid */
@@ -513,12 +568,40 @@ export interface components {
             hash_recomputed?: string;
             /** @description The content_hash recorded on the row. */
             hash_stored: string;
-            /** @description True when the stored HMAC matched a recomputed HMAC against the platform's current signing key. Only meaningful when `signature_checked` is true. */
+            /** @description True when the Ed25519 signature verifies over the stored envelope under `signature_kid` AND every envelope field still matches the row. Only meaningful when `signature_checked` is true. */
             signature_valid: boolean;
-            /** @description False covers three cases: artifact unsigned, no verifier wired, or the hash check failed (in which case re-signing would be misleading). Treat false as "not asserted," not "asserted invalid." */
+            /** @description False covers: artifact unsigned, no verifier wired, or the bytes could not be read. Treat false as "not asserted," not "asserted invalid." */
             signature_checked: boolean;
             /** @description Key id stored on the artifact; empty for unsigned. */
             signature_kid?: string;
+            /**
+             * @description Scheme of the stored signature; `hmac-sha256` marks a legacy row.
+             * @enum {string}
+             */
+            signature_algorithm?: "ed25519" | "hmac-sha256";
+            /**
+             * @description Why a checked signature is not valid. Omitted when valid.
+             * @enum {string}
+             */
+            signature_reason?: "legacy-hmac; regenerate" | "envelope-mismatch" | "signature-invalid" | "unknown-kid";
+            /** @description Signed-envelope fields whose recorded value no longer matches the row. */
+            envelope_mismatch?: ("hash" | "scope_id" | "scope_version" | "layers_hash" | "kind" | "generated_by")[];
+        };
+        SigningKey: {
+            /** @description First 16 hex characters of the SHA-256 of the raw 32-byte public key. */
+            kid: string;
+            /** @enum {string} */
+            algorithm: "ed25519";
+            /** @description SubjectPublicKeyInfo PEM ("PUBLIC KEY"). */
+            public_key_pem: string;
+            /** @description True for the key that signs new artifacts. */
+            active: boolean;
+            /** Format: date-time */
+            created_at: string;
+        };
+        SigningKeysResponse: {
+            /** @description Every verification key, current and retired. Empty on a Core build. */
+            keys: components["schemas"]["SigningKey"][];
         };
         CompareRequest: {
             /** Format: uuid */
@@ -659,7 +742,7 @@ export interface components {
                 "application/json": components["schemas"]["LegacyError"];
             };
         };
-        /** @description Operation not permitted (e.g. deleting a system scope). */
+        /** @description Conflict (e.g. deleting a system scope, or a scope name that already exists for the tenant). */
         LegacyConflict: {
             headers: {
                 [name: string]: unknown;
@@ -736,6 +819,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -794,6 +878,7 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -911,6 +996,15 @@ export interface operations {
                     "application/json": components["schemas"]["LegacyError"];
                 };
             };
+            /** @description The request explicitly asked for `sign: true` but this deployment has no signing key configured (an Enterprise build without `INTERNAL_AUTH_SECRET`). No artifact is created. When signing is only on by default for the tenant the artifact is still produced and the 202 body carries `signing_error` instead. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
         };
     };
     listCBOMArtifacts: {
@@ -920,7 +1014,11 @@ export interface operations {
                 scope_id?: string;
                 /** @description Filter to one artifact kind. **Omitted means every kind, not `cbom`** — this is one list of the tenant's artifacts, and defaulting the filter would hide an SBOM someone just generated behind a filter they never set. An unrecognised value is 400, not an empty list. */
                 kind?: components["schemas"]["ArtifactKind"];
-                /** @description Maximum number of artifacts to return. Defaults to 50; values above 200 are clamped to 200. */
+                /** @description 1-based page number. */
+                page?: number;
+                /** @description Artifacts per page. Values above 100 are clamped to 100. */
+                page_size?: number;
+                /** @description Page size, when `page_size` is absent. Maximum number of artifacts to return. Defaults to 50; values above 200 are clamped to 200. */
                 limit?: number;
             };
             header?: never;
@@ -1042,6 +1140,15 @@ export interface operations {
                 };
             };
             404: components["responses"]["LegacyNotFound"];
+            /** @description An artifact involved was stored before the internal view was kept, so it cannot be compared or re-rendered as SPDX/PDF without producing a wrong result. Regenerate it. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
             /** @description `format=ocsf` was requested but this deployment has no OCSF renderer wired. A wiring fault, not a missing subscription — the format is Core. */
             501: {
@@ -1081,6 +1188,28 @@ export interface operations {
             500: components["responses"]["LegacyServerError"];
         };
     };
+    listCBOMSigningKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The verification keys. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SigningKeysResponse"];
+                };
+            };
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
     compareCBOMArtifacts: {
         parameters: {
             query?: never;
@@ -1115,6 +1244,15 @@ export interface operations {
                 };
             };
             404: components["responses"]["LegacyNotFound"];
+            /** @description An artifact involved was stored before the internal view was kept, so it cannot be compared or re-rendered as SPDX/PDF without producing a wrong result. Regenerate it. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -1151,6 +1289,15 @@ export interface operations {
                 };
             };
             404: components["responses"]["LegacyNotFound"];
+            /** @description An artifact involved was stored before the internal view was kept, so it cannot be compared or re-rendered as SPDX/PDF without producing a wrong result. Regenerate it. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };

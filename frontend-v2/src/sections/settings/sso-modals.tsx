@@ -4,6 +4,7 @@
 // providers (owner decision D2 — OIDC-only for v3; the backend rejects SAML
 // provider creation). Legacy SAML providers stay viewable/editable.
 // Client secrets are write-only: never echoed back, blank on edit = unchanged.
+import { rolesQuery } from './roles-query';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@vistasecurity/primitives/auth';
@@ -13,6 +14,7 @@ import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../componen
 import { normalizeAllowedDomains } from './allowed-domains';
 import { entraDomainsNeedDirectory, isEntraProviderType } from './entra-authority';
 import type { authServiceComponents as AuthC } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
 
 type SSOProvider = AuthC['schemas']['SSOProvider'];
 type GroupRoleMapping = AuthC['schemas']['GroupRoleMapping'];
@@ -62,11 +64,6 @@ const PROVIDER_DEFAULTS: Record<string, OAuthEndpoints> = {
 const TEMPLATE_URLS = new Set(
   Object.values(PROVIDER_DEFAULTS).flatMap((d) => [d.authUrl, d.tokenUrl, d.userinfoUrl]),
 );
-
-function legacyMessage(error: unknown, fallback: string): string {
-  if (error && typeof error === 'object' && 'error' in error) return String(error.error);
-  return fallback;
-}
 
 type MappingDraft = { external_group_name: string; role_id: string };
 
@@ -183,15 +180,7 @@ export function SsoProviderModal({ provider, open, onClose }: { provider: SSOPro
   // Not destructured: `const { hasPermission } = usePermissions()` trips
   // @typescript-eslint/unbound-method and the lint job is a warning ratchet.
   const rolesReadable = usePermissions().hasPermission(TENANT_PERMISSIONS.users.manage);
-  const rolesQ = useQuery({
-    queryKey: ['settings', 'roles', tenant?.id],
-    enabled: !!tenant?.id && open && rolesReadable,
-    queryFn: async () => {
-      const { data, error } = await clients.auth.GET('/tenant/{tenantId}/roles', { params: { path: { tenantId: tenant!.id } } });
-      if (error || !data) throw new Error('Failed to load roles');
-      return data;
-    },
-  });
+  const rolesQ = useQuery({ ...rolesQuery(tenant?.id), enabled: !!tenant?.id && open && rolesReadable });
   const roles = (rolesQ.data?.roles ?? []).map((r) => ({ id: r.id, name: r.name }));
 
   const normalizedDomains = normalizeAllowedDomains(domains);
@@ -231,16 +220,14 @@ export function SsoProviderModal({ provider, open, onClose }: { provider: SSOPro
       } : {};
 
       if (isEdit) {
-        const { error, response } = await clients.auth.PUT('/tenant/sso/providers/{id}', {
+        unwrap(await clients.auth.PUT('/tenant/sso/providers/{id}', {
           params: { path: { id: provider.id } },
           body: { ...common, ...oauthFields, ...samlFields },
-        });
-        if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to update the provider'));
+        }), 'Failed to update the provider');
       } else {
-        const { error, response } = await clients.auth.POST('/tenant/sso/providers', {
+        unwrap(await clients.auth.POST('/tenant/sso/providers', {
           body: { provider_type: type, ...common, ...oauthFields, ...samlFields },
-        });
-        if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to create the provider'));
+        }), 'Failed to create the provider');
       }
     },
     onSuccess: () => {
@@ -397,8 +384,7 @@ export function SsoProviderDeleteModal({ provider, open, onClose }: { provider: 
   const mutation = useMutation({
     mutationFn: async () => {
       if (!provider) return;
-      const { error, response } = await clients.auth.DELETE('/tenant/sso/providers/{id}', { params: { path: { id: provider.id } } });
-      if (error || !response.ok) throw new Error(legacyMessage(error, 'Failed to delete the provider'));
+      unwrap(await clients.auth.DELETE('/tenant/sso/providers/{id}', { params: { path: { id: provider.id } } }), 'Failed to delete the provider');
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['settings', 'sso-providers'] });

@@ -29,6 +29,7 @@ import type { SettingValue } from './agent-config';
 // command-center.tsx, and duplicating it here would mean a second cache entry
 // for the same data.
 import { useDiscoveryCounts } from './queries';
+import { unwrap } from '../../lib/api-result';
 
 type Sensor = sensorManagerComponents['schemas']['Sensor'];
 type HealthMetrics = sensorManagerComponents['schemas']['SensorHealthMetrics'];
@@ -398,11 +399,10 @@ function RevokeCertModal({ open, sensorId, onClose }: { open: boolean; sensorId:
 
   const revoke = useMutation({
     mutationFn: async () => {
-      const { error, response } = await clients.sensors.POST('/sensors/{sensor_id}/certificates/revoke', {
+      unwrap(await clients.sensors.POST('/sensors/{sensor_id}/certificates/revoke', {
         params: { path: { sensor_id: sensorId } },
         body: { reason: reason.trim() },
-      });
-      if (!response.ok || error) throw new Error('Failed to revoke certificate');
+      }), 'Failed to revoke certificate');
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['discovery', 'sensor-certificate', sensorId] });
@@ -753,11 +753,10 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
 
   const saveNics = useMutation({
     mutationFn: async () => {
-      const { error, response } = await clients.sensors.PUT('/sensors/{sensor_id}/interfaces', {
+      unwrap(await clients.sensors.PUT('/sensors/{sensor_id}/interfaces', {
         params: { path: { sensor_id: sensorId } },
         body: { add: toAdd, remove: toRemove },
-      });
-      if (!response.ok || error) throw new Error('Failed to update interfaces');
+      }), 'Failed to update interfaces');
     },
     onSuccess: () => {
       invalidateSensor();
@@ -767,11 +766,10 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
 
   const detect = useMutation({
     mutationFn: async () => {
-      const { error, response } = await clients.sensors.POST('/sensors/{sensor_id}/commands', {
+      unwrap(await clients.sensors.POST('/sensors/{sensor_id}/commands', {
         params: { path: { sensor_id: sensorId } },
         body: { command_type: 'list_interfaces', payload: {} },
-      });
-      if (!response.ok || error) throw new Error('Failed to queue detect command');
+      }), 'Failed to queue detect command');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] }),
   });
@@ -779,11 +777,10 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
   const saveConfig = useMutation({
     mutationFn: async () => {
       const tagList = tags.split(',').map((t) => t.trim()).filter(Boolean);
-      const { error, response } = await clients.sensors.PUT('/sensors/{sensor_id}/config', {
+      unwrap(await clients.sensors.PUT('/sensors/{sensor_id}/config', {
         params: { path: { sensor_id: sensorId } },
         body: { air_gapped: airGapped, description, tags: tagList },
-      });
-      if (!response.ok || error) throw new Error('Failed to save configuration');
+      }), 'Failed to save configuration');
     },
     onSuccess: () => invalidateSensor(),
   });
@@ -793,11 +790,10 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
   const saveInterval = useMutation({
     mutationFn: async () => {
       if (reportingInterval == null) throw new Error('Pick an interval');
-      const { error, response } = await clients.sensors.PUT('/sensors/{sensor_id}/config', {
+      unwrap(await clients.sensors.PUT('/sensors/{sensor_id}/config', {
         params: { path: { sensor_id: sensorId } },
         body: { reporting_interval: reportingInterval },
-      });
-      if (!response.ok || error) throw new Error('Failed to update reporting interval');
+      }), 'Failed to update reporting interval');
     },
     onSuccess: () => {
       invalidateSensor();
@@ -935,11 +931,10 @@ function CommandsSection({ sensorId }: { sensorId: string }) {
       } catch {
         throw new Error('Payload is not valid JSON');
       }
-      const { error, response } = await clients.sensors.POST('/sensors/{sensor_id}/commands', {
+      unwrap(await clients.sensors.POST('/sensors/{sensor_id}/commands', {
         params: { path: { sensor_id: sensorId } },
         body: { command_type: commandType, payload },
-      });
-      if (!response.ok || error) throw new Error('Failed to queue command');
+      }), 'Failed to queue command');
     },
     onSuccess: () => {
       setPayloadText('{}');

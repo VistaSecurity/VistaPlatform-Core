@@ -41,9 +41,10 @@ function draft(over: Partial<ControlDraft> = {}): ControlDraft {
 function stubClient(impl?: (path: string, init: unknown) => unknown) {
   const POST = vi.fn().mockImplementation((path: string, init: unknown) => {
     const custom = impl?.(path, init);
-    if (custom !== undefined) return Promise.resolve(custom);
-    if (path.endsWith('/controls')) return Promise.resolve({ data: { control: { id: 'ctrl-1' } } });
-    return Promise.resolve({ data: {} });
+    // openapi-fetch always supplies `response`; unwrap treats !response.ok as failure.
+    if (custom !== undefined) return Promise.resolve({ response: new Response(null, { status: 400 }), ...(custom as object) });
+    if (path.endsWith('/controls')) return Promise.resolve({ data: { control: { id: 'ctrl-1' } }, response: new Response(null, { status: 200 }) });
+    return Promise.resolve({ data: {}, response: new Response(null, { status: 200 }) });
   });
   return { client: { POST } as never, POST };
 }

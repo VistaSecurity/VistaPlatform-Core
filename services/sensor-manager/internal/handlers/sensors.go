@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -34,10 +35,10 @@ func (h *Handler) GetSensors(c *gin.Context) {
 	if h.sensorServiceV2 != nil {
 		sensors, err := h.sensorServiceV2.ListSensors(c.Request.Context(), tenantID)
 		if err != nil {
-			// Log error for debugging but return empty list instead of 500
-			// This allows the UI to load even if database is temporarily unavailable
-			log.Printf("⚠️  Error listing sensors for tenant %s: %v", tenantID, err)
-			c.JSON(http.StatusOK, gin.H{"sensors": []interface{}{}})
+			// An empty 200 here reads as "this tenant has no sensors", which is
+			// a lie during a database blip. Say the fleet is unavailable.
+			log.Printf("Error listing sensors for tenant %s: %v", tenantID, err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Sensor list temporarily unavailable"})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"sensors": sensors})
@@ -77,10 +78,9 @@ func (h *Handler) GetSensorStats(c *gin.Context) {
 	if h.sensorServiceV2 != nil {
 		sensors, err := h.sensorServiceV2.ListSensors(c.Request.Context(), tenantID)
 		if err != nil {
-			// Log error for debugging but return default stats instead of 500
-			// This allows the UI to load even if database is temporarily unavailable
-			log.Printf("⚠️  Error getting sensor stats for tenant %s: %v", tenantID, err)
-			c.JSON(http.StatusOK, stats)
+			// Zeroed stats on a database error read as "no sensors"; fail honestly.
+			log.Printf("Error getting sensor stats for tenant %s: %v", tenantID, err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Sensor stats temporarily unavailable"})
 			return
 		}
 		total := len(sensors)
@@ -232,6 +232,31 @@ func (h *Handler) DeleteSensor(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "sensor deleted"})
 }
 
+const (
+	// maxCommandPayloadBytes bounds a command payload (its JSON encoding).
+	maxCommandPayloadBytes = 64 << 10
+	// maxPendingCommandsPerSensor bounds the undelivered backlog per sensor.
+	maxPendingCommandsPerSensor = 50
+	// maxSensorDiscoveriesLimit caps GetSensorDiscoveries' limit parameter.
+	maxSensorDiscoveriesLimit = 500
+)
+
+// tenantCommandTypes are the command verbs a tenant may queue by hand: exactly
+// the ones the sensor's command dispatcher (sensor/cmd processCommand) handles
+// as operator actions. Platform-dispatched verbs (discovery_job,
+// cancel_discovery_job, resolve_identity_dns) are written by their own
+// services behind dispatch guards and are deliberately not creatable here.
+var tenantCommandTypes = map[string]bool{
+	"restart":           true,
+	"update_config":     true,
+	"clear_cache":       true,
+	"trigger_scan":      true,
+	"update_interfaces": true,
+	"list_interfaces":   true,
+	"set_log_level":     true,
+	"export_logs":       true,
+}
+
 // CreateSensorCommand creates a command for a sensor
 func (h *Handler) CreateSensorCommand(c *gin.Context) {
 	sensor, _, ok := h.requireSensorAccess(c)
@@ -249,6 +274,15 @@ func (h *Handler) CreateSensorCommand(c *gin.Context) {
 		return
 	}
 
+	if !tenantCommandTypes[req.CommandType] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported command_type"})
+		return
+	}
+	if b, err := json.Marshal(req.Payload); err != nil || len(b) > maxCommandPayloadBytes {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Command payload too large (limit 64 KB)"})
+		return
+	}
+
 	cmd := &models.SensorCommand{
 		ID:          uuid.New(),
 		SensorID:    sensorID,
@@ -262,9 +296,14 @@ func (h *Handler) CreateSensorCommand(c *gin.Context) {
 	defer cancel()
 	// Use type assertion to underlying repository method signature
 	// Create a minimal wrapper to satisfy the interface without exposing internal types
-	if err := h.repo.CreateCommand(ctx, cmd); err != nil {
+	created, err := h.repo.CreateCommandIfUnderLimit(ctx, cmd, maxPendingCommandsPerSensor)
+	if err != nil {
 		h.logErr(c, err, "create sensor command", sensorID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+	if !created {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "This sensor already has the maximum number of pending commands; wait for it to pick them up"})
 		return
 	}
 
@@ -367,12 +406,16 @@ func (h *Handler) GetSensorDiscoveries(c *gin.Context) {
 	}
 	sensorID := sensor.ID
 
-	// Get limit from query parameter, default to 50
+	// Default 50, at most maxSensorDiscoveriesLimit: this reads a partitioned,
+	// high-volume table.
 	limit := 50
 	if limitStr := c.Query("limit"); limitStr != "" {
-		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
-			limit = parsedLimit
+		parsedLimit, err := strconv.Atoi(limitStr)
+		if err != nil || parsedLimit < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
+			return
 		}
+		limit = min(parsedLimit, maxSensorDiscoveriesLimit)
 	}
 
 	rows, err := h.repo.ListSensorDiscoveries(c.Request.Context(), sensorID, limit)

@@ -26,6 +26,9 @@ spec:
         app.kubernetes.io/component: admin-ui
     spec:
       automountServiceAccountToken: false
+      {{- with include "vistaplatform.pullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
       {{- $antiAffinity := include "vistaplatform.podAntiAffinity" (dict "ctx" . "component" "admin-ui") }}
@@ -35,7 +38,7 @@ spec:
       {{- end }}
       containers:
         - name: admin-ui
-          image: {{ include "vistaplatform.image" (dict "ctx" . "repo" "admin-ui" "tag" .Values.frontend.adminUi.image.tag) }}
+          image: {{ include "vistaplatform.image" (dict "ctx" . "repo" "admin-ui" "tag" .Values.frontend.adminUi.image.tag "digest" .Values.frontend.adminUi.image.digest) }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
@@ -75,4 +78,19 @@ spec:
     {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "admin-ui") | nindent 4 }}
   ports:
     - { name: http, port: 80, targetPort: 3007 }
+---
+{{- if gt (int (default .Values.defaultReplicas .Values.frontend.adminUi.replicas)) 1 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: admin-ui
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admin-ui
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "admin-ui") | nindent 6 }}
+{{- end }}
 {{- end }}

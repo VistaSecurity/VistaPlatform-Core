@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/security"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 )
 
 // SecurityService holds the security service instance
@@ -42,17 +43,10 @@ func GetSecurityEvents(svc securityProvider) gin.HandlerFunc {
 		}
 
 		// Parse query parameters
-		limit := 50
-		if limitStr := c.Query("limit"); limitStr != "" {
-			if parsed, err := strconv.Atoi(limitStr); err == nil && parsed > 0 && parsed <= 100 {
-				limit = parsed
-			}
-		}
-		offset := 0
-		if offsetStr := c.Query("offset"); offsetStr != "" {
-			if parsed, err := strconv.Atoi(offsetStr); err == nil && parsed >= 0 {
-				offset = parsed
-			}
+		limit, offset, perr := sharedapi.ParseLimitOffsetStrict(c, 50, 100)
+		if perr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": perr.Error()})
+			return
 		}
 
 		// Build filters. The severity/status/risk_level/is_anomaly filters that

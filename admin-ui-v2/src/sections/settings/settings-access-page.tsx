@@ -18,6 +18,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { DoorOpen, MailCheck, Building2, CheckCircle, XCircle } from 'lucide-react';
 import { clients } from '../../lib/clients';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 interface AccessSettings {
   registration_enabled: boolean;
@@ -56,8 +57,7 @@ function useSaveAccessSettings() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (patch: Partial<Omit<AccessSettings, 'signup_bootstrap'>>) => {
-      const { error } = await clients.admin.PUT('/admin/settings', { body: patch as any });
-      if (error) throw new Error((error as any)?.error ?? 'Save failed');
+      unwrap(await clients.admin.PUT('/admin/settings', { body: patch as any }), 'Save failed');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['platform', 'settings', 'access'] }),
   });

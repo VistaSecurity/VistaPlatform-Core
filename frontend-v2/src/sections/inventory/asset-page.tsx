@@ -12,6 +12,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import type { Asset } from '@vistasecurity/api-contract';
 import { parseSeverity, severityRank } from '@vistasecurity/primitives/ratings';
 import { Icon, MetaRow, RiskGauge, RiskChip, SectionLabel } from '../../components/ui';
@@ -1078,7 +1079,7 @@ function SoftwareTab({ asset }: { asset: Asset }) {
   const [status, setStatus] = useState('');
   const [sort, setSort] = useState<SoftwareSort>('name');
   const [page, setPage] = useState(0);
-  const q = useAssetSoftware(asset.id, { q: search, status, sort, page });
+  const q = useAssetSoftware(asset.id, { q: useDebouncedValue(search), status, sort, page });
 
   const rows = q.data?.rows ?? [];
   const total = q.data?.total ?? 0;

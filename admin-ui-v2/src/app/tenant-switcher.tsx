@@ -18,6 +18,13 @@ export function TenantSwitcher() {
 
   useEffect(() => { if (open) setTimeout(() => inputRef.current?.focus(), 30); else setQ(''); }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open]);
+
   // No management plane, no tenant directory to switch between: a Core console
   // administers the one organization running it. Rendering an always-empty
   // "All tenants" chip in the topbar of every page would be pure confusion.
@@ -29,7 +36,7 @@ export function TenantSwitcher() {
 
   return (
     <div style={{ position: 'relative' }}>
-      <button onClick={() => setOpen((o) => !o)} className="op-chip" style={{ height: 32, paddingLeft: 9, maxWidth: 230 }}>
+      <button onClick={() => setOpen((o) => !o)} aria-label="Switch tenant scope" aria-haspopup="true" aria-expanded={open} className="op-chip" style={{ height: 32, paddingLeft: 9, maxWidth: 230 }}>
         {scopeId ? <Avatar initials={initialsFromName(scopeName ?? '')} size={18} square /> : <Building2 size={14} />}
         <span style={{ fontWeight: scopeId ? 600 : 500, color: scopeId ? 'var(--op-t1)' : undefined, overflow: 'hidden', textOverflow: 'ellipsis' }}>{scopeId ? scopeName : 'All tenants'}</span>
         <ChevronDown size={13} style={{ opacity: 0.7 }} />

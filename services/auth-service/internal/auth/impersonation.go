@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sirupsen/logrus"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 )
@@ -101,6 +102,49 @@ func (a *AuthService) RevokeUserAccess(ctx context.Context, userID uuid.UUID) er
 	return a.Redis().Set(ctx, sharedmw.RevokedUserKey(userID), "1", 0).Err()
 }
 
+// accessTokenCutoffLeeway pads the cutoff key's TTL past the longest access
+// token it must outlive, so clock skew between pods cannot drop it early.
+const accessTokenCutoffLeeway = 5 * time.Minute
+
+// maxElevatedTokenTTL is the longest impersonation token (see
+// impersonation_handlers.go), which can outlast a short JWT_EXPIRY.
+const maxElevatedTokenTTL = 30 * time.Minute
+
+// RevokeUserAccessBefore invalidates, on every service, each access token for
+// userID minted before now: the per-user issued-before cutoff
+// (sharedmw.UserCutoffChecker). Unlike RevokeUserAccess it is not permanent. A
+// token minted afterwards works, so reactivating a user or signing in again
+// after a password reset needs nothing cleared, and the entry expires once
+// every older token has (JWT_EXPIRY plus leeway).
+//
+// Call it AFTER the database change commits: the request that made the change
+// must not fail or be rolled back because Redis is down, and a denylist write
+// for a change that then rolled back would sign out a user for nothing.
+func (a *AuthService) RevokeUserAccessBefore(ctx context.Context, userID uuid.UUID) error {
+	if a.Redis() == nil {
+		return nil
+	}
+	ttl := a.jwt.GetAccessExpiry()
+	if ttl < maxElevatedTokenTTL {
+		ttl = maxElevatedTokenTTL
+	}
+	// iat has one-second resolution. Storing the NEXT whole second refuses a
+	// token minted in the second of the event too (no sub-second race); the cost
+	// is that a sign-in within that same second must be repeated.
+	cutoff := time.Now().Add(time.Second)
+	return sharedmw.RevokeUserTokensIssuedBefore(ctx, a.Redis(), userID, cutoff, ttl+accessTokenCutoffLeeway)
+}
+
+// revokeLiveAccessTokens is RevokeUserAccessBefore for call sites that cannot
+// fail on a denylist outage: it logs and carries on, matching the fail-open
+// stance of the readers.
+func (a *AuthService) revokeLiveAccessTokens(userID uuid.UUID, reason string) {
+	if err := a.RevokeUserAccessBefore(context.Background(), userID); err != nil {
+		logrus.WithError(err).WithFields(logrus.Fields{"user_id": userID, "reason": reason}).
+			Warn("Failed to invalidate live access tokens; they stay valid until they expire")
+	}
+}
+
 // ClearUserAccessRevocation removes a user-level access-token denylist entry.
 // It exists for callers that set the key before a non-Redis transaction commits
 // and need to compensate if that transaction rolls back.
@@ -139,6 +183,31 @@ func (a *AuthService) RemainingImpersonationTTL(ctx context.Context, jti string)
 	}
 	remaining := time.Until(occurredAt.Add(time.Duration(ttlSeconds) * time.Second))
 	return remaining, true, nil
+}
+
+// ImpersonationActor returns the admin who started the impersonation session
+// identified by jti, from its start audit record. found is false when there is no
+// such record. StopAdminImpersonation uses it to let only the starter end a
+// session.
+func (a *AuthService) ImpersonationActor(ctx context.Context, jti string) (string, bool, error) {
+	// RLS: cross-tenant — runs on the bypass role (Phase 4), like
+	// RemainingImpersonationTTL: the record is resolved FROM the jti with no
+	// tenant input. Wrapping would fail closed.
+	var actorID sql.NullString
+	err := a.BypassDB().QueryRowContext(ctx, `
+        SELECT event_data->>'actor_id'
+        FROM auth_audit_log
+        WHERE event_type = 'impersonation_start' AND event_data->>'jti' = $1
+        ORDER BY occurred_at DESC
+        LIMIT 1
+    `, jti).Scan(&actorID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return actorID.String, actorID.Valid, nil
 }
 
 // RecordImpersonationStop writes an impersonation-stop audit-log entry.

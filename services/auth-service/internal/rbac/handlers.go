@@ -574,6 +574,13 @@ func (h *RBACHandlers) RemoveRole(c *gin.Context) {
 	}
 
 	if err := h.rbacService.RemoveUserRole(tenantID, userID, roleID); err != nil {
+		if errors.Is(err, ErrLastTenantAdmin) {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "Cannot remove the last tenant admin. Assign the tenant_admin role to another user first.",
+				"code":  "last_tenant_admin",
+			})
+			return
+		}
 		if err.Error() == "active role assignment not found" {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Active role assignment not found"})
 			return

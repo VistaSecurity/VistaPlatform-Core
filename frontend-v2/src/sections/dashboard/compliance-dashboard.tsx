@@ -5,7 +5,7 @@
 // owner chose a full compliance dashboard over a gap-scoped one on,
 // with the overlap named. What keeps the overlap safe is that every number here
 // comes from the same hook, with the same react-query key, as the Posture page
-// — `useFrameworkContext`, the `['posture','available-frameworks']` rollup,
+// — `useFrameworkContext`, the shared `useFrameworksAvailable` rollup,
 // `usePostureByControl`. One fetch, one cached answer, two renderings. The
 // failure this guards against is specific and has happened: the Dashboard read
 // "0 critical findings" while the Findings page listed four, because the two
@@ -21,7 +21,8 @@ import { Icon, LevelDot, PercentageGauge, frameworkPercentageColor } from '../..
 import { clients } from '../../lib/clients';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import { sevLevel } from '../findings/model';
-import { useFrameworkContext, usePostureByControl, usePostureTrend } from '../findings/queries';
+import { useFrameworkContext, usePostureByControl } from '../findings/queries';
+import { useFrameworksAvailable, usePostureTrend } from '../../lib/shared-queries';
 import { fetchDashboardTicketStats } from './dashboard-queries';
 import {
   BandHeading, DashboardHeader, DashboardShell, Grid, PageError, Panel, PanelLink, PanelNote, StatTile,
@@ -40,15 +41,7 @@ import {
  * with Posture: three surfaces, one fetch, one answer.
  */
 function useAvailableFrameworks() {
-  return useQuery({
-    queryKey: ['posture', 'available-frameworks'],
-    queryFn: async () => {
-      const { data, error } = await clients.compliance.GET('/frameworks/available', {});
-      if (error || !data) throw new Error('Failed to load frameworks');
-      return data.frameworks ?? [];
-    },
-    staleTime: 60_000,
-  });
+  return useFrameworksAvailable();
 }
 
 /** Tenant-wide finding counts, every producer. */

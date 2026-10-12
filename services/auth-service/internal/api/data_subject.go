@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -476,6 +477,13 @@ func EraseUser(db *sql.DB, accessRevoker userAccessRevoker) gin.HandlerFunc {
 				return err
 			}
 
+			// Never erase the tenant's last active tenant_admin: it would leave
+			// the organization with nobody able to administer it. Runs before any
+			// irreversible step, in the erasure's own transaction.
+			if err := guardLastTenantAdmin(ctx, tx, tenantID, userID); err != nil {
+				return err
+			}
+
 			// Revoke already-issued access tokens before committing erasure. If
 			// Redis is unavailable, rolling back here is safer than tombstoning the
 			// user while their current JWT can still call data-plane services.
@@ -556,6 +564,12 @@ func EraseUser(db *sql.DB, accessRevoker userAccessRevoker) gin.HandlerFunc {
 			}
 		}
 
+		if errors.Is(err, errLastAdmin) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Cannot erase the last admin in the tenant. Promote another tenant admin first.",
+			})
+			return
+		}
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return

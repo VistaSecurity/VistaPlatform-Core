@@ -194,7 +194,7 @@ func (s *Server) Start(addr string) error {
 // fans out to. The source is the runtime services map, but it's filtered
 // and patched:
 //
-//   - Infra entries (postgres/redis/influxdb/nats/grafana) and the gateway
+//   - Infra entries (postgres/redis/nats/grafana) and the gateway
 //     don't expose a Vista Platform-style /health response — including them
 //     would just clutter the About page with "unreachable" rows.
 //   - The config map historically omits monitoring-service (self) and
@@ -206,7 +206,6 @@ func (s *Server) peerServiceURLs() map[string]string {
 	skip := map[string]bool{
 		"postgres":    true,
 		"redis":       true,
-		"influxdb":    true,
 		"nats":        true,
 		"grafana":     true,
 		"api-gateway": true,
@@ -440,9 +439,8 @@ func (s *Server) getTenantStatus(c *gin.Context) {
 
 func (s *Server) getMonitoringData(c *gin.Context) {
 	// For now, return basic monitoring data
-	// This could be expanded to query InfluxDB for time-series data
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Monitoring data endpoint - integrate with InfluxDB for time-series data",
+		"message": "Monitoring data endpoint",
 	})
 }
 

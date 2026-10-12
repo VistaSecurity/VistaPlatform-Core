@@ -30,11 +30,15 @@ type IntegrationService struct {
 
 // Integration represents a platform integration
 type Integration struct {
-	ID                         uuid.UUID              `json:"id"`
-	IntegrationType            string                 `json:"integration_type"`
-	IntegrationName            string                 `json:"integration_name"`
-	Provider                   string                 `json:"provider"`
-	Config                     map[string]interface{} `json:"config"` // Decrypted config
+	ID              uuid.UUID `json:"id"`
+	IntegrationType string    `json:"integration_type"`
+	IntegrationName string    `json:"integration_name"`
+	Provider        string    `json:"provider"`
+	// Config is the stored config with every secret MASKED (MaskedSecret): the
+	// API never returns a credential, decrypted or not. HasCredentials says a
+	// secret is stored.
+	Config                     map[string]interface{} `json:"config"`
+	HasCredentials             bool                   `json:"has_credentials"`
 	ConfigVersion              int                    `json:"config_version"`
 	IsEnabled                  bool                   `json:"is_enabled"`
 	IsActive                   bool                   `json:"is_active"`
@@ -158,18 +162,15 @@ func (s *IntegrationService) CreateIntegration(ctx context.Context, req *CreateI
 		return nil, fmt.Errorf("failed to create integration: %w", err)
 	}
 
-	// Decrypt config for response
-	decryptedConfig, err := s.decryptConfig(encryptedConfig)
-	if err != nil {
-		s.log.WithError(err).Warn("Failed to decrypt config after creation")
-	}
+	maskedConfig, hasCredentials := maskConfig(encryptedConfig)
 
 	integration := &Integration{
 		ID:              integrationID,
 		IntegrationType: req.IntegrationType,
 		IntegrationName: req.IntegrationName,
 		Provider:        req.Provider,
-		Config:          decryptedConfig,
+		Config:          maskedConfig,
+		HasCredentials:  hasCredentials,
 		ConfigVersion:   1,
 		IsEnabled:       req.IsEnabled,
 		IsActive:        true,
@@ -198,9 +199,28 @@ func (s *IntegrationService) UpdateIntegration(ctx context.Context, id uuid.UUID
 	if err := ValidateIntegrationType(req.IntegrationType); err != nil {
 		return nil, err
 	}
-	encryptedConfig, err := s.encryptConfig(req.Config)
+	// The API never returns a stored secret, so an edit cannot send it back.
+	// A secret left blank, left out, or echoed as the mask means "keep what is
+	// stored"; only a new non-blank value replaces it.
+	var storedJSON string
+	if err := s.bypassDB.QueryRowContext(ctx,
+		`SELECT config FROM platform_integrations WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&storedJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("integration not found")
+		}
+		return nil, fmt.Errorf("failed to load integration: %w", err)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal([]byte(storedJSON), &stored); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+	incoming, kept := withKeptSecrets(req.Config, stored)
+	encryptedConfig, err := s.encryptConfig(incoming)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt config: %w", err)
+	}
+	for k, v := range kept {
+		encryptedConfig[k] = v // already encrypted at rest; do not encrypt twice
 	}
 
 	configJSON, err := json.Marshal(encryptedConfig)
@@ -258,17 +278,15 @@ func (s *IntegrationService) UpdateIntegration(ctx context.Context, id uuid.UUID
 		return nil, fmt.Errorf("failed to update integration: %w", err)
 	}
 
-	decryptedConfig, err := s.decryptConfig(encryptedConfig)
-	if err != nil {
-		s.log.WithError(err).Warn("Failed to decrypt config after update")
-	}
+	maskedConfig, hasCredentials := maskConfig(encryptedConfig)
 
 	integration := &Integration{
 		ID:              id,
 		IntegrationType: req.IntegrationType,
 		IntegrationName: req.IntegrationName,
 		Provider:        req.Provider,
-		Config:          decryptedConfig,
+		Config:          maskedConfig,
+		HasCredentials:  hasCredentials,
 		ConfigVersion:   configVersion,
 		IsEnabled:       req.IsEnabled,
 		IsActive:        true,
@@ -566,17 +584,13 @@ func (s *IntegrationService) GetIntegration(ctx context.Context, id uuid.UUID) (
 		return nil, fmt.Errorf("failed to get integration: %w", err)
 	}
 
-	// Decrypt config
-	var encryptedConfig map[string]interface{}
-	if err := json.Unmarshal([]byte(configJSON), &encryptedConfig); err != nil {
+	// Mask, never decrypt: a read returns no credential (and so needs no audit
+	// row for a reveal). The stored form is masked directly.
+	var storedConfig map[string]interface{}
+	if err := json.Unmarshal([]byte(configJSON), &storedConfig); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
-
-	decryptedConfig, err := s.decryptConfig(encryptedConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt config: %w", err)
-	}
-	integration.Config = decryptedConfig
+	integration.Config, integration.HasCredentials = maskConfig(storedConfig)
 
 	// Parse optional fields
 	if statusMessage.Valid {
@@ -705,6 +719,54 @@ var legacyPlaintextKeys = func() map[string]bool {
 	}
 	return out
 }()
+
+// MaskedSecret stands in for a stored secret in every API response.
+const MaskedSecret = "********"
+
+// maskConfig returns a copy of a config with each non-empty sensitive value
+// replaced by MaskedSecret, and whether any secret is stored. It works on the
+// stored (encrypted) form or a plaintext one alike; neither leaves the function.
+func maskConfig(config map[string]interface{}) (map[string]interface{}, bool) {
+	masked := make(map[string]interface{}, len(config))
+	has := false
+	for key, value := range config {
+		if slices.Contains(sensitiveKeys, key) && asString(value) != "" {
+			masked[key] = MaskedSecret
+			has = true
+			continue
+		}
+		masked[key] = value
+	}
+	return masked, has
+}
+
+// withKeptSecrets splits an edit's config: the values to encrypt and store, and
+// the stored (already encrypted) secrets to carry over unchanged. A sensitive
+// key that is blank, absent or the mask keeps its stored value.
+func withKeptSecrets(incoming, stored map[string]interface{}) (replace, kept map[string]interface{}) {
+	replace = make(map[string]interface{}, len(incoming))
+	kept = map[string]interface{}{}
+	for key, value := range incoming {
+		if slices.Contains(sensitiveKeys, key) {
+			if v := asString(value); v == "" || v == MaskedSecret {
+				if old, ok := stored[key]; ok {
+					kept[key] = old
+				}
+				continue
+			}
+		}
+		replace[key] = value
+	}
+	for _, key := range sensitiveKeys {
+		if _, in := incoming[key]; in {
+			continue
+		}
+		if old, ok := stored[key]; ok {
+			kept[key] = old
+		}
+	}
+	return replace, kept
+}
 
 // encryptConfig encrypts sensitive fields in the config
 func (s *IntegrationService) encryptConfig(config map[string]interface{}) (map[string]interface{}, error) {

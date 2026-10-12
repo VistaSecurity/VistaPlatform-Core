@@ -5,7 +5,7 @@
 // provides; cross-service gaps render an honest empty-state with a note — no
 // fabricated numbers. Best-effort first pass; polish (per-tenant entitlement
 // overrides, SSO config editing, platform-scoped activity) tracked in BUILD_PLAN.
-import { useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import toast from 'react-hot-toast';
 import {
   X, Filter, Pencil, Pause, Play, Trash2, MapPin, RefreshCw,
@@ -23,6 +23,7 @@ import { TenantSettingsPanel } from './tenant-settings-tab';
 import { usePlatformEdition } from '../../lib/edition';
 import { OperatorTenantControl } from './operator-tenant-control';
 import { useScope } from '../../app/scope';
+import { Dialog } from '../../components/ui/dialog';
 
 const TABS = ['Overview', 'Billing', 'Entitlements', 'Settings', 'SSO', 'Activity'] as const;
 type DrawerTab = (typeof TABS)[number];
@@ -192,7 +193,7 @@ function OverviewTab({ t, health, onClose }: { t: Tenant; health?: TenantHealthS
 // tenant that has a live one (RC-25): shown to every tenant it always failed
 // for the rest with a generic message. Without one, the plan is assigned from
 // Plans & Pricing (owner decision 7), and the panel says so.
-function PlanChangePanel({ t }: { t: Tenant }) {
+function PlanChangePanel({ t, onDirtyChange }: { t: Tenant; onDirtyChange?: (dirty: boolean) => void }) {
   const billing = useTenantBillingRecords(t.id);
   if (billing.isLoading) return null;
   if (!billing.data?.hasLiveStripeSubscription) {
@@ -206,14 +207,17 @@ function PlanChangePanel({ t }: { t: Tenant }) {
       </DrawerSection>
     );
   }
-  return <StripePlanChangeForm t={t} />;
+  return <StripePlanChangeForm t={t} onDirtyChange={onDirtyChange} />;
 }
 
-function StripePlanChangeForm({ t }: { t: Tenant }) {
+function StripePlanChangeForm({ t, onDirtyChange }: { t: Tenant; onDirtyChange?: (dirty: boolean) => void }) {
   const tiers = useAdminTiers();
   const change = useAdminChangePlan();
   const [tierId, setTierId] = useState('');
   const [reason, setReason] = useState('');
+  // Tell the drawer there is unsent input, so a stray scrim click / Esc asks first.
+  const hasInput = tierId !== '' || reason !== '';
+  useEffect(() => { onDirtyChange?.(hasInput); return () => onDirtyChange?.(false); }, [hasInput, onDirtyChange]);
 
   const options = (tiers.data ?? []).filter((tier) => tier.is_active && !tier.deprecated_at);
   const apply = async () => {
@@ -278,7 +282,7 @@ const COMPONENT_LABELS: Record<string, string> = {
 
 const componentLabel = (key: string) => COMPONENT_LABELS[key] ?? key;
 
-function BillingTab({ t }: { t: Tenant }) {
+function BillingTab({ t, onDirtyChange }: { t: Tenant; onDirtyChange?: (dirty: boolean) => void }) {
   const cost = useTenantCost(t.id);
   const coupons = useTenantCoupons(t.id);
   const breakdown = cost.data?.cost_breakdown ? Object.entries(cost.data.cost_breakdown) : [];
@@ -290,7 +294,7 @@ function BillingTab({ t }: { t: Tenant }) {
 
   return (
     <>
-      <PlanChangePanel t={t} />
+      <PlanChangePanel t={t} onDirtyChange={onDirtyChange} />
       <DrawerSection title="Current period cost">
         {cost.isLoading ? (
           <Pending>Loading cost…</Pending>
@@ -384,6 +388,8 @@ function ActivityTab() {
 export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; health?: TenantHealthSummary; onClose: () => void }) {
   const [tab, setTab] = useState<DrawerTab>('Overview');
   const [editing, setEditing] = useState(false);
+  const [planDirty, setPlanDirty] = useState(false);
+  const titleId = useId();
   const status = tenantStatus(t);
   const plan = planLabel(t);
   const { isMsp, has } = usePlatformEdition();
@@ -401,17 +407,22 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
 
   return (
     <>
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 80, background: 'var(--op-scrim)', display: 'flex', justifyContent: 'flex-end', animation: 'opScrim .15s ease both' }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 480, maxWidth: '94vw', height: '100%', background: 'var(--op-panel)', borderLeft: '1px solid var(--op-border2)', boxShadow: 'var(--op-shadow)', display: 'flex', flexDirection: 'column', animation: 'opDrawer .28s cubic-bezier(.2,.8,.2,1) both' }}>
+    <Dialog
+      onClose={onClose}
+      dirty={planDirty}
+      labelId={titleId}
+      scrimStyle={{ position: 'fixed', inset: 0, zIndex: 80, background: 'var(--op-scrim)', display: 'flex', justifyContent: 'flex-end', animation: 'opScrim .15s ease both' }}
+      panelStyle={{ width: 480, maxWidth: '94vw', height: '100%', background: 'var(--op-panel)', borderLeft: '1px solid var(--op-border2)', boxShadow: 'var(--op-shadow)', display: 'flex', flexDirection: 'column', animation: 'opDrawer .28s cubic-bezier(.2,.8,.2,1) both' }}
+    >
         {/* header */}
         <div style={{ padding: '18px 20px 14px', borderBottom: '1px solid var(--op-border)' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: 13 }}>
             <Avatar initials={initialsFromName(t.name)} size={44} brand={plan === 'Sovereign'} square />
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontFamily: 'var(--font-head)', fontSize: 18, fontWeight: 700, color: 'var(--op-t1)', letterSpacing: '-.01em' }}>{t.name}</div>
+              <div id={titleId} style={{ fontFamily: 'var(--font-head)', fontSize: 18, fontWeight: 700, color: 'var(--op-t1)', letterSpacing: '-.01em' }}>{t.name}</div>
               <div className="mono" style={{ fontSize: 11.5, color: 'var(--op-t3)', marginTop: 2 }}>{t.slug}{t.domain ? ` · ${t.domain}` : ''}</div>
             </div>
-            <button onClick={onClose} className="op-btn icon sm"><X size={14} /></button>
+            <button onClick={onClose} className="op-btn icon sm" aria-label="Close"><X size={14} /></button>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 14, flexWrap: 'wrap' }}>
             <PlanTag plan={plan} /><StatusTag status={status} />
@@ -419,7 +430,7 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 15 }}>
             <button onClick={scopeToTenant} className="op-btn sm" style={{ flex: 1, justifyContent: 'center' }}><Filter size={14} />Scope</button>
-            <button onClick={() => setEditing(true)} className="op-btn icon sm" title="Edit tenant"><Pencil size={14} /></button>
+            <button onClick={() => setEditing(true)} className="op-btn icon sm" title="Edit tenant" aria-label="Edit tenant"><Pencil size={14} /></button>
           </div>
           {/* tab strip */}
           <div style={{ display: 'flex', gap: 6, marginTop: 14, flexWrap: 'wrap' }}>
@@ -431,15 +442,14 @@ export function TenantDrawer({ tenant: t, health, onClose }: { tenant: Tenant; h
 
         <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
           {tab === 'Overview' && <OverviewTab t={t} health={health} onClose={onClose} />}
-          {tab === 'Billing' && tabs.includes('Billing') && <BillingTab t={t} />}
+          {tab === 'Billing' && tabs.includes('Billing') && <BillingTab t={t} onDirtyChange={setPlanDirty} />}
           {tab === 'Entitlements' && <TenantEntitlementsTab tenant={t} />}
           {tab === 'Settings' && <TenantSettingsPanel tenantId={t.id} />}
           {tab === 'SSO' && <SSOTab t={t} />}
           {tab === 'Activity' && <ActivityTab />}
           <div style={{ height: 16 }} />
         </div>
-      </div>
-    </div>
+    </Dialog>
     {editing && <TenantFormModal tenant={t} onClose={() => setEditing(false)} />}
     </>
   );

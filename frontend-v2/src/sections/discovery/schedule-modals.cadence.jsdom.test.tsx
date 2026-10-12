@@ -68,7 +68,9 @@ it('creates a weekday schedule in the person\'s time zone without them typing cr
   await act(async () => button('Create schedule').click());
   expect(post).toHaveBeenCalledOnce();
   expect(sentCron(post)).toBe('CRON_TZ=America/Chicago 30 23 * * 1-5');
-});
+  // ~10 awaited act() renders of the real modal (~0.7s idle): legitimately the
+  // longest flow in this file, so on a loaded runner it needs more than the 5s default.
+}, 20_000);
 
 it('blocks saving a weekly schedule with no days', async () => {
   await render(<ScheduleFormModal open onClose={() => {}} />);

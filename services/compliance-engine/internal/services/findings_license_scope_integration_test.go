@@ -203,7 +203,7 @@ func TestIntegration_Findings_ByControlExcludesUnactivatedFrameworks(t *testing.
 func TestIntegration_Findings_ByAssetExcludesUnactivatedFrameworks(t *testing.T) {
 	f := newLicenseScopeFixture(t)
 
-	findings, err := f.svc.GetFindingsByAsset(f.tenant, f.assetID)
+	findings, _, err := f.svc.GetFindingsByAsset(f.tenant, f.assetID, 1000, 0)
 	if err != nil {
 		t.Fatalf("GetFindingsByAsset: %v", err)
 	}
@@ -276,12 +276,8 @@ func TestIntegration_Findings_ControlDetailsExcludeUnactivatedFrameworkFindings(
 	if len(unlicensed.Findings) != 0 {
 		t.Fatalf("unlicensed control details returned %d findings, want 0", len(unlicensed.Findings))
 	}
-	total, err := f.eval.GetControlDetailsTotalCount(f.tenant, f.unlicensedControl, models.ScenarioFilters{})
-	if err != nil {
-		t.Fatalf("GetControlDetailsTotalCount unlicensed: %v", err)
-	}
-	if total != 0 {
-		t.Fatalf("unlicensed control detail total = %d, want 0", total)
+	if unlicensed.TotalFindings != 0 {
+		t.Fatalf("unlicensed control detail total = %d, want 0", unlicensed.TotalFindings)
 	}
 }
 

@@ -30,13 +30,15 @@ import (
 // fakeFormatter stands in for the Enterprise renderer.
 type fakeFormatter struct {
 	gotFormat string
+	gotBytes  []byte
 	body      []byte
 	mime      string
 	err       error
 }
 
-func (f *fakeFormatter) Render(_ []byte, format string) ([]byte, string, error) {
+func (f *fakeFormatter) Render(in []byte, format string) ([]byte, string, error) {
 	f.gotFormat = format
+	f.gotBytes = in
 	if f.err != nil {
 		return nil, "", f.err
 	}

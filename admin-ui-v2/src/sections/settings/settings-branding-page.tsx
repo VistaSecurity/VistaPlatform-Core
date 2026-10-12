@@ -12,6 +12,7 @@ import { useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Paintbrush, CheckCircle, XCircle, Upload, Trash2, Image as ImageIcon } from 'lucide-react';
 import { clients } from '../../lib/clients';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -50,10 +51,9 @@ function useSaveName() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (platform_name: string) => {
-      const { error } = await clients.admin.PUT('/admin/settings', {
+      unwrap(await clients.admin.PUT('/admin/settings', {
         body: { platform_name } as Record<string, unknown>,
-      });
-      if (error) throw new Error((error as { error?: string })?.error ?? 'Save failed');
+      }), 'Save failed');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: SETTINGS_KEY }),
   });
@@ -63,7 +63,7 @@ function useUploadAsset() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ type, file }: { type: AssetType; file: File }) => {
-      const { error, response } = await clients.admin.POST('/admin/branding/upload', {
+      unwrap(await clients.admin.POST('/admin/branding/upload', {
         body: { type, file: '' } as never,
         bodySerializer: () => {
           const fd = new FormData();
@@ -71,10 +71,7 @@ function useUploadAsset() {
           fd.append('file', file);
           return fd;
         },
-      });
-      if (error || !response.ok) {
-        throw new Error((error as { error?: string })?.error ?? 'Upload failed');
-      }
+      }), 'Upload failed');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: SETTINGS_KEY }),
   });
@@ -84,10 +81,9 @@ function useDeleteAsset() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (type: AssetType) => {
-      const { error } = await clients.admin.DELETE('/admin/branding/{type}', {
+      unwrap(await clients.admin.DELETE('/admin/branding/{type}', {
         params: { path: { type } },
-      });
-      if (error) throw new Error((error as { error?: string })?.error ?? 'Remove failed');
+      }), 'Remove failed');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: SETTINGS_KEY }),
   });

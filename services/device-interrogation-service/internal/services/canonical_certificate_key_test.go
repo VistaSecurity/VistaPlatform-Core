@@ -71,6 +71,12 @@ var certKeyAllowlist = map[string]string{
 	"with_certificates":                  "a COUNT field in the job-results summary",
 	"total_certificates":                 "a COUNT field in the certificate statistics response",
 	"crypto_implementation_certificates": "a database TABLE name, in the merge-preview table list",
+	"affected_certificates":              "a COUNT field in the tenant trust-store summary (certtrust/store.go)",
+
+	// A database COLUMN name on external_connections (schema.sql: `cert_pem text`),
+	// read through a `db:` struct tag by the trust evaluator. It is a column the
+	// pre-canon schema already carried, not a key emitted into discovery metadata.
+	"cert_pem": "external_connections.cert_pem column, read via a db: tag by certtrust/presented.go",
 
 	// The sensor's passive TLS parser used to flatten the leaf certificate
 	// into cert_* keys here. It now emits the canonical array, and the nine

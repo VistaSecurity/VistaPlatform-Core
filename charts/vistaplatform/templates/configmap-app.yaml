@@ -1,6 +1,7 @@
 {{- include "vistaplatform.validateTLS" . -}}
 {{- include "vistaplatform.validateMtls" . -}}
 {{- include "vistaplatform.validateRls" . -}}
+{{- include "vistaplatform.validateDatastores" . -}}
 {{- $derivedScheme := ternary "http" "https" (eq .Values.tls.mode "none") -}}
 {{- $tlsScheme := default $derivedScheme .Values.tls.externalScheme -}}
 {{- $publicHost := include "vistaplatform.publicHost" . -}}

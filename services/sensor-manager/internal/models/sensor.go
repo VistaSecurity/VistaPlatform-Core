@@ -294,25 +294,6 @@ type SensorDiscoveryInput struct {
 	Timestamp     time.Time              `json:"timestamp"`
 }
 
-// AirGappedExport represents an air-gapped export
-type AirGappedExport struct {
-	ID           uuid.UUID              `json:"id" db:"id"`
-	ExportID     uuid.UUID              `json:"export_id" db:"export_id"`
-	SensorID     uuid.UUID              `json:"sensor_id" db:"sensor_id"`
-	TenantID     uuid.UUID              `json:"tenant_id" db:"tenant_id"`
-	ExportType   string                 `json:"export_type" db:"export_type"` // "full", "incremental", "compliance"
-	Status       string                 `json:"status" db:"status"`           // "pending", "generating", "ready", "downloaded", "expired"
-	Data         map[string]interface{} `json:"data" db:"data"`
-	FilePath     *string                `json:"file_path" db:"file_path"`
-	FileSize     *int64                 `json:"file_size" db:"file_size"`
-	Checksum     *string                `json:"checksum" db:"checksum"`
-	Signature    *string                `json:"signature" db:"signature"`
-	ExpiresAt    *time.Time             `json:"expires_at" db:"expires_at"`
-	DownloadedAt *time.Time             `json:"downloaded_at" db:"downloaded_at"`
-	CreatedAt    time.Time              `json:"created_at" db:"created_at"`
-	UpdatedAt    time.Time              `json:"updated_at" db:"updated_at"`
-}
-
 // PendingSensorRegistration represents a pending sensor registration
 type PendingSensorRegistration struct {
 	ID                uuid.UUID              `json:"id" db:"id"`
@@ -622,4 +603,16 @@ type DiscoveryJob struct {
 	StartedAt          *time.Time `json:"started_at" db:"started_at"`
 	CompletedAt        *time.Time `json:"completed_at" db:"completed_at"`
 	ErrorMessage       *string    `json:"error_message" db:"error_message"`
+}
+
+// SensorEdit is a partial update of the operator-editable columns of a sensor.
+// A nil field is left untouched. It deliberately has no Status or
+// LastHeartbeat: those belong to the heartbeat path, and an edit built from a
+// stale read must never be able to write them back.
+type SensorEdit struct {
+	Name        *string
+	Description *string
+	AirGapped   *bool
+	// Tags replaces the tag set when non-nil.
+	Tags []string
 }

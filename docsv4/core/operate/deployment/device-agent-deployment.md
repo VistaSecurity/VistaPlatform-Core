@@ -81,6 +81,26 @@ enrollment and replaces only the binary, which is how to upgrade it. For a
 platform whose certificate this host does not already trust, add
 `--ca-fingerprint <sha256>` (see
 [Platforms with a privately-signed certificate](#platforms-with-a-privately-signed-certificate)).
+
+A `--key` on the command line is visible to other users in the process list.
+To keep the key out of it, set `VISTA_REGISTRATION_KEY` in the environment
+(`sudo VISTA_REGISTRATION_KEY=... bash install-device-agent.sh --url ...`, which
+passes the variable through `sudo` directly) or pipe it in with `--key-stdin`. The
+installer never prints the key in full, and writes every value it puts in the
+config file as a quoted YAML string.
+
+**Exit status 78.** A start that only a person can fix, namely a registration
+key the platform rejected, a config file that cannot be parsed, or a data
+directory the agent cannot write, makes the agent exit with status `78`
+(`EX_CONFIG`). The installed systemd unit sets `RestartPreventExitStatus=78`, so
+the service stops and stays stopped instead of retrying every 10 seconds; check
+`journalctl -u crypto-device-agent`, fix the cause (usually: generate a new key
+and re-run the installer), then `systemctl start crypto-device-agent`. Any other
+failure, such as the platform being unreachable, still restarts and retries.
+Windows services and macOS launchd have no equivalent exit-status exclusion, so
+a rejected key under those supervisors still exits `78` but may be restarted by
+the supervisor.
+
 `bash install-device-agent.sh --check-dependencies` checks the binary runs on
 this host without installing anything. Use `-arm64` in the download for ARM
 hosts.
@@ -122,6 +142,11 @@ EOF
 
 ./device-agent --config device-agent.yaml
 ```
+
+A config file that exists but cannot be read or parsed (a typo such as a line
+missing its `:`) is **fatal**: the agent logs the file's path and the parse error and
+exits non-zero, rather than starting against built-in defaults with no identity. The
+environment-variable fallback applies only when no config file exists.
 
 ### Linux (ARM64)
 
@@ -252,6 +277,43 @@ Set `platform_url` (or `PLATFORM_URL`) to the **API gateway** base URL (for exam
    If `registration_key` is set and `agent_id` is empty, the agent registers once on startup, saves certificates under `<data_path>/certs`, and updates the config file with `agent_id`. If you did not pass `-config`, it writes `<data_path>/agent-config.yaml` by default.
 5. After a successful enrollment, the server marks the key as used. Keep `agent_id` and the saved certificate paths for subsequent runs.
 
+### What the agent keeps after enrollment
+
+The registration key is single-use and is **not kept** once enrollment has
+succeeded. At enrollment the platform also issues the agent a random **agent
+secret**, once, alongside its client certificate. That secret is what protects
+the device credentials the platform sends with each job (F5, Cisco, Fortinet,
+Palo Alto and UniFi administrator passwords), so it replaces the registration
+key as the thing worth stealing.
+
+| What | Where | Notes |
+|---|---|---|
+| Client private key, certificate, platform CA | `<data_path>/certs/client.key` (0600), `client.crt`, `ca.crt` | Written as one unit. |
+| Agent secret | `<data_path>/certs/agent-secret.json` (0600) | Written atomically **with** the certificate, so a rotation replaces both or neither. The platform stores only its encrypted form and cannot show it again. |
+| Registration key | **Nowhere.** The config file holds `registration_key_sha256` (a fingerprint) in its place. | The fingerprint lets `install-device-agent.sh` recognise "this host already enrolled with this key" on a re-run. The key itself is removed from the config only after the agent secret is safely on disk; if the platform issued no secret, or the save failed, the key stays where it was. |
+
+Setting `REGISTRATION_KEY` in the service environment after enrollment has no
+effect on credential decryption; an enrolled agent never derives its key from it.
+
+### Certificate rotation also rotates the agent secret
+
+Every certificate rotation (an agent rotates when its certificate is within 30
+days of expiry) issues the agent a **new** agent secret, saved with the new
+certificate. The secret it replaces stays valid on the agent for **24 hours**,
+so a job the platform sealed just before the rotation still decrypts; after that
+the old secret is discarded from memory and from `agent-secret.json`. The
+platform seals every job with the current secret only.
+
+### Agents enrolled by an earlier release
+
+An agent enrolled before agent secrets existed keeps working with no
+re-enrollment. It keeps decrypting with its registration key until its next
+certificate rotation, when it receives its first agent secret, switches to it,
+and removes the registration key from its config. The registration key keeps
+decrypting jobs sealed in the 24 hours around that switch, then is discarded
+too. An agent binary older than this feature never asks for an agent secret, so
+the platform never switches it away from its registration key.
+
 Job polling, results, and heartbeat use **agent mTLS** (client certificate) when certificates are present; they do not use tenant user JWT cookies.
 
 ### Platforms with a privately-signed certificate
@@ -307,6 +369,18 @@ The agent polls the platform every 30 seconds (configurable) for pending jobs. W
 3. Device interrogation is executed
 4. Results are submitted back to platform
 5. Credentials are cleared from memory
+
+**Timeouts, retries and shutdown.** The agent runs one job at a time, and each
+job is bounded: 5 minutes unless the job carries its own `timeout_seconds`
+(capped at 1 hour). A device that does not answer in time fails the job with a
+"timed out" reason and the agent moves on to the next one. A crash inside one
+device's interrogation is reported as a failed job too, not a dead agent. If the
+platform cannot be reached when a job finishes, the agent retries the result
+five times over about two minutes before giving up; a result still undelivered
+after that is lost, and the job shows as failed or stuck on the platform. On
+`SIGTERM` or `SIGINT` (and on a service stop) the agent takes no new jobs, lets
+a job already running finish and submit its result, and exits, waiting at most
+30 seconds. Set your service manager's stop timeout above 30 seconds.
 
 **Adding devices through the agent.** When a device is reachable only from
 this agent, **Add device** can route its identification here (**Reach it
@@ -599,7 +673,7 @@ Removing an agent:
 ### Credential Handling
 
 - Credentials are encrypted at rest in the platform database
-- Credentials are wrapped in AES-256-GCM envelope per-job (key derived from job ID)
+- Credentials are wrapped in an AES-256-GCM envelope per job (key derived from the job ID and the agent's secret, which the platform issues at enrollment)
 - Agent decrypts credentials in-memory only during job execution
 - Backward compatible: accepts pre-decrypted credentials if `encrypted_data` field absent
 - Credentials are never written to disk or logged
@@ -614,8 +688,9 @@ Removing an agent:
 
 ### Access Control
 
-- Registration key required for initial bootstrap only
+- Registration key required for initial bootstrap only, and not kept on the agent afterwards
 - Client certificate (issued at registration) and agent ID are used for job polling and results
+- Job credentials are protected by a per-agent secret issued at enrollment and rotated with the certificate (see [What the agent keeps after enrollment](#what-the-agent-keeps-after-enrollment))
 - Jobs are scoped to specific agents
 - Agent can only access jobs assigned to it
 
@@ -637,6 +712,26 @@ Agents older than this check sent the key first and then failed to save. They
 logged `Failed to save certificates to disk`, and every later call failed with
 `certificate signed by unknown authority`. That enrollment cannot be recovered:
 delete the agent in the console, generate a new key, and install again.
+
+### Behind an egress proxy
+
+The agent honours the standard `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`
+environment variables both before and after enrolment, including after its
+mTLS client certificate is issued or rotated. Set them in the agent's service
+environment (for the systemd unit, an `Environment=` line) and restart it. The
+proxy must allow a tunnelled connection (`CONNECT`) to the platform's mTLS
+endpoint, because the agent presents its client certificate end to end.
+
+### The agent reports "rotated" but you see lock-outs after a restart
+
+Certificate rotation revokes the old certificate on the platform. If the agent
+cannot save the new one (a full disk, a read-only data directory) it keeps
+running on the new certificate in memory, logs
+`Certificate rotated on the platform but the new certificate could NOT be saved`
+at error level, and repeats the message on every heartbeat while retrying the
+save. Fix the permissions or free space on the data path; the next heartbeat
+saves the certificate and logs that it did. Restarting before that point
+leaves the agent unable to authenticate, and it must be re-enrolled.
 
 ### Invalid or rejected registration key
 

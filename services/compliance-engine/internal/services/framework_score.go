@@ -44,7 +44,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 )
 
@@ -303,7 +305,7 @@ func loadControlAssessmentsAt(ctx context.Context, db *sql.DB, tenantID uuid.UUI
 			  AND control_id = ANY($2)
 			  AND detection_state = 'ACTIVE'
 			  AND `+complianceProducerScope("findings")+`
-			  AND (workflow_status <> 'SUPPRESSED' OR workflow_status IS NULL)
+			  AND `+notSuppressedPredicate("findings")+`
 		`, tenantID, pq.Array(ids))
 		if err != nil {
 			return fmt.Errorf("load violated controls: %w", err)
@@ -418,4 +420,126 @@ func outcomesFromAssessments[T any](controls []T, id func(T) uuid.UUID, severity
 		outcomes = append(outcomes, controlOutcome{BaselineSeverity: severity(c), Status: a.Status})
 	}
 	return outcomes
+}
+
+// scoredControl is the part of a control the score fold needs: its id and its
+// baseline severity (the weight).
+type scoredControl struct {
+	ID               uuid.UUID `db:"id"`
+	BaselineSeverity string    `db:"baseline_severity"`
+}
+
+// overridePrecedenceOrder is THE order in which overrides compete for one
+// control: a scenario-specific override beats a global one, then the earliest
+// created wins, with the id as a total-order tiebreak. The first row in this
+// order wins everywhere (loadOverrides, GetActiveOverrideForControl). There is
+// no unique index on compliance_overrides, so legacy duplicates can exist and
+// without an ORDER BY the winner was whichever row the planner returned last.
+const overridePrecedenceOrder = ` ORDER BY (scenario_id IS NULL), created_at, id`
+
+// loadOverrides returns the tenant's effective override per control (global,
+// plus the scenario's own when scenarioID is set). The winner for a control is
+// the first row in overridePrecedenceOrder.
+func loadOverrides(ctx context.Context, db *sqlx.DB, tenantID uuid.UUID, scenarioID *uuid.UUID) (map[uuid.UUID]models.Override, error) {
+	query := `
+		SELECT id, tenant_id, scenario_id, control_id, override_type, severity_from,
+		       severity_to, rationale, framework_type, created_by, created_at, updated_at
+		FROM compliance_overrides
+		WHERE tenant_id = $1`
+	args := []interface{}{tenantID}
+	if scenarioID != nil {
+		query += " AND (scenario_id = $2 OR scenario_id IS NULL)"
+		args = append(args, *scenarioID)
+	} else {
+		query += " AND scenario_id IS NULL"
+	}
+	query += overridePrecedenceOrder
+
+	// compliance_overrides is RLS-policied: scope the read with app.tenant_id.
+	var overrides []models.Override
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := shareddatabase.SetTenantContext(ctx, tx.Tx, tenantID); err != nil {
+		return nil, err
+	}
+	if err := tx.SelectContext(ctx, &overrides, query, args...); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	byControl := make(map[uuid.UUID]models.Override, len(overrides))
+	for _, o := range overrides {
+		if _, taken := byControl[o.ControlID]; !taken {
+			byControl[o.ControlID] = o // first in precedence order wins
+		}
+	}
+	return byControl, nil
+}
+
+// overrideEffect applies one override to a control's baseline status/severity.
+func overrideEffect(override models.Override, baselineStatus, baselineSeverity string) (effectiveStatus, effectiveSeverity string) {
+	effectiveSeverity = baselineSeverity
+	switch override.OverrideType {
+	case models.OverrideTypeDisregard:
+		if baselineStatus == statusNotAssessed {
+			// "Accept this risk" cannot manufacture evidence of a check that was
+			// never run. A disregard on a not-assessed control leaves it not
+			// assessed rather than laundering it into a pass.
+			return baselineStatus, baselineSeverity
+		}
+		return statusPass, baselineSeverity
+	case models.OverrideTypeSeverity:
+		if override.SeverityTo != nil {
+			effectiveSeverity = *override.SeverityTo
+		}
+		// A re-rating changes the control's WEIGHT, not whether it was violated
+		//. It used to also flip the status, so re-rating a failing
+		// control to Low made it report PASS.
+		return baselineStatus, effectiveSeverity
+	}
+	return baselineStatus, baselineSeverity
+}
+
+// foldOutcomes is the ONE fold from materialized assessments plus overrides to
+// control outcomes. The stored rollup, the Frameworks status endpoint and the
+// posture scorecard all go through it, so an override moves every one of them
+// (the rollup and status used to ignore compliance_overrides entirely while the
+// summary page applied them — two scores for one framework).
+func foldOutcomes(controls []scoredControl, assessments map[uuid.UUID]controlAssessment, overrides map[uuid.UUID]models.Override) []controlOutcome {
+	outcomes := outcomesFromAssessments(controls,
+		func(c scoredControl) uuid.UUID { return c.ID },
+		func(c scoredControl) string { return c.BaselineSeverity },
+		assessments)
+	for i, c := range controls {
+		if o, ok := overrides[c.ID]; ok {
+			outcomes[i].Status, _ = overrideEffect(o, outcomes[i].Status, c.BaselineSeverity)
+		}
+	}
+	return outcomes
+}
+
+// scoreControls loads the controls' materialized assessments and the tenant's
+// global overrides in a fixed number of queries and folds them into the
+// framework score. evaluatedAt is loadControlAssessmentsAt's in-flight
+// evaluation instant (zero for read paths).
+func scoreControls(ctx context.Context, db *sqlx.DB, tenantID uuid.UUID, controls []scoredControl, frameworkType string, evaluatedAt time.Time) (scoreBreakdown, error) {
+	ids := make([]uuid.UUID, len(controls))
+	for i, c := range controls {
+		ids[i] = c.ID
+	}
+	assessments, err := loadControlAssessmentsAt(ctx, db.DB, tenantID, ids, frameworkType, evaluatedAt)
+	if err != nil {
+		return scoreBreakdown{}, err
+	}
+	// Global overrides only: a stored rollup has no scenario.
+	overrides, err := loadOverrides(ctx, db, tenantID, nil)
+	if err != nil {
+		return scoreBreakdown{}, fmt.Errorf("load overrides: %w", err)
+	}
+	return frameworkScore(foldOutcomes(controls, assessments, overrides))
 }

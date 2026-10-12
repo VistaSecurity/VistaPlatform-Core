@@ -4,6 +4,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import type { components } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
+import { scopesQuery } from '../../lib/shared-queries';
 
 export type CBOMArtifact = components['schemas']['CBOMArtifact'];
 export type Scope = components['schemas']['Scope'];
@@ -58,15 +60,7 @@ export function useArtifact(id: string | undefined) {
 
 /** Tenant scopes — the boundary picker for generation. Seeds system defaults. */
 export function useScopes() {
-  return useQuery({
-    queryKey: ['cbom', 'scopes'],
-    queryFn: async () => {
-      const { data, error } = await clients.cbom.GET('/scopes', {});
-      if (error || !data) throw new Error('Failed to load scopes');
-      return data.scopes ?? [];
-    },
-    staleTime: 60_000,
-  });
+  return useQuery(scopesQuery());
 }
 
 /** Generate a new immutable artifact from a scope. Server defaults sign +
@@ -78,8 +72,7 @@ export function useGenerate() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: { scope_id: string; name?: string; kind?: ArtifactKind }) => {
-      const { data, error } = await clients.cbom.POST('/cbom/generate', { body });
-      if (error || !data) throw new Error(error?.error ?? 'Artifact generation failed');
+      const data = unwrap(await clients.cbom.POST('/cbom/generate', { body }), 'Artifact generation failed', { requireData: true });
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['cbom', 'artifacts'] }),
@@ -92,8 +85,7 @@ export function useDeleteArtifact() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { error, response } = await clients.cbom.DELETE('/cbom/artifacts/{id}', { params: { path: { id } } });
-      if (!response.ok) throw new Error(error?.error ?? 'Delete failed');
+      unwrap(await clients.cbom.DELETE('/cbom/artifacts/{id}', { params: { path: { id } } }), 'Delete failed');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['cbom', 'artifacts'] }),
   });
@@ -103,8 +95,7 @@ export function useDeleteArtifact() {
 export function useVerify() {
   return useMutation({
     mutationFn: async (id: string): Promise<VerifyResponse> => {
-      const { data, error } = await clients.cbom.POST('/cbom/artifacts/{id}/verify', { params: { path: { id } } });
-      if (error || !data) throw new Error('Verification failed');
+      const data = unwrap(await clients.cbom.POST('/cbom/artifacts/{id}/verify', { params: { path: { id } } }), 'Verification failed', { requireData: true });
       return data;
     },
   });

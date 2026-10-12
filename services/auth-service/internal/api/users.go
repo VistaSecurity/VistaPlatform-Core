@@ -331,20 +331,23 @@ func CreateUser(db *sql.DB, bypassDB *sql.DB, cfg *config.Config) gin.HandlerFun
 			return
 		}
 
-		// Check if email already exists in tenant.
-		// RLS-scoped: users carries a tenant_isolation policy; tenant from token.
-		var existingID uuid.UUID
-		checkQuery := `SELECT id FROM users WHERE tenant_id = $1 AND email = $2 AND deleted_at IS NULL`
-		err = shareddatabase.WithTenantTx(c.Request.Context(), db, tenantID, func(tx *sql.Tx) error {
-			return tx.QueryRowContext(c.Request.Context(), checkQuery, tenantID, req.Email).Scan(&existingID)
-		})
-		if err == nil {
-			c.JSON(http.StatusConflict, gin.H{"error": "Email already exists in this tenant"})
-			return
-		}
-		if err != sql.ErrNoRows {
+		// Normalise once: login looks the address up lower-cased, so an address
+		// stored as typed ("Alice@Example.com") could never sign in, and the
+		// case-sensitive duplicate check let "alice@" and "Alice@" coexist.
+		req.Email = auth.NormalizeEmail(req.Email)
+
+		// An address identifies exactly ONE account platform-wide (login and
+		// reset resolve an account by email alone), so the check is global —
+		// any tenant, and platform users — not just this tenant. It is repeated
+		// under a lock in the insert transaction below to close the race.
+		inUse, err := auth.EmailInUseGlobally(c.Request.Context(), bypassDB, req.Email)
+		if err != nil {
 			logrus.WithError(err).Error("Failed to check email existence")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check email"})
+			return
+		}
+		if inUse {
+			c.JSON(http.StatusConflict, gin.H{"error": "Email already exists"})
 			return
 		}
 
@@ -392,12 +395,26 @@ func CreateUser(db *sql.DB, bypassDB *sql.DB, cfg *config.Config) gin.HandlerFun
 		var userID uuid.UUID
 		var createdAt, updatedAt time.Time
 		err = shareddatabase.WithTenantTx(c.Request.Context(), db, tenantID, func(tx *sql.Tx) error {
+			if err := lockEmailForCreate(c.Request.Context(), tx, req.Email); err != nil {
+				return err
+			}
+			taken, err := auth.EmailInUseGlobally(c.Request.Context(), bypassDB, req.Email)
+			if err != nil {
+				return err
+			}
+			if taken {
+				return errEmailTaken
+			}
 			return tx.QueryRowContext(c.Request.Context(), createQuery,
 				tenantID, req.Email, hashedPassword, req.FirstName, req.LastName,
 				true, emailVerified, verificationToken, verificationExpires,
 			).Scan(&userID, &createdAt, &updatedAt)
 		})
 
+		if errors.Is(err, errEmailTaken) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Email already exists"})
+			return
+		}
 		if err != nil {
 			logrus.WithError(err).Error("Failed to create user")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
@@ -420,12 +437,11 @@ func CreateUser(db *sql.DB, bypassDB *sql.DB, cfg *config.Config) gin.HandlerFun
 			if err != nil {
 				logrus.WithError(err).WithField("email", req.Email).Warn("Email not configured — skipping verification email")
 			} else {
-				// Use first CORS origin as base URL, or default to localhost
-				baseURL := "http://localhost:3000"
-				if len(cfg.CORSOrigins) > 0 {
-					baseURL = cfg.CORSOrigins[0]
-				}
-				verificationURL := fmt.Sprintf("%s/auth/verify-email?token=%s", baseURL, *verificationToken)
+				// The link must land on the web UI's /verify-email page, which
+				// posts the token to /auth/verify-email; AuthService.VerifyEmail
+				// redeems it from users.email_verification_token (this flow's
+				// token is stored in the column, not in Redis).
+				verificationURL := fmt.Sprintf("%s/verify-email?token=%s", getWebUIBaseURL(cfg), *verificationToken)
 				if err := emailService.SendEmailVerificationEmail(req.Email, verificationURL); err != nil {
 					logrus.WithError(err).WithField("email", req.Email).Warn("Failed to send verification email")
 				}
@@ -464,7 +480,7 @@ func CreateUser(db *sql.DB, bypassDB *sql.DB, cfg *config.Config) gin.HandlerFun
 }
 
 // UpdateUser handles PUT /users/:id - Update user
-func UpdateUser(db *sql.DB) gin.HandlerFunc {
+func UpdateUser(db *sql.DB, access userSessionInvalidator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Get tenant ID from context
 		tenantIDStr := c.GetString("tenantID")
@@ -527,17 +543,6 @@ func UpdateUser(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Check if trying to change role away from an admin-level role
-		isAdminRole := existingRole == "tenant_admin" || existingRole == "billing_admin"
-		if req.Role != nil && isAdminRole && *req.Role != "tenant_admin" && *req.Role != "billing_admin" && userID == currentUserID {
-			// Check if this is the last admin
-			adminCount, countErr := countTenantAdmins(db, tenantID)
-			if countErr == nil && adminCount <= 1 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot change role of last admin in tenant"})
-				return
-			}
-		}
-
 		// Build dynamic update query (role is handled via RBAC, not users table)
 		updates := []string{}
 		args := []interface{}{}
@@ -559,79 +564,105 @@ func UpdateUser(db *sql.DB) gin.HandlerFunc {
 			argIndex++
 		}
 
-		// Handle role update via RBAC if requested
-		if req.Role != nil {
-			if err := assignUserRole(db, userID, tenantID, actorID, *req.Role); err != nil {
-				if writeRoleGrantError(c, err) {
-					return
+		if len(updates) == 0 && req.Role == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
+			return
+		}
+
+		// A deactivation, or a role change away from tenant_admin, can strip the
+		// tenant of its last active tenant_admin — whoever the target is, not only
+		// the caller themself. The guard, the role change and the field update
+		// share ONE transaction so two concurrent requests cannot each see "one
+		// other admin remains" (see guardLastTenantAdmin).
+		deactivating := req.IsActive != nil && !*req.IsActive
+		leavingAdmin := req.Role != nil && *req.Role != "tenant_admin"
+
+		var user TenantUser
+		stage := "update"
+		err = shareddatabase.WithTenantTx(c.Request.Context(), db, tenantID, func(tx *sql.Tx) error {
+			ctx := c.Request.Context()
+			if deactivating || leavingAdmin {
+				stage = "guard"
+				if err := guardLastTenantAdmin(ctx, tx, tenantID, userID); err != nil {
+					return err
 				}
+			}
+
+			// Handle role update via RBAC if requested
+			if req.Role != nil {
+				stage = "role"
+				if err := assignUserRoleTx(ctx, tx, userID, tenantID, actorID, *req.Role); err != nil {
+					return err
+				}
+			}
+			stage = "update"
+
+			if len(updates) > 0 {
+				allUpdates := append(append([]string{}, updates...), "updated_at = NOW()")
+				allArgs := append(append([]interface{}{}, args...), userID, tenantID)
+
+				//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
+				updateQuery := fmt.Sprintf(`
+					UPDATE users
+					SET %s
+					WHERE id = $%d AND tenant_id = $%d AND deleted_at IS NULL
+					RETURNING id, tenant_id, email, first_name, last_name,
+					          is_active, email_verified, last_login_at, created_at, updated_at
+				`, strings.Join(allUpdates, ", "), argIndex, argIndex+1)
+
+				// RLS-scoped write over users (tenant_isolation policy); tenant from token.
+				return tx.QueryRowContext(ctx, updateQuery, allArgs...).Scan(
+					&user.ID, &user.TenantID, &user.Email, &user.FirstName, &user.LastName,
+					&user.IsActive, &user.EmailVerified, &user.LastLoginAt,
+					&user.CreatedAt, &user.UpdatedAt,
+				)
+			}
+
+			// Only role was changed — re-fetch user.
+			// RLS-scoped read over users (tenant_isolation policy); tenant from token.
+			stage = "fetch"
+			return tx.QueryRowContext(ctx, `
+				SELECT id, tenant_id, email, first_name, last_name,
+				       is_active, email_verified, last_login_at, created_at, updated_at
+				FROM users
+				WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+			`, userID, tenantID).Scan(
+				&user.ID, &user.TenantID, &user.Email, &user.FirstName, &user.LastName,
+				&user.IsActive, &user.EmailVerified, &user.LastLoginAt,
+				&user.CreatedAt, &user.UpdatedAt,
+			)
+		})
+		switch {
+		case errors.Is(err, errLastAdmin):
+			msg := "Cannot change role of last admin in tenant"
+			if deactivating {
+				msg = "Cannot deactivate last admin in tenant"
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+			return
+		case err == sql.ErrNoRows:
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		case err != nil:
+			if writeRoleGrantError(c, err) {
+				return
+			}
+			if stage == "role" {
 				logrus.WithError(err).WithFields(logrus.Fields{
 					"user_id": userID, "role": *req.Role,
 				}).Error("Failed to update user role")
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update role"})
 				return
 			}
-		}
-
-		// If only role was changed (no other fields), we still need to return the updated user
-		if len(updates) == 0 && req.Role == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
+			logrus.WithError(err).WithField("user_id", userID).Error("Failed to update user")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user"})
 			return
 		}
 
-		var user TenantUser
-		if len(updates) > 0 {
-			updates = append(updates, "updated_at = NOW()")
-			args = append(args, userID, tenantID)
-
-			//nolint:gosec // intentional — placeholder concatenation only; values are parameterized via args slice
-			updateQuery := fmt.Sprintf(`
-				UPDATE users
-				SET %s
-				WHERE id = $%d AND tenant_id = $%d AND deleted_at IS NULL
-				RETURNING id, tenant_id, email, first_name, last_name,
-				          is_active, email_verified, last_login_at, created_at, updated_at
-			`, strings.Join(updates, ", "), argIndex, argIndex+1)
-
-			// RLS-scoped write over users (tenant_isolation policy); tenant from token.
-			err = shareddatabase.WithTenantTx(c.Request.Context(), db, tenantID, func(tx *sql.Tx) error {
-				return tx.QueryRowContext(c.Request.Context(), updateQuery, args...).Scan(
-					&user.ID, &user.TenantID, &user.Email, &user.FirstName, &user.LastName,
-					&user.IsActive, &user.EmailVerified, &user.LastLoginAt,
-					&user.CreatedAt, &user.UpdatedAt,
-				)
-			})
-
-			if err == sql.ErrNoRows {
-				c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-				return
-			}
-			if err != nil {
-				logrus.WithError(err).WithField("user_id", userID).Error("Failed to update user")
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user"})
-				return
-			}
-		} else {
-			// Only role was changed — re-fetch user.
-			// RLS-scoped read over users (tenant_isolation policy); tenant from token.
-			fetchQuery := `
-				SELECT id, tenant_id, email, first_name, last_name,
-				       is_active, email_verified, last_login_at, created_at, updated_at
-				FROM users
-				WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-			`
-			err = shareddatabase.WithTenantTx(c.Request.Context(), db, tenantID, func(tx *sql.Tx) error {
-				return tx.QueryRowContext(c.Request.Context(), fetchQuery, userID, tenantID).Scan(
-					&user.ID, &user.TenantID, &user.Email, &user.FirstName, &user.LastName,
-					&user.IsActive, &user.EmailVerified, &user.LastLoginAt,
-					&user.CreatedAt, &user.UpdatedAt,
-				)
-			})
-			if err != nil {
-				logrus.WithError(err).WithField("user_id", userID).Error("Failed to fetch updated user")
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
-				return
-			}
+		// A deactivated user's access tokens already in circulation must stop
+		// working now, on every service, not when each expires.
+		if deactivating {
+			revokeUserAccess(c.Request.Context(), access, userID, "deactivated")
 		}
 
 		// Populate role from RBAC system
@@ -654,8 +685,29 @@ func UpdateUser(db *sql.DB) gin.HandlerFunc {
 	}
 }
 
+// userSessionInvalidator invalidates a user's already-issued access tokens (the
+// per-user issued-before cutoff, enforced by every service's JWT middleware).
+// *auth.AuthService implements it.
+type userSessionInvalidator interface {
+	RevokeUserAccessBefore(ctx context.Context, userID uuid.UUID) error
+}
+
+// revokeUserAccess is called after a deactivation or deletion has committed.
+// A nil revoker (a test harness without Redis) is a no-op; a failed write is
+// logged, not surfaced, because the account change itself already succeeded and
+// the readers fail open on the same outage.
+func revokeUserAccess(ctx context.Context, r userSessionInvalidator, userID uuid.UUID, reason string) {
+	if r == nil {
+		return
+	}
+	if err := r.RevokeUserAccessBefore(ctx, userID); err != nil {
+		logrus.WithError(err).WithFields(logrus.Fields{"user_id": userID, "reason": reason}).
+			Error("Failed to invalidate live access tokens; they stay valid until they expire")
+	}
+}
+
 // DeleteUser handles DELETE /users/:id - Soft delete user
-func DeleteUser(db *sql.DB) gin.HandlerFunc {
+func DeleteUser(db *sql.DB, access userSessionInvalidator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Get tenant ID from context
 		tenantIDStr := c.GetString("tenantID")
@@ -705,20 +757,7 @@ func DeleteUser(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Get role from RBAC system
-		userRole := getUserRole(db, userID, tenantID)
-
-		// Prevent deletion of last admin
-		isAdminRole := userRole == "tenant_admin" || userRole == "billing_admin"
-		if isAdminRole && isActive {
-			adminCount, countErr := countTenantAdmins(db, tenantID)
-			if countErr == nil && adminCount <= 1 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete last admin in tenant"})
-				return
-			}
-		}
-
-		// Soft delete
+		// Soft delete (the last-admin guard runs in the SAME transaction).
 		deleteQuery := `
 			UPDATE users
 			SET deleted_at = NOW(), updated_at = NOW()
@@ -728,6 +767,9 @@ func DeleteUser(db *sql.DB) gin.HandlerFunc {
 		// RLS-scoped write over users (tenant_isolation policy); tenant from token.
 		var rowsAffected int64
 		err = shareddatabase.WithTenantTx(c.Request.Context(), db, tenantID, func(tx *sql.Tx) error {
+			if err := guardLastTenantAdmin(c.Request.Context(), tx, tenantID, userID); err != nil {
+				return err
+			}
 			result, e := tx.ExecContext(c.Request.Context(), deleteQuery, userID, tenantID)
 			if e != nil {
 				return e
@@ -735,6 +777,10 @@ func DeleteUser(db *sql.DB) gin.HandlerFunc {
 			rowsAffected, e = result.RowsAffected()
 			return e
 		})
+		if errors.Is(err, errLastAdmin) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete last admin in tenant"})
+			return
+		}
 		if err != nil {
 			logrus.WithError(err).WithField("user_id", userID).Error("Failed to delete user")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
@@ -745,6 +791,8 @@ func DeleteUser(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
+
+		revokeUserAccess(c.Request.Context(), access, userID, "deleted")
 
 		// Audit: log user deletion
 		if rawMW, exists := c.Get("audit_middleware"); exists {
@@ -896,7 +944,20 @@ func InviteTenantMember(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, authSe
 			return
 		}
 
-		emailNorm := strings.ToLower(strings.TrimSpace(req.Email))
+		emailNorm := auth.NormalizeEmail(req.Email)
+
+		// Global, not per-tenant: the invitee is created with this address and
+		// login resolves an account by address alone. A tenant admin who could
+		// invite (and, holding the returned accept link, accept) someone else's
+		// address would capture that person's login, resets and lockouts.
+		if taken, tErr := auth.EmailInUseGlobally(c.Request.Context(), bypassDB, emailNorm); tErr != nil {
+			logrus.WithError(tErr).Error("Failed to check global email existence for invite")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check email"})
+			return
+		} else if taken {
+			c.JSON(http.StatusConflict, gin.H{"error": "This email address is already registered and cannot be invited"})
+			return
+		}
 
 		// RLS-scoped: users carries a tenant_isolation policy; tenant from path.
 		var existingID uuid.UUID
@@ -1086,58 +1147,58 @@ func assignUserRole(db *sql.DB, userID, tenantID, actorID uuid.UUID, roleName st
 	// policies; tenant is known. The role lookup, deactivate, and reassign run
 	// inside one WithTenantTx.
 	return shareddatabase.WithTenantTx(context.Background(), db, tenantID, func(tx *sql.Tx) error {
-		// Look up the role ID
-		roleID, err := roleIDByName(context.Background(), tx, tenantID, roleName)
-		if err != nil {
-			return err
-		}
-		if err := validateRoleGrantable(context.Background(), tx, tenantID, actorID, roleID); err != nil {
-			return err
-		}
-
-		// Deactivate any existing roles for this user in this tenant
-		if _, err = tx.ExecContext(context.Background(), `
-			UPDATE user_tenant_roles
-			SET is_active = false
-			WHERE user_id = $1 AND tenant_id = $2 AND is_active = true
-		`, userID, tenantID); err != nil {
-			return fmt.Errorf("failed to deactivate existing roles: %w", err)
-		}
-
-		// Assign the new role
-		if _, err = tx.ExecContext(context.Background(), `
-			INSERT INTO user_tenant_roles (user_id, tenant_id, role_id, assigned_at, is_active)
-			VALUES ($1, $2, $3, NOW(), true)
-			ON CONFLICT (user_id, tenant_id, role_id)
-			DO UPDATE SET is_active = true, assigned_at = NOW()
-		`, userID, tenantID, roleID); err != nil {
-			return fmt.Errorf("failed to assign role: %w", err)
-		}
-
-		return nil
+		return assignUserRoleTx(context.Background(), tx, userID, tenantID, actorID, roleName)
 	})
 }
 
-// countTenantAdmins counts the number of active admin-level users in a tenant
-// (users with tenant_admin or billing_admin roles).
-func countTenantAdmins(db *sql.DB, tenantID uuid.UUID) (int, error) {
-	query := `
-		SELECT COUNT(DISTINCT utr.user_id)
-		FROM user_tenant_roles utr
-		JOIN tenant_roles tr ON utr.role_id = tr.id
-		JOIN users u ON utr.user_id = u.id
-		WHERE utr.tenant_id = $1
-		  AND tr.name IN ('tenant_admin', 'billing_admin')
-		  AND utr.is_active = true
-		  AND u.is_active = true
-		  AND u.deleted_at IS NULL
-	`
+// assignUserRoleTx is assignUserRole inside a caller-owned tenant-scoped
+// transaction, so a role change can share a transaction with the last-admin
+// guard that must precede it.
+func assignUserRoleTx(ctx context.Context, tx *sql.Tx, userID, tenantID, actorID uuid.UUID, roleName string) error {
+	// Look up the role ID
+	roleID, err := roleIDByName(ctx, tx, tenantID, roleName)
+	if err != nil {
+		return err
+	}
+	if err := validateRoleGrantable(ctx, tx, tenantID, actorID, roleID); err != nil {
+		return err
+	}
 
-	// RLS-scoped: joins user_tenant_roles + tenant_roles + users (all
-	// tenant_isolation tables); tenant is known.
-	var count int
-	err := shareddatabase.WithTenantTx(context.Background(), db, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(context.Background(), query, tenantID).Scan(&count)
-	})
-	return count, err
+	// Deactivate any existing roles for this user in this tenant
+	if _, err = tx.ExecContext(ctx, `
+		UPDATE user_tenant_roles
+		SET is_active = false
+		WHERE user_id = $1 AND tenant_id = $2 AND is_active = true
+	`, userID, tenantID); err != nil {
+		return fmt.Errorf("failed to deactivate existing roles: %w", err)
+	}
+
+	// Assign the new role
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO user_tenant_roles (user_id, tenant_id, role_id, assigned_at, is_active)
+		VALUES ($1, $2, $3, NOW(), true)
+		ON CONFLICT (user_id, tenant_id, role_id)
+		DO UPDATE SET is_active = true, assigned_at = NOW()
+	`, userID, tenantID, roleID); err != nil {
+		return fmt.Errorf("failed to assign role: %w", err)
+	}
+
+	return nil
+}
+
+// errEmailTaken is returned from inside an insert transaction when the address
+// turns out to be held by another live account.
+var errEmailTaken = errors.New("email address already registered")
+
+// lockEmailForCreate takes a transaction-scoped advisory lock keyed on the
+// normalised address. users is only unique per (tenant, email), so the
+// global-uniqueness check is check-then-insert across two connections; this lock
+// makes concurrent creators of the SAME address queue (the second one's check
+// runs after the first's commit and sees the row). Different addresses never
+// contend.
+func lockEmailForCreate(ctx context.Context, tx *sql.Tx, email string) error {
+	_, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('email_identity:' || $1::text, 0))`,
+		auth.NormalizeEmail(email))
+	return err
 }

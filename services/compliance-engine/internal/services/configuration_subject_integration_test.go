@@ -82,7 +82,7 @@ func TestIntegration_ConfigurationFinding_IsVisibleOnItsAsset(t *testing.T) {
 	}
 	mustUpsert(t, svc, tenant, control, assetID, f, "ACTIVE")
 
-	got, err := svc.GetFindingsByAsset(tenant, assetID)
+	got, _, err := svc.GetFindingsByAsset(tenant, assetID, 1000, 0)
 	if err != nil {
 		t.Fatalf("GetFindingsByAsset: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestIntegration_ConfigurationFinding_UnionsEveryFailingConfiguration(t *tes
 	mergeSubjectEvidence(&a, &b)
 	mustUpsert(t, svc, tenant, control, assetID, &a, "ACTIVE")
 
-	got, err := svc.GetFindingsByAsset(tenant, assetID)
+	got, _, err := svc.GetFindingsByAsset(tenant, assetID, 1000, 0)
 	if err != nil {
 		t.Fatalf("GetFindingsByAsset: %v", err)
 	}

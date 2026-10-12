@@ -127,7 +127,13 @@ func setupRouter(cfg *config.Config, handler *handlers.Handler, db, bypassDB *sq
 	sensors.Use(middleware.SensorAuth(dbForAuth, bypassDBForAuth, cfg.EncryptionMasterKey, cfg.SensorMTLSRequired)) // Sensor-specific auth (fail-closed mTLS when SensorMTLSRequired), no tenant required
 	{
 		// Outbound-only communication endpoints
-		agentRoutes.POST(sensors, "/heartbeat", handler.Heartbeat)
+		//
+		// Liveness reports (heartbeat and its legacy /health alias) are not
+		// recorded in the tenant activity log: they arrive every few seconds per
+		// sensor and no person did them. audit.Skip() is for liveness ONLY. A
+		// sensor SUBMITTING data (/discoveries, /units, /exports), registering or
+		// rotating its certificate stays audited.
+		agentRoutes.POST(sensors, "/heartbeat", auditmiddleware.Skip(), handler.Heartbeat)
 		// Polling endpoint moved to avoid duplicate with management GET /sensors/:sensor_id/commands
 		agentRoutes.GET(sensors, "/commands/poll", handler.PollCommands)
 		agentRoutes.POST(sensors, "/commands/:command_id/ack", handler.AcknowledgeCommand)
@@ -157,11 +163,8 @@ func setupRouter(cfg *config.Config, handler *handlers.Handler, db, bypassDB *sq
 		// the tenant-admin group below and 401'd every renewal.
 		agentRoutes.POST(sensors, "/certificates/rotate", handler.RotateSensorCertificate)
 
-		// Air-gapped export
-		agentRoutes.POST(sensors, "/exports", handler.SubmitAirGappedExport)
-
 		// Legacy endpoints (for backward compatibility)
-		agentRoutes.POST(sensors, "/health", handler.ReportHealth)
+		agentRoutes.POST(sensors, "/health", auditmiddleware.Skip(), handler.ReportHealth) // liveness report, see heartbeat
 		agentRoutes.GET(sensors, "/config", handler.GetSensorConfig)
 	}
 

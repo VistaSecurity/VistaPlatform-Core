@@ -37,10 +37,6 @@ func TestIntegration_SensorHeartbeatCarriesTheConfigExchange(t *testing.T) {
 	r.POST("/sensors/:sensor_id/heartbeat", h.Heartbeat)
 
 	// status "active" is what the sensor binary actually sends (sensor/cmd/main.go).
-	// "healthy" is documented on SensorHealth and handled by the heartbeat
-	// UPDATE's CASE, but violates sensors_status_check — see issue filed
-	// separately; not this feature's to fix, but worth knowing before copying
-	// this payload.
 	post := func(body string) map[string]any {
 		t.Helper()
 		w := httptest.NewRecorder()
@@ -93,6 +89,15 @@ func TestIntegration_SensorHeartbeatCarriesTheConfigExchange(t *testing.T) {
 func newHeartbeatHandler(t *testing.T, db *sql.DB) *handlers.Handler {
 	t.Helper()
 	repo := database.NewSensorRepository(db, db)
+	legacy := services.NewSensorService(db, db)
+	v2 := services.NewSensorServiceV2(repo)
+	return handlers.NewHandlerWithBoth(legacy, v2, repo, db, db)
+}
+
+// newHeartbeatHandlerWithRepo is newHeartbeatHandler with the sensor repository
+// swapped for a wrapper, so a test can act between the handler's read and write.
+func newHeartbeatHandlerWithRepo(t *testing.T, db *sql.DB, repo database.SensorRepository) *handlers.Handler {
+	t.Helper()
 	legacy := services.NewSensorService(db, db)
 	v2 := services.NewSensorServiceV2(repo)
 	return handlers.NewHandlerWithBoth(legacy, v2, repo, db, db)

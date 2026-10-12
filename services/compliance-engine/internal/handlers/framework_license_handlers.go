@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -180,6 +181,10 @@ func (h *FrameworkLicenseHandlers) GetDefaultFramework(c *gin.Context) {
 			})
 			return
 		}
+		if errors.Is(err, services.ErrNoActiveFramework) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "No active framework licence"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to get default framework",
 		})
@@ -314,8 +319,12 @@ func (h *FrameworkLicenseHandlers) SubscribeFramework(c *gin.Context) {
 		return
 	}
 
+	// Self-service never sets commercial terms: provenance, expiry and the
+	// recorded purchase price are server-decided (price is admin provisioning's
+	// field only; a tenant-sent price_cents used to land in purchase_price_cents).
 	input.ProvisionedBy = "self_service"
 	input.ExpiresAt = nil
+	input.PriceCents = nil
 
 	err := h.frameworkLicenseService.SubscribeFramework(tenantUUID, input, userUUID)
 	if err != nil {

@@ -2,8 +2,19 @@
 // contract. The backend engine already existed; the default workflow is seeded
 // in scripts/database/seed.sql. See feature spec:
 // docsv4/internal/developer/standards/features/onboarding-wizard.md
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
+import { unwrap } from '../../lib/api-result';
+
+/**
+ * Refresh the checklist. Steps auto-complete server-side from evidence (a
+ * segment / location / sensor exists), but the status and workflow reads are
+ * cached for 30-60s, so creating that evidence must invalidate them or the
+ * checklist and the nudge show the step as still pending.
+ */
+export function invalidateOnboarding(qc: QueryClient): Promise<void> {
+  return qc.invalidateQueries({ queryKey: ['onboarding'] });
+}
 
 // GET /onboarding/status — { required, completed, show_banner }. Cheap; drives
 // whether the profile-dropdown "Getting Started" entry is shown. Does not depend
@@ -43,10 +54,9 @@ export function useCompleteStep() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await clients.auth.POST('/onboarding/steps/{id}/complete', {
+      const data = unwrap(await clients.auth.POST('/onboarding/steps/{id}/complete', {
         params: { path: { id } },
-      });
-      if (error || !data) throw new Error('Failed to complete step');
+      }), 'Failed to complete step', { requireData: true });
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['onboarding'] }),
@@ -58,8 +68,7 @@ export function useDismissOnboarding() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      const { data, error } = await clients.auth.POST('/onboarding/dismiss', {});
-      if (error || !data) throw new Error('Failed to dismiss onboarding');
+      const data = unwrap(await clients.auth.POST('/onboarding/dismiss', {}), 'Failed to dismiss onboarding', { requireData: true });
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['onboarding'] }),
@@ -71,8 +80,7 @@ export function useSetOnboardingEnabled() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (enabled: boolean) => {
-      const { data, error } = await clients.auth.PUT('/onboarding/settings', { body: { enabled } });
-      if (error || !data) throw new Error('Failed to update onboarding settings');
+      const data = unwrap(await clients.auth.PUT('/onboarding/settings', { body: { enabled } }), 'Failed to update onboarding settings', { requireData: true });
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['onboarding'] }),

@@ -582,8 +582,8 @@ paths:
           $ref: "#/components/responses/LegacyBadRequest"
         "409":
           description: >
-            A user with this email already exists, OR (MSP installs only) the
-            install is past its licensed tenant limit and grace period — `error`
+            (MSP installs only) the install is past its licensed tenant limit
+            and grace period — `error`
             then reads "This platform is not accepting new organisations right
             now. Please contact the platform operator." and is meant to be shown
             as-is. The refusal deliberately carries no tenant counts and no
@@ -596,6 +596,7 @@ paths:
         "500":
           $ref: "#/components/responses/LegacyServerError"
       x-quirks:
+        - "An already-registered email is NOT a 409: it returns the same 201 shape as a new signup (with a decoy `user`), so the endpoint is not an account-existence oracle."
         - "400 covers BOTH a malformed body and a personal-email rejection, distinguished only by the `error` string (\"Personal email addresses are not allowed...\")."
         - "When legal documents are published, `accepted_legal` must be true or the request 400s before any tenant/user is created."
         - "Unlike /auth/login, no auth cookies are set on success."
@@ -627,8 +628,8 @@ paths:
           $ref: "#/components/responses/LegacyBadRequest"
         "409":
           description: >
-            A user with this email already exists, OR (MSP installs only) the
-            install is past its licensed tenant limit and grace period — `error`
+            (MSP installs only) the install is past its licensed tenant limit
+            and grace period — `error`
             then reads "This platform is not accepting new organisations right
             now. Please contact the platform operator." and is meant to be shown
             as-is. The refusal deliberately carries no tenant counts and no
@@ -799,6 +800,46 @@ paths:
         "500":
           $ref: "#/components/responses/LegacyServerError"
 
+  /auth/forgot-password:
+    post:
+      operationId: forgotPassword
+      tags: [auth]
+      summary: Request a password-reset email
+      description: >
+        Unauthenticated. Emails a password-reset link to the address if it has
+        an account. The answer is the same 200 whether or not the address is
+        known (and when the per-email limit is exceeded), so the endpoint cannot
+        be used to discover which addresses are registered.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgotPasswordRequest"
+      responses:
+        "200":
+          description: Request accepted (identical for known and unknown addresses).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "429":
+          description: Per-IP login-class rate limit exceeded (`Retry-After` header).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+        "503":
+          description: The per-email rate limiter is unavailable; the endpoint fails closed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
+      x-quirks:
+        - "400 covers a malformed body and a missing or syntactically invalid `email`."
+
   /auth/reset-password:
     post:
       operationId: resetPassword
@@ -862,6 +903,7 @@ paths:
       x-quirks:
         - "Sets httpOnly `access_token` + `refresh_token` cookies and a JS-readable `csrf_token` cookie; the body ALSO contains the raw tokens for backward-compat. Cookie auth is authoritative — do not store the body tokens."
         - "403 covers inactive account and unverified email (distinguished only by the `error` string), and a suspended, canceled or deleted organization — those carry a machine-readable `code` (`tenant_suspended` / `tenant_deleted`, see TenantBlockedError) and an `error` sentence the sign-in page shows verbatim. A 429 (not enumerated) is returned for per-email rate-limit / account-lockout with a `Retry-After` header and a `retry_after` seconds field."
+        - "A correct password for a PLATFORM account (not a tenant user) is a 403 with `code` `platform_account_use_admin_console` and, when known, `admin_url` (see TenantBlockedError); no session is issued. /auth/authenticate and /auth/refresh answer the same way."
         - "Bare error shape `{ \"error\": \"...\" }` (pre-ADR-0002), matching the Legacy* responses."
 
   /auth/logout:
@@ -1423,7 +1465,11 @@ paths:
       tags:
         - impersonation
       summary: Stop an active impersonation
-      description: Adds the impersonation token's JTI to the revocation denylist. Returns 204 with no body.
+      description: >
+        Adds the impersonation token's JTI to the revocation denylist. Returns
+        204 with no body. Only the administrator who started the impersonation
+        may stop it (403 for anyone else, 404 when no impersonation with that
+        JTI was started).
       requestBody:
         required: true
         content:
@@ -1435,6 +1481,10 @@ paths:
           description: Impersonation revoked (no body).
         "400":
           $ref: "#/components/responses/LegacyBadRequest"
+        "403":
+          $ref: "#/components/responses/LegacyForbidden"
+        "404":
+          $ref: "#/components/responses/LegacyNotFound"
         "500":
           $ref: "#/components/responses/LegacyServerError"
   /admin/impersonations/audit:
@@ -1461,8 +1511,7 @@ paths:
       summary: Update the current tenant's organization details (partial)
       description: >
         Partial update of the current tenant row — only the fields present in
-        the body are written (name, domain, billing_email, custom_branding,
-        ui_config, settings); omitted fields are left untouched. The tenant is
+        the body are written (name, domain, billing_email); omitted fields are left untouched. The tenant is
         resolved from the auth context, never from the body. Sending a body
         with none of the updatable fields returns 400 ("No fields to update").
         Gated by settings.update. UI consumer: frontend-v2 Settings →
@@ -4675,14 +4724,27 @@ components:
         decision, RC-4 / #1985). `code` is stable and machine-readable; `error`
         is a sentence for the sign-in page. `tenant_status_unavailable`
         accompanies HTTP 503 when the organization's state could not be read —
-        enforcement fails closed.
+        enforcement fails closed. `sso_required` (HTTP 403, login only) is not
+        a tenant-state block: the organization's authentication policy refuses
+        a local password for this user (sso_only for everyone, enforce_sso for
+        non-admins); the user must sign in through the identity provider.
+        `platform_account_use_admin_console` (HTTP 403, login/authenticate/refresh)
+        means the credentials are valid but belong to a platform account, which
+        this service does not sign in (#2458); `admin_url` points at the admin
+        console. It is only returned to a caller who proved the password -- a
+        wrong password answers 401 like any other account.
       required: [error, code]
       properties:
         error:
           type: string
         code:
           type: string
-          enum: [tenant_suspended, tenant_deleted, tenant_status_unavailable]
+          enum: [tenant_suspended, tenant_deleted, tenant_status_unavailable, sso_required, platform_account_use_admin_console]
+        admin_url:
+          type: string
+          description: >
+            Only with `platform_account_use_admin_console`, and only when the
+            service knows the admin console's address.
 
     LegacyError:
       type: object
@@ -4813,6 +4875,16 @@ components:
           type: integer
           description: Number of current documents the user is now on record as accepting.
 
+    ForgotPasswordRequest:
+      type: object
+      additionalProperties: false
+      description: 'Forgot-password body (models.ForgotPasswordRequest). email is required and must be a syntactically valid address.'
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
     ResetPasswordRequest:
       type: object
       additionalProperties: false
@@ -4865,10 +4937,10 @@ components:
         Partial current-tenant update — every field optional; only present
         fields are written. The handler applies no per-field validation beyond
         JSON binding (billing_email is a plain string, not format-checked), so
-        the spec types match the handler, not an aspiration. The three JSONB
-        blobs (custom_branding / ui_config / settings) are replaced wholesale
-        when present, not merged — prefer the dedicated
-        /tenant/branding and /tenant/ui-config endpoints for those.
+        the spec types match the handler, not an aspiration. Any other field
+        (custom_branding, ui_config, settings, ...) is refused with 400 naming
+        it: branding and UI config have their own endpoints
+        (/tenant/branding, /tenant/ui-config) with their own gates.
       properties:
         name:
           type: string
@@ -4879,18 +4951,6 @@ components:
         billing_email:
           type: string
           description: Billing contact email. Not format-validated server-side.
-        custom_branding:
-          type: object
-          additionalProperties: true
-          description: Replaces the stored custom_branding JSONB wholesale.
-        ui_config:
-          type: object
-          additionalProperties: true
-          description: Replaces the stored ui_config JSONB wholesale.
-        settings:
-          type: object
-          additionalProperties: true
-          description: Replaces the stored settings JSONB wholesale.
 
     UpdateMeRequest:
       type: object

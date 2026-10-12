@@ -9,7 +9,7 @@ export type {
   AuthContextType,
 } from './types';
 export { tokenManager } from './token';
-export { createAuthClient } from './client';
+export { createAuthClient, PlatformAccountError, PLATFORM_ACCOUNT_CODE } from './client';
 export type { AuthClient, AuthResponse, MeResponse, AuthUser, AuthTenant } from './client';
 export { AuthProvider, useAuth } from './context';
 export type { AuthState, AuthProviderProps } from './context';

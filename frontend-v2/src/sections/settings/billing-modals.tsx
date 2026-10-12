@@ -6,6 +6,8 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalSelect } from '../../components/ui';
+import { unwrap } from '../../lib/api-result';
+import { invalidateEntitlements } from '../../lib/shared-queries';
 
 function money(cents: number, currency = 'USD'): string {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency, maximumFractionDigits: 0 }).format(cents / 100);
@@ -31,11 +33,10 @@ export function useChangePlan() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: { tier_id: string; billing_interval?: string }) => {
-      const { data, error } = await clients.admin.POST('/my-billing/subscription/change-plan', { body });
-      if (error || !data) throw new Error('Plan change failed');
+      const data = unwrap(await clients.admin.POST('/my-billing/subscription/change-plan', { body }), 'Plan change failed', { requireData: true });
       return data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: SUB_KEY }),
+    onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: SUB_KEY }), invalidateEntitlements(qc)]),
   });
 }
 
@@ -43,13 +44,12 @@ export function useCancelSubscription() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (reason?: string) => {
-      const { data, error } = await clients.admin.POST('/my-billing/subscription/cancel', {
+      const data = unwrap(await clients.admin.POST('/my-billing/subscription/cancel', {
         body: reason?.trim() ? { reason: reason.trim() } : {},
-      });
-      if (error || !data) throw new Error('Cancellation failed');
+      }), 'Cancellation failed', { requireData: true });
       return data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: SUB_KEY }),
+    onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: SUB_KEY }), invalidateEntitlements(qc)]),
   });
 }
 
@@ -57,11 +57,10 @@ export function useReactivate() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      const { data, error } = await clients.admin.POST('/my-billing/subscription/reactivate', {});
-      if (error || !data) throw new Error('Reactivation failed');
+      const data = unwrap(await clients.admin.POST('/my-billing/subscription/reactivate', {}), 'Reactivation failed', { requireData: true });
       return data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: SUB_KEY }),
+    onSuccess: () => Promise.all([qc.invalidateQueries({ queryKey: SUB_KEY }), invalidateEntitlements(qc)]),
   });
 }
 

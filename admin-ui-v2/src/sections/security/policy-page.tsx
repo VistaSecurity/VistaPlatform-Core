@@ -6,7 +6,7 @@
 // (Email Delivery). updatePlatformSettings takes PlatformSettingsInput ("only provided
 // fields are persisted") — a partial merge — so this page sends ONLY the security keys
 // it owns and leaves email_config / other keys untouched. See queries.ts.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import { ShieldCheck, Save, RotateCcw, Lock } from 'lucide-react';
 import { usePlatformPermissions, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
@@ -77,7 +77,17 @@ export function SecurityPolicyPage() {
   const baseline = useMemo<SecurityForm | null>(() => (settings ? fromSettings(settings as any) : null), [settings]);
   const [form, setForm] = useState<SecurityForm | null>(null);
 
-  useEffect(() => { if (baseline) setForm(baseline); }, [baseline]);
+  // Re-seed from the server only while the form is unedited. A refetch that
+  // lands mid-edit (window focus, a save elsewhere) must not discard what the
+  // operator has typed; after their own save the form already equals the new
+  // baseline, so keeping it is the same thing.
+  const seededFrom = useRef<SecurityForm | null>(null);
+  useEffect(() => {
+    if (!baseline) return;
+    const prev = seededFrom.current;
+    seededFrom.current = baseline;
+    setForm((f) => (f === null || prev === null || JSON.stringify(f) === JSON.stringify(prev) ? baseline : f));
+  }, [baseline]);
 
   const current = form ?? baseline;
   const dirty = !!(form && baseline && JSON.stringify(form) !== JSON.stringify(baseline));

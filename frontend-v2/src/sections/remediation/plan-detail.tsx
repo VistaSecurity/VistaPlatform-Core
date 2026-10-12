@@ -9,7 +9,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import type { complianceEngineComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { ShownOfNotice } from '../../components/shown-of-notice';
 import { DrawerCloseBtn, DrawerShell, Icon, MiniBar, Modal, ModalField, ModalInput, ModalSelect, Pill, SectionLabel } from '../../components/ui';
+import { unwrap } from '../../lib/api-result';
 
 type RemediationPlan = complianceEngineComponents['schemas']['RemediationPlan'];
 
@@ -60,10 +62,9 @@ export function CreatePlanModal({ open, onClose }: { open: boolean; onClose: () 
 
   const create = useMutation({
     mutationFn: async () => {
-      const { data, error, response } = await clients.compliance.POST('/plans', {
+      const data = unwrap(await clients.compliance.POST('/plans', {
         body: { title: title.trim(), description: description.trim() || undefined, plan_type: planType, priority },
-      });
-      if (!response.ok || error || !data) throw new Error('Failed to create plan');
+      }), 'Failed to create plan', { requireData: true });
       return data;
     },
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['remediation', 'plans'] }); onClose(); },
@@ -155,7 +156,8 @@ export function PlanDetailDrawer({ plan: seed, onClose }: { plan: RemediationPla
     queryFn: async () => {
       const { data, error } = await clients.compliance.GET('/findings', { params: { query: { page: 1, page_size: 200 } } });
       if (error || !data) throw new Error('Failed to load findings');
-      return data.findings ?? [];
+      const rows = data.findings ?? [];
+      return { rows, total: data.total ?? rows.length };
     },
   });
 
@@ -167,22 +169,19 @@ export function PlanDetailDrawer({ plan: seed, onClose }: { plan: RemediationPla
 
   const advancePlan = useMutation({
     mutationFn: async (to: string) => {
-      const { error, response } = await clients.compliance.PUT('/plans/{id}', { params: { path: { id: seed.id } }, body: { status: to } });
-      if (!response.ok || error) throw new Error('Failed to update plan');
+      unwrap(await clients.compliance.PUT('/plans/{id}', { params: { path: { id: seed.id } }, body: { status: to } }), 'Failed to update plan');
     },
     onSuccess: invalidate,
   });
   const addItem = useMutation({
     mutationFn: async (findingId: string) => {
-      const { error, response } = await clients.compliance.POST('/plans/{id}/items', { params: { path: { id: seed.id } }, body: { finding_id: findingId } });
-      if (!response.ok || error) throw new Error('Failed to add item');
+      unwrap(await clients.compliance.POST('/plans/{id}/items', { params: { path: { id: seed.id } }, body: { finding_id: findingId } }), 'Failed to add item');
     },
     onSuccess: () => { setPickFinding(''); setAdding(false); invalidate(); },
   });
   const removeItem = useMutation({
     mutationFn: async (itemId: string) => {
-      const { error, response } = await clients.compliance.DELETE('/plans/{id}/items/{itemId}', { params: { path: { id: seed.id, itemId } } });
-      if (!response.ok || error) throw new Error('Failed to remove item');
+      unwrap(await clients.compliance.DELETE('/plans/{id}/items/{itemId}', { params: { path: { id: seed.id, itemId } } }), 'Failed to remove item');
     },
     onSuccess: invalidate,
   });
@@ -190,7 +189,7 @@ export function PlanDetailDrawer({ plan: seed, onClose }: { plan: RemediationPla
   const plan = planQ.data ?? seed;
   const items = itemsQ.data ?? [];
   const inPlan = new Set(items.map((i) => i.finding_id));
-  const availableFindings = (findingsQ.data ?? []).filter((f) => !inPlan.has(f.id));
+  const availableFindings = (findingsQ.data?.rows ?? []).filter((f) => !inPlan.has(f.id));
   const next = NEXT_PLAN_STATUS[plan.status];
   const progress = typeof plan.progress === 'number' ? plan.progress : 0;
 
@@ -247,6 +246,9 @@ export function PlanDetailDrawer({ plan: seed, onClose }: { plan: RemediationPla
             </ModalSelect>
             <button className="ui-btn sm accent" disabled={!pickFinding || addItem.isPending} onClick={() => addItem.mutate(pickFinding)}>{addItem.isPending ? 'Adding…' : 'Add'}</button>
           </div>
+        )}
+        {adding && findingsQ.data && (
+          <ShownOfNotice shown={findingsQ.data.rows.length} total={findingsQ.data.total} noun="findings (the picker lists only the first page)" />
         )}
         {(addItem.isError || removeItem.isError) && <div style={{ fontSize: 11.5, color: 'var(--danger-text)', marginBottom: 8 }}>Couldn't update items — try again.</div>}
 

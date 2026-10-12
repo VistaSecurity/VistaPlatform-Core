@@ -10,7 +10,7 @@
 // per-viewer convenience kept in localStorage; the site focus and the selected
 // device are in the URL (`site=`, `asset=`), so a map is a link somebody can
 // paste into a ticket.
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { Icon } from '../../components/ui';
 import { useNetworkMap } from './relationship-queries';
@@ -108,8 +108,16 @@ function ToneBreakdown({ assets, mode }: { assets: readonly NetworkMapAsset[]; m
 
 /** One device. A button, so every tile is a tab stop that opens the exploded
  *  view on Enter as well as on click. */
-function Tile({ asset, mode, selected, onSelect }: {
-  asset: NetworkMapAsset; mode: ColourMode; selected: boolean; onSelect: (id: string) => void;
+/** Past this many tiles the browser is told it may skip painting off-screen ones. */
+const LAZY_TILE_THRESHOLD = 500;
+
+/**
+ * `memo`'d, and fed only primitives plus a stable `onSelect`, so a URL change
+ * (selecting a device, focusing a site) re-renders the tiles whose own props
+ * changed — the previously and newly selected — not every tile on the map.
+ */
+const Tile = memo(function Tile({ asset, mode, selected, lazy, onSelect }: {
+  asset: NetworkMapAsset; mode: ColourMode; selected: boolean; lazy: boolean; onSelect: (id: string) => void;
 }) {
   const tone = assetTone(asset, mode);
   const pending = asset.asset_status === 'pending_approval';
@@ -130,6 +138,9 @@ function Tile({ asset, mode, selected, onSelect }: {
         borderRadius: 8, background: 'var(--app-panel)', color: selected ? 'var(--accent)' : 'var(--app-t2)',
         border: `1px ${pending ? 'dashed' : 'solid'} var(--app-border2)`,
         outline: selected ? '2px solid var(--accent)' : 'none', outlineOffset: 1,
+        // Large estates: off-screen tiles skip layout and paint. The intrinsic
+        // size keeps the scroll height right while they are skipped.
+        ...(lazy ? { contentVisibility: 'auto', containIntrinsicSize: '32px 32px' } : null),
       }}
     >
       <Icon name={assetIcon(asset.class_key)} size={16} />
@@ -146,14 +157,14 @@ function Tile({ asset, mode, selected, onSelect }: {
       )}
     </button>
   );
-}
+});
 
 function Tiles({ assets, ctx }: { assets: readonly NetworkMapAsset[]; ctx: Ctx }) {
   if (!assets.length) return <span style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>No devices</span>;
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
       {assets.map((a) => (
-        <Tile key={a.asset_id} asset={a} mode={ctx.mode} selected={a.asset_id === ctx.selected} onSelect={ctx.onSelect} />
+        <Tile key={a.asset_id} asset={a} mode={ctx.mode} selected={a.asset_id === ctx.selected} lazy={ctx.lazy} onSelect={ctx.onSelect} />
       ))}
     </div>
   );
@@ -255,6 +266,8 @@ interface Ctx {
   zoom: Zoom;
   mode: ColourMode;
   selected: string | null;
+  /** Large map: tiles opt into `content-visibility: auto`. */
+  lazy: boolean;
   onSelect: (id: string) => void;
   onFocus: (siteKey: string) => void;
 }
@@ -373,7 +386,7 @@ function CircuitView({ sites, ctx }: { sites: SiteGroup[]; ctx: Ctx }) {
                       {t.assets.map((a) => (
                         <div key={a.asset_id} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                           <div aria-hidden style={{ width: 2, height: 8, background: trunk }} />
-                          <Tile asset={a} mode={ctx.mode} selected={a.asset_id === ctx.selected} onSelect={ctx.onSelect} />
+                          <Tile asset={a} mode={ctx.mode} selected={a.asset_id === ctx.selected} lazy={ctx.lazy} onSelect={ctx.onSelect} />
                         </div>
                       ))}
                     </div>
@@ -591,7 +604,20 @@ export function NetworkMapView() {
   const sites = useMemo(() => (focus ? allSites.filter((s) => s.key === focus) : allSites), [allSites, focus]);
   const focusedSite = focus ? allSites.find((s) => s.key === focus) : undefined;
   const scopedAssets = useMemo(() => sites.flatMap((s) => s.assets), [sites]);
-  const selectedAsset = useMemo(() => (map?.assets ?? []).find((a) => a.asset_id === selected), [map, selected]);
+  const assetById = useMemo(() => new Map((map?.assets ?? []).map((a) => [a.asset_id, a])), [map]);
+  const selectedAsset = selected ? assetById.get(selected) : undefined;
+
+  // `onSelect` must keep its identity across URL changes or every memoised Tile
+  // re-renders on each one. react-router's setter is recreated whenever the
+  // params change, so the handler reads the latest through a ref.
+  const latest = useRef({ params, setParams });
+  useEffect(() => { latest.current = { params, setParams }; });
+  const onSelect = useCallback((id: string) => {
+    const { params: cur, setParams: set } = latest.current;
+    const next = new URLSearchParams(cur);
+    if (cur.get('asset') === id) next.delete('asset'); else next.set('asset', id);
+    set(next, { replace: true });
+  }, []);
 
   const showNeighbourhood = useCallback((id: string) => {
     const next = new URLSearchParams(params);
@@ -626,7 +652,8 @@ export function NetworkMapView() {
     zoom: p.zoom,
     mode: p.colour,
     selected,
-    onSelect: (id) => setParam('asset', id === selected ? null : id),
+    lazy: scopedAssets.length > LAZY_TILE_THRESHOLD,
+    onSelect,
     onFocus: (key) => {
       const next = new URLSearchParams(params);
       next.set('site', key);

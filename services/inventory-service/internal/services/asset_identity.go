@@ -835,7 +835,7 @@ func (s *AssetService) manualObservation(tenantID uuid.UUID, in models.AssetInpu
 	}
 	sg, scoped, err := declaredSighting(tenantID, in, source, receiptID)
 	if err != nil {
-		return identity.Observation{}, err
+		return identity.Observation{}, fmt.Errorf("%w: %w", ErrInvalidInput, err)
 	}
 	res, err := s.assessSighting(context.Background(), "declared asset", sg)
 	if err != nil && !errors.Is(err, identity.ErrNoUsableIdentifier) {
@@ -847,10 +847,10 @@ func (s *AssetService) manualObservation(tenantID uuid.UUID, in models.AssetInpu
 	}
 	if len(obs.Identifiers) == 0 {
 		if assetclass.IsAncestor(assetclass.KeyService, in.ClassKey) {
-			return identity.Observation{}, fmt.Errorf("%w: a %s is identified by its name, so display_name is required",
-				errNoIdentifiers, in.ClassKey)
+			return identity.Observation{}, fmt.Errorf("%w: %w: a %s is identified by its name, so display_name is required",
+				ErrInvalidInput, errNoIdentifiers, in.ClassKey)
 		}
-		return identity.Observation{}, fmt.Errorf("%w: an asset needs a hostname, an address or an identifier", errNoIdentifiers)
+		return identity.Observation{}, fmt.Errorf("%w: %w: an asset needs a hostname, an address or an identifier", ErrInvalidInput, errNoIdentifiers)
 	}
 	return obs, nil
 }

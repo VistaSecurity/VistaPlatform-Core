@@ -49,11 +49,11 @@ type CommitOptions struct {
 	Attempt int
 	// MirrorSensorID returns the sensor the findings are queued under
 	// (sensor_discoveries.sensor_id). It is asked only when a finding is to
-	// be queued; an error records the findings on the job without queueing
-	// them, and is logged by the caller through MirrorErr.
+	// be queued. An error fails the whole commit with a *MirrorSensorError
+	// (nothing is stored, the unit stays as it was): the alternative was a unit
+	// that committed `done` with findings in the job record that inventory
+	// never saw, which a retry then skips.
 	MirrorSensorID func(Tx) (string, error)
-	// MirrorErr, when set, is told why findings were not queued.
-	MirrorErr func(error)
 	// ActiveScan selects the mirror's provenance stamp (MirrorMetadata).
 	ActiveScan bool
 	// DiscoveryMethod is the discovery_method the mirrored rows carry
@@ -103,11 +103,10 @@ func Commit(tx Tx, u Unit, out shareddisc.UnitOutput, o CommitOptions) error {
 	sensorID := ""
 	if len(findings) > 0 && o.MirrorSensorID != nil {
 		id, err := o.MirrorSensorID(tx)
-		if err == nil {
-			sensorID = id
-		} else if o.MirrorErr != nil {
-			o.MirrorErr(err)
+		if err != nil {
+			return &MirrorSensorError{Err: err}
 		}
+		sensorID = id
 	}
 	for i := range findings {
 		f := &findings[i]
@@ -122,6 +121,16 @@ func Commit(tx Tx, u Unit, out shareddisc.UnitOutput, o CommitOptions) error {
 	}
 	return SettleTarget(tx, u.JobID, u.TargetID, u.TargetInput)
 }
+
+// MirrorSensorError is a commit refused because the sensor to queue findings
+// under could not be found. The unit is retryable once that sensor exists.
+type MirrorSensorError struct{ Err error }
+
+func (e *MirrorSensorError) Error() string {
+	return "findings could not be queued for inventory: " + e.Err.Error()
+}
+
+func (e *MirrorSensorError) Unwrap() error { return e.Err }
 
 // InsertFinding is the job record of one finding, carrying its unit.
 func InsertFinding(tx Tx, u Unit, f *Finding) error {

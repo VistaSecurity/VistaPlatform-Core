@@ -101,12 +101,19 @@ type stubActivityLogService struct {
 	summary         map[string]interface{}
 	summaryErr      error
 	capturedFilters *models.ActivityLogFilters // last filters passed to GetActivityLogs
+	// applyFilters makes GetActivityLogs behave like the real query: it returns
+	// only the rows in logs that match the filters it was handed.
+	applyFilters bool
 }
 
 func (s *stubActivityLogService) LogActivity(context.Context, *models.ActivityLog) error { return nil }
 func (s *stubActivityLogService) AssignComplianceTags(string, string) []string           { return nil }
 func (s *stubActivityLogService) GetActivityLogs(_ context.Context, filters models.ActivityLogFilters) ([]models.ActivityLog, int, error) {
 	s.capturedFilters = &filters
+	if s.applyFilters {
+		out := filterLogs(s.logs, filters)
+		return out, len(out), s.logsErr
+	}
 	return s.logs, s.total, s.logsErr
 }
 func (s *stubActivityLogService) GetActivityLogByID(context.Context, uuid.UUID, *uuid.UUID) (*models.ActivityLog, error) {

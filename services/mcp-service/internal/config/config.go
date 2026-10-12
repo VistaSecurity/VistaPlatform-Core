@@ -1,6 +1,9 @@
 package config
 
 import (
+	"strings"
+	"time"
+
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 )
 
@@ -30,6 +33,27 @@ type Config struct {
 	// public host; OAUTH_CALLBACK_BASE_URL is preferred because auth-service
 	// derives its OAuth issuer from it, and the two must agree.
 	PublicBaseURL string
+
+	// AllowHostFallback (MCP_ALLOW_HOST_FALLBACK) lets production derive the
+	// OAuth discovery origin from the request Host when PublicBaseURL is unset.
+	AllowHostFallback bool
+
+	// TrustedProxyCIDRs (TRUSTED_PROXY_CIDRS, comma separated) are the peers
+	// whose X-Forwarded-For is believed when deriving the client address for
+	// audit rows and the auth rate limits. Empty trusts nobody.
+	TrustedProxyCIDRs []string
+
+	// Token-exchange hardening (see platform.Options).
+	GrantCacheTTL         time.Duration // MCP_GRANT_CACHE_TTL, default 60s
+	NegativeCacheTTL      time.Duration // MCP_NEGATIVE_CACHE_TTL, default 30s
+	AuthAttemptsPerMinute int           // MCP_AUTH_ATTEMPTS_PER_MINUTE per client address, default 60; <0 disables
+
+	// AuditFailOpen (MCP_AUDIT_FAIL_OPEN=true) lets a tool read succeed when
+	// its audit record cannot be written. Default false: no audit, no data.
+	AuditFailOpen bool
+
+	// MaxResultBytes (MCP_MAX_RESULT_BYTES) caps one tool result; default 256 KiB.
+	MaxResultBytes int
 
 	// mTLS Configuration
 	UseMTLS            bool
@@ -72,6 +96,15 @@ func Load() *Config {
 			sharedconfig.GetEnv("WEB_UI_BASE_URL", ""),
 		),
 
+		AllowHostFallback: sharedconfig.GetEnvAsBool("MCP_ALLOW_HOST_FALLBACK", false),
+		TrustedProxyCIDRs: splitList(sharedconfig.GetEnv("TRUSTED_PROXY_CIDRS", "")),
+
+		GrantCacheTTL:         sharedconfig.GetEnvAsDuration("MCP_GRANT_CACHE_TTL", 60*time.Second),
+		NegativeCacheTTL:      sharedconfig.GetEnvAsDuration("MCP_NEGATIVE_CACHE_TTL", 30*time.Second),
+		AuthAttemptsPerMinute: sharedconfig.GetEnvAsInt("MCP_AUTH_ATTEMPTS_PER_MINUTE", 60),
+		AuditFailOpen:         sharedconfig.GetEnvAsBool("MCP_AUDIT_FAIL_OPEN", false),
+		MaxResultBytes:        sharedconfig.GetEnvAsInt("MCP_MAX_RESULT_BYTES", 256<<10),
+
 		UseMTLS:            sharedconfig.GetEnvAsBool("USE_MTLS", true),
 		TLSPort:            sharedconfig.GetEnv("TLS_PORT", "8443"),
 		ServiceCertPath:    sharedconfig.GetEnv("SERVICE_CERT_PATH", "/app/certs/server-cert.pem"),
@@ -89,4 +122,14 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func splitList(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

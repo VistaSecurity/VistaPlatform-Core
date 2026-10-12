@@ -96,6 +96,15 @@ func NewInventoryClient(cfg *config.Config) (*InventoryClient, error) {
 	}, nil
 }
 
+// maxResponseBytes bounds how much of an inventory-service response is read
+// into memory. A chunk's response is a few hundred bytes per finding; 64 MiB is
+// orders of magnitude above any real answer and still safe to hold.
+var maxResponseBytes int64 = 64 << 20
+
+// maxErrorBodyBytes is how much of an oversized error response is kept for the
+// error message.
+const maxErrorBodyBytes = 4 << 10
+
 // ImportFindingsRequest represents the request body for importing findings.
 //
 // It carries no status. inventory-service classifies each finding and
@@ -154,17 +163,27 @@ func (c *InventoryClient) ImportFindings(tenantID, jobID uuid.UUID, findings []c
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
-
+	oversize := int64(len(body)) > maxResponseBytes
 	if resp.StatusCode != http.StatusOK {
+		// The status is what classifies the failure, so it is reported even when
+		// the body is too large to keep; the body is only for diagnostics.
+		if len(body) > maxErrorBodyBytes {
+			body = body[:maxErrorBodyBytes]
+		}
 		return nil, &HTTPStatusError{
 			StatusCode: resp.StatusCode,
 			Op:         "inventory-service import-findings",
 			Body:       string(body),
 		}
+	}
+	if oversize {
+		// Refuse rather than truncate: a cut-off JSON body would fail to
+		// unmarshal anyway.
+		return nil, fmt.Errorf("inventory-service response exceeded %d bytes", maxResponseBytes)
 	}
 
 	var result ImportFindingsResponse

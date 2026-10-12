@@ -10,6 +10,8 @@ import { Search, ScrollText, Download, UserCog, ChevronLeft, ChevronRight } from
 import { Avatar, Tag, initialsFromName, relTime } from '../../components/ui/primitives';
 import { Modal } from '../../components/ui/modal';
 import { useScope } from '../../app/scope';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
+import { AUDIT_EVENT_CATEGORIES } from './audit-categories';
 import { useActivityLogs, exportActivityLogs, type ActivityFilters, type ActivityLog } from './audit-queries';
 
 const USER_TYPES = ['all', 'platform', 'tenant', 'system'] as const;
@@ -87,6 +89,8 @@ export function ActivityPage() {
   const [impOnly, setImpOnly] = useState(false);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<ActivityLog | null>(null);
+  // The input is controlled by `q`; the query is keyed on the debounced value.
+  const debouncedQ = useDebouncedValue(q);
 
   // All filters run server-side via the typed query body, so pagination totals
   // reflect the filtered set. Tenant scope + impersonation are real server
@@ -94,12 +98,12 @@ export function ActivityPage() {
   const filters: ActivityFilters = useMemo(() => ({
     page,
     page_size: PAGE_SIZE,
-    search: q.trim() || undefined,
+    search: debouncedQ.trim() || undefined,
     event_category: cat === 'all' ? undefined : [cat],
     user_type: userType === 'all' ? undefined : userType,
     tenant_id: scopeId || undefined,
     impersonation: impOnly || undefined,
-  }), [page, q, cat, userType, scopeId, impOnly]);
+  }), [page, debouncedQ, cat, userType, scopeId, impOnly]);
 
   const { data, isLoading, isError, refetch } = useActivityLogs(filters);
   // Memoised so the fallback `[]` keeps a stable identity — otherwise every
@@ -109,17 +113,14 @@ export function ActivityPage() {
 
   // Reset to page 1 whenever a result-set-changing filter toggles, so we never
   // land on an out-of-range page after the filtered count shrinks.
-  useEffect(() => { setPage(1); }, [q, cat, userType, scopeId, impOnly]);
+  useEffect(() => { setPage(1); }, [debouncedQ, cat, userType, scopeId, impOnly]);
 
-  // Category chips derived from the visible page (the server has no category-list
-  // endpoint; chips reflect what's present).
-  const categories = useMemo(
-    () => ['all', ...Array.from(new Set(rows.map((l) => l.event_category).filter(Boolean)))],
-    [rows],
-  );
+  // Static list: deriving chips from the current page made the other chips (and
+  // the active one, on an empty result) vanish after a category was chosen.
+  const categories = ['all', ...AUDIT_EVENT_CATEGORIES];
 
   const onExport = async (format: 'csv' | 'json') => {
-    try { await exportActivityLogs(format); toast.success(`Exported ${format.toUpperCase()}`); }
+    try { await exportActivityLogs(format, filters); toast.success(`Exported ${format.toUpperCase()}`); }
     catch { toast.error('Export failed'); }
   };
 
@@ -189,13 +190,13 @@ export function ActivityPage() {
         <ScrollText size={13} />
         <span>{pagination ? `${pagination.total.toLocaleString()} events` : `${rows.length} events`}</span>
         <span>·</span>
-        <span>Platform-wide trail (folds Log Explorer + impersonation log). Export is the full server-side log.</span>
+        <span>Platform-wide trail (folds Log Explorer + impersonation log).</span>
         <div style={{ flex: 1 }} />
         {pagination && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span>Page {pagination.page} / {Math.max(1, pagination.total_pages)}</span>
-            <button className="op-btn icon sm" disabled={!pagination.has_prev} onClick={() => setPage((p) => Math.max(1, p - 1))}><ChevronLeft size={14} /></button>
-            <button className="op-btn icon sm" disabled={!pagination.has_next} onClick={() => setPage((p) => p + 1)}><ChevronRight size={14} /></button>
+            <button className="op-btn icon sm" aria-label="Previous page" disabled={!pagination.has_prev} onClick={() => setPage((p) => Math.max(1, p - 1))}><ChevronLeft size={14} /></button>
+            <button className="op-btn icon sm" aria-label="Next page" disabled={!pagination.has_next} onClick={() => setPage((p) => p + 1)}><ChevronRight size={14} /></button>
           </div>
         )}
       </div>

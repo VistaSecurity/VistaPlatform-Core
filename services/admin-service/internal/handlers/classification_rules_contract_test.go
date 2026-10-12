@@ -29,9 +29,12 @@ type stubRuleStore struct {
 	rules   []classificationrules.Rule
 	listErr error
 	nextID  int
+
+	lastListQuery classificationrules.Query
 }
 
 func (s *stubRuleStore) List(_ context.Context, q classificationrules.Query) ([]classificationrules.Rule, int64, error) {
+	s.lastListQuery = q
 	if s.listErr != nil {
 		return nil, 0, s.listErr
 	}

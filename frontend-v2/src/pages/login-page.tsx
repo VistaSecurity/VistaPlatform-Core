@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { useNavigate } from 'react-router';
-import { useAuth } from '@vistasecurity/primitives/auth';
+import { Link, useNavigate } from 'react-router';
+import { useAuth, PlatformAccountError } from '@vistasecurity/primitives/auth';
 import { Icon } from '../components/ui';
 import { clients } from '../lib/clients';
 import { usePlatformBranding, BrandLogo } from '../app/platform-branding';
 import { socialSignInErrorMessage } from './social-sign-in-errors';
+import { unwrap } from '../lib/api-result';
 
 // An SSO sign-in option discovered for the typed email via POST /auth/methods.
 type SsoOption = { provider: string; providerName: string; tenantId: string };
@@ -42,7 +43,7 @@ function safeNextURL(): string | null {
 // /auth/methods, and if the user's tenant has an enabled OIDC provider, the
 // browser navigates to the provider's authorize endpoint (a top-level redirect,
 // which then bounces to Google/Microsoft and back to /auth/sso/callback).
-// forgot-password is still omitted until that flow exists.
+// "Forgot password?" opens /forgot-password (public page, contracted endpoint).
 
 const ACCENT = 'var(--accent-gradient)';
 
@@ -77,6 +78,9 @@ export function LoginPage() {
         return null;
     }
   });
+  // Set when the credentials were a platform account's: the sign-in
+  // error then carries a link to the admin console.
+  const [adminUrl, setAdminUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [ssoOptions, setSsoOptions] = useState<SsoOption[]>([]);
   // Provider types (e.g. "google") this email signed up with via Vista's shared
@@ -109,8 +113,7 @@ export function LoginPage() {
     }
     setBusy(true);
     try {
-      const { data, error: apiErr } = await clients.auth.POST('/auth/methods', { body: { email: email.trim() } });
-      if (apiErr || !data) throw new Error('Could not check sign-in options. Please try again.');
+      const data = unwrap(await clients.auth.POST('/auth/methods', { body: { email: email.trim() } }), 'Could not check sign-in options. Please try again.', { requireData: true });
       const tenantId = data.tenant_id ?? '';
       const options: SsoOption[] = (data.methods ?? [])
         .filter((m) => m.type === 'sso' && m.enabled && m.provider_name && tenantId)
@@ -138,16 +141,18 @@ export function LoginPage() {
   const passwordSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+    setAdminUrl(null);
     try {
       await login(email.trim(), password);
       if (nextURL) window.location.href = nextURL;
       else navigate('/dashboard', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign-in failed');
+      setAdminUrl(err instanceof PlatformAccountError ? err.adminUrl : null);
     }
   };
 
-  const backToEmail = () => { setStep('email'); setPassword(''); setError(null); setSsoOptions([]); setPlatformProviders([]); };
+  const backToEmail = () => { setStep('email'); setPassword(''); setError(null); setAdminUrl(null); setSsoOptions([]); setPlatformProviders([]); };
 
   useEffect(() => {
     if (!isInitializing && isAuthenticated) {
@@ -249,7 +254,17 @@ export function LoginPage() {
                   }>
                     <input type={showPw ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus required placeholder="Password" style={inputStyle} />
                   </LoginField>
-                  {error && <ErrorBox>{error}</ErrorBox>}
+                  {error && (
+                    <ErrorBox>
+                      {error}
+                      {adminUrl && (
+                        <>
+                          {' '}
+                          <a href={adminUrl} style={{ color: 'inherit', fontWeight: 700 }}>Open the admin console</a>
+                        </>
+                      )}
+                    </ErrorBox>
+                  )}
                   <button type="submit" disabled={isLoginLoading} style={primaryBtn(isLoginLoading)}>
                     <Icon name="shield-check" size={17} />{isLoginLoading ? 'Signing in…' : 'Sign in securely'}
                   </button>
@@ -258,6 +273,9 @@ export function LoginPage() {
               {!passwordAllowed && error && <ErrorBox>{error}</ErrorBox>}
             </div>
           )}
+          <div style={{ marginTop: 16, textAlign: 'center' }}>
+            <Link to={email.trim() ? `/forgot-password?email=${encodeURIComponent(email.trim())}` : '/forgot-password'} style={{ color: 'var(--accent-light)', fontSize: 12.5, fontWeight: 600, textDecoration: 'none' }}>Forgot password?</Link>
+          </div>
           <style>{'@keyframes spin { to { transform: rotate(360deg); } }'}</style>
 
           <p style={{ margin: '22px 0 0', fontSize: 13, color: 'rgba(255,255,255,.5)', textAlign: 'center' }}>

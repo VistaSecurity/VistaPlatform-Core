@@ -16,7 +16,6 @@ type Config struct {
 	LogLevel            string
 	DatabaseURL         string
 	RedisURL            string
-	InfluxDBURL         string
 	JWTSecret           string
 	ServiceTimeout      time.Duration
 	HealthCheckInterval time.Duration
@@ -130,7 +129,6 @@ func Load() *Config {
 		LogLevel:             sharedconfig.GetEnv("LOG_LEVEL", "info"),
 		DatabaseURL:          databaseURL,
 		RedisURL:             sharedconfig.GetEnv("REDIS_URL", "redis://:redis_pass_dev@redis:6379/0"),
-		InfluxDBURL:          sharedconfig.GetEnv("INFLUXDB_URL", "http://influxdb:8086"),
 		JWTSecret:            sharedconfig.JWTSecret(),
 		ServiceTimeout:       time.Duration(timeout) * time.Second,
 		HealthCheckInterval:  time.Duration(interval) * time.Second,
@@ -243,11 +241,6 @@ func Load() *Config {
 			},
 			"redis": {
 				URL:     sharedconfig.GetEnv("REDIS_URL", "redis://:redis_pass_dev@redis:6379/0"),
-				Timeout: time.Duration(timeout) * time.Second,
-				Enabled: true,
-			},
-			"influxdb": {
-				URL:     sharedconfig.GetEnv("INFLUXDB_URL", "http://influxdb:8086"),
 				Timeout: time.Duration(timeout) * time.Second,
 				Enabled: true,
 			},

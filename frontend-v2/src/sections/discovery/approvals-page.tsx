@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -6,7 +6,7 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { assetConfidencePercent, Icon, MiniBar } from '../../components/ui';
 import { DTable, CellMono, CellTxt, PageWrap, queryNote, relTime } from './kit';
-import { usePendingAssets } from './queries';
+import { PENDING_ASSETS_PAGE_SIZE, usePendingAssets } from './queries';
 import {
   MERGE_PROPOSALS_PAGE_SIZE, mergeProposalRangeLabel, useAutoAcceptedMerges,
   useMergeAsIs, useMergeProposals, useResolveMergeProposal,
@@ -28,6 +28,7 @@ import {
   countBySource, matchesSourceFilter, sourceOfAsset, sourceOfClassProposal,
   sourceOfProposal, sourceOfRelationshipProposal, type ApprovalSource,
 } from './approval-sources';
+import { unwrap } from '../../lib/api-result';
 
 // Discovery → Approvals — the single proposal queue (ADR-0006 D6).
 //
@@ -76,7 +77,8 @@ function SourceChip({ source, count, active, onClick }: {
 
 export function ApprovalsPage() {
   const navigate = useNavigate();
-  const q = usePendingAssets();
+  const [assetPage, setAssetPage] = useState(1);
+  const q = usePendingAssets(assetPage);
   // Merge proposals are SERVER-paged (the list is capped at 50 whether or not
   // anyone asks), so the page offset is state here and the counts come off
   // `total` rather than off the array.
@@ -112,7 +114,15 @@ export function ApprovalsPage() {
   const autoMergedQ = useAutoAcceptedMerges();
   const qc = useQueryClient();
 
-  const allAssets = useMemo(() => q.data ?? [], [q.data]);
+  const allAssets = useMemo(() => q.data?.assets ?? [], [q.data]);
+  // The tenant's whole pending-asset count, which is NOT the page length.
+  const assetTotal = q.data?.total ?? 0;
+  const assetPages = Math.max(1, Math.ceil(assetTotal / PENDING_ASSETS_PAGE_SIZE));
+  // Approving the last rows of the final page empties it; step back rather than
+  // render an empty queue above a non-empty one.
+  useEffect(() => {
+    if (q.data && !q.isFetching && assetPage > assetPages) setAssetPage(assetPages);
+  }, [q.data, q.isFetching, assetPage, assetPages]);
   const allProposals = useMemo(() => proposalsQ.data?.proposals ?? [], [proposalsQ.data]);
   const allRelProposals = useMemo(() => relProposalsQ.data?.proposals ?? [], [relProposalsQ.data]);
   const allClassProposals = useMemo(() => classProposalsQ.data?.proposals ?? [], [classProposalsQ.data]);
@@ -146,7 +156,7 @@ export function ApprovalsPage() {
   // What is on this page, and what the tenant actually has waiting. The header
   // must say the second: the merge list stops at the page size.
   const shown = assets.length + proposals.length + relProposals.length + classProposals.length;
-  const queueTotal = allAssets.length + proposalTotal + relProposalTotal + classProposalTotal;
+  const queueTotal = assetTotal + proposalTotal + relProposalTotal + classProposalTotal;
   const morePages = proposalTotal > allProposals.length;
 
   const toggleSource = (s: ApprovalSource) =>
@@ -155,8 +165,7 @@ export function ApprovalsPage() {
   const decide = useMutation({
     mutationFn: async ({ ids, approve }: { ids: string[]; approve: boolean }) => {
       const path = approve ? '/infrastructure-assets/approve' : '/infrastructure-assets/deny';
-      const { data, error } = await clients.inventory.POST(path, { body: { asset_ids: ids } });
-      if (error || !data) throw new Error(`Failed to ${approve ? 'approve' : 'deny'} asset${ids.length === 1 ? '' : 's'}`);
+      const data = unwrap(await clients.inventory.POST(path, { body: { asset_ids: ids } }), `Failed to ${approve ? 'approve' : 'deny'} asset${ids.length === 1 ? '' : 's'}`, { requireData: true });
       return { ...data, approve };
     },
     onSuccess: (r) => toast.success(`${r.count ?? ''} asset${(r.count ?? 2) === 1 ? '' : 's'} ${r.approve ? 'approved' : 'denied'}`),
@@ -205,7 +214,7 @@ export function ApprovalsPage() {
             <button
               className="ui-btn sm"
               disabled={decide.isPending}
-              title={filtered ? 'Accepts the assets matching the current source filter' : 'Accepts every pending asset'}
+              title={filtered ? 'Accepts the assets matching the current source filter' : assetTotal > allAssets.length ? 'Accepts every pending asset on this page' : 'Accepts every pending asset'}
               onClick={() => decide.mutate({ ids: assets.map((a) => a.id), approve: true })}
             >
               <Icon name="check-check" />Accept {filtered ? `these ${assets.length}` : 'all'}
@@ -434,7 +443,39 @@ export function ApprovalsPage() {
       ) : note ?? (
         assets.length > 0 && (
           <>
-            {(proposals.length > 0 || relProposals.length > 0 || classProposals.length > 0) && <div className="eyebrow-app" style={{ marginBottom: 8 }}>Discovered assets ({assets.length})</div>}
+            {(proposals.length > 0 || relProposals.length > 0 || classProposals.length > 0 || assetTotal > allAssets.length) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                <div className="eyebrow-app">Discovered assets ({assetTotal > allAssets.length ? assetTotal : assets.length})</div>
+                {assetTotal > PENDING_ASSETS_PAGE_SIZE && (
+                  <span className="mono" data-testid="asset-page-range" style={{ fontSize: 11, color: 'var(--app-t3)' }}>
+                    {(assetPage - 1) * PENDING_ASSETS_PAGE_SIZE + 1}–{(assetPage - 1) * PENDING_ASSETS_PAGE_SIZE + allAssets.length} of {assetTotal}
+                  </span>
+                )}
+                <div style={{ flex: 1 }} />
+                {assetTotal > PENDING_ASSETS_PAGE_SIZE && (
+                  <div style={{ display: 'flex', gap: 7 }}>
+                    <button
+                      className="ui-btn sm"
+                      data-testid="asset-page-prev"
+                      disabled={assetPage <= 1 || q.isFetching}
+                      onClick={() => setAssetPage((p) => Math.max(1, p - 1))}
+                      style={{ opacity: assetPage <= 1 ? 0.5 : 1 }}
+                    >
+                      <Icon name="chevron-left" size={13} />Prev
+                    </button>
+                    <button
+                      className="ui-btn sm"
+                      data-testid="asset-page-next"
+                      disabled={assetPage >= assetPages || q.isFetching}
+                      onClick={() => setAssetPage((p) => p + 1)}
+                      style={{ opacity: assetPage >= assetPages ? 0.5 : 1 }}
+                    >
+                      Next<Icon name="chevron-right" size={13} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
             <DTable
               cols={COLS}
               rows={assets}

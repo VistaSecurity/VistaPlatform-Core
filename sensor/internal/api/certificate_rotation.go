@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/certificates"
 	// Aliased: the sensor has its own `certificates` package, imported above.
 	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/httpclient"
 )
 
 // RotateCertificate rotates the sensor's certificate by generating a new CSR and requesting a new certificate
@@ -73,6 +74,9 @@ func (c *SensorManagerClient) RotateCertificate() error {
 	// Request certificate rotation
 	rotationReq := map[string]interface{}{
 		"csr": csrPEM,
+		// This build stores the per-sensor secret; the platform issues a
+		// replacement only to a build that says so.
+		"supports_agent_secret": true,
 	}
 
 	jsonData, err := json.Marshal(rotationReq)
@@ -106,6 +110,8 @@ func (c *SensorManagerClient) RotateCertificate() error {
 		ServerCACert         string    `json:"server_ca_cert"`
 		CertificateExpiresAt time.Time `json:"certificate_expires_at"`
 		Message              string    `json:"message"`
+		AgentSecret          string    `json:"agent_secret"`
+		AgentSecretVersion   int       `json:"agent_secret_version"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&rotationResp); err != nil {
@@ -121,6 +127,14 @@ func (c *SensorManagerClient) RotateCertificate() error {
 	if rotationResp.ServerCACert != "" {
 		c.config.Security.ServerCACert = sharedcerts.MergeCAPEMs(
 			c.config.Security.ServerCACert, rotationResp.ServerCACert)
+	}
+
+	// The replacement per-sensor secret. The one it replaces stays valid
+	// for agentcreds.PreviousSecretWindow; for a sensor that held none (it
+	// enrolled before secrets existed) the replaced root is its registration
+	// key. The caller persists it with the certificate.
+	if rotationResp.AgentSecret != "" {
+		c.config.RotateAgentSecret(rotationResp.AgentSecret, rotationResp.AgentSecretVersion, time.Now())
 	}
 
 	// Reconfigure HTTP client with new certificate
@@ -180,9 +194,7 @@ func (c *SensorManagerClient) reconfigureTLS() error {
 		tlsConfig.RootCAs = caPool
 	}
 
-	c.httpClient.Transport = &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
+	httpclient.Swap(c.httpClient, httpclient.NewTransport(tlsConfig))
 
 	return nil
 }

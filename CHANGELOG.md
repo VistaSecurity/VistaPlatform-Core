@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.5.0-rc.5] - 2026-10-07
+## [4.5.0-rc.6] - 2026-10-07
 
 **Version 4.5.0 is a security-hardening and dependency release, and it also improves
-classification, DHCP matching, the agent installers and the discovery pipeline.** The edge,
+classification, DHCP matching, the agent installers and the discovery pipeline, and adds
+GitOps-safe chart installs and Ed25519-signed CBOM artifacts.** The edge,
 sign-in and sessions, authorization and tenant isolation, outbound requests, request sizes
 and the chart's defaults were reviewed, and every confirmed, bounded finding is fixed. The
 bundled NATS server moves off a release its project no longer patches, and Go (now 1.26.9,
@@ -26,8 +27,9 @@ Both product lines are cut from the same commit: `v4.5.0` (commercial) and `core
 
 **Read Breaking / Upgrading first.** In production a service refuses to start on a weak
 platform secret, scans need your cluster's real network ranges, a rollback is a restore, the
-first schema upgrade can take longer on a large inventory, and a sensor installed with an
-earlier installer needs a new registration key.
+first schema upgrade can take longer on a large inventory, a sensor installed with an
+earlier installer needs a new registration key, and an existing chart release must pin its
+storage class before upgrading.
 
 ### Highlights
 
@@ -37,6 +39,15 @@ earlier installer needs a new registration key.
 - **Discovery navigation and import fixes.** Discovery tools are grouped together, imported
   assets inherit their segment environment, integration audit events are retained, and the
   Windows sensor installer works in Windows PowerShell 5.1.
+- **GitOps installs and signed evidence.** `platform.generateSecrets=false` lets Argo CD and
+  Flux manage the chart with pre-created Secrets; CBOM artifacts are signed with Ed25519 under
+  a per-install key that a third party can verify offline (Enterprise); each sensor and device
+  agent gets its own secret at enrolment, so the registration key is no longer kept on disk;
+  and the sign-in page has **Forgot password?**.
+- **Lighter at scale.** Compliance no longer re-evaluates when a re-sighting changes nothing,
+  the Crypto Risks list reads a persisted judgement with paging and search in the database,
+  large relationship maps lay out in seconds, and the unused InfluxDB datastore is removed.
+  Assigning a plan to a tenant now needs `platform.billing`.
 
 - **Security review fixes.** Account takeover through the profile closed; sign-in reveals
   nothing about which addresses exist and platform-admin sign-in is rate limited; sessions
@@ -79,7 +90,7 @@ earlier installer needs a new registration key.
 - **Bundled NATS 2.14,** Caddy 2.11.7 in the user-interface images, Go 1.26.9, refreshed Go
   and npm modules (no called vulnerability; one accepted build-time npm advisory).
 
-### Breaking / Upgrading
+### Upgrading
 
 Back up your database (`pg_dump`) first. Upgrade from 4.4.0 and pass a `helm upgrade
 --timeout` that covers the migration plus the rollout. The schema upgrade is additive except
@@ -120,6 +131,17 @@ list, with every note below in detail, is in the release notes linked at the end
 - **Third-party discoveries now settle `observed`, a source-less one is dropped,** and the
   internal `network-segments/classify-asset` route is removed. Hosts on 100.64.0.0/10 now
   appear as Unknown assets for review rather than 3rd Party Connections.
+- **Pin your storage class before upgrading.** `datastores.storageClassName` now defaults
+  to `""` (the cluster's default StorageClass) instead of `longhorn`. StatefulSet volume
+  claims are immutable, so an existing release that relied on the old default must pass
+  `--set datastores.storageClassName=<class>` (read it from `kubectl get pvc`) or the upgrade
+  fails.
+- **InfluxDB is removed.** Delete any `datastores.influxdb` block from your values (the chart
+  now refuses it); the `influxdb` StatefulSet goes, its kept PVC can be deleted afterwards.
+- **CBOM artifacts signed by earlier releases report `legacy-hmac; regenerate`** and must be
+  regenerated (Enterprise). **mcp-service now needs Redis** (the chart and Compose wire it).
+- **Assigning a plan to a tenant needs `platform.billing`,** not `platform.settings`. Stock
+  roles are unaffected; a custom platform role may need the permission added.
 - **During the rolling upgrade** a queued scan can wait briefly, producers on the old version
   rely on the 60-second fallback poll, and single-sign-on sign-ins in progress must be
   started again once. An external Redis must be 6.2 or later; edge Content-Security-Policy is
@@ -133,7 +155,7 @@ list, with every note below in detail, is in the release notes linked at the end
 and cluster addresses for the identity provider and requires `https://` endpoints;
 `CONNECTOR_ALLOW_PRIVATE_ENDPOINTS=false` forbids private ones too), the stricter AI
 private-endpoint setting, the browser binding and PKCE of tenant and platform sign-in, and
-the billing webhook's body limit. Staff single sign-on to the admin console is in every
+the billing webhook's body limit, and Ed25519 signing of CBOM artifacts. Staff single sign-on to the admin console is in every
 edition. **MSP** adds the dashboard
 WebSocket origin check. The authoritative list of what each edition includes is generated,
 not asserted: [`docsv4/core/editions.md`](docsv4/core/editions.md).
@@ -223,7 +245,7 @@ need a sensor from this release, and the create-scan API is stricter about what 
 
 - **A Quick Start guide** walks from first sign-in to a populated inventory.
 
-### Breaking / Upgrading
+### Upgrading
 
 Back up your database (`pg_dump`) first, as always. Upgrade from 4.3.1; the schema changes
 are additive except as noted.
@@ -316,7 +338,7 @@ same as 4.3.0. Both product lines are cut from the same commit: `v4.3.1`
   alongside a copy per release (`features/<tag>.json`). It replaces the 4.3.0
   release-verification feed: that file (`latest.json`) is no longer updated.
 
-### Breaking / Upgrading
+### Upgrading
 
 Nothing to do. The upgrade from 4.3.0 changes no service, configuration or schema.
 
@@ -371,7 +393,7 @@ commit: `v4.3.0` (commercial) and `core-v4.3.0` (Core).
   values, so a wider value is rejected as malformed instead of truncated, and a
   build-audit script escapes every regex metacharacter in the target names it matches.
 
-### Breaking / Upgrading
+### Upgrading
 
 Back up your database (`pg_dump`) first, as always. This release does not change the
 database schema.
@@ -457,7 +479,7 @@ use CMDB sync or NetBox, and every upgrade now waits for its schema migration.
   in CI and run over the whole tree nightly. Both close ways a break reached the main
   branch or a release candidate unseen.
 
-### Breaking / Upgrading
+### Upgrading
 
 Back up your database (`pg_dump`) first, as always.
 
@@ -631,7 +653,7 @@ read credentials. Both product lines are cut from the same commit: `v4.1.0`
 - **Outbound integrations work behind an egress proxy**, and with
   `networkPolicy.egressEnabled=true`.
 
-### Breaking / Upgrading
+### Upgrading
 
 Back up your database first, as always.
 
@@ -2517,7 +2539,7 @@ enabled. The separate tenant 24-hour/two-cycle canary remains a rollout gate. Se
   ask/query, remediator — are Enterprise, and where a model translates a question it
   returns **one line of the query language**, shown to you editable, never rows.
 
-### Breaking / Upgrading
+### Upgrading
 
 - **Fresh install only. There is no upgrade path from a `core-v0.x` release.** The
   port-as-asset tables (`network_assets`, `devices`) and the `asset_type` enum were

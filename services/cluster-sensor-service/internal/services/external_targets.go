@@ -39,44 +39,56 @@ type jobTargetGrant struct {
 	consent dispatchguard.DispatchConsent
 }
 
-// loadJobTargetGrant reads the pin for input and the job's confirmed external
-// ranges. A job with neither (created before this existed, or with no hostname
-// and nothing external) yields the zero grant: no pin, no consent — which is
-// exactly the pre-existing behaviour.
-func loadJobTargetGrant(tx *sqlx.Tx, jobID, input string) (jobTargetGrant, error) {
+// loadJobTargetGrants reads the pin for each input and the job's confirmed
+// external ranges, in a single query: the confirmed ranges and total are the
+// job's, only the pin differs by input. A job with neither (created before this
+// existed, or with no hostname and nothing external) yields the zero grant: no
+// pin, no consent — exactly the pre-existing behaviour.
+func loadJobTargetGrants(tx *sqlx.Tx, jobID string, inputs []string) (map[string]jobTargetGrant, error) {
 	var (
 		pinnedRaw   []byte
 		externalRaw []byte
 		total       int64
 	)
 	err := tx.QueryRow(`
-		SELECT COALESCE(metadata->'pinned_addresses'->$2, '[]'::jsonb),
+		SELECT COALESCE(metadata->'pinned_addresses', '{}'::jsonb),
 		       CASE WHEN metadata->'external_targets'->>'confirmed' = 'true'
 		            THEN COALESCE(metadata->'external_targets'->'targets', '[]'::jsonb)
 		            ELSE '[]'::jsonb END,
 		       COALESCE((metadata->'external_targets'->>'total_addresses')::bigint, 0)
-		FROM discovery_jobs WHERE id = $1`, jobID, input).Scan(&pinnedRaw, &externalRaw, &total)
+		FROM discovery_jobs WHERE id = $1`, jobID).Scan(&pinnedRaw, &externalRaw, &total)
+	out := make(map[string]jobTargetGrant, len(inputs))
 	if errors.Is(err, sql.ErrNoRows) {
-		return jobTargetGrant{}, nil
+		return out, nil
 	}
 	if err != nil {
-		return jobTargetGrant{}, err
+		return nil, err
 	}
-	var grant jobTargetGrant
-	if err := json.Unmarshal(pinnedRaw, &grant.pinned); err != nil {
-		// A pin that is not a list of strings is not a pin; refusing to scan
-		// is the safe reading, and authorization below will refuse the bare
-		// hostname.
-		grant.pinned = nil
-	}
+	var consent dispatchguard.DispatchConsent
 	var external []dispatchguard.ExternalTarget
 	if err := json.Unmarshal(externalRaw, &external); err == nil {
-		grant.consent.Ranges = dispatchguard.ConfirmedRanges(external)
+		consent.Ranges = dispatchguard.ConfirmedRanges(external)
 	}
 	if total > 0 {
-		grant.consent.TotalAddresses = uint64(total)
+		consent.TotalAddresses = uint64(total)
 	}
-	return grant, nil
+	// A pin object that is not a map of string lists is no pin at all; refusing
+	// to scan is the safe reading, and authorization will refuse the bare
+	// hostname.
+	var pins map[string]json.RawMessage
+	if err := json.Unmarshal(pinnedRaw, &pins); err != nil {
+		pins = nil
+	}
+	for _, input := range inputs {
+		grant := jobTargetGrant{consent: consent}
+		if raw, ok := pins[input]; ok {
+			if err := json.Unmarshal(raw, &grant.pinned); err != nil {
+				grant.pinned = nil
+			}
+		}
+		out[input] = grant
+	}
+	return out, nil
 }
 
 // jobHasConfirmedExternalTargets reports whether a job recorded confirmed

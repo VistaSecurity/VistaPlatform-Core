@@ -130,7 +130,16 @@ function Get-ConfigValue([string]$key) {
 # install command (to upgrade the binary, or by mistake) must not discard the
 # certificate and UUID the sensor holds and send it back to register with a key
 # it has already spent. A different key means a fresh enrolment.
-$keepEnrolment = ((Get-ConfigValue 'sensorId') -match $uuidPattern) -and ((Get-ConfigValue 'registrationKey') -eq $Key)
+# The registration key itself (a config written before the sensor stopped keeping
+# it) or its SHA-256 fingerprint, which is all the sensor keeps once the platform
+# has issued the per-sensor secret that replaced it (#2437).
+function Get-KeySha256([string]$value) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($value))) -replace '-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
+}
+$enrolledWithKey = ((Get-ConfigValue 'registrationKey') -eq $Key) -or ((Get-ConfigValue 'registrationKeySha256') -eq (Get-KeySha256 $Key))
+$keepEnrolment = ((Get-ConfigValue 'sensorId') -match $uuidPattern) -and $enrolledWithKey
 if ($keepEnrolment) {
     Write-Info "This host is already enrolled with this key (sensor $(Get-ConfigValue 'sensorId')); keeping its identity and configuration."
 }

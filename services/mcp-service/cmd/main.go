@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/tools"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/version"
 
@@ -64,13 +65,34 @@ func main() {
 	defer auditMiddleware.Stop()
 	recorder := auditlog.NewRecorder(auditMiddleware)
 
-	exchanger := platform.NewExchanger(cfg.AuthServiceURL, httpc, recorder)
+	// Per-user revocation (erased users, deactivation / password-reset cutoffs)
+	// is consulted on every cached grant. Needs REDIS_URL, which the registry's
+	// `redis` dependency provides; without it the check is skipped (fail open,
+	// like every other consumer) and the grant cache TTL is the only bound.
+	revocation := sharedmw.RedisRevocationCheckerFromEnv()
+	if revocation == nil {
+		log.Printf("⚠️  REDIS_URL not set or unusable — cached API-token grants cannot be revoked early; " +
+			"a revoked token or deactivated user is honoured until the grant cache TTL expires")
+	}
+	exchanger := platform.NewExchanger(cfg.AuthServiceURL, httpc, recorder, platform.Options{
+		GrantCacheTTL:         cfg.GrantCacheTTL,
+		NegativeCacheTTL:      cfg.NegativeCacheTTL,
+		AuthAttemptsPerMinute: cfg.AuthAttemptsPerMinute,
+		Revocation:            revocation,
+	})
 	client := platform.NewClient(httpc, cfg.InventoryServiceURL, cfg.ComplianceEngineURL, cfg.CBOMServiceURL)
 
 	// Public identity advertised to OAuth clients: the resource identifier and
 	// the authorization-server pointer are both built from this origin.
-	discovery := server.Discovery{PublicBaseURL: cfg.PublicBaseURL}
-	if cfg.PublicBaseURL == "" {
+	discovery := server.Discovery{
+		PublicBaseURL:     cfg.PublicBaseURL,
+		Production:        cfg.Environment == "production" || os.Getenv("GIN_MODE") == gin.ReleaseMode,
+		AllowHostFallback: cfg.AllowHostFallback,
+	}
+	if cfg.PublicBaseURL == "" && discovery.Production && !discovery.AllowHostFallback {
+		log.Printf("⚠️  neither OAUTH_CALLBACK_BASE_URL nor WEB_UI_BASE_URL is set — OAuth discovery is DISABLED " +
+			"(503) until one is; set MCP_ALLOW_HOST_FALLBACK=true only behind a gateway that rewrites Host")
+	} else if cfg.PublicBaseURL == "" {
 		// Not fatal — the metadata falls back to the request's own origin — but
 		// an operator should know the advertised URL is inferred rather than
 		// declared, because a client that follows it to the wrong host simply
@@ -79,9 +101,12 @@ func main() {
 			"OAuth discovery URLs will be derived from the inbound request's Host header")
 	}
 
-	mcpServer := server.NewMCPServer(&tools.Deps{Client: client, Audit: recorder})
+	mcpServer := server.NewMCPServer(&tools.Deps{Client: client, Audit: recorder, AuditFailOpen: cfg.AuditFailOpen, MaxResultBytes: cfg.MaxResultBytes})
 	handler := server.NewHandler(mcpServer, exchanger, recorder, discovery)
-	router := server.NewRouter(handler, discovery)
+	router, err := server.NewRouter(handler, discovery, server.WithTrustedProxies(cfg.TrustedProxyCIDRs))
+	if err != nil {
+		log.Fatalf("Failed to build router: %v", err)
+	}
 
 	// Health-only listener on the plain port when mTLS serves the API on 8443
 	// (kubelet probes need plaintext) — same dual-listener shape as every

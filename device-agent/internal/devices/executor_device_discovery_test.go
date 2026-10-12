@@ -1,6 +1,7 @@
 package devices
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -52,7 +53,7 @@ func TestExecute_DeviceDiscovery_PostsAllowlistedIdentification(t *testing.T) {
 		Credentials: map[string]interface{}{"username": "readonly", "password": "device-password-123"},
 		Parameters:  map[string]interface{}{"device_type": "fortinet", "management_url": srv.URL},
 	}
-	if err := exec.Execute(job); err != nil {
+	if err := exec.Execute(context.Background(), job); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	got := rec.last()
@@ -100,7 +101,7 @@ func TestExecute_DeviceDiscovery_FailureIsTypedCodeOnly(t *testing.T) {
 				Credentials: map[string]interface{}{"username": "u", "password": "device-password-123"},
 				Parameters:  map[string]interface{}{"device_type": c.deviceType, "management_url": "https://" + addr},
 			}
-			if err := exec.Execute(job); err != nil {
+			if err := exec.Execute(context.Background(), job); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 			got := rec.last()

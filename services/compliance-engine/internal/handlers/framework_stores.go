@@ -65,7 +65,7 @@ type ticketStore interface {
 	Delete(tenantID, ticketID uuid.UUID) (*models.Ticket, error)
 	GetProgress(tenantID uuid.UUID, days int, category string) (*models.TicketProgress, error)
 	GetStats(tenantID uuid.UUID) (*models.TicketStats, error)
-	ListComments(tenantID, ticketID uuid.UUID) ([]models.TicketComment, error)
+	ListComments(tenantID, ticketID uuid.UUID, limit, offset int) ([]models.TicketComment, bool, error)
 	AddComment(tenantID, ticketID, authorID uuid.UUID, content string) (*models.TicketComment, error)
 }
 

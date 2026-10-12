@@ -9,6 +9,7 @@ import { useMutation } from '@tanstack/react-query';
 import { clients } from '../lib/clients';
 import { Icon } from '../components/ui';
 import { AuthShell, AuthLabel, AuthSubmit, AuthError, authInputStyle } from './auth-shell';
+import { unwrap } from '../lib/api-result';
 
 export function VerifyEmailPage() {
   const navigate = useNavigate();
@@ -19,16 +20,14 @@ export function VerifyEmailPage() {
 
   const verify = useMutation({
     mutationFn: async () => {
-      const { data, error } = await clients.auth.POST('/auth/verify-email', { params: { query: { token } } });
-      if (error || !data) throw new Error((error as { error?: string } | undefined)?.error || 'This verification link is invalid or has expired.');
+      const data = unwrap(await clients.auth.POST('/auth/verify-email', { params: { query: { token } } }), 'This verification link is invalid or has expired.', { requireData: true });
       return data;
     },
   });
 
   const resend = useMutation({
     mutationFn: async () => {
-      const { error } = await clients.auth.POST('/auth/resend-verification', { body: { email: resendEmail.trim() } });
-      if (error) throw new Error('Could not resend the email.');
+      unwrap(await clients.auth.POST('/auth/resend-verification', { body: { email: resendEmail.trim() } }), 'Could not resend the email.');
     },
   });
 

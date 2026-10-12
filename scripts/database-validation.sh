@@ -748,7 +748,7 @@ apply_schema_if_needed() {
         # Check if schema file exists in container
         if docker exec "$container_name" test -f "$schema_path" 2>/dev/null; then
             # Apply schema and capture output
-            local result=$(docker exec -T "$container_name" psql -U "$db_user" -d "$db_name" -f "$schema_path" 2>&1)
+            local result=$(docker exec -T "$container_name" psql -v ON_ERROR_STOP=1 -U "$db_user" -d "$db_name" -f "$schema_path" 2>&1)
             local exit_code=$?
 
             # Check for critical errors (ignore "already exists" and "does not exist" errors)
@@ -912,7 +912,7 @@ apply_schema_if_needed() {
                     return 1
                 fi
                 # Apply schema and capture output
-                local result=$(docker exec -T "$actual_container" psql -U "$db_user" -d "$db_name" -f /tmp/schema.sql 2>&1)
+                local result=$(docker exec -T "$actual_container" psql -v ON_ERROR_STOP=1 -U "$db_user" -d "$db_name" -f /tmp/schema.sql 2>&1)
                 local exit_code=$?
 
                 # Check for critical errors (ignore "already exists" errors as they're expected for idempotent schema)

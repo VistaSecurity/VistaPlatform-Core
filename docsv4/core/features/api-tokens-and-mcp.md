@@ -123,7 +123,10 @@ The chart derives those addresses from your `tls.dnsName`. If the public address
 differs, set `appConfig.oauthCallbackBaseURL` (the `OAUTH_CALLBACK_BASE_URL`
 environment variable) to the public one. When it is unset, the platform falls
 back to the first configured CORS origin — which is your tenant app host, not
-necessarily the address the assistant used.
+necessarily the address the assistant used. The MCP server itself does not
+guess: in production it answers its OAuth discovery document with `503` until
+`OAUTH_CALLBACK_BASE_URL` is set (`MCP_ALLOW_HOST_FALLBACK=true` restores
+Host-header derivation behind a gateway that rewrites Host).
 
 ### A tunnel is the easier route
 
@@ -259,9 +262,11 @@ Go to **My Profile → API Tokens → New token**:
    password and store it in a secret manager.
 
 Tokens are listed with their prefix, last-used time, and status. Revoke one at
-any time from the same page. After revocation, in-flight sessions may keep
-working for up to 15 minutes (the lifetime of the short-lived internal
-credential), then fail.
+any time from the same page. The MCP server remembers a token's identity for at
+most **60 seconds** (`MCP_GRANT_CACHE_TTL`), so a revoked token stops working
+within a minute. A deactivated or erased user, or one whose sessions were
+revoked (password reset), is refused on the next call. A tenant suspension takes
+effect when the remembered identity expires, within the same 60 seconds.
 
 ## A 1.0.0 change if you parse tool output
 
@@ -283,5 +288,22 @@ English, update for the new field names and values.
 - Tokens and OAuth credentials are never stored by VistaSecurity in plaintext
   (only hashed). They are never forwarded to data services.
 - 25 active tokens per user; OAuth-granted tokens count against this limit.
-- Revocation is immediate at the credential store (≤15 min for cached
-  sessions).
+- Revocation is immediate at the credential store; the MCP server's own cache
+  adds at most 60 seconds (see above). Repeated failed authentication from one
+  address is rate limited (`429`), and a rejected token is refused locally for
+  30 seconds rather than re-checked on every request.
+- Every tool result is labelled `"data_origin": "tenant-inventory, untrusted"`:
+  host names, tags, certificate subjects and banners come from your network and
+  may contain text written to manipulate an assistant. The values are not
+  rewritten; the label tells the assistant to treat them as data, not
+  instructions.
+- A tool result is capped at 256 KiB (`MCP_MAX_RESULT_BYTES`). Past that the
+  longest lists are shortened and the result carries `"truncated": true`;
+  totals still describe the whole match, so ask again with a narrower query or
+  a smaller `page_size`.
+- Every read is audited, and **fails closed**: if the audit record cannot be
+  written the read is refused with `audit unavailable` rather than served
+  unrecorded. Set `MCP_AUDIT_FAIL_OPEN=true` to serve anyway (not recommended).
+- The client address in audit rows is the first address that is not one of your
+  trusted proxies (`trustedProxyCIDRs` in the chart, `TRUSTED_PROXY_CIDRS`); a
+  forged `X-Forwarded-For` is ignored.

@@ -40,10 +40,18 @@
 //
 // The plaintext is a JSON object of credential fields (username, password,
 // api_key, token, management_url, insecure_skip_verify, ...). The key is
-// SHA-256(jobID || 0x00 || agentSecret), where agentSecret is the agent's
-// registration key — a secret the platform and that one agent share, and no
-// other agent does. Binding the key to the job id means a captured envelope is
-// useless for any other job.
+// SHA-256(jobID || 0x00 || agentSecret), where agentSecret is a secret the
+// platform and that one collector share, and no other collector does. Binding
+// the key to the job id means a captured envelope is useless for any other job.
+//
+// # Where agentSecret comes from
+//
+// It is the per-collector AGENT SECRET the platform issues at enrolment and
+// again at every certificate rotation (see secret.go). A collector enrolled
+// before that existed has no agent secret and the platform still derives from
+// its registration key; the collector side accepts both (SecretState.Candidates)
+// so no re-enrolment is needed. The registration key is single-use and is not
+// kept on disk once an agent secret has replaced it.
 package agentcreds
 
 import (
@@ -70,7 +78,8 @@ var ErrNotSealed = errors.New("agentcreds: payload is not a sealed credential en
 // The empty-agentSecret branch reproduces the agent's original job-id-only
 // derivation. It is kept for compatibility with already-deployed agent binaries
 // and is deliberately weaker — a job id is not a secret — so callers should
-// always pass the agent's registration key.
+// always pass the collector's agent secret (or, for a collector that has not
+// rotated yet, its registration key).
 func DeriveKey(jobKey, agentSecret string) []byte {
 	if agentSecret == "" {
 		sum := sha256.Sum256([]byte(jobKey))

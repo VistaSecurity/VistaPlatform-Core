@@ -19,12 +19,18 @@ type Agent struct {
 	// RegistrationKey is the bootstrap secret. It is scanned internally during
 	// enrollment but never serialized to tenant clients (json:"-") — they already
 	// hold the key from registration, and the admin Fleet view omits it too.
-	RegistrationKey string  `json:"-" db:"registration_key"`
-	Name            *string `json:"name" db:"name"`
-	Platform        string  `json:"platform" db:"platform"`
-	Profile         *string `json:"profile" db:"profile"`
-	Version         string  `json:"version" db:"version"`
-	Status          string  `json:"status" db:"status"` // "active", "inactive", "error"
+	RegistrationKey string `json:"-" db:"registration_key"`
+	// AgentSecret is the plaintext per-agent secret just issued at enrolment
+	//. It exists only on the value RegisterDeviceAgentBootstrap returns,
+	// so the enrolment response can carry it once; it is never read back from the
+	// database (only its wrapped form is stored) and never serialized.
+	AgentSecret        string  `json:"-" db:"-"`
+	AgentSecretVersion int     `json:"-" db:"-"`
+	Name               *string `json:"name" db:"name"`
+	Platform           string  `json:"platform" db:"platform"`
+	Profile            *string `json:"profile" db:"profile"`
+	Version            string  `json:"version" db:"version"`
+	Status             string  `json:"status" db:"status"` // "active", "inactive", "error"
 	// IPAddress is the agent host's primary address, self-reported on each
 	// heartbeat. Nil until an agent old enough to report one checks in — the
 	// platform cannot derive it, since NAT rewrites the connection source.
@@ -145,6 +151,11 @@ type RegisterAgentRequest struct {
 	// CSR-based registration fields (optional for backward compatibility)
 	CSR     string `json:"csr,omitempty"`      // Certificate Signing Request (PEM format)
 	AgentID string `json:"agent_id,omitempty"` // Proposed agent ID (UUID string) for CSR CN
+	// SupportsAgentSecret is sent by an agent build that can store and use the
+	// per-agent secret. An older build omits it and keeps deriving its
+	// credential key from the registration key, so the platform must not switch
+	// it to a secret it would ignore.
+	SupportsAgentSecret bool `json:"supports_agent_secret,omitempty"`
 }
 
 // RegisterAgentResponse represents an agent registration response
@@ -158,6 +169,12 @@ type RegisterAgentResponse struct {
 	// all post-registration traffic. Only set when fail-closed agent
 	// mTLS is enforced; empty means "keep the URL you registered against".
 	ControlPlaneURL string `json:"control_plane_url,omitempty"`
+	// AgentSecret is the per-agent secret that roots the key sealing this
+	// agent's job credentials. It is returned exactly once, here, and
+	// only to an agent that sent supports_agent_secret; the platform keeps it
+	// wrapped under the master key and cannot show it again.
+	AgentSecret        string `json:"agent_secret,omitempty"`
+	AgentSecretVersion int    `json:"agent_secret_version,omitempty"`
 }
 
 // Job represents a job for an agent to execute

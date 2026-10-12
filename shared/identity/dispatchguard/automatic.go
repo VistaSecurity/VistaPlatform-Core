@@ -22,27 +22,96 @@ func AuthorizeAutomaticScan(tx Queryer, payload sensordispatch.Payload) error {
 	if !IsAutomaticScan(payload.Options) {
 		return nil
 	}
-	var raw []byte
-	if err := tx.QueryRow(`SELECT config FROM tenant_admin_settings WHERE tenant_id=$1 FOR SHARE`, payload.TenantID).Scan(&raw); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	scope, err := LoadAutomaticScope(tx, payload.TenantID)
+	if err != nil {
 		return err
+	}
+	return scope.Authorize(tx, payload)
+}
+
+// AutomaticScope is the tenant-level half of the automatic-scan judgement: the
+// policy, its restrictions and the registered segments. It is a snapshot, so a
+// caller judging many addresses (one work unit each) can read it once and
+// re-read it on a TTL, as the manual path does with TargetScope, instead of
+// paying for it on every address. Authorize is the per-payload half, which
+// always reads asset protection fresh.
+type AutomaticScope struct {
+	tenantID     string
+	restrictions autoscan.Restrictions
+	policy       autoscan.Policy
+	excluded     []netip.Prefix
+	allowed      []netip.Prefix
+	// declared: the segments a person registered. Connection consent is not
+	// required for an address inside one (SegmentDeclaresAutomaticScope).
+	declared []netip.Prefix
+}
+
+// LoadAutomaticScope reads the policy (locked FOR SHARE, as AuthorizeAutomaticScan
+// always has, before asset protection is read) and the tenant's segments.
+func LoadAutomaticScope(tx Queryer, tenantID string) (*AutomaticScope, error) {
+	var raw []byte
+	if err := tx.QueryRow(`SELECT config FROM tenant_admin_settings WHERE tenant_id=$1 FOR SHARE`, tenantID).Scan(&raw); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
 	}
 	config := map[string]interface{}{}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &config); err != nil {
-			return denied("invalid automatic-scan policy")
+			return nil, denied("invalid automatic-scan policy")
 		}
 	}
 	restrictions, err := autoscan.RestrictionsFromConfig(config)
 	if err != nil {
-		return denied("invalid automatic-scan restrictions")
+		return nil, denied("invalid automatic-scan restrictions")
 	}
 	policy, err := autoscan.Normalize(autoscan.FromConfig(config))
 	if err != nil {
-		return denied("invalid automatic-scan policy")
+		return nil, denied("invalid automatic-scan policy")
 	}
 	if restrictions.Paused || !policy.Enabled {
-		return ErrPaused
+		return nil, ErrPaused
 	}
+	var segmentRaw []byte
+	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('value',value,'network_type',network_type,'learned',`+learnedSegmentSQL+`,'imported',`+connectionImportedSegmentSQL+`,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, tenantID).Scan(&segmentRaw); err != nil {
+		return nil, err
+	}
+	var segments []struct {
+		Value       string
+		NetworkType string `json:"network_type"`
+		Learned     bool
+		Imported    bool
+		Blocked     bool
+	}
+	if err := json.Unmarshal(segmentRaw, &segments); err != nil {
+		return nil, err
+	}
+	excluded := append(autoscan.PlatformExcludedPrefixes(), restrictions.Excluded...)
+	allowed := []netip.Prefix{}
+	// declared: the segments a person registered. Connection consent is not
+	// required for an address inside one (SegmentDeclaresAutomaticScope).
+	declared := []netip.Prefix{}
+	for _, seg := range segments {
+		prefix, err := netip.ParsePrefix(seg.Value)
+		if err != nil {
+			continue
+		}
+		if seg.Blocked {
+			excluded = append(excluded, prefix)
+		} else if SegmentPrefixGrantsOwnership(prefix, seg.NetworkType, seg.Learned, true) {
+			allowed = append(allowed, prefix)
+			if SegmentDeclaresAutomaticScope(prefix, seg.NetworkType, seg.Learned, seg.Imported) {
+				declared = append(declared, prefix)
+			}
+		}
+	}
+	return &AutomaticScope{tenantID: tenantID, restrictions: restrictions, policy: policy, excluded: excluded, allowed: allowed, declared: declared}, nil
+}
+
+// Authorize judges payload against the snapshot and fresh asset protection.
+func (s *AutomaticScope) Authorize(tx Queryer, payload sensordispatch.Payload) error {
+	if payload.TenantID != s.tenantID {
+		return denied("automatic-scan scope belongs to another tenant")
+	}
+	restrictions, policy, excluded, allowed, declared := s.restrictions, s.policy, s.excluded, s.allowed, s.declared
 	// The addresses and ports the scanner will contact, from the legacy
 	// payload or from a plan (planned.go, WP2).
 	scope, err := probeScopeOf(payload)
@@ -64,39 +133,6 @@ func AuthorizeAutomaticScan(tx Queryer, payload sensordispatch.Payload) error {
 	for _, port := range scope.Ports {
 		if !slices.Contains(policy.Ports, port) {
 			return denied("automatic scan port no longer authorized")
-		}
-	}
-	var segmentRaw []byte
-	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('value',value,'network_type',network_type,'learned',`+learnedSegmentSQL+`,'imported',`+connectionImportedSegmentSQL+`,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, payload.TenantID).Scan(&segmentRaw); err != nil {
-		return err
-	}
-	var segments []struct {
-		Value       string
-		NetworkType string `json:"network_type"`
-		Learned     bool
-		Imported    bool
-		Blocked     bool
-	}
-	if err := json.Unmarshal(segmentRaw, &segments); err != nil {
-		return err
-	}
-	excluded := append(autoscan.PlatformExcludedPrefixes(), restrictions.Excluded...)
-	allowed := []netip.Prefix{}
-	// declared: the segments a person registered. Connection consent is not
-	// required for an address inside one (SegmentDeclaresAutomaticScope).
-	declared := []netip.Prefix{}
-	for _, seg := range segments {
-		prefix, err := netip.ParsePrefix(seg.Value)
-		if err != nil {
-			continue
-		}
-		if seg.Blocked {
-			excluded = append(excluded, prefix)
-		} else if SegmentPrefixGrantsOwnership(prefix, seg.NetworkType, seg.Learned, true) {
-			allowed = append(allowed, prefix)
-			if SegmentDeclaresAutomaticScope(prefix, seg.NetworkType, seg.Learned, seg.Imported) {
-				declared = append(declared, prefix)
-			}
 		}
 	}
 	// Every target is judged in order, and the first refusal is the one

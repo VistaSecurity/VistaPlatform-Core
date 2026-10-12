@@ -20,6 +20,7 @@ export const PUBLIC_PATHS: readonly string[] = [
   '/login',
   '/signup',
   '/verify-email',
+  '/forgot-password',
   '/reset-password',
   '/accept-invite',
   '/auth/sso/callback',

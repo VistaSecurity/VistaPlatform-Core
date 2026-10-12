@@ -11,6 +11,7 @@ import { clients } from '../../lib/clients';
 import { Icon, Modal } from '../../components/ui';
 import { SPage, SSection, SCard, STable, STableRow, STag, StateNote, relTime, GREEN, AMBER } from './kit';
 import type { SettingsNavItem } from './nav';
+import { unwrap } from '../../lib/api-result';
 
 type Session = authServiceComponents['schemas']['Session'];
 type Connection = authServiceComponents['schemas']['Connection'];
@@ -46,8 +47,7 @@ export function ProfileSessionsPage({ meta }: { meta: SettingsNavItem }) {
   const revoke = useMutation({
     mutationFn: async (ids: string[]) => {
       for (const id of ids) {
-        const { error, response } = await clients.auth.DELETE('/auth/sessions/{id}', { params: { path: { id } } });
-        if (!response.ok || error) throw new Error('Failed to revoke a session');
+        unwrap(await clients.auth.DELETE('/auth/sessions/{id}', { params: { path: { id } } }), 'Failed to revoke a session');
       }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settings', 'sessions'] }),
@@ -155,8 +155,7 @@ export function ProfileConnectedPage({ meta }: { meta: SettingsNavItem }) {
 
   const setPrimary = useMutation({
     mutationFn: async (id: string) => {
-      const { error, response } = await clients.auth.PUT('/auth/connections/{id}/primary', { params: { path: { id } } });
-      if (!response.ok || error) throw new Error('Failed to set primary');
+      unwrap(await clients.auth.PUT('/auth/connections/{id}/primary', { params: { path: { id } } }), 'Failed to set primary');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settings', 'connections'] }),
   });
@@ -164,8 +163,7 @@ export function ProfileConnectedPage({ meta }: { meta: SettingsNavItem }) {
   const unlink = useMutation({
     mutationFn: async (c: Connection) => {
       if (!c.sso_provider_id) throw new Error('Not an unlinkable connection');
-      const { error, response } = await clients.auth.DELETE('/auth/sso/unlink', { body: { provider_id: c.sso_provider_id } });
-      if (!response.ok || error) throw new Error('Failed to unlink');
+      unwrap(await clients.auth.DELETE('/auth/sso/unlink', { body: { provider_id: c.sso_provider_id } }), 'Failed to unlink');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settings', 'connections'] }),
     onSettled: () => setConfirmUnlink(null),

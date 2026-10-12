@@ -145,7 +145,7 @@ export function RetentionPage() {
                 <td className="mono t-muted">{p.hot_storage_days}d</td>
                 <td className="mono t-muted">{p.total_retention_days}d</td>
                 <td><Tag color={p.is_active ? 'var(--ok)' : 'var(--neutral)'}>{p.is_active ? 'Active' : 'Inactive'}</Tag></td>
-                <td><div style={{ display: 'flex', justifyContent: 'flex-end' }}><PlatformPermissionGate permission={PLATFORM_PERMISSIONS.platform.auditManage}><button className="op-btn icon sm" title="Edit" onClick={() => setModal({ kind: 'edit', policy: p })}><Pencil size={13} /></button></PlatformPermissionGate></div></td>
+                <td><div style={{ display: 'flex', justifyContent: 'flex-end' }}><PlatformPermissionGate permission={PLATFORM_PERMISSIONS.platform.auditManage}><button className="op-btn icon sm" title="Edit" aria-label="Edit" onClick={() => setModal({ kind: 'edit', policy: p })}><Pencil size={13} /></button></PlatformPermissionGate></div></td>
               </tr>
             ))}
             {isLoading && <tr><td colSpan={6} style={{ textAlign: 'center', padding: 40, color: 'var(--op-t3)' }}>Loading policies…</td></tr>}

@@ -33,6 +33,7 @@
 // Unlike End-of-life and Vulnerability feed, this page WRITES. There is no
 // upstream feed to mirror: the rules are ours and the admin's.
 import { useState } from 'react';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import { Crosshair, Plus, Search, Trash2, Pencil, X } from 'lucide-react';
 import { Tag, num } from '../../components/ui/primitives';
 import { AcceptUpdateButton, SeededContentBadges } from './seeded-content';
@@ -251,10 +252,12 @@ export function ClassificationRulesPage() {
   const [search, setSearch] = useState('');
   const [kind, setKind] = useState<ClassificationRuleKind | ''>('');
   const [page, setPage] = useState(1);
+  // The input is controlled by `search`; the query is keyed on the debounced value.
+  const debouncedSearch = useDebouncedValue(search);
   const [editing, setEditing] = useState<ClassificationRule | 'new' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ClassificationRule | null>(null);
 
-  const { data, isLoading, isError, refetch } = useClassificationRules({ search, kind, page });
+  const { data, isLoading, isError, refetch } = useClassificationRules({ search: debouncedSearch, kind, page });
   const create = useCreateClassificationRule();
   const update = useUpdateClassificationRule();
   const remove = useDeleteClassificationRule();

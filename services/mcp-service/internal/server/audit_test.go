@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	sharedaudit "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
@@ -19,9 +21,15 @@ import (
 type auditSink struct {
 	mu      sync.Mutex
 	entries []*sharedaudit.ActivityLogRequest
+	// failTools makes LogActivity refuse tool-call entries, as a broken audit
+	// path would.
+	failTools atomic.Bool
 }
 
 func (s *auditSink) LogActivity(_ context.Context, entry *sharedaudit.ActivityLogRequest) error {
+	if s.failTools.Load() && strings.HasPrefix(entry.EventType, "mcp.tool.") {
+		return errors.New("audit backend down")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries = append(s.entries, entry)

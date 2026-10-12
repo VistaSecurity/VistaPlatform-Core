@@ -3,6 +3,11 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Release.Namespace }}
+  annotations:
+    # `helm uninstall` would otherwise delete the Namespace and, with it, the
+    # PVCs and Secrets that carry their own keep annotations (encryption-master-key,
+    # datastore volumes). Delete the namespace by hand when you mean to.
+    helm.sh/resource-policy: keep
   labels:
     {{- include "vistaplatform.labels" . | nindent 4 }}
     pod-security.kubernetes.io/enforce: baseline

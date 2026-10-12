@@ -27,6 +27,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/apitokens"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/config"
+	"github.com/vistasecurity/vistaplatform/auth-service/internal/middleware"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	passwordsvc "github.com/vistasecurity/vistaplatform/shared/security/password"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
@@ -273,6 +274,10 @@ func TestIntegration_TenantSuspension_InvitationAcceptRefusedBeforeAccountExists
 func TestIntegration_TenantSuspension_PATExchangeRefused(t *testing.T) {
 	const hmacKeyForTest = "suspension-test-internal-hmac" // not a real credential
 	t.Setenv("INTERNAL_AUTH_SECRET", hmacKeyForTest)
+	// The middleware caches its verifier per process; pin this test's own so a
+	// router built by an earlier test (with another secret) cannot decide it.
+	middleware.SetInternalVerifier(serviceauth.NewVerifier(hmacKeyForTest))
+	t.Cleanup(func() { middleware.SetInternalVerifier(nil) })
 	f := newSuspensionFixture(t)
 
 	var userID uuid.UUID

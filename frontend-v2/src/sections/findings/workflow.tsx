@@ -21,11 +21,12 @@ import { categoryForProducer, defaultDueDate } from '@vistasecurity/primitives/t
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import {
-  catOf, issueLabel, sevLevel, cryptoTicketRating, sevRank, wfOf, WF_COLOR, WF_LABEL, WF_STATUSES,
+  catOf, issueLabel, sevLevel, cryptoTicketRating, sevRank, wfOf, WF_COLOR, WF_LABEL, WF_STATUSES, isWorkflowStatus, type WorkflowStatus,
   type ComplianceFinding, type ControlRef, type CryptoRisk,
 } from './model';
 import { producerLabel } from './producer-evidence';
 import { useTenantUsers } from './queries';
+import { unwrap } from '../../lib/api-result';
 
 export type TicketTarget =
   | { kind: 'crypto'; risk: CryptoRisk }
@@ -238,8 +239,7 @@ export function WorkflowActions({ target }: { target: TicketTarget }) {
 
   const createTicket = useMutation({
     mutationFn: async () => {
-      const { data, error } = await clients.compliance.POST('/tickets', { body: ticketBody(target) });
-      if (error || !data) throw new Error('Failed to create ticket');
+      const data = unwrap(await clients.compliance.POST('/tickets', { body: ticketBody(target) }), 'Failed to create ticket', { requireData: true });
       return data.ticket;
     },
     onSuccess: (t) => {
@@ -252,11 +252,10 @@ export function WorkflowActions({ target }: { target: TicketTarget }) {
 
   const addToPlan = useMutation({
     mutationFn: async (planId: string) => {
-      const { error } = await clients.compliance.POST('/plans/{id}/items', {
+      unwrap(await clients.compliance.POST('/plans/{id}/items', {
         params: { path: { id: planId } },
         body: { finding_id: finding!.id },
-      });
-      if (error) throw new Error('Failed to add to plan');
+      }), 'Failed to add to plan');
     },
     onSuccess: () => {
       toast.success('Added to plan');
@@ -268,13 +267,11 @@ export function WorkflowActions({ target }: { target: TicketTarget }) {
 
   const createPlanAndAdd = useMutation({
     mutationFn: async (title: string) => {
-      const { data, error } = await clients.compliance.POST('/plans', { body: { title, plan_type: 'remediation' } });
-      if (error || !data) throw new Error('Failed to create plan');
-      const { error: e2 } = await clients.compliance.POST('/plans/{id}/items', {
+      const data = unwrap(await clients.compliance.POST('/plans', { body: { title, plan_type: 'remediation' } }), 'Failed to create plan', { requireData: true });
+      unwrap(await clients.compliance.POST('/plans/{id}/items', {
         params: { path: { id: data.plan.id } },
         body: { finding_id: finding!.id },
-      });
-      if (e2) throw new Error('Plan created, but adding the finding failed');
+      }), 'Plan created, but adding the finding failed');
       return data.plan;
     },
     onSuccess: (p) => {
@@ -288,15 +285,14 @@ export function WorkflowActions({ target }: { target: TicketTarget }) {
 
   const createOverride = useMutation({
     mutationFn: async () => {
-      const { error } = await clients.compliance.POST('/overrides', {
+      unwrap(await clients.compliance.POST('/overrides', {
         body: {
           control_id: finding!.control_id,
           override_type: 'disregard',
           rationale: rationale.trim(),
           framework_type: 'platform',
         },
-      });
-      if (error) throw new Error('Failed to create override');
+      }), 'Failed to create override');
     },
     onSuccess: () => {
       toast.success('Override recorded — control disregarded for future evaluations');
@@ -308,12 +304,11 @@ export function WorkflowActions({ target }: { target: TicketTarget }) {
   });
 
   const setStatus = useMutation({
-    mutationFn: async ({ status, reason }: { status: string; reason?: string }) => {
-      const { error } = await clients.compliance.PUT('/findings/{id}/workflow-status', {
+    mutationFn: async ({ status, reason }: { status: WorkflowStatus; reason?: string }) => {
+      unwrap(await clients.compliance.PUT('/findings/{id}/workflow-status', {
         params: { path: { id: finding!.id } },
         body: { workflow_status: status, ...(reason ? { suppression_reason: reason } : {}) },
-      });
-      if (error) throw new Error('Failed to update status');
+      }), 'Failed to update status');
     },
     onSuccess: (_d, v) => {
       toast.success(`Status set to ${WF_LABEL[v.status] ?? v.status}`);
@@ -321,8 +316,8 @@ export function WorkflowActions({ target }: { target: TicketTarget }) {
       setSuppressFor(null);
       invalidateFindings();
     },
-    onError: () => {
-      toast.error('Status update failed — re-checking server state');
+    onError: (e) => {
+      toast.error(`${e instanceof Error && e.message ? e.message : 'Status update failed'} — re-checking server state`);
       setSuppressFor(null);
       invalidateFindings();
     },
@@ -331,16 +326,14 @@ export function WorkflowActions({ target }: { target: TicketTarget }) {
   const assign = useMutation({
     mutationFn: async (userId: string | null) => {
       if (userId) {
-        const { error } = await clients.compliance.POST('/findings/{id}/assign', {
+        unwrap(await clients.compliance.POST('/findings/{id}/assign', {
           params: { path: { id: finding!.id } },
           body: { assigned_to: userId },
-        });
-        if (error) throw new Error('Failed to assign finding');
+        }), 'Failed to assign finding');
       } else {
-        const { error } = await clients.compliance.DELETE('/findings/{id}/assign', {
+        unwrap(await clients.compliance.DELETE('/findings/{id}/assign', {
           params: { path: { id: finding!.id } },
-        });
-        if (error) throw new Error('Failed to unassign finding');
+        }), 'Failed to unassign finding');
       }
       return userId;
     },
@@ -377,6 +370,7 @@ export function WorkflowActions({ target }: { target: TicketTarget }) {
                 value={wf}
                 onChange={(e) => {
                   const v = e.target.value;
+                  if (!isWorkflowStatus(v)) return;
                   if (v === 'SUPPRESSED') setSuppressFor('');
                   else setStatus.mutate({ status: v });
                 }}

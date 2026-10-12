@@ -100,12 +100,12 @@ frontend-v2/src/sections/findings/findings-page.tsx#FindingsPage:
   reason: UI comparisons and conditional labels describe row counts, filters and
     the bounded loaded prefix. Severity mapping delegates to shared sevLevel;
     this component defines no numeric risk thresholds.
-  fingerprint: 1fa0306a14d7bc6279d54824d70c75d57ae17ac6ec398c589432f3a2ad754fc2
+  fingerprint: 87777a9d6ba79c68bac7c1b9c351cc4cda22123384c1b00248c1be9082c0b24b
 frontend-v2/src/sections/inventory/inventory-page.tsx#InventoryPage:
   concept: inventory_counts
   reason: Displays grade groups and asset counts; risk conversion delegates to
     shared helpers.
-  fingerprint: ea514fd5a44b8dd5b700dcae0d22e0bac9e6486b76f884f1ded1b9bb8f56332b
+  fingerprint: 54b9a28a4d4e3f2cfd1dc2112c15889ff4e3a2d956c01e20e14d97c7feb88d9e
 frontend-v2/src/sections/posture/algorithm-reference.tsx#AlgorithmReference:
   concept: catalogue_display
   reason: Strength filter values, row counts and column alignment coexist; score

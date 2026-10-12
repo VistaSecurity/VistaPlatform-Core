@@ -2,8 +2,7 @@
 {{/* ───────────────────────────────────────────────────────────────────────
      Egress allow rules. Activated only when networkPolicy.egressEnabled
      is true. Mirrors the consumer side of the existing ingress allow
-     rules: the registry's .Values.backends[*].needs.{postgres,redis,nats,
-     influxdb} fields decide which backends are granted outbound to each
+     rules: the registry's .Values.backends[*].needs.{postgres,redis,nats} fields decide which backends are granted outbound to each
      datastore. Backend-to-backend HTTP on :8080 is allowed for all
      backends (the gateway-free chart routes inter-service traffic
      directly). The services in .Values.networkPolicy.externalEgressBackends
@@ -92,6 +91,32 @@ spec:
               app.kubernetes.io/component: postgres
       ports:
         - { protocol: TCP, port: 5432 }
+{{- if not .Values.datastores.postgres.enabled }}
+{{- $extCIDRs := .Values.networkPolicy.externalDatastoreCIDRs | default (list) }}
+{{- if not $extCIDRs }}
+  {{- fail "networkPolicy.egressEnabled is true and datastores.postgres.enabled is false (external Postgres), but networkPolicy.externalDatastoreCIDRs is empty. The egress default-deny would block every backend and Job from reaching the external database. List the database's CIDR(s), e.g. --set networkPolicy.externalDatastoreCIDRs={10.20.30.0/24}, or set networkPolicy.egressEnabled=false." }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-external-postgres
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ $pgConsumers | join "," }}] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        {{- range $cidr := $extCIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: 5432 }
+{{- end }}
 {{- end }}
 ---
 
@@ -121,6 +146,32 @@ spec:
               app.kubernetes.io/component: redis
       ports:
         - { protocol: TCP, port: 6379 }
+{{- if not .Values.datastores.redis.enabled }}
+{{- $extCIDRs := .Values.networkPolicy.externalDatastoreCIDRs | default (list) }}
+{{- if not $extCIDRs }}
+  {{- fail "networkPolicy.egressEnabled is true and datastores.redis.enabled is false (external Redis), but networkPolicy.externalDatastoreCIDRs is empty. The egress default-deny would block every Redis-using backend from reaching the external cache. List the cache's CIDR(s), e.g. --set networkPolicy.externalDatastoreCIDRs={10.20.30.0/24}, or set networkPolicy.egressEnabled=false." }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-to-external-redis
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ $redisConsumers | join "," }}] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        {{- range $cidr := $extCIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: 6379 }
+{{- end }}
 {{- end }}
 ---
 
@@ -172,35 +223,6 @@ spec:
               app.kubernetes.io/component: nats
       ports:
         - { protocol: TCP, port: 8222 }
----
-
-{{/* Backends that need InfluxDB. */}}
-{{- $influxConsumers := list }}
-{{- range $name, $svc := .Values.backends }}
-  {{- if (default (dict) $svc.needs).influxdb }}
-    {{- $influxConsumers = append $influxConsumers $name }}
-  {{- end }}
-{{- end }}
-{{- if and $influxConsumers .Values.datastores.influxdb.enabled }}
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-egress-to-influxdb
-  labels:
-    {{- include "vistaplatform.labels" . | nindent 4 }}
-spec:
-  podSelector:
-    matchExpressions:
-      - { key: app.kubernetes.io/component, operator: In, values: [{{ $influxConsumers | join "," }}] }
-  policyTypes: [Egress]
-  egress:
-    - to:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/component: influxdb
-      ports:
-        - { protocol: TCP, port: 8086 }
-{{- end }}
 ---
 
 {{/* Outbound egress for backends that legitimately need to leave the

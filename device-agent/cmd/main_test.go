@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/config"
+	"github.com/vistasecurity/vistaplatform/shared/atomicfile"
 )
 
 type fakeCertificateRotator struct {
@@ -36,24 +39,13 @@ func TestCheckAndRotateAgentCertificate_RotatesAndPersistsExpiringCert(t *testin
 		expiresAt:    time.Now().Add(7 * 24 * time.Hour),
 		expiringSoon: true,
 	}
-	cfg := &config.Config{}
-	var savedCerts, savedConfig int
+	var pending atomicfile.Pending
+	var persisted int
 
-	rotated := checkAndRotateAgentCertificate(
-		rotator,
-		cfg,
-		func(got *config.Config) error {
-			savedCerts++
-			if got != cfg {
-				t.Fatalf("saveCerts received unexpected config pointer")
-			}
-			return nil
-		},
-		func() error {
-			savedConfig++
-			return nil
-		},
-	)
+	rotated := checkAndRotateAgentCertificate(rotator, &config.Config{}, func() error {
+		persisted++
+		return nil
+	}, &pending)
 
 	if !rotated {
 		t.Fatal("expected expiring certificate to rotate")
@@ -61,38 +53,25 @@ func TestCheckAndRotateAgentCertificate_RotatesAndPersistsExpiringCert(t *testin
 	if rotator.checks != 1 || rotator.rotations != 1 {
 		t.Fatalf("checks=%d rotations=%d, want 1/1", rotator.checks, rotator.rotations)
 	}
-	if savedCerts != 1 || savedConfig != 1 {
-		t.Fatalf("savedCerts=%d savedConfig=%d, want 1/1", savedCerts, savedConfig)
+	if persisted != 1 || pending.Err() != nil {
+		t.Fatalf("persisted=%d pending=%v, want 1/nil", persisted, pending.Err())
 	}
 }
 
 func TestCheckAndRotateAgentCertificate_SkipsValidCert(t *testing.T) {
-	rotator := &fakeCertificateRotator{
-		expiresAt: time.Now().Add(90 * 24 * time.Hour),
-	}
-	var savedCerts, savedConfig int
+	rotator := &fakeCertificateRotator{expiresAt: time.Now().Add(90 * 24 * time.Hour)}
+	var persisted int
 
-	rotated := checkAndRotateAgentCertificate(
-		rotator,
-		&config.Config{},
-		func(*config.Config) error {
-			savedCerts++
-			return nil
-		},
-		func() error {
-			savedConfig++
-			return nil
-		},
-	)
+	rotated := checkAndRotateAgentCertificate(rotator, &config.Config{}, func() error {
+		persisted++
+		return nil
+	}, &atomicfile.Pending{})
 
 	if rotated {
 		t.Fatal("did not expect valid certificate to rotate")
 	}
-	if rotator.rotations != 0 {
-		t.Fatalf("rotations=%d, want 0", rotator.rotations)
-	}
-	if savedCerts != 0 || savedConfig != 0 {
-		t.Fatalf("savedCerts=%d savedConfig=%d, want 0/0", savedCerts, savedConfig)
+	if rotator.rotations != 0 || persisted != 0 {
+		t.Fatalf("rotations=%d persisted=%d, want 0/0", rotator.rotations, persisted)
 	}
 }
 
@@ -102,29 +81,147 @@ func TestCheckAndRotateAgentCertificate_DoesNotPersistFailedRotation(t *testing.
 		expiringSoon: true,
 		rotateErr:    errors.New("rotation failed"),
 	}
-	var savedCerts, savedConfig int
+	var persisted int
+	var pending atomicfile.Pending
 
-	rotated := checkAndRotateAgentCertificate(
-		rotator,
-		&config.Config{},
-		func(*config.Config) error {
-			savedCerts++
-			return nil
-		},
-		func() error {
-			savedConfig++
-			return nil
-		},
-	)
+	rotated := checkAndRotateAgentCertificate(rotator, &config.Config{}, func() error {
+		persisted++
+		return nil
+	}, &pending)
 
 	if rotated {
 		t.Fatal("did not expect failed rotation to report success")
 	}
-	if rotator.rotations != 1 {
-		t.Fatalf("rotations=%d, want 1", rotator.rotations)
+	if rotator.rotations != 1 || persisted != 0 || pending.Err() != nil {
+		t.Fatalf("rotations=%d persisted=%d pending=%v", rotator.rotations, persisted, pending.Err())
 	}
-	if savedCerts != 0 || savedConfig != 0 {
-		t.Fatalf("savedCerts=%d savedConfig=%d, want 0/0", savedCerts, savedConfig)
+}
+
+// The platform revokes the old certificate on rotation, so a failed save must
+// be retried, remembered, and never reported as a successful rotation.
+func TestCheckAndRotateAgentCertificate_PersistFailureIsRetriedAndRemembered(t *testing.T) {
+	oldAttempts, oldDelay := rotationPersistAttempts, rotationPersistDelay
+	rotationPersistAttempts, rotationPersistDelay = 3, 0
+	t.Cleanup(func() { rotationPersistAttempts, rotationPersistDelay = oldAttempts, oldDelay })
+
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	rotator := &fakeCertificateRotator{expiresAt: time.Now().Add(time.Hour), expiringSoon: true}
+	var pending atomicfile.Pending
+	calls := 0
+	rotated := checkAndRotateAgentCertificate(rotator, &config.Config{DataPath: "/data"}, func() error {
+		calls++
+		return errors.New("disk full")
+	}, &pending)
+
+	if !rotated {
+		t.Fatal("the platform did rotate; the return value reports that")
+	}
+	if calls != 3 {
+		t.Fatalf("persist attempted %d times, want 3", calls)
+	}
+	if pending.Err() == nil {
+		t.Fatal("unpersisted state not recorded")
+	}
+	if strings.Contains(logs.String(), "rotated successfully") {
+		t.Fatalf("claimed success although the certificate was not saved:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "could NOT be saved") {
+		t.Fatalf("failure not logged:\n%s", logs.String())
+	}
+}
+
+func TestRetryUnpersistedCredentials_ClearsOnceSaved(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{DataPath: dir, PlatformURL: "https://p.example", Security: config.SecurityConfig{ClientCert: "C", ClientKey: "K"}}
+	a := &DeviceAgent{config: cfg, configPath: filepath.Join(dir, "agent.yaml")}
+	a.unpersistedCredentials.Set(errors.New("earlier failure"))
+
+	a.retryUnpersistedCredentials()
+
+	if err := a.unpersistedCredentials.Err(); err != nil {
+		t.Fatalf("still pending after a successful save: %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "certs", "client.key")); err != nil || string(b) != "K" {
+		t.Fatalf("key not written: %q %v", b, err)
+	}
+}
+
+// Values with YAML syntax characters, and every field of the config struct,
+// must survive a save and a reload; comments an operator added must survive a
+// rewrite.
+func TestSaveConfigFileRoundTripsAndPreservesComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	verbose := true
+	cfg := &config.Config{
+		PlatformURL:                     "https://platform.example/path#frag",
+		AgentID:                         "3f2b8c1e-9a7d-4e65-b0c4-2d1e8f7a6b59",
+		RegistrationKey:                 "key: with # hash and \"quotes\"",
+		PollInterval:                    45 * time.Second,
+		HeartbeatInterval:               90 * time.Second,
+		DataPath:                        `C:\Data: x # y`,
+		Verbose:                         &verbose,
+		HostInventoryEnabled:            true,
+		HostInventoryInterval:           6 * time.Hour,
+		HostInventoryConnectionsEnabled: true,
+		Security: config.SecurityConfig{
+			ClientCertPath: "/d/certs/client.crt", ClientKeyPath: "/d/certs/client.key", ServerCACertPath: "/d/certs/ca.crt",
+		},
+	}
+	if err := os.WriteFile(path, []byte("# operator note: keep this\nplatform_url: old\ncustom_key: kept\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveConfigFile(path, cfg); err != nil {
+		t.Fatalf("saveConfigFile: %v", err)
+	}
+
+	got, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	want := *cfg
+	if got.PlatformURL != want.PlatformURL || got.AgentID != want.AgentID || got.RegistrationKey != want.RegistrationKey ||
+		got.PollInterval != want.PollInterval || got.HeartbeatInterval != want.HeartbeatInterval || got.DataPath != want.DataPath ||
+		got.Verbose == nil || !*got.Verbose || !got.HostInventoryEnabled || got.HostInventoryInterval != want.HostInventoryInterval ||
+		!got.HostInventoryConnectionsEnabled || got.Security.ClientCertPath != want.Security.ClientCertPath ||
+		got.Security.ClientKeyPath != want.Security.ClientKeyPath || got.Security.ServerCACertPath != want.Security.ServerCACertPath {
+		t.Fatalf("round trip lost data:\n got %+v\nwant %+v", got, want)
+	}
+	body, _ := os.ReadFile(path)
+	for _, frag := range []string{"operator note: keep this", "custom_key: kept", "heartbeat_interval"} {
+		if !strings.Contains(string(body), frag) {
+			t.Errorf("rewrite dropped %q:\n%s", frag, body)
+		}
+	}
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Errorf("leftover temp file %s", e.Name())
+		}
+	}
+	if strings.Contains(string(body), "client_key:") || strings.Contains(string(body), "PRIVATE KEY") {
+		t.Errorf("config file must not carry key material:\n%s", body)
+	}
+}
+
+func TestSaveConfigFileDropsSettingsNoLongerSet(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	on := &config.Config{PlatformURL: "u", DataPath: "d", HostInventoryEnabled: true, HostInventoryInterval: 2 * time.Hour}
+	if err := saveConfigFile(path, on); err != nil {
+		t.Fatal(err)
+	}
+	off := &config.Config{PlatformURL: "u", DataPath: "d"}
+	if err := saveConfigFile(path, off); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HostInventoryEnabled {
+		t.Fatal("host inventory stayed enabled after the agent turned it off")
 	}
 }
 

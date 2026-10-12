@@ -14,9 +14,7 @@
 // The framework is untouched and remains the source of the PQC *score* that
 // compliance reads. This page answers the different question: what, specifically,
 // do we have to replace, and with what.
-import { useQuery } from '@tanstack/react-query';
 import { Icon, PercentageGauge } from '../../components/ui';
-import { clients } from '../../lib/clients';
 import {
   BandHeading, DashboardHeader, DashboardShell, Grid, PageError, Panel, PanelLink, PanelNote, StatTile,
 } from './dashboard-bits';
@@ -26,23 +24,12 @@ import {
   migrationWorklist, nistTimeline, pqcCategories, pqcHeadline, safeFamilies,
 } from './pqc-dashboard-metrics';
 import { hygieneScore } from './inventory-health';
-
-function usePqcProgress() {
-  return useQuery({
-    queryKey: ['dashboard', 'pqc-progress'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/pqc/progress', {});
-      if (error || !data) throw new Error('Failed to load PQC progress');
-      return data.progress;
-    },
-    staleTime: 60_000,
-  });
-}
+import { useFrameworksAvailable, usePqcProgress } from '../../lib/shared-queries';
 
 /**
  * The PQC Readiness framework's materialized score.
  *
- * Same `['posture','available-frameworks']` key the Posture page, the shared
+ * Same shared `useFrameworksAvailable` read the Posture page, the shared
  * Dashboard's hygiene tile and the Compliance dashboard all use — one fetch,
  * one cached answer. `hygieneScore` is the generic "pull one framework's rollup
  * out of the list" reader despite its name; it is reused rather than copied so
@@ -50,15 +37,7 @@ function usePqcProgress() {
  * be assessed", and is never 0 or 100) has exactly one implementation.
  */
 function usePqcFramework() {
-  return useQuery({
-    queryKey: ['posture', 'available-frameworks'],
-    queryFn: async () => {
-      const { data, error } = await clients.compliance.GET('/frameworks/available', {});
-      if (error || !data) throw new Error('Failed to load frameworks');
-      return data.frameworks ?? [];
-    },
-    staleTime: 60_000,
-  });
+  return useFrameworksAvailable();
 }
 
 export function PqcDashboardPage() {

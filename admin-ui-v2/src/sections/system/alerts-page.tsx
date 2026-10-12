@@ -8,6 +8,7 @@ import { BellRing, CalendarClock, ShieldAlert, SlidersHorizontal, Trash2 } from 
 import { clients } from '../../lib/clients';
 import { StatusTag, relTime } from '../../components/ui/primitives';
 import { Panel, EmptyRow } from './parts';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export function AlertsPage() {
   const historyQ = useQuery({
@@ -61,19 +62,17 @@ export function AlertsPage() {
   const [mwReason, setMwReason] = useState('');
   const createMw = useMutation({
     mutationFn: async () => {
-      const { error } = await clients.notifications.POST('/platform/maintenance-windows', {
+      unwrap(await clients.notifications.POST('/platform/maintenance-windows', {
         body: { starts_at: new Date(mwStart).toISOString(), ends_at: new Date(mwEnd).toISOString(), reason: mwReason },
-      });
-      if (error) throw new Error('create failed');
+      }), 'create failed');
     },
     onSuccess: () => { setMwStart(''); setMwEnd(''); setMwReason(''); qc.invalidateQueries({ queryKey: ['platform', 'notif', 'maintenance-windows'] }); },
   });
   const deleteMw = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.notifications.DELETE('/platform/maintenance-windows/{id}', {
+      unwrap(await clients.notifications.DELETE('/platform/maintenance-windows/{id}', {
         params: { path: { id } },
-      });
-      if (error) throw new Error('delete failed');
+      }), 'delete failed');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['platform', 'notif', 'maintenance-windows'] }),
   });

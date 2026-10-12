@@ -14,6 +14,7 @@ import { useEffect, useRef } from 'react';
 import { Link } from 'react-router';
 import { useAuth } from '@vistasecurity/primitives/auth';
 import { useFeatures } from '@vistasecurity/primitives/features';
+import { usePermissions } from '@vistasecurity/primitives/rbac';
 import { Icon } from '../../components/ui';
 import { SAvatar } from './kit';
 import { visibleProfileNav, visibleSettingsNav, type SettingsNavItem } from './nav';
@@ -59,7 +60,10 @@ export function SettingsDrawer({
   // to false while loading, so Enterprise-only entries appear on resolve rather
   // than flashing and disappearing.
   const { features } = useFeatures();
-  const sections = visibleSettingsNav(features);
+  // Fail closed on permissions too: a rail link the viewer cannot open is worse
+  // than none (the deep link still answers with the access notice).
+  const { hasPermission } = usePermissions();
+  const sections = visibleSettingsNav(features, hasPermission);
   const profileItems = visibleProfileNav();
   const inProfile = layer === 'profile';
   const scroller = useRef<HTMLElement>(null);

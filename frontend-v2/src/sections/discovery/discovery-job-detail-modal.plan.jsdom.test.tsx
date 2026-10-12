@@ -218,8 +218,13 @@ describe('coverage', () => {
   it('loading: a skeleton until the job read lands; then the numbers', async () => {
     server = { job: planJob(), hosts: HOSTS };
     install();
+    // Hold ONLY the job read pending, routed by path — the modal also reads the
+    // hosts and the materialization, and their order against the job read is not
+    // fixed, so a call-order hook can land the pending promise on the wrong one.
+    const answer = mocks.get.getMockImplementation()!;
     let release: (v: unknown) => void = () => {};
-    mocks.get.mockImplementationOnce(() => new Promise((r) => { release = r; }));
+    const held = new Promise((r) => { release = r; });
+    mocks.get.mockImplementation((path: string, init: never) => (path === '/discovery/jobs/{id}' ? held : answer(path, init)));
     await act(async () => {
       root.render(
         <MemoryRouter>

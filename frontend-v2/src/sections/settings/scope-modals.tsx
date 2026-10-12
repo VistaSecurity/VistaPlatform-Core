@@ -17,6 +17,8 @@ import { Modal, ModalField, ModalInput } from '../../components/ui';
 import { QueryInput, ServerQueryErrors, checkAssetQuery } from '../inventory/query-editor';
 import { queryDiagnostics, type QueryDiagnostic } from '../inventory/asset-queries';
 import type { components as CbomComponents } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
+import { SHARED_QUERY_KEYS } from '../../lib/shared-queries';
 
 type Scope = CbomComponents['schemas']['Scope'];
 
@@ -96,7 +98,7 @@ export function ScopeEditModal({ scope, open, onClose }: { scope: Scope | null; 
       }
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['settings', 'scopes'] });
+      void queryClient.invalidateQueries({ queryKey: SHARED_QUERY_KEYS.scopes });
       onClose();
     },
   });
@@ -168,11 +170,10 @@ export function ScopeDeleteModal({ scope, open, onClose }: { scope: Scope | null
   const mutation = useMutation({
     mutationFn: async () => {
       if (!scope) return;
-      const { error, response } = await clients.cbom.DELETE('/scopes/{id}', { params: { path: { id: scope.id } } });
-      if (error || !response.ok) throw new Error('Failed to delete the scope');
+      unwrap(await clients.cbom.DELETE('/scopes/{id}', { params: { path: { id: scope.id } } }), 'Failed to delete the scope');
     },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['settings', 'scopes'] });
+      void queryClient.invalidateQueries({ queryKey: SHARED_QUERY_KEYS.scopes });
       onClose();
     },
   });

@@ -1,15 +1,22 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/shared/agentcreds"
+	"github.com/vistasecurity/vistaplatform/shared/atomicfile"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 	"gopkg.in/yaml.v3"
@@ -29,6 +36,12 @@ type Config struct {
 	// Control plane connection
 	ControlPlaneURL string `json:"control_plane_url"`
 	RegistrationKey string `json:"registration_key"`
+	// RegistrationKeySHA256 is the SHA-256 (hex) of the registration key this
+	// sensor enrolled with, written in its place once the key is no longer kept
+	//. The key is single-use and spent at enrolment; the installer needs
+	// only to recognise "this host already enrolled with this key", which a hash
+	// answers without keeping the key on disk.
+	RegistrationKeySHA256 string `json:"registration_key_sha256"`
 
 	// Reporting configuration
 	ReportingInterval time.Duration `json:"reporting_interval"`
@@ -63,6 +76,77 @@ type Config struct {
 	// live mirrors the capture switches that concurrent probe workers read
 	// while the main loop changes them. See EnableLiveSwitches.
 	live *liveSwitches
+
+	// agentSecrets is the per-sensor secret the platform issued at enrolment
+	// (and the one it replaced, for a rotation window). It lives in
+	// Security.AgentSecretPath, not in the YAML, and is reached only through the
+	// methods below, which hold agentSecretsMu.
+	agentSecrets agentcreds.SecretState
+}
+
+// agentSecretsMu guards every Config's agentSecrets. Package-level rather than a
+// field so a Config stays a plain copyable value.
+var agentSecretsMu sync.RWMutex
+
+// AgentSecretState returns a snapshot of the sensor's secrets.
+func (c *Config) AgentSecretState() agentcreds.SecretState {
+	agentSecretsMu.RLock()
+	defer agentSecretsMu.RUnlock()
+	return c.agentSecrets
+}
+
+// SetAgentSecretState replaces the sensor's secrets (loading them from disk).
+func (c *Config) SetAgentSecretState(s agentcreds.SecretState) {
+	agentSecretsMu.Lock()
+	c.agentSecrets = s
+	agentSecretsMu.Unlock()
+}
+
+// SetEnrolledAgentSecret records the secret issued at enrolment.
+func (c *Config) SetEnrolledAgentSecret(secret string, version int) {
+	c.SetAgentSecretState(agentcreds.SecretState{Secret: secret, Version: version})
+}
+
+// RotateAgentSecret records the secret issued at a certificate rotation. The
+// one it replaces — or, for a sensor that held none, its registration key —
+// stays valid for agentcreds.PreviousSecretWindow.
+func (c *Config) RotateAgentSecret(secret string, version int, now time.Time) {
+	agentSecretsMu.Lock()
+	c.agentSecrets = c.agentSecrets.Rotate(secret, version, c.RegistrationKey, now)
+	agentSecretsMu.Unlock()
+}
+
+// PruneAgentSecrets drops an expired previous secret and reports whether it did.
+func (c *Config) PruneAgentSecrets(now time.Time) bool {
+	agentSecretsMu.Lock()
+	defer agentSecretsMu.Unlock()
+	next, changed := c.agentSecrets.Prune(now)
+	c.agentSecrets = next
+	return changed
+}
+
+// RegistrationKeyRetained reports whether the registration key still has to be
+// kept in the config file: only while no agent secret is safely on disk.
+func (c *Config) RegistrationKeyRetained() bool {
+	return c.Security.AgentSecretPath == "" || c.AgentSecretState().IsZero()
+}
+
+// RegistrationKeyFingerprint is the value written in place of the key: the
+// stored hash, or the hash of the key held in memory.
+func (c *Config) RegistrationKeyFingerprint() string {
+	if c.RegistrationKeySHA256 != "" {
+		return c.RegistrationKeySHA256
+	}
+	if c.RegistrationKey == "" {
+		return ""
+	}
+	return HashRegistrationKey(c.RegistrationKey)
+}
+
+// HashRegistrationKey is the fingerprint the installer compares against.
+func HashRegistrationKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])
 }
 
 // liveSwitches holds the capture switches the TLS enricher's workers read on
@@ -295,7 +379,9 @@ type SecurityConfig struct {
 	ClientCertPath   string `json:"client_cert_path"`    // Path to certificate file on disk
 	ClientKeyPath    string `json:"client_key_path"`     // Path to private key file on disk
 	ServerCACertPath string `json:"server_ca_cert_path"` // Path to CA certificate file on disk
-	UseTLS           bool   `json:"use_tls"`
+	// AgentSecretPath is the 0600 file holding the per-sensor secret.
+	AgentSecretPath string `json:"agent_secret_path"`
+	UseTLS          bool   `json:"use_tls"`
 }
 
 // ConfigFile represents the YAML config file structure
@@ -303,6 +389,7 @@ type ConfigFile struct {
 	SensorID              string `yaml:"sensorId"`
 	ControlPlaneURL       string `yaml:"controlPlaneUrl"`
 	RegistrationKey       string `yaml:"registrationKey"`
+	RegistrationKeySHA256 string `yaml:"registrationKeySha256"`
 	ReportingIntervalSecs int    `yaml:"reportingIntervalSeconds"`
 	HeartbeatIntervalSecs int    `yaml:"heartbeatIntervalSeconds"`
 	Storage               struct {
@@ -350,6 +437,7 @@ type ConfigFile struct {
 		ClientCertPath   string `yaml:"clientCertPath"`
 		ClientKeyPath    string `yaml:"clientKeyPath"`
 		ServerCACertPath string `yaml:"serverCACertPath"`
+		AgentSecretPath  string `yaml:"agentSecretPath"`
 		UseTLS           bool   `yaml:"useTLS"`
 	} `yaml:"security"`
 	TestMode bool `yaml:"testMode"`
@@ -366,37 +454,32 @@ func LoadFromFile(filePath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	// Debug: Show first 500 chars of YAML file
-	preview := string(data)
-	if len(preview) > 500 {
-		preview = preview[:500] + "..."
-	}
-	fmt.Printf("🔍 Reading config file (first 500 chars):\n%s\n", preview)
+	// The raw file is deliberately never echoed: it contains the registration
+	// key (and, after registration, the mTLS private key).
 
 	var cfgFile ConfigFile
 	if err := yaml.Unmarshal(data, &cfgFile); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Debug: Log what was parsed from the file (using fmt.Printf for immediate output)
-	fmt.Printf("🔍 Parsed from config file:\n")
-	fmt.Printf("  controlPlaneUrl: %q\n", cfgFile.ControlPlaneURL)
-	fmt.Printf("  sensorId: %q\n", cfgFile.SensorID)
+	// Secret-safe summary of what was parsed; the registration key is reported
+	// by length only. Verbose is not resolved yet at this point (env overrides
+	// are applied later), so the summary stays unconditional.
+	keyState := "(empty)"
 	if cfgFile.RegistrationKey != "" {
-		fmt.Printf("  registrationKey: (set, %d chars)\n", len(cfgFile.RegistrationKey))
-	} else {
-		fmt.Printf("  registrationKey: (empty)\n")
+		keyState = fmt.Sprintf("(set, %d chars)", len(cfgFile.RegistrationKey))
 	}
-	fmt.Printf("  interfaces: %v\n", cfgFile.Capture.Interfaces)
-	fmt.Printf("  dataPath: %q\n", cfgFile.Storage.DataPath)
+	log.Printf("🔍 Parsed from config file: controlPlaneUrl=%q sensorId=%q registrationKey=%s interfaces=%v dataPath=%q",
+		cfgFile.ControlPlaneURL, cfgFile.SensorID, keyState, cfgFile.Capture.Interfaces, cfgFile.Storage.DataPath)
 
 	// Convert ConfigFile to Config, using config file values as base
 	cfg := &Config{
-		SensorID:          cfgFile.SensorID,
-		ControlPlaneURL:   cfgFile.ControlPlaneURL,
-		RegistrationKey:   cfgFile.RegistrationKey,
-		ReportingInterval: time.Duration(cfgFile.ReportingIntervalSecs) * time.Second,
-		HeartbeatInterval: time.Duration(cfgFile.HeartbeatIntervalSecs) * time.Second,
+		SensorID:              cfgFile.SensorID,
+		ControlPlaneURL:       cfgFile.ControlPlaneURL,
+		RegistrationKey:       cfgFile.RegistrationKey,
+		RegistrationKeySHA256: cfgFile.RegistrationKeySHA256,
+		ReportingInterval:     time.Duration(cfgFile.ReportingIntervalSecs) * time.Second,
+		HeartbeatInterval:     time.Duration(cfgFile.HeartbeatIntervalSecs) * time.Second,
 		Storage: StorageConfig{
 			DataPath: cfgFile.Storage.DataPath,
 		},
@@ -440,6 +523,7 @@ func LoadFromFile(filePath string) (*Config, error) {
 			ClientCertPath:   cfgFile.Security.ClientCertPath,
 			ClientKeyPath:    cfgFile.Security.ClientKeyPath,
 			ServerCACertPath: cfgFile.Security.ServerCACertPath,
+			AgentSecretPath:  cfgFile.Security.AgentSecretPath,
 			UseTLS:           cfgFile.Security.UseTLS,
 		},
 		TestMode: cfgFile.TestMode,
@@ -450,10 +534,10 @@ func LoadFromFile(filePath string) (*Config, error) {
 	if cfg.Storage.DataPath == "" {
 		cfg.Storage.DataPath = getDefaultDataPath()
 	}
-	if cfg.ReportingInterval == 0 {
+	if cfg.ReportingInterval <= 0 {
 		cfg.ReportingInterval = 30 * time.Second
 	}
-	if cfg.HeartbeatInterval == 0 {
+	if cfg.HeartbeatInterval <= 0 {
 		cfg.HeartbeatInterval = 60 * time.Second
 	}
 	if cfg.Capture.DedupTTLMinutes == 0 {
@@ -498,7 +582,9 @@ func LoadFromFile(filePath string) (*Config, error) {
 	mergeEnvVars(cfg)
 
 	// Load certificates from files if paths are set
-	loadCertificatesFromFiles(cfg)
+	if err := loadCertificatesFromFiles(cfg); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
@@ -852,29 +938,94 @@ func getCertsPath(dataPath string) string {
 	return filepath.Join(dataPath, "certs")
 }
 
-// loadCertificatesFromFiles loads certificates from disk if file paths are set
-func loadCertificatesFromFiles(cfg *Config) {
-	// If certificate paths are set, load from files
-	if cfg.Security.ClientCertPath != "" {
-		if certData, err := os.ReadFile(cfg.Security.ClientCertPath); err == nil {
-			cfg.Security.ClientCert = string(certData)
+// CertificateReadError is returned when a certificate, key or CA file named by
+// the configuration exists but cannot be read (typically a permissions
+// problem). Callers must not fall back to running without mTLS.
+type CertificateReadError struct {
+	Label string
+	Path  string
+	Err   error
+}
+
+func (e *CertificateReadError) Error() string {
+	return fmt.Sprintf("cannot read %s %s: %v (is it readable by the user this process runs as?)", e.Label, e.Path, e.Err)
+}
+
+func (e *CertificateReadError) Unwrap() error { return e.Err }
+
+// loadCertificatesFromFiles loads certificates from disk if file paths are set.
+//
+// A file that is missing is logged and skipped (the host is simply not
+// enrolled yet, or its data directory was wiped). Any OTHER read error — a
+// root-owned key read by the service user, an I/O error — is returned: the
+// config says the material exists, and running on without it would silently
+// drop mTLS and then try to re-register with a registration key that is
+// already spent.
+func loadCertificatesFromFiles(cfg *Config) error {
+	read := func(label, path string, dst *string) error {
+		if path == "" {
+			return nil
 		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				log.Printf("⚠️  %s %s does not exist; continuing without it", label, path)
+				return nil
+			}
+			return &CertificateReadError{Label: label, Path: path, Err: err}
+		}
+		*dst = string(data)
+		return nil
 	}
-	if cfg.Security.ClientKeyPath != "" {
-		if keyData, err := os.ReadFile(cfg.Security.ClientKeyPath); err == nil {
-			cfg.Security.ClientKey = string(keyData)
-		}
+	if err := read("client certificate", cfg.Security.ClientCertPath, &cfg.Security.ClientCert); err != nil {
+		return err
 	}
-	if cfg.Security.ServerCACertPath != "" {
-		if caData, err := os.ReadFile(cfg.Security.ServerCACertPath); err == nil {
-			cfg.Security.ServerCACert = string(caData)
-		}
+	if err := read("client private key", cfg.Security.ClientKeyPath, &cfg.Security.ClientKey); err != nil {
+		return err
+	}
+	if err := read("server CA certificate", cfg.Security.ServerCACertPath, &cfg.Security.ServerCACert); err != nil {
+		return err
+	}
+
+	if err := loadAgentSecret(cfg); err != nil {
+		return err
 	}
 
 	// Enable TLS if we have certificates
 	if cfg.Security.ClientCert != "" && cfg.Security.ClientKey != "" {
 		cfg.Security.UseTLS = true
 	}
+	return nil
+}
+
+// loadAgentSecret reads the agent secret file the config names. A missing file
+// is logged and skipped like the certificates; one that exists but cannot be
+// read or parsed is an error. A previous secret past its window is dropped from
+// the file here, so a replaced secret does not stay on disk after it stopped
+// being honoured.
+func loadAgentSecret(cfg *Config) error {
+	path := cfg.Security.AgentSecretPath
+	if path == "" {
+		return nil
+	}
+	state, err := agentcreds.LoadSecretStateFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			log.Printf("⚠️  agent secret %s does not exist; continuing without it", path)
+			return nil
+		}
+		return &CertificateReadError{Label: "agent secret", Path: path, Err: err}
+	}
+	if pruned, changed := state.Prune(time.Now()); changed {
+		state = pruned
+		if f, ferr := agentcreds.SecretStateFile(path, state); ferr == nil {
+			if werr := atomicfile.WriteAll([]atomicfile.File{f}); werr != nil {
+				log.Printf("⚠️  could not drop the expired previous agent secret from %s: %v", path, werr)
+			}
+		}
+	}
+	cfg.SetAgentSecretState(state)
+	return nil
 }
 
 // SaveCertificatesToFiles saves certificates to disk and updates config with file paths
@@ -891,31 +1042,50 @@ func SaveCertificatesToFiles(cfg *Config, clientCert, clientKey, serverCACert st
 	clientKeyPath := filepath.Join(certsDir, "client.key")
 	serverCACertPath := filepath.Join(certsDir, "ca.crt")
 
-	// Save client certificate
+	// Write every file as one unit (temp files, then renames) so a crash or a
+	// failure part-way never leaves a certificate that does not match its key.
+	var files []atomicfile.File
 	if clientCert != "" {
-		if err := os.WriteFile(clientCertPath, []byte(clientCert), 0644); err != nil {
-			return fmt.Errorf("failed to write client certificate: %w", err)
+		files = append(files, atomicfile.File{Path: clientCertPath, Data: []byte(clientCert), Perm: 0o644})
+	}
+	// The private key is owner read/write only.
+	if clientKey != "" {
+		files = append(files, atomicfile.File{Path: clientKeyPath, Data: []byte(clientKey), Perm: 0o600})
+	}
+	if serverCACert != "" {
+		files = append(files, atomicfile.File{Path: serverCACertPath, Data: []byte(serverCACert), Perm: 0o644})
+	}
+	// The agent secret goes in the SAME unit as the certificate: a
+	// rotation replaces both or neither.
+	agentSecretPath := filepath.Join(certsDir, agentcreds.SecretFileName)
+	haveSecret := false
+	if state := cfg.AgentSecretState(); !state.IsZero() {
+		state, _ = state.Prune(time.Now()) // never write a replaced secret back to disk after its window
+		f, err := agentcreds.SecretStateFile(agentSecretPath, state)
+		if err != nil {
+			return fmt.Errorf("failed to encode agent secret: %w", err)
 		}
+		files = append(files, f)
+		haveSecret = true
+	}
+	if err := atomicfile.WriteAll(files); err != nil {
+		return fmt.Errorf("failed to write certificates: %w", err)
+	}
+	if clientCert != "" {
 		cfg.Security.ClientCert = clientCert
 		cfg.Security.ClientCertPath = clientCertPath
 	}
-
-	// Save private key with restricted permissions (0600 - owner read/write only)
 	if clientKey != "" {
-		if err := os.WriteFile(clientKeyPath, []byte(clientKey), 0600); err != nil {
-			return fmt.Errorf("failed to write client key: %w", err)
-		}
 		cfg.Security.ClientKey = clientKey
 		cfg.Security.ClientKeyPath = clientKeyPath
 	}
-
-	// Save CA certificate
 	if serverCACert != "" {
-		if err := os.WriteFile(serverCACertPath, []byte(serverCACert), 0644); err != nil {
-			return fmt.Errorf("failed to write server CA certificate: %w", err)
-		}
 		cfg.Security.ServerCACert = serverCACert
 		cfg.Security.ServerCACertPath = serverCACertPath
+	}
+
+	if haveSecret {
+		cfg.Security.AgentSecretPath = agentSecretPath
 	}
 
 	// Enable TLS now that we have certificates

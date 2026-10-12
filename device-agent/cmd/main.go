@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,10 +28,12 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/config"
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/devices"
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig/desiredstate"
+	"github.com/vistasecurity/vistaplatform/shared/atomicfile"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 	"golang.org/x/term"
+	"gopkg.in/yaml.v3"
 )
 
 // Version is stamped at build time via -ldflags "-X main.Version=<tag>"
@@ -39,11 +42,25 @@ import (
 var Version = "dev"
 
 type DeviceAgent struct {
+	// unpersistedCredentials is set when a rotated certificate could not be
+	// written to disk; see checkAndRotateAgentCertificate.
+	unpersistedCredentials atomicfile.Pending
+
 	config      *config.Config
 	configPath  string
 	apiClient   *api.OutboundClient
 	jobExecutor *devices.JobExecutor
 	auditLogger *audit.AuditLogger
+
+	// Lifecycle. lifeCtx is cancelled by Stop (which runAgent calls on
+	// SIGINT/SIGTERM) and every loop selects on it. loops counts the loop
+	// goroutines, so Stop can wait for a job still in flight to submit its
+	// result before the process exits. All zero values work: a DeviceAgent
+	// built without newDeviceAgent simply never stops its loops early.
+	lifeMu     sync.Mutex
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+	loops      sync.WaitGroup
 
 	// Control-plane-managed runtime state. The config file supplies the
 	// STARTING value for each of these; the platform owns them from the first
@@ -149,20 +166,17 @@ func main() {
 		return
 	}
 
-	// Load configuration
-	var cfg *config.Config
-	var err error
-
+	// Load configuration. A config file that exists but cannot be parsed is
+	// fatal: falling back to defaults would start the agent against the wrong
+	// platform with no identity while reporting success.
 	if configPath != "" {
 		log.Printf("📁 Loading configuration from file: %s", configPath)
-		cfg, err = config.LoadFromFile(configPath)
-		if err != nil {
-			log.Printf("⚠️  Failed to load config file (%v), falling back to environment variables", err)
-			cfg = config.Load()
-			configPath = ""
-		}
-	} else {
-		cfg = config.Load()
+	}
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		log.Printf("❌ %v", err)
+		exitProcess(exitNeedsOperator)
+		return
 	}
 
 	// Verbose logging is on by default; a `verbose:` key in the config file (or
@@ -214,12 +228,15 @@ func main() {
 		// Before anything is sent: an enrollment this process cannot save is
 		// a spent key and an identity nobody holds (enrollment.go).
 		if err := checkEnrollmentWritable(cfg.DataPath, savePath); err != nil {
-			log.Fatalf("❌ %s", enrollmentUnwritableMessage(err, cfg.DataPath))
+			log.Printf("❌ %s", enrollmentUnwritableMessage(err, cfg.DataPath))
+			exitProcess(exitNeedsOperator)
+			return
 		}
 		log.Println("📝 Registering agent with platform...")
 		if err := apiClient.Register(Version); err != nil {
 			logRegistrationFailure(err)
-			os.Exit(1)
+			exitProcess(registrationFailureExitCode(err))
+			return
 		}
 		log.Println("✅ Agent registered successfully")
 
@@ -243,7 +260,9 @@ func main() {
 			configPath = filepath.Join(cfg.DataPath, "agent-config.yaml")
 		}
 		if err := checkEnrollmentWritable(cfg.DataPath, configPath); err != nil {
-			log.Fatalf("❌ %s", enrollmentUnwritableMessage(err, cfg.DataPath))
+			log.Printf("❌ %s", enrollmentUnwritableMessage(err, cfg.DataPath))
+			exitProcess(exitNeedsOperator)
+			return
 		}
 		log.Println("📝 Registration key set without agent_id — registering with control plane...")
 		if err := apiClient.Register(Version); err != nil {
@@ -252,7 +271,8 @@ func main() {
 			// manager the restart IS the retry; a rejected key is reported
 			// as such, and the installers stop the service on it.
 			logRegistrationFailure(err)
-			os.Exit(1)
+			exitProcess(registrationFailureExitCode(err))
+			return
 		}
 		log.Println("✅ Agent enrolled successfully")
 		if err := saveCertificates(cfg); err != nil {
@@ -284,6 +304,7 @@ func runAgent(cfg *config.Config, configPath string, apiClient *api.OutboundClie
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	signal.Stop(quit)
 
 	log.Println("🛑 Shutting down device agent...")
 	agent.Stop()
@@ -411,17 +432,17 @@ func (a *DeviceAgent) Start() error {
 	log.Printf("💓 Heartbeat interval: %v", a.config.HeartbeatInterval)
 
 	if a.apiClient != nil && a.config.Security.UseTLS {
-		go a.monitorCertificateRotation()
+		a.goLoop(a.monitorCertificateRotation)
 	}
 
 	// Start job polling loop
-	go a.pollForJobs()
+	a.goLoop(a.pollForJobs)
 
 	// Start heartbeat loop. Without it device_agents.last_heartbeat never moves
 	// after registration: the agent is invisible to the platform's liveness
 	// view, and a genuinely dead agent raises no discovery_agent_offline alert
 	// because that detector excludes rows whose last_heartbeat is NULL.
-	go a.sendHeartbeats()
+	a.goLoop(a.sendHeartbeats)
 
 	// Start the LOCAL host-inventory schedule, when the operator has turned it
 	// on. It is not a job: the agent describes the host it is installed on, on
@@ -685,8 +706,48 @@ func runHostInventoryOnce() int {
 	return 0
 }
 
-// Stop stops the device agent
+// shutdownGrace bounds how long Stop waits for the loops, and so for a job in
+// flight to finish and submit its result, before the process exits anyway.
+const shutdownGrace = 30 * time.Second
+
+// context returns the agent's lifetime context, creating it on first use.
+func (a *DeviceAgent) context() context.Context {
+	a.lifeMu.Lock()
+	defer a.lifeMu.Unlock()
+	if a.lifeCtx == nil {
+		a.lifeCtx, a.lifeCancel = context.WithCancel(context.Background())
+	}
+	return a.lifeCtx
+}
+
+// goLoop runs fn as one of the agent's loops, tracked so Stop can wait for it.
+func (a *DeviceAgent) goLoop(fn func()) {
+	a.loops.Add(1)
+	go func() {
+		defer a.loops.Done()
+		fn()
+	}()
+}
+
+// Stop stops the device agent: it cancels every loop, then waits up to
+// shutdownGrace for a job already running to finish and submit its result.
 func (a *DeviceAgent) Stop() {
+	a.context() // make sure there is something to cancel
+	a.lifeMu.Lock()
+	cancel := a.lifeCancel
+	a.lifeMu.Unlock()
+	cancel()
+
+	if a.hostInventory != nil {
+		if err := a.hostInventory.setEnabled(false); err != nil {
+			log.Printf("⚠️  Could not stop host inventory: %v", err)
+		}
+	}
+
+	if !waitTimeout(&a.loops, shutdownGrace) {
+		log.Printf("⚠️  Shutdown timed out after %v with a job still running; its result may be lost", shutdownGrace)
+	}
+
 	if a.auditLogger != nil {
 		// Close on a file being WRITTEN can surface a lost final write.
 		if err := a.auditLogger.Close(); err != nil {
@@ -695,12 +756,28 @@ func (a *DeviceAgent) Stop() {
 	}
 }
 
-// pollForJobs continuously polls for jobs from the platform.
+// waitTimeout waits for wg, reporting false if d elapsed first.
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// pollForJobs continuously polls for jobs from the platform until the agent is
+// stopped.
 //
 // The interval is re-read every tick rather than fixed at startup, so a change
 // pushed from the control plane takes effect without a restart.
 func (a *DeviceAgent) pollForJobs() {
-	everyInterval(a.pollEvery, nil, a.executeJobPoll)
+	everyInterval(a.pollEvery, a.context().Done(), a.executeJobPoll)
 }
 
 // heartbeatSender is the slice of the API client the heartbeat loop needs, so
@@ -712,7 +789,22 @@ type heartbeatSender interface {
 // sendHeartbeats reports liveness to the platform on the configured interval,
 // re-read every beat so the control plane can change it live.
 func (a *DeviceAgent) sendHeartbeats() {
-	runHeartbeatLoop(a.apiClient, a.beatEvery, nil)
+	if a.apiClient == nil {
+		runHeartbeatLoop(nil, a.beatEvery, a.context().Done())
+		return
+	}
+	runHeartbeatLoop(retryingSender{heartbeatSender: a.apiClient, before: a.retryUnpersistedCredentials}, a.beatEvery, a.context().Done())
+}
+
+// retryingSender runs before ahead of every beat.
+type retryingSender struct {
+	heartbeatSender
+	before func()
+}
+
+func (r retryingSender) SendHeartbeat() error {
+	r.before()
+	return r.heartbeatSender.SendHeartbeat()
 }
 
 // runHeartbeatLoop beats immediately, then on the interval, until stop closes.
@@ -738,26 +830,79 @@ func (a *DeviceAgent) monitorCertificateRotation() {
 
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
-	for range ticker.C {
-		a.checkAndRotateCertificate()
+	for {
+		select {
+		case <-a.context().Done():
+			return
+		case <-ticker.C:
+			a.checkAndRotateCertificate()
+		}
 	}
 }
 
-func (a *DeviceAgent) checkAndRotateCertificate() {
-	checkAndRotateAgentCertificate(
-		a.apiClient,
-		a.config,
-		saveCertificates,
-		func() error {
-			if a.configPath == "" {
-				return fmt.Errorf("no config file path set")
-			}
-			return saveConfigFile(a.configPath, a.config)
-		},
-	)
+// Persisting a rotated certificate is retried a few times before the agent
+// gives up and holds it in memory only. Variables so tests do not sleep.
+var (
+	rotationPersistAttempts = 3
+	rotationPersistDelay    = time.Second
+)
+
+func (a *DeviceAgent) persistCredentials() error {
+	if err := saveCertificates(a.config); err != nil {
+		return fmt.Errorf("certificates: %w", err)
+	}
+	if a.configPath == "" {
+		return fmt.Errorf("config file: no config file path set")
+	}
+	if err := saveConfigFile(a.configPath, a.config); err != nil {
+		return fmt.Errorf("config file: %w", err)
+	}
+	return nil
 }
 
-func checkAndRotateAgentCertificate(rotator certificateRotator, cfg *config.Config, saveCerts func(*config.Config) error, saveCfg func() error) bool {
+func (a *DeviceAgent) checkAndRotateCertificate() {
+	checkAndRotateAgentCertificate(a.apiClient, a.config, a.persistCredentials, &a.unpersistedCredentials)
+	a.pruneAgentSecrets()
+}
+
+// pruneAgentSecrets stops keeping the previous agent secret once its window has
+// passed (agentcreds.PreviousSecretWindow): in memory it is already ignored, and
+// this rewrites the secret file so a replaced secret does not outlive its use on
+// disk. Best effort; the next daily check tries again.
+func (a *DeviceAgent) pruneAgentSecrets() {
+	if !a.config.PruneAgentSecrets(time.Now()) {
+		return
+	}
+	if err := a.persistCredentials(); err != nil {
+		log.Printf("⚠️  Could not drop the expired previous agent secret from disk: %v", err)
+	}
+}
+
+// retryUnpersistedCredentials runs on every heartbeat. While a rotated
+// certificate has not reached disk it says so at error level and tries again.
+func (a *DeviceAgent) retryUnpersistedCredentials() {
+	pending := a.unpersistedCredentials.Err()
+	if pending == nil {
+		return
+	}
+	if err := a.persistCredentials(); err != nil {
+		a.unpersistedCredentials.Set(err)
+		log.Printf("❌ Rotated certificate is still NOT saved to disk (%v) — a restart now would lock this agent out", err)
+		return
+	}
+	a.unpersistedCredentials.Clear()
+	log.Printf("✅ Rotated certificate is now saved to disk (earlier failure: %v)", pending)
+}
+
+// checkAndRotateAgentCertificate rotates the client certificate when it is
+// close to expiry and persists the result. It returns true when the platform
+// rotated the certificate, whether or not the new one reached disk.
+//
+// The platform revokes the old certificate as part of rotation, so persisting
+// is not optional: when it fails after retries the new material stays in
+// memory, pending records why, and the failure is re-reported on every
+// heartbeat. "rotated successfully" is only logged once it is on disk.
+func checkAndRotateAgentCertificate(rotator certificateRotator, cfg *config.Config, persist func() error, pending *atomicfile.Pending) bool {
 	if rotator == nil {
 		return false
 	}
@@ -779,23 +924,33 @@ func checkAndRotateAgentCertificate(rotator certificateRotator, cfg *config.Conf
 		return false
 	}
 
-	if saveCerts != nil {
-		if err := saveCerts(cfg); err != nil {
-			log.Printf("⚠️  Failed to persist rotated certificate to disk: %v", err)
+	if persist != nil {
+		if err := atomicfile.Retry(rotationPersistAttempts, rotationPersistDelay, persist); err != nil {
+			if pending != nil {
+				pending.Set(err)
+			}
+			log.Printf("❌ Certificate rotated on the platform but the new certificate could NOT be saved: %v", err)
+			log.Printf("❌ The previous certificate is revoked. The agent keeps working on the new one in memory, but a restart before it is saved will lock this agent out. Retrying on every heartbeat; fix the permissions or free space on %s.", cfg.DataPath)
+			return true
 		}
 	}
-	if saveCfg != nil {
-		if err := saveCfg(); err != nil {
-			log.Printf("⚠️  Failed to persist rotated certificate to config file: %v", err)
-		}
+	if pending != nil {
+		pending.Clear()
 	}
 
 	log.Println("✅ Certificate rotated successfully")
 	return true
 }
 
-// executeJobPoll polls for a job and executes it if available
+// executeJobPoll polls for a job and executes it if available.
+//
+// The job runs on a context detached from the agent's lifetime: a SIGTERM stops
+// the loops from taking NEW work but must not abort the interrogation already
+// running, whose result Stop waits for. The job's own timeout still bounds it.
 func (a *DeviceAgent) executeJobPoll() {
+	if a.context().Err() != nil {
+		return
+	}
 	job, err := a.apiClient.GetNextJob()
 	if err != nil {
 		log.Printf("⚠️  Error polling for jobs: %v", err)
@@ -810,10 +965,10 @@ func (a *DeviceAgent) executeJobPoll() {
 	log.Printf("📋 Received job: %s (type: %s)", job.ID, job.Type)
 
 	// Execute job
-	if err := a.jobExecutor.Execute(job); err != nil {
+	if err := a.jobExecutor.Execute(context.WithoutCancel(a.context()), job); err != nil {
 		log.Printf("❌ Error executing job %s: %v", job.ID, err)
-		// Report error back to platform
-		if err := a.apiClient.ReportJobError(job.ID, err.Error()); err != nil {
+		// Report error back to platform (redacted, with retries)
+		if err := a.jobExecutor.ReportError(job.ID, err.Error()); err != nil {
 			log.Printf("⚠️  Failed to report job error: %v", err)
 		}
 		return
@@ -833,7 +988,77 @@ func saveCertificates(cfg *config.Config) error {
 	)
 }
 
-// saveConfigFile updates the config file with agent ID and certificate paths
+// persistedConfig is exactly what the agent records about itself. It is a
+// separate struct from config.Config on purpose: Config also carries the PEM
+// certificate, key and CA, which belong in the certs directory (0600 key file),
+// never in the config file. Every other Config field is listed here.
+type persistedConfig struct {
+	AgentID                         string         `yaml:"agent_id"`
+	PlatformURL                     string         `yaml:"platform_url"`
+	RegistrationKey                 string         `yaml:"registration_key,omitempty"`
+	RegistrationKeySHA256           string         `yaml:"registration_key_sha256,omitempty"`
+	PollInterval                    time.Duration  `yaml:"poll_interval"`
+	HeartbeatInterval               time.Duration  `yaml:"heartbeat_interval,omitempty"`
+	DataPath                        string         `yaml:"data_path"`
+	Verbose                         *bool          `yaml:"verbose,omitempty"`
+	HostInventoryEnabled            bool           `yaml:"host_inventory_enabled,omitempty"`
+	HostInventoryInterval           time.Duration  `yaml:"host_inventory_interval,omitempty"`
+	HostInventoryConnectionsEnabled bool           `yaml:"host_inventory_connections_enabled,omitempty"`
+	Security                        *persistedSecu `yaml:"security,omitempty"`
+}
+
+type persistedSecu struct {
+	ClientCertPath   string `yaml:"client_cert_path"`
+	ClientKeyPath    string `yaml:"client_key_path"`
+	ServerCACertPath string `yaml:"server_ca_cert_path"`
+	AgentSecretPath  string `yaml:"agent_secret_path,omitempty"`
+	UseTLS           bool   `yaml:"use_tls"`
+}
+
+func newPersistedConfig(cfg *config.Config) persistedConfig {
+	p := persistedConfig{
+		AgentID:                         cfg.AgentID,
+		PlatformURL:                     cfg.PlatformURL,
+		PollInterval:                    cfg.PollInterval,
+		HeartbeatInterval:               cfg.HeartbeatInterval,
+		DataPath:                        cfg.DataPath,
+		Verbose:                         cfg.Verbose,
+		HostInventoryEnabled:            cfg.HostInventoryEnabled,
+		HostInventoryConnectionsEnabled: cfg.HostInventoryConnectionsEnabled,
+	}
+	// The registration key is single use and spent at enrolment. Once the agent
+	// secret that replaced it as the credential-key root is safely on disk
+	// (Security.AgentSecretPath is only set after the atomic write succeeded) the
+	// key is NOT written any more: a fingerprint stands in for it so the
+	// installer can still tell "already enrolled with this key". Until then — an
+	// older platform that issued no secret, or a failed save — it stays, because
+	// it is still what opens the platform's envelopes.
+	if cfg.RegistrationKeyRetained() {
+		p.RegistrationKey = cfg.RegistrationKey
+	} else {
+		p.RegistrationKeySHA256 = cfg.RegistrationKeyFingerprint()
+	}
+	// The interval only means something once local host inventory is on.
+	if cfg.HostInventoryEnabled {
+		p.HostInventoryInterval = cfg.HostInventoryInterval
+	}
+	if cfg.Security.ClientCertPath != "" {
+		p.Security = &persistedSecu{
+			ClientCertPath:   cfg.Security.ClientCertPath,
+			ClientKeyPath:    cfg.Security.ClientKeyPath,
+			ServerCACertPath: cfg.Security.ServerCACertPath,
+			AgentSecretPath:  cfg.Security.AgentSecretPath,
+			UseTLS:           true,
+		}
+	}
+	return p
+}
+
+// saveConfigFile updates the config file with the agent ID and certificate
+// paths. It marshals with the yaml library (so values holding '#', ': ' or
+// quotes round-trip) and merges into the existing document, so comments and
+// keys this build does not know about survive a rewrite. The file is replaced
+// atomically.
 func saveConfigFile(configPath string, cfg *config.Config) error {
 	// Ensure directory exists
 	dir := filepath.Dir(configPath)
@@ -841,71 +1066,134 @@ func saveConfigFile(configPath string, cfg *config.Config) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	var configContent strings.Builder
-
-	// Add header
-	configContent.WriteString("# Vista Platform Device Agent Configuration\n")
-	configContent.WriteString("# Generated after registration\n\n")
-
-	// Write config with proper quoting for Windows paths
-	fmt.Fprintf(&configContent, "agent_id: %q\n", cfg.AgentID)
-	fmt.Fprintf(&configContent, "platform_url: %s\n", cfg.PlatformURL)
-	fmt.Fprintf(&configContent, "registration_key: %s\n", cfg.RegistrationKey)
-	fmt.Fprintf(&configContent, "poll_interval: %s\n", cfg.PollInterval)
-	fmt.Fprintf(&configContent, "data_path: %q\n", cfg.DataPath)
-	// Only write `verbose:` when something actually set it. Writing the
-	// resolved value would silently pin the command-line default into the file
-	// and make it look like an operator choice.
-	if cfg.Verbose != nil {
-		fmt.Fprintf(&configContent, "verbose: %t\n", *cfg.Verbose)
+	var desired yaml.Node
+	if err := desired.Encode(newPersistedConfig(cfg)); err != nil {
+		return fmt.Errorf("failed to encode config: %w", err)
 	}
-	// Only written once the operator has turned local host inventory on.
-	// Writing `host_inventory_enabled: false` into every generated config
-	// would freeze the default into the file and make a later change of
-	// default look like an operator decision that was never made.
-	if cfg.HostInventoryEnabled {
-		configContent.WriteString("host_inventory_enabled: true\n")
-		fmt.Fprintf(&configContent, "host_inventory_interval: %s\n", cfg.HostInventoryInterval)
-	}
-	if cfg.HostInventoryConnectionsEnabled {
-		configContent.WriteString("host_inventory_connections_enabled: true\n")
-	}
+	quoteStrings(&desired)
 
-	// Add security section with certificate paths
-	if cfg.Security.ClientCertPath != "" {
-		configContent.WriteString("\n# mTLS Certificate Configuration (auto-generated after registration)\n")
-		configContent.WriteString("security:\n")
-		fmt.Fprintf(&configContent, "  client_cert_path: %q\n", cfg.Security.ClientCertPath)
-		fmt.Fprintf(&configContent, "  client_key_path: %q\n", cfg.Security.ClientKeyPath)
-		fmt.Fprintf(&configContent, "  server_ca_cert_path: %q\n", cfg.Security.ServerCACertPath)
-		configContent.WriteString("  use_tls: true\n")
+	root := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	doc := &yaml.Node{
+		Kind:        yaml.DocumentNode,
+		Content:     []*yaml.Node{root},
+		HeadComment: "Vista Platform Device Agent Configuration\nGenerated after registration",
+	}
+	if existing, err := os.ReadFile(configPath); err == nil {
+		var parsed yaml.Node
+		if yerr := yaml.Unmarshal(existing, &parsed); yerr == nil && parsed.Kind == yaml.DocumentNode &&
+			len(parsed.Content) == 1 && parsed.Content[0].Kind == yaml.MappingNode {
+			doc = &parsed
+			root = parsed.Content[0]
+		}
+	}
+	mergeMapping(root, &desired)
+	// A managed key the agent no longer sets (verbose back to unset, host
+	// inventory turned off) must not linger from the previous write.
+	for _, key := range managedConfigKeys {
+		if !hasKey(&desired, key) {
+			removeKey(root, key)
+		}
 	}
 
-	// Write to file
-	if err := writeSecretConfigFile(configPath, []byte(configContent.String())); err != nil {
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("failed to encode config: %w", err)
+	}
+	if err := writeSecretConfigFile(configPath, out); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	return nil
 }
 
+// managedConfigKeys are the top-level keys persistedConfig can write.
+var managedConfigKeys = []string{
+	"agent_id", "platform_url", "registration_key", "registration_key_sha256", "poll_interval", "heartbeat_interval",
+	"data_path", "verbose", "host_inventory_enabled", "host_inventory_interval",
+	"host_inventory_connections_enabled", "security",
+}
+
+func hasKey(m *yaml.Node, key string) bool {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
+}
+
+func removeKey(m *yaml.Node, key string) {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			m.Content = append(m.Content[:i], m.Content[i+2:]...)
+			return
+		}
+	}
+}
+
+// quoteStrings double-quotes every string scalar value, so no value can be
+// read back as anything but the string that was written. Mapping keys are left
+// bare.
+func quoteStrings(n *yaml.Node) {
+	switch n.Kind {
+	case yaml.MappingNode:
+		for i := 1; i < len(n.Content); i += 2 {
+			quoteStrings(n.Content[i])
+		}
+	case yaml.SequenceNode, yaml.DocumentNode:
+		for _, c := range n.Content {
+			quoteStrings(c)
+		}
+	case yaml.ScalarNode:
+		if n.Tag == "!!str" {
+			n.Style = yaml.DoubleQuotedStyle
+		}
+	}
+}
+
+// mergeMapping sets every key of src into dst: an existing key keeps its
+// position and comments but takes the new value; a new key is appended.
+func mergeMapping(dst, src *yaml.Node) {
+	for i := 0; i+1 < len(src.Content); i += 2 {
+		key, val := src.Content[i], src.Content[i+1]
+		found := false
+		for j := 0; j+1 < len(dst.Content); j += 2 {
+			if dst.Content[j].Value != key.Value {
+				continue
+			}
+			found = true
+			cur := dst.Content[j+1]
+			if cur.Kind == yaml.MappingNode && val.Kind == yaml.MappingNode {
+				mergeMapping(cur, val)
+			} else {
+				val.HeadComment, val.LineComment, val.FootComment = cur.HeadComment, cur.LineComment, cur.FootComment
+				dst.Content[j+1] = val
+			}
+			break
+		}
+		if !found {
+			dst.Content = append(dst.Content, key, val)
+		}
+	}
+}
+
 // writeSecretConfigFile writes an agent configuration file owner-only.
 //
-// The file carries `registration_key:` in plaintext, and that key is the
-// agentSecret input to agentcreds.DeriveKey — the AES key that unwraps every
-// credential envelope the platform hands this agent (F5, Cisco, Fortinet,
-// Palo Alto and UniFi administrator passwords). At 0644 any unprivileged local
-// user on the agent host could read the key and decrypt them. The adjacent
-// client private key has always been written 0600; this matches it.
+// Until the agent holds an agent secret the file carries `registration_key:` in
+// plaintext, and that key is then the agentSecret input to agentcreds.DeriveKey —
+// the AES key that unwraps every credential envelope the platform hands this
+// agent (F5, Cisco, Fortinet, Palo Alto and UniFi administrator passwords). At
+// 0644 any unprivileged local user on the agent host could read the key and
+// decrypt them. The adjacent client private key has always been written 0600;
+// this matches it. Once the platform has issued an agent secret the key
+// is no longer written at all.
 //
-// os.WriteFile applies the mode only when it CREATES the file, so an upgrade
-// over a config an older build left world-readable would keep 0644. The
-// explicit Chmod is what actually tightens those.
+// The write is atomic (temp file in the same directory, then rename) so a crash
+// never leaves a truncated config, and the mode is set explicitly on every
+// write so an upgrade over a config an older build left world-readable is
+// tightened.
 func writeSecretConfigFile(path string, data []byte) error {
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0600)
+	return atomicfile.Write(path, data, 0o600)
 }
 
 // connectivityResult summarizes a platform reachability probe for display

@@ -4848,13 +4848,16 @@ export interface components {
         };
         /** @description Bulk approve/deny body. asset_ids is required (binding:"required"). */
         AssetIdsRequest: {
-            /** @description Asset UUIDs as strings. Unparseable entries are silently dropped. */
+            /** @description Asset UUIDs as strings, at most 200 per request. Unparseable entries are reported back in `invalid_ids`. */
             asset_ids: string[];
         };
-        /** @description CURRENT response for POST /infrastructure-assets/approve and /deny: a human-readable message plus the count of assets acted on. */
+        /** @description CURRENT response for POST /infrastructure-assets/approve and /deny. `count` is the number of assets whose status actually moved (never the number requested); `changed` lists them, `skipped` lists valid ids that did not move (unknown, already in the target state, or not in a state the decision applies to), and `invalid_ids` echoes request entries that were not UUIDs. */
         ApprovalResult: {
             message: string;
             count: number;
+            changed: string[];
+            skipped: string[];
+            invalid_ids?: string[];
         };
         /** @description An X.509 certificate as returned by inventory-service. Mirrors models.Certificate's json tags. Most pointer fields carry `omitempty` and are absent when nil; the unconditional fields are required and non-nullable strings/bools. */
         Certificate: {
@@ -6395,7 +6398,7 @@ export interface components {
         };
         /** @description Body for POST /infrastructure-assets/scan. The assets are a selection: either `asset_ids`, or `query` with `expected_count` — never both. At most 1000 assets either way (the scan engine's per-job target limit); more answers 413. */
         ActiveScanRequest: {
-            /** @description Asset UUIDs as strings. Unparseable entries are silently dropped. */
+            /** @description Asset UUIDs as strings, at most 200 per request. Unparseable entries are reported back in `invalid_ids`. */
             asset_ids?: string[];
             /** @description Every asset GET /infrastructure-assets lists for this query, including its default `status:monitoring` scope. An empty string selects the whole default scope. */
             query?: string;
@@ -6416,7 +6419,7 @@ export interface components {
         };
         /** @description A selection of assets for a bulk action: `asset_ids`, or `query` with `expected_count`, never both. */
         AssetSelectionRequest: {
-            /** @description Asset UUIDs as strings. Unparseable entries are silently dropped. */
+            /** @description Asset UUIDs as strings, at most 200 per request. Unparseable entries are reported back in `invalid_ids`. */
             asset_ids?: string[];
             /** @description Every asset GET /infrastructure-assets lists for this query, including its default `status:monitoring` scope. An empty string selects the whole default scope. */
             query?: string;
@@ -7491,6 +7494,8 @@ export interface components {
             /** Format: date-time */
             completed_at?: string | null;
             error_message?: string | null;
+            /** @description A sentence about how the job ended or what it did not do, when that is not an error: "no active scanning requested; nothing probed", or the targets dropped because they were no longer authorized. Absent when there is nothing to say. */
+            note?: string;
             /** @description Percent of the job the scanner is finished with. For a scan-plan job run in work units it is per HOST: the job's addresses scanned, or refused with a reason, over all of them (see `coverage`). For any other job it is per TARGET, from its target rows: a CIDR is one target, so a job of one /24 reads 0 until the whole range is done. A host or target the job never reached because it was cancelled does not count. A job with nothing to count reads 100 once completed, else 0. Filled on the single-job read, and on the job list for a scan-plan job that has not ended; any other listed job carries 0. */
             progress?: number;
             target_counts?: components["schemas"]["DiscoveryJobTargetCounts"];

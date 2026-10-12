@@ -7,10 +7,11 @@
 // cannot be edited or deleted — guarded in the table + drawer, and the server
 // rejects permission writes to them with 403.
 // UX ported from _legacy/admin-ui roles-page.tsx into the v2 op-* design.
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import toast from 'react-hot-toast';
 import { Search, ShieldCheck, Plus, Pencil, Trash2, Eye, Users, Lock, X } from 'lucide-react';
 import { StatTile, Tag, relTime } from '../../components/ui/primitives';
+import { Dialog } from '../../components/ui/dialog';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { usePlatformPermissions, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
 import {
@@ -69,6 +70,7 @@ function RoleViewModal({ role, permissions, permsLoading, permsError, onClose, o
 }) {
   // Editable only if the operator can manage roles AND the role isn't built-in.
   const editable = canManage && !role.is_system_role;
+  const titleId = useId();
   // Role.permissions is a list of permission NAMES; map to ids via the catalog.
   const nameToId = useMemo(() => {
     const m = new Map<string, string>();
@@ -125,15 +127,20 @@ function RoleViewModal({ role, permissions, permsLoading, permsError, onClose, o
   const readOnlyNames = role.permissions ?? [];
 
   return (
-    <div onClick={onClose} role="dialog" aria-modal="true" style={{ position: 'fixed', inset: 0, zIndex: 95, background: 'var(--op-scrim)', backdropFilter: 'blur(4px)', display: 'flex', justifyContent: 'flex-end' }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 480, maxWidth: '94vw', height: '100%', background: 'var(--op-panel)', borderLeft: '1px solid var(--op-border2)', boxShadow: 'var(--op-shadow)', display: 'flex', flexDirection: 'column' }}>
+    <Dialog
+      onClose={onClose}
+      dirty={editable && !permsError && dirty}
+      labelId={titleId}
+      scrimStyle={{ position: 'fixed', inset: 0, zIndex: 95, background: 'var(--op-scrim)', backdropFilter: 'blur(4px)', display: 'flex', justifyContent: 'flex-end' }}
+      panelStyle={{ width: 480, maxWidth: '94vw', height: '100%', background: 'var(--op-panel)', borderLeft: '1px solid var(--op-border2)', boxShadow: 'var(--op-shadow)', display: 'flex', flexDirection: 'column' }}
+    >
         <div style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '16px 18px', borderBottom: '1px solid var(--op-border)' }}>
           <span style={{ width: 30, height: 30, borderRadius: 'var(--r-sm)', background: 'var(--op-panel2)', border: '1px solid var(--op-border)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--op-t3)' }}><ShieldCheck size={16} /></span>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 15, color: 'var(--op-t1)' }}>{role.display_name || role.name}</div>
+            <div id={titleId} style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 15, color: 'var(--op-t1)' }}>{role.display_name || role.name}</div>
             <div className="mono" style={{ fontSize: 11, color: 'var(--op-t3)' }}>{role.name}</div>
           </div>
-          <button onClick={onClose} className="op-btn icon sm"><X size={14} /></button>
+          <button onClick={onClose} className="op-btn icon sm" aria-label="Close"><X size={14} /></button>
         </div>
         <div style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 16, overflowY: 'auto', flex: 1 }}>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -199,8 +206,7 @@ function RoleViewModal({ role, permissions, permsLoading, permsError, onClose, o
             <button className="op-btn primary sm" onClick={onEdit} disabled={role.is_system_role} title={role.is_system_role ? 'System roles cannot be edited' : undefined}>Edit role</button>
           ) : null}
         </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -283,7 +289,7 @@ export function RolesPage() {
             <option value="created_at">Created</option>
             <option value="user_count">User count</option>
           </select>
-          <button className="op-btn icon sm" title="Toggle sort direction" onClick={() => setSortAsc((v) => !v)}>{sortAsc ? '↑' : '↓'}</button>
+          <button className="op-btn icon sm" title="Toggle sort direction" aria-label="Toggle sort direction" onClick={() => setSortAsc((v) => !v)}>{sortAsc ? '↑' : '↓'}</button>
           {canManage && <button className="op-btn primary sm" onClick={() => setModal({ kind: 'create' })}><Plus size={14} />Create role</button>}
         </div>
 
@@ -299,9 +305,9 @@ export function RolesPage() {
                 <td><Tag color={r.is_system_role ? 'var(--info)' : 'var(--ok)'}>{r.is_system_role ? 'System' : 'Custom'}</Tag></td>
                 <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(r.created_at)}</td>
                 <td style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }} onClick={(e) => e.stopPropagation()}>
-                  <button className="op-btn icon sm" title="View" onClick={() => setModal({ kind: 'view', role: r })}><Eye size={14} /></button>
-                  {canManage && <button className="op-btn icon sm" title={r.is_system_role ? 'System roles cannot be edited' : 'Edit'} disabled={r.is_system_role} onClick={() => setModal({ kind: 'edit', role: r })}><Pencil size={14} /></button>}
-                  {canManage && <button className="op-btn icon sm" title={r.is_system_role ? 'System roles cannot be deleted' : 'Delete'} disabled={r.is_system_role} onClick={() => setModal({ kind: 'delete', role: r })}><Trash2 size={14} style={{ color: r.is_system_role ? undefined : 'var(--danger)' }} /></button>}
+                  <button className="op-btn icon sm" title="View" aria-label="View" onClick={() => setModal({ kind: 'view', role: r })}><Eye size={14} /></button>
+                  {canManage && <button className="op-btn icon sm" title={r.is_system_role ? 'System roles cannot be edited' : 'Edit'} aria-label="Edit role" disabled={r.is_system_role} onClick={() => setModal({ kind: 'edit', role: r })}><Pencil size={14} /></button>}
+                  {canManage && <button className="op-btn icon sm" title={r.is_system_role ? 'System roles cannot be deleted' : 'Delete'} aria-label="Delete role" disabled={r.is_system_role} onClick={() => setModal({ kind: 'delete', role: r })}><Trash2 size={14} style={{ color: r.is_system_role ? undefined : 'var(--danger)' }} /></button>}
                 </td>
               </tr>
             ))}

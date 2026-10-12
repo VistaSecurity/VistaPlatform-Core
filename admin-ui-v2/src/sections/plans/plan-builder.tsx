@@ -16,16 +16,19 @@
 //
 // There is no backend "draft" state today — a saved plan is live — so this ships
 // Save (+ Deprecate for existing) rather than a faked draft→publish lifecycle.
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { X, ToggleRight, Gauge, Activity, ListChecks, Trash2, UserPlus, RefreshCw } from 'lucide-react';
 import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { Dialog } from '../../components/ui/dialog';
 import { modalInputStyle } from '../../components/ui/modal';
 import { money } from '../../components/ui/primitives';
 import { AssignTierModal } from './assign-tier-modal';
 import { apiDetail, fetchTierComposition, tierCompositionKey } from './composition';
+import { unwrap } from '@vistasecurity/primitives/shared';
+import { PLATFORM_PERMISSIONS, usePlatformPermissions } from '@vistasecurity/primitives/platform-auth';
 
 type SubscriptionTier = adminServiceComponents['schemas']['SubscriptionTier'];
 type BillableItem = adminServiceComponents['schemas']['BillableItem'];
@@ -103,6 +106,10 @@ export function PlanBuilder({ tier, items: allItems, onClose }: { tier?: Subscri
   });
 
   const [assigning, setAssigning] = useState(false);
+  // Assigning a plan is a billing action: POST /admin/tiers/{id}/assign needs
+  // platform.billing (the rest of this dialog needs platform.settings).
+  const canAssign = usePlatformPermissions().hasPermission(PLATFORM_PERMISSIONS.platform.billing);
+  const titleId = useId();
   const [displayName, setDisplayName] = useState(tier?.display_name ?? '');
   const [monthly, setMonthly] = useState(tier ? String((tier.price_cents ?? 0) / 100) : '');
   const [annual, setAnnual] = useState(tier?.annual_price_cents != null ? String(tier.annual_price_cents / 100) : '');
@@ -164,10 +171,9 @@ export function PlanBuilder({ tier, items: allItems, onClose }: { tier?: Subscri
           void qc.invalidateQueries({ queryKey: tierCompositionKey(tier!.id) });
           throw new Error(apiDetail(res.error, 'This plan changed since you opened it. Nothing was saved — review and save again.'));
         }
-        if (res.error) throw new Error(apiDetail(res.error, 'Failed to save plan — nothing was changed'));
+        if (res.error || !res.response.ok) throw new Error(apiDetail(res.error, 'Failed to save plan — nothing was changed'));
       } else {
-        const { error } = await clients.admin.POST('/admin/tiers', { body: { name: slug(displayName), display_name: displayName.trim(), billing_interval: 'month', billing_method: billingMethod, price_cents, annual_price_cents, is_custom: isCustom, entitlements: entitlementsBody() } });
-        if (error) throw new Error(apiDetail(error, 'Failed to create plan'));
+        unwrap(await clients.admin.POST('/admin/tiers', { body: { name: slug(displayName), display_name: displayName.trim(), billing_interval: 'month', billing_method: billingMethod, price_cents, annual_price_cents, is_custom: isCustom, entitlements: entitlementsBody() } }), 'Failed to create plan');
       }
     },
     onSuccess: () => {
@@ -184,8 +190,7 @@ export function PlanBuilder({ tier, items: allItems, onClose }: { tier?: Subscri
 
   const deprecate = useMutation({
     mutationFn: async () => {
-      const { error } = await clients.admin.DELETE('/admin/tiers/{id}', { params: { path: { id: tier!.id } } });
-      if (error) throw new Error('Failed to deprecate');
+      unwrap(await clients.admin.DELETE('/admin/tiers/{id}', { params: { path: { id: tier!.id } } }), 'Failed to deprecate');
     },
     onSuccess: () => { toast.success(`Deprecated ${displayName}`); qc.invalidateQueries({ queryKey: ['platform', 'tiers'] }); onClose(); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Deprecate failed'),
@@ -201,6 +206,15 @@ export function PlanBuilder({ tier, items: allItems, onClose }: { tier?: Subscri
   const error = !ready
     ? (entQ.isError ? 'The plan’s entitlements failed to load' : 'Loading the plan’s entitlements…')
     : !displayName.trim() ? 'Plan name is required' : leverError;
+  // Unsaved input: any identity/pricing field or lever the admin has touched.
+  const dirty = isEdit
+    ? displayName !== (tier?.display_name ?? '')
+      || monthly !== String((tier!.price_cents ?? 0) / 100)
+      || annual !== (tier!.annual_price_cents != null ? String(tier!.annual_price_cents / 100) : '')
+      || billingMethod !== ((tier!.billing_method as 'stripe' | 'invoice') ?? 'stripe')
+      || isCustom !== !!tier!.is_custom
+      || items.some((it) => it.key in edits && edits[it.key] !== initDrafts?.[it.key])
+    : displayName !== '' || monthly !== '' || annual !== '' || billingMethod !== 'stripe' || isCustom || Object.keys(edits).length > 0;
   const price = Number(monthly || 0);
   const stripeFee = billingMethod === 'stripe' && price > 0 ? price * 0.029 + 0.3 : 0;
   const marginAbs = price - INFRA_PER_CUSTOMER - stripeFee;
@@ -213,14 +227,20 @@ export function PlanBuilder({ tier, items: allItems, onClose }: { tier?: Subscri
     .map((it) => it.kind === 'boolean' ? it.display_name : `${fmtCard(it.kind, draft[it.key] ?? '')} ${it.unit || it.display_name.toLowerCase()}`);
 
   return (
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 90, background: 'var(--op-scrim)', backdropFilter: 'blur(3px)', display: 'flex', justifyContent: 'flex-end', animation: 'opScrim .15s ease both' }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: 'min(980px, 96vw)', height: '100%', background: 'var(--op-panel)', borderLeft: '1px solid var(--op-border2)', boxShadow: 'var(--op-shadow)', display: 'flex', animation: 'opDrawer .26s cubic-bezier(.2,.8,.2,1) both' }}>
+    <>
+    <Dialog
+      onClose={onClose}
+      dirty={dirty}
+      labelId={titleId}
+      scrimStyle={{ position: 'fixed', inset: 0, zIndex: 90, background: 'var(--op-scrim)', backdropFilter: 'blur(3px)', display: 'flex', justifyContent: 'flex-end', animation: 'opScrim .15s ease both' }}
+      panelStyle={{ width: 'min(980px, 96vw)', height: '100%', background: 'var(--op-panel)', borderLeft: '1px solid var(--op-border2)', boxShadow: 'var(--op-shadow)', display: 'flex', animation: 'opDrawer .26s cubic-bezier(.2,.8,.2,1) both' }}
+    >
         {/* LEFT — form */}
         <div style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '18px 22px 40px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-            <div style={{ fontFamily: 'var(--font-head)', fontSize: 19, fontWeight: 700, color: 'var(--op-t1)' }}>{isEdit ? `Edit plan — ${tier!.display_name || tier!.name}` : 'New plan'}</div>
+            <div id={titleId} style={{ fontFamily: 'var(--font-head)', fontSize: 19, fontWeight: 700, color: 'var(--op-t1)' }}>{isEdit ? `Edit plan — ${tier!.display_name || tier!.name}` : 'New plan'}</div>
             <div style={{ flex: 1 }} />
-            <button onClick={onClose} className="op-btn icon sm"><X size={14} /></button>
+            <button onClick={onClose} className="op-btn icon sm" aria-label="Close"><X size={14} /></button>
           </div>
 
           <Eyebrow>Identity</Eyebrow>
@@ -336,16 +356,16 @@ export function PlanBuilder({ tier, items: allItems, onClose }: { tier?: Subscri
           <div style={{ flex: 1 }} />
           {isEdit && <div style={{ fontSize: 11, color: 'var(--op-t3)' }}>Deprecating keeps existing tenants on the plan (grandfathered) and hides it from new sign-ups.</div>}
           <div style={{ display: 'flex', gap: 8 }}>
-            {isEdit && <button onClick={() => setAssigning(true)} className="op-btn sm"><UserPlus size={14} />Assign to tenant…</button>}
+            {isEdit && canAssign && <button onClick={() => setAssigning(true)} className="op-btn sm"><UserPlus size={14} />Assign to tenant…</button>}
             {isEdit && <button onClick={() => { if (window.confirm(`Deprecate ${displayName}? Existing tenants are grandfathered.`)) deprecate.mutate(); }} disabled={deprecate.isPending} className="op-btn danger sm"><Trash2 size={14} />Deprecate</button>}
             <div style={{ flex: 1 }} />
             <button onClick={onClose} className="op-btn ghost sm">Cancel</button>
             <button onClick={() => { if (error) { toast.error(error); return; } save.mutate(); }} disabled={!!error || save.isPending} title={error ?? undefined} className="op-btn primary sm">{save.isPending ? 'Saving…' : isEdit ? 'Save plan' : 'Create plan'}</button>
           </div>
         </div>
-      </div>
-      {isEdit && assigning && <AssignTierModal tier={tier} onClose={() => setAssigning(false)} />}
-    </div>
+    </Dialog>
+    {isEdit && canAssign && assigning && <AssignTierModal tier={tier} onClose={() => setAssigning(false)} />}
+    </>
   );
 }
 

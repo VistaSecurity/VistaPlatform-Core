@@ -3,13 +3,14 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/services"
@@ -438,7 +439,7 @@ func (s *FrameworkLicenseService) GetAvailableFrameworks(tenantID uuid.UUID) ([]
 		WHERE cf.tenant_id = $1
 		  AND cf.detection_state = 'ACTIVE'
 		  AND `+complianceProducerScope("cf")+`
-		  AND (cf.workflow_status <> 'SUPPRESSED' OR cf.workflow_status IS NULL)
+		  AND `+notSuppressedPredicate("cf")+`
 		GROUP BY pfc.framework_id
 	`, tenantID)
 	if err != nil && err != sql.ErrNoRows {
@@ -600,6 +601,14 @@ func (s *FrameworkLicenseService) GetDefaultFramework(tenantID uuid.UUID) (*mode
 	var license models.TenantFrameworkLicense
 	var pf models.PlatformFramework
 
+	// One read-only query that carries the fallback in its ORDER BY: the
+	// tenant's active default licence first, else Best Practices if the tenant
+	// has it active, else the first active licensed framework by name. This is
+	// a GET, so it never writes (it used to INSERT a Best Practices licence on a
+	// miss, and ON CONFLICT DO NOTHING left a tenant whose Best Practices row
+	// was cancelled with no active default anyway). Ensuring Best Practices is
+	// licensed is the job of the tenant-creation trigger and of the
+	// subscribe/cancel paths (ensureActiveDefaultTx).
 	query := `
 		SELECT
 			tfl.id,
@@ -610,14 +619,14 @@ func (s *FrameworkLicenseService) GetDefaultFramework(tenantID uuid.UUID) (*mode
 			pf.is_platform_default, pf.published_at, pf.published_by, pf.created_by, pf.created_at, pf.updated_at
 		FROM tenant_framework_licenses tfl
 		JOIN platform_frameworks pf ON tfl.platform_framework_id = pf.id
-		WHERE tfl.tenant_id = $1 AND tfl.is_default = true AND ` + sqlActiveSubscriptionTfl + `
+		WHERE tfl.tenant_id = $1 AND ` + sqlActiveSubscriptionTfl + `
+		ORDER BY tfl.is_default DESC, pf.is_platform_default DESC, pf.name, pf.id
 		LIMIT 1
 	`
 
-	// RLS: tenant_framework_licenses read+write. The whole multi-step body runs in
-	// one tenant tx that has set app.tenant_id; the platform_frameworks/tenants
-	// reads inside are global and harmless under the tenant scope.
-	tx, err := s.db.BeginTxx(context.Background(), nil)
+	// RLS: tenant_framework_licenses read. ReadOnly makes "this GET never
+	// writes" a property the database enforces rather than a comment.
+	tx, err := s.db.BeginTxx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
@@ -633,84 +642,151 @@ func (s *FrameworkLicenseService) GetDefaultFramework(tenantID uuid.UUID) (*mode
 		&pf.ID, &pf.Code, &pf.Name, &pf.Version, &pf.Description, &pf.Organization, &pf.Status,
 		&pf.IsPlatformDefault, &pf.PublishedAt, &pf.PublishedBy, &pf.CreatedBy, &pf.CreatedAt, &pf.UpdatedAt,
 	)
-
-	if err == nil {
-		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit tx: %w", err)
-		}
-		return &models.DefaultFrameworkResponse{
-			FrameworkID:        license.PlatformFrameworkID.String(),
-			FrameworkType:      "licensed",
-			Framework:          &pf,
-			SubscriptionStatus: license.SubscriptionStatus,
-		}, nil
-	}
-
-	if err == sql.ErrNoRows {
-		// Auto-create Best Practices license if missing
-		log.Printf("No default framework found for tenant %s, auto-creating Best Practices license", tenantID)
-		var bestPracticesID uuid.UUID
-		err = tx.Get(&bestPracticesID, `
-			SELECT id FROM platform_frameworks
-			WHERE is_platform_default = true AND status = 'published'
-			LIMIT 1
-		`)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find Best Practices framework: %w", err)
-		}
-
+	if errors.Is(err, sql.ErrNoRows) {
 		var tenantExists bool
-		err = tx.Get(&tenantExists, `SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)`, tenantID)
-		if err != nil || !tenantExists {
+		if terr := tx.Get(&tenantExists, `SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)`, tenantID); terr != nil || !tenantExists {
 			return nil, fmt.Errorf("tenant not found: %s", tenantID)
 		}
-
-		_, err = tx.Exec(`
-			INSERT INTO tenant_framework_licenses (
-				id, tenant_id, platform_framework_id,
-				is_default, subscription_status, subscription_started_at, provisioned_by,
-				purchased_at, created_at, updated_at
-			) VALUES (
-				gen_random_uuid(), $1, $2,
-				true, 'active', NOW(), 'auto',
-				NOW(), NOW(), NOW()
-			)
-			ON CONFLICT (tenant_id, platform_framework_id) DO NOTHING
-		`, tenantID, bestPracticesID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to auto-create Best Practices license: %w", err)
-		}
-
-		// Retry
-		err = tx.QueryRow(query, tenantID).Scan(
-			&license.ID,
-			&license.PlatformFrameworkID,
-			&license.SubscriptionStatus,
-			&pf.ID, &pf.Code, &pf.Name, &pf.Version, &pf.Description, &pf.Organization, &pf.Status,
-			&pf.IsPlatformDefault, &pf.PublishedAt, &pf.PublishedBy, &pf.CreatedBy, &pf.CreatedAt, &pf.UpdatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get default framework after auto-creation: %w", err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit tx: %w", err)
-		}
-
-		return &models.DefaultFrameworkResponse{
-			FrameworkID:        license.PlatformFrameworkID.String(),
-			FrameworkType:      "licensed",
-			Framework:          &pf,
-			SubscriptionStatus: license.SubscriptionStatus,
-		}, nil
+		return nil, ErrNoActiveFramework
 	}
-
-	return nil, fmt.Errorf("failed to get default framework: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get default framework: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit tx: %w", err)
+	}
+	return &models.DefaultFrameworkResponse{
+		FrameworkID:        license.PlatformFrameworkID.String(),
+		FrameworkType:      "licensed",
+		Framework:          &pf,
+		SubscriptionStatus: license.SubscriptionStatus,
+	}, nil
 }
 
-// SubscribeFramework subscribes a tenant to a platform framework (self-service).
+// ErrNoActiveFramework means the tenant exists but holds no active framework
+// licence at all, so there is nothing to fall back to.
+var ErrNoActiveFramework = errors.New("tenant has no active framework licence")
+
+// ErrFrameworkLimitExceeded wraps a denial from the plan's framework cap.
+var ErrFrameworkLimitExceeded = errors.New("framework limit exceeded")
+
+// lockTenantLicencesTx serialises every licence write for one tenant for the
+// life of tx (transaction-scoped advisory lock, released on commit/rollback).
+// The cap check and the insert it guards must sit under this lock: without it
+// two concurrent subscribes both count the same "current" and both pass.
+func lockTenantLicencesTx(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID) error {
+	if _, err := tx.ExecContext(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('framework_licences:' || $1::text, 0))`, tenantID.String()); err != nil {
+		return fmt.Errorf("lock tenant licences: %w", err)
+	}
+	return nil
+}
+
+// checkFrameworkCapTx re-evaluates the cap INSIDE the licence-write
+// transaction, after lockTenantLicencesTx. limit is the tenant's resolved
+// compliance_frameworks_max (nil = unlimited), taken from the pre-check so the
+// entitlement resolver never needs a second connection while this tx holds
+// one. Free frameworks (Best Practices and shared/services.FreeFrameworkCodes)
+// do not count, matching the shared limit service.
+func checkFrameworkCapTx(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, frameworkIDs []uuid.UUID, limit *int) error {
+	if limit == nil {
+		return nil
+	}
+	ids := make([]string, len(frameworkIDs))
+	for i, id := range frameworkIDs {
+		ids[i] = id.String()
+	}
+	var additional int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM (SELECT DISTINCT unnest($1::uuid[]) AS id) u
+		LEFT JOIN platform_frameworks pf ON pf.id = u.id
+		WHERE pf.id IS NULL
+		   OR NOT (COALESCE(pf.is_platform_default, false) OR pf.code = ANY($2))
+	`, pq.Array(ids), pq.Array(services.FreeFrameworkCodes)).Scan(&additional); err != nil {
+		return fmt.Errorf("count chargeable frameworks: %w", err)
+	}
+	var current int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM tenant_framework_licenses tfl
+		JOIN platform_frameworks pf ON pf.id = tfl.platform_framework_id
+		WHERE tfl.tenant_id = $1
+		  AND tfl.subscription_status = 'active'
+		  AND COALESCE(pf.is_platform_default, false) = false
+		  AND pf.code <> ALL($2)
+	`, tenantID, pq.Array(services.FreeFrameworkCodes)).Scan(&current); err != nil {
+		return fmt.Errorf("count active framework subscriptions: %w", err)
+	}
+	if current+additional > *limit {
+		return fmt.Errorf("%w: %d + %d exceeds the plan limit of %d", ErrFrameworkLimitExceeded, current, additional, *limit)
+	}
+	return nil
+}
+
+// ensureActiveDefaultTx leaves the tenant with exactly one ACTIVE default
+// licence, repairing it when it is missing: defaults on licences that are no
+// longer active (cancelled/expired) are cleared, Best Practices is re-activated
+// (it is free and cannot be cancelled), and when the tenant has no active
+// default it becomes the default. A tenant that already has an active default
+// is left alone. Must run under lockTenantLicencesTx.
+func ensureActiveDefaultTx(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID) error {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE tenant_framework_licenses SET is_default = false, updated_at = NOW()
+		WHERE tenant_id = $1 AND is_default AND NOT (`+sqlActiveSubscription+`)
+	`, tenantID); err != nil {
+		return fmt.Errorf("clear inactive default: %w", err)
+	}
+	var bpID uuid.UUID
+	err := tx.QueryRowContext(ctx, `
+		SELECT id FROM platform_frameworks
+		WHERE is_platform_default = true AND status = 'published' LIMIT 1
+	`).Scan(&bpID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // no Best Practices framework exists to repair with
+	}
+	if err != nil {
+		return fmt.Errorf("find Best Practices framework: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO tenant_framework_licenses (
+			id, tenant_id, platform_framework_id,
+			is_default, subscription_status, subscription_started_at, provisioned_by,
+			purchased_at, created_at, updated_at
+		) VALUES (
+			gen_random_uuid(), $1, $2,
+			NOT EXISTS (SELECT 1 FROM tenant_framework_licenses d
+			            WHERE d.tenant_id = $1 AND d.is_default AND `+strings.ReplaceAll(sqlActiveSubscription, "subscription_", "d.subscription_")+`),
+			'active', NOW(), 'auto',
+			NOW(), NOW(), NOW()
+		)
+		ON CONFLICT (tenant_id, platform_framework_id) DO UPDATE SET
+			subscription_status = 'active',
+			subscription_expires_at = CASE
+				WHEN tenant_framework_licenses.subscription_expires_at <= NOW() THEN NULL
+				ELSE tenant_framework_licenses.subscription_expires_at END,
+			is_default = tenant_framework_licenses.is_default OR NOT EXISTS (
+				SELECT 1 FROM tenant_framework_licenses d
+				WHERE d.tenant_id = $1 AND d.is_default AND `+strings.ReplaceAll(sqlActiveSubscription, "subscription_", "d.subscription_")+`),
+			updated_at = NOW()
+	`, tenantID, bpID); err != nil {
+		return fmt.Errorf("ensure Best Practices licence: %w", err)
+	}
+	// If some other framework is the active default, Best Practices must not
+	// also be flagged default (single_default_per_tenant would have refused it,
+	// and the NOT EXISTS above guarantees it), so nothing more to do here.
+	return nil
+}
+
+// SubscribeFramework subscribes a tenant to a platform framework.
 // Validates subscription tier limits. Best Practices is free and doesn't count toward limits.
+//
+// The duplicate check, the cap check and the write happen in ONE transaction
+// under a per-tenant advisory lock, so concurrent subscribes cannot both pass
+// the cap. Price is never taken from a self-service caller (the handler zeroes
+// it); only the admin provisioning path may record one.
 func (s *FrameworkLicenseService) SubscribeFramework(tenantID uuid.UUID, input models.ProvisionFrameworkInput, userID uuid.UUID) error {
+	ctx := context.Background()
 	frameworkID, err := uuid.Parse(input.FrameworkID)
 	if err != nil {
 		return fmt.Errorf("invalid framework_id: %w", err)
@@ -718,34 +794,22 @@ func (s *FrameworkLicenseService) SubscribeFramework(tenantID uuid.UUID, input m
 
 	// Validate framework exists and is published
 	var exists bool
-	err = s.db.Get(&exists, `
+	if err := s.db.Get(&exists, `
 		SELECT EXISTS(SELECT 1 FROM platform_frameworks WHERE id = $1 AND status = 'published')
-	`, frameworkID)
-	if err != nil || !exists {
+	`, frameworkID); err != nil {
+		return fmt.Errorf("failed to look up framework: %w", err)
+	}
+	if !exists {
 		return fmt.Errorf("framework not published or does not exist")
 	}
 
-	// Check if already subscribed (not expired) — RLS: tenant_framework_licenses
-	var alreadyLicensed bool
-	err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
-		return tx.QueryRowContext(context.Background(), `
-			SELECT EXISTS(
-				SELECT 1 FROM tenant_framework_licenses
-				WHERE tenant_id = $1 AND platform_framework_id = $2 AND `+sqlActiveSubscription+`
-			)
-		`, tenantID, frameworkID).Scan(&alreadyLicensed)
-	})
-	if err == nil && alreadyLicensed {
-		return fmt.Errorf("tenant already has an active subscription for this framework")
-	}
-
-	// Check compliance framework limit
+	// Fast-fail on the cap, and resolve the limit for the in-tx re-check.
 	limitResult, err := s.limitService.CheckComplianceFrameworkLimit(tenantID, []uuid.UUID{frameworkID})
 	if err != nil {
 		return fmt.Errorf("failed to validate framework limit: %w", err)
 	}
 	if !limitResult.Allowed {
-		return fmt.Errorf("framework limit exceeded: %s", limitResult.Message)
+		return fmt.Errorf("%w: %s", ErrFrameworkLimitExceeded, limitResult.Message)
 	}
 
 	provisionedBy := input.ProvisionedBy
@@ -764,8 +828,46 @@ func (s *FrameworkLicenseService) SubscribeFramework(tenantID uuid.UUID, input m
 
 	now := time.Now()
 	// RLS: tenant_framework_licenses — set app.tenant_id on the same tx as the write.
-	err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
-		_, execErr := tx.ExecContext(context.Background(), `
+	err = shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		if err := lockTenantLicencesTx(ctx, tx, tenantID); err != nil {
+			return err
+		}
+
+		var alreadyLicensed bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM tenant_framework_licenses
+				WHERE tenant_id = $1 AND platform_framework_id = $2 AND `+sqlActiveSubscription+`
+			)
+		`, tenantID, frameworkID).Scan(&alreadyLicensed); err != nil {
+			return fmt.Errorf("check existing subscription: %w", err)
+		}
+		if alreadyLicensed {
+			return fmt.Errorf("tenant already has an active subscription for this framework")
+		}
+
+		if err := checkFrameworkCapTx(ctx, tx, tenantID, []uuid.UUID{frameworkID}, limitResult.Limit); err != nil {
+			return err
+		}
+
+		// Repair first: a tenant whose Best Practices licence lapsed gets it
+		// back (and, with no active default, the default) here — not in a GET.
+		if err := ensureActiveDefaultTx(ctx, tx, tenantID); err != nil {
+			return err
+		}
+
+		if input.SetAsDefault {
+			// One default per tenant (single_default_per_tenant): clear the old
+			// one in this tx before the new row is flagged.
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE tenant_framework_licenses SET is_default = false, updated_at = NOW()
+				WHERE tenant_id = $1 AND is_default AND platform_framework_id <> $2
+			`, tenantID, frameworkID); err != nil {
+				return fmt.Errorf("clear previous default: %w", err)
+			}
+		}
+
+		_, execErr := tx.ExecContext(ctx, `
 			INSERT INTO tenant_framework_licenses (
 				id, tenant_id, platform_framework_id,
 				is_default, subscription_status, subscription_started_at, subscription_expires_at, provisioned_by,
@@ -780,11 +882,15 @@ func (s *FrameworkLicenseService) SubscribeFramework(tenantID uuid.UUID, input m
 				subscription_started_at = $4,
 				subscription_expires_at = EXCLUDED.subscription_expires_at,
 				provisioned_by = $6,
+				is_default = $3,
 				updated_at = $10
 		`, tenantID, frameworkID, input.SetAsDefault, now, subscriptionExpiresAt, provisionedBy, now, input.PriceCents, now, now)
 		return execErr
 	})
 	if err != nil {
+		if errors.Is(err, ErrFrameworkLimitExceeded) {
+			return err
+		}
 		return fmt.Errorf("failed to create framework subscription: %w", err)
 	}
 
@@ -798,32 +904,53 @@ func (s *FrameworkLicenseService) SubscribeFramework(tenantID uuid.UUID, input m
 }
 
 // CancelSubscription cancels a framework subscription for a tenant.
-// Best Practices cannot be cancelled.
+// Best Practices cannot be cancelled. If the cancelled licence was the tenant's
+// default, the default moves to Best Practices in the same transaction, and a
+// reconcile is enqueued so findings and rollups follow the licence set.
 func (s *FrameworkLicenseService) CancelSubscription(tenantID, frameworkID uuid.UUID) error {
-	// Prevent cancelling Best Practices
-	var isPlatformDefault bool
-	err := s.db.Get(&isPlatformDefault, `
-		SELECT is_platform_default FROM platform_frameworks WHERE id = $1
-	`, frameworkID)
-	if err == nil && isPlatformDefault {
-		return fmt.Errorf("cannot cancel subscription for the platform default framework")
-	}
+	ctx := context.Background()
 
 	// RLS: tenant_framework_licenses — set app.tenant_id on the same tx as the write.
 	var rowsAffected int64
-	err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
-		result, execErr := tx.ExecContext(context.Background(), `
+	err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		if err := lockTenantLicencesTx(ctx, tx, tenantID); err != nil {
+			return err
+		}
+
+		// Prevent cancelling Best Practices. Fail CLOSED: a lookup error must
+		// not let the cancel through. "No such framework" is not an error here
+		// — it falls through to "no active subscription found".
+		var isPlatformDefault bool
+		err := tx.QueryRowContext(ctx, `
+			SELECT COALESCE(is_platform_default, false) FROM platform_frameworks WHERE id = $1
+		`, frameworkID).Scan(&isPlatformDefault)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("check platform default framework: %w", err)
+		}
+		if isPlatformDefault {
+			return errCancelPlatformDefault
+		}
+
+		result, execErr := tx.ExecContext(ctx, `
 			UPDATE tenant_framework_licenses
-			SET subscription_status = 'cancelled', updated_at = NOW()
+			SET subscription_status = 'cancelled', is_default = false, updated_at = NOW()
 			WHERE tenant_id = $1 AND platform_framework_id = $2 AND subscription_status = 'active'
 		`, tenantID, frameworkID)
 		if execErr != nil {
 			return execErr
 		}
 		rowsAffected, execErr = result.RowsAffected()
-		return execErr
+		if execErr != nil || rowsAffected == 0 {
+			return execErr
+		}
+		// If the cancelled licence was the default the tenant now has none:
+		// hand it back to Best Practices.
+		return ensureActiveDefaultTx(ctx, tx, tenantID)
 	})
 	if err != nil {
+		if errors.Is(err, errCancelPlatformDefault) {
+			return fmt.Errorf("cannot cancel subscription for the platform default framework")
+		}
 		return fmt.Errorf("failed to cancel subscription: %w", err)
 	}
 
@@ -831,8 +958,11 @@ func (s *FrameworkLicenseService) CancelSubscription(tenantID, frameworkID uuid.
 		return fmt.Errorf("no active subscription found for this framework")
 	}
 
+	s.reconcile.EnqueueTenantScoped(tenantID, frameworkID, "framework_deactivated")
 	return nil
 }
+
+var errCancelPlatformDefault = errors.New("platform default framework")
 
 // SetDefaultFramework sets a licensed framework as the tenant's default
 func (s *FrameworkLicenseService) SetDefaultFramework(tenantID, frameworkID uuid.UUID) error {
@@ -907,13 +1037,14 @@ func (s *FrameworkLicenseService) ValidateFrameworkLimit(tenantID uuid.UUID, fra
 // SelectFrameworks selects frameworks for a tenant (legacy compatibility).
 // New code should use SubscribeFramework for individual subscriptions.
 func (s *FrameworkLicenseService) SelectFrameworks(tenantID uuid.UUID, frameworkIDs []uuid.UUID, defaultFrameworkID uuid.UUID, userID uuid.UUID) error {
-	// Validate framework limit
+	ctx := context.Background()
+	// Fast-fail on the cap, and resolve the limit for the in-tx re-check.
 	limitResult, err := s.limitService.CheckComplianceFrameworkLimit(tenantID, frameworkIDs)
 	if err != nil {
 		return fmt.Errorf("failed to validate framework limit: %w", err)
 	}
 	if !limitResult.Allowed {
-		return fmt.Errorf("framework limit exceeded: %s", limitResult.Message)
+		return fmt.Errorf("%w: %s", ErrFrameworkLimitExceeded, limitResult.Message)
 	}
 
 	// Validate all framework IDs are published
@@ -922,7 +1053,10 @@ func (s *FrameworkLicenseService) SelectFrameworks(tenantID uuid.UUID, framework
 		err := s.db.Get(&exists, `
 			SELECT EXISTS(SELECT 1 FROM platform_frameworks WHERE id = $1 AND status = 'published')
 		`, frameworkID)
-		if err != nil || !exists {
+		if err != nil {
+			return fmt.Errorf("failed to look up framework %s: %w", frameworkID, err)
+		}
+		if !exists {
 			return fmt.Errorf("framework %s is not published or does not exist", frameworkID)
 		}
 	}
@@ -941,11 +1075,13 @@ func (s *FrameworkLicenseService) SelectFrameworks(tenantID uuid.UUID, framework
 
 	// Get Best Practices ID
 	var bestPracticesID uuid.UUID
-	_ = s.db.Get(&bestPracticesID, `
+	if err := s.db.Get(&bestPracticesID, `
 		SELECT id FROM platform_frameworks
 		WHERE is_platform_default = true AND status = 'published'
 		LIMIT 1
-	`)
+	`); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("failed to look up Best Practices framework: %w", err)
+	}
 
 	// RLS: tenant_framework_licenses — set app.tenant_id on the same tx as the writes.
 	tx, err := s.db.BeginTxx(context.Background(), nil)
@@ -953,7 +1089,13 @@ func (s *FrameworkLicenseService) SelectFrameworks(tenantID uuid.UUID, framework
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := shareddatabase.SetTenantContext(context.Background(), tx.Tx, tenantID); err != nil {
+	if err := shareddatabase.SetTenantContext(ctx, tx.Tx, tenantID); err != nil {
+		return err
+	}
+	if err := lockTenantLicencesTx(ctx, tx.Tx, tenantID); err != nil {
+		return err
+	}
+	if err := checkFrameworkCapTx(ctx, tx.Tx, tenantID, frameworkIDs, limitResult.Limit); err != nil {
 		return err
 	}
 
@@ -973,6 +1115,16 @@ func (s *FrameworkLicenseService) SelectFrameworks(tenantID uuid.UUID, framework
 	}
 	if err != nil {
 		return fmt.Errorf("failed to cancel existing subscriptions: %w", err)
+	}
+
+	// Drop every default flag first (cancelled rows keep theirs otherwise, and
+	// single_default_per_tenant would refuse the new default below); the
+	// requested default is re-flagged by the upserts.
+	if _, err = tx.Exec(`
+		UPDATE tenant_framework_licenses SET is_default = false, updated_at = NOW()
+		WHERE tenant_id = $1 AND is_default
+	`, tenantID); err != nil {
+		return fmt.Errorf("failed to clear current default: %w", err)
 	}
 
 	now := time.Now()
@@ -1029,7 +1181,19 @@ func (s *FrameworkLicenseService) SelectFrameworks(tenantID uuid.UUID, framework
 		}
 	}
 
-	return tx.Commit()
+	// Cancelling the old set and the Best Practices fallback above may have left
+	// a stale default; settle on exactly one active default.
+	if err := ensureActiveDefaultTx(ctx, tx.Tx, tenantID); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Same as SubscribeFramework: activation should produce posture now. The
+	// selection can change the whole licence set, so reconcile the tenant.
+	s.reconcile.EnqueueTenant(tenantID, "frameworks_selected")
+	return nil
 }
 
 // UnlockFrameworks is a legacy compatibility method. In the new model, use CancelSubscription instead.

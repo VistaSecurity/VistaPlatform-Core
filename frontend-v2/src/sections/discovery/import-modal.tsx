@@ -13,6 +13,7 @@ import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { ASSET_CLASSES, ASSET_CLASS_KEYS, ATTRIBUTE_SCHEMAS } from '@vistasecurity/primitives/assets';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalSelect, Icon } from '../../components/ui';
+import { unwrap } from '../../lib/api-result';
 
 type AssetInput = inventoryComponents['schemas']['AssetInput'];
 type NetworkSegmentInput = inventoryComponents['schemas']['NetworkSegmentInput'];
@@ -387,16 +388,14 @@ export function ImportSpreadsheetModal({
     mutationFn: async () => {
       const payloadRows = validRows.map((b) => b.input);
       if (target === 'assets') {
-        const { data, error } = await clients.inventory.POST('/infrastructure-assets/bulk', {
+        const data = unwrap(await clients.inventory.POST('/infrastructure-assets/bulk', {
           body: { rows: payloadRows as AssetInput[] },
-        });
-        if (error || !data) throw new Error('Import failed');
+        }), 'Import failed', { requireData: true });
         return data as BulkImportResult;
       }
-      const { data, error } = await clients.inventory.POST('/network-segments/bulk', {
+      const data = unwrap(await clients.inventory.POST('/network-segments/bulk', {
         body: { rows: payloadRows as NetworkSegmentInput[] },
-      });
-      if (error || !data) throw new Error('Import failed');
+      }), 'Import failed', { requireData: true });
       return data as BulkImportResult;
     },
     onSuccess: (data) => {
@@ -417,8 +416,7 @@ export function ImportSpreadsheetModal({
   // scan approves + dispatches a TLS probe).
   const scanM = useMutation({
     mutationFn: async (ids: string[]) => {
-      const { data, error } = await clients.inventory.POST('/infrastructure-assets/scan', { body: { asset_ids: ids } });
-      if (error || !data) throw new Error('Failed to start scan');
+      const data = unwrap(await clients.inventory.POST('/infrastructure-assets/scan', { body: { asset_ids: ids } }), 'Failed to start scan', { requireData: true });
       return data;
     },
     onSuccess: (d) => {

@@ -426,6 +426,8 @@ func TestContract_MergeProposals_ListCarriesTheTotalAndHonoursThePage(t *testing
 	}
 }
 
+// A non-numeric limit is a 400 (list_input_validation_test.go), not a silent
+// fall back to the default; numeric out-of-range values below are clamped.
 // TestContract_MergeProposals_LimitIsCapped: the cap is what makes the page a
 // page. A caller asking for 10000 gets the default, and the ECHO says so — a
 // caller that paginated off its own unclamped number would skip rows.
@@ -439,7 +441,6 @@ func TestContract_MergeProposals_LimitIsCapped(t *testing.T) {
 		{"?limit=0", services.MergeProposalPageSize, 0},
 		{"?limit=-5", services.MergeProposalPageSize, 0},
 		{"?limit=" + strconv.Itoa(services.MergeProposalMaxPageSize), services.MergeProposalMaxPageSize, 0},
-		{"?limit=nonsense", services.MergeProposalPageSize, 0},
 		{"?offset=-3", services.MergeProposalPageSize, 0},
 		{"?limit=25&offset=25", 25, 25},
 	} {

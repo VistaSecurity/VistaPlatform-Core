@@ -5,7 +5,8 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { clients } from '../../lib/clients';
 import { DrawerCloseBtn as CloseBtn, DrawerShell, Icon, LevelDot, MetaRow, RiskChip, RiskGauge, SectionLabel, levelFromScore, riskColor } from '../../components/ui';
 import { DeleteAssetButton, RestoreAssetButton, ScanAssetButton } from './bulk-actions';
-import { SCANNING_POLL_MS, isScanning } from '../discovery/active-scan-row-state';
+import { useAsset } from './asset-queries';
+import { ShownOfNotice } from '../../components/shown-of-notice';
 import { serviceConfidence, keyCustodyLabel } from './lens-helpers';
 import { safeHttpUrl } from '../../lib/url';
 import { assetIdentity, classDeclares, classLabel, handshakeRefusal, operatingSystem, primaryAddressPort, primaryEndpoint, stripMask, type EndpointLike } from './asset-shape';
@@ -345,29 +346,24 @@ function RemediationGuidanceBlock({ g, defaultOpen }: { g: RemediationGuidanceVi
 export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, active = true, depth = 0 }: {
   assetId: string; seed?: Partial<Asset>; onOpenConfig: OpenConfig; onClose: () => void; onEdit?: (asset: Asset) => void; active?: boolean; depth?: number;
 }) {
-  const detailQ = useQuery({
-    queryKey: ['asset-detail', assetId],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/infrastructure-assets/{id}', { params: { path: { id: assetId } } });
-      if (error || !data) throw new Error('Failed to load asset');
-      return data.asset;
-    },
-    // While a person's scan of this asset runs, re-read it so the Active Scan
-    // button changes when the scan finishes rather than when the drawer reopens.
-    refetchInterval: (query) => (isScanning(query.state.data) ? SCANNING_POLL_MS : false),
-  });
+  const detailQ = useAsset(assetId);
   const configsQ = useQuery({
-    queryKey: ['asset-configs', assetId],
+    // Distinct from useAssetConfigs' ['asset-configs', id]: this one carries the
+    // total too, and two shapes must not share a cache entry. The shared prefix
+    // keeps the existing invalidations working.
+    queryKey: ['asset-configs', assetId, 'with-total'],
     queryFn: async () => {
       const { data, error } = await clients.inventory.GET('/crypto-configurations', { params: { query: { asset_id: assetId, page: 1, page_size: 100 } } });
       if (error || !data) throw new Error('Failed to load configs');
-      return data.crypto_implementations ?? [];
+      const rows = data.crypto_implementations ?? [];
+      return { rows, total: data.pagination?.total ?? rows.length };
     },
   });
   const a = ((detailQ.data ?? seed ?? {}) as Record<string, unknown> & Partial<Asset>);
   const risk = typeof a.risk_score === 'number' ? a.risk_score : 0;
   const riskLevel = (a.risk_level as string) || levelFromScore(risk);
-  const configs = configsQ.data ?? [];
+  const configs = configsQ.data?.rows ?? [];
+  const configsTotal = configsQ.data?.total ?? configs.length;
   const tags = Array.isArray(a.tags) ? (a.tags as string[]) : [];
   const ident = assetIdentity(a);
 
@@ -426,7 +422,8 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
         )}
       </div>
       <div style={{ flex: 1, padding: '4px 22px 30px' }}>
-        <SectionLabel icon="key-round">Cryptographic configurations ({configsQ.isLoading ? '…' : configs.length})</SectionLabel>
+        <SectionLabel icon="key-round">Cryptographic configurations ({configsQ.isLoading ? '…' : configsTotal})</SectionLabel>
+        <ShownOfNotice shown={configs.length} total={configsTotal} noun="configurations" />
         {configsQ.isLoading ? (
           <div style={{ fontSize: 12.5, color: 'var(--app-t3)', padding: '8px 0' }}>Loading configurations…</div>
         ) : configs.length === 0 ? (

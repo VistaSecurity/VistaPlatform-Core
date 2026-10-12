@@ -97,15 +97,39 @@ type stubArtifactStore struct {
 	inlineContentErr error
 	softDeleteErr    error
 
+	// diffContent / diffContentErr stand in for GetDiffContent. When diffContent
+	// is nil the inline content is returned, which is what the real repository
+	// does for an artifact with no internal view of its own.
+	diffContent    []byte
+	diffContentErr error
+
+	// lastLimit / lastOffset record the paging the handler passed to List.
+	lastLimit, lastOffset int
+	total                 int64
+
 	// lastKindFilter records the ?kind= value the handler passed through, so a
 	// test can assert the filter reached the store rather than only that the
 	// request was accepted.
 	lastKindFilter ArtifactKind
 }
 
-func (s *stubArtifactStore) List(_ context.Context, _ uuid.UUID, _ *uuid.UUID, kind ArtifactKind, _ int) ([]Artifact, error) {
+func (s *stubArtifactStore) List(_ context.Context, _ uuid.UUID, _ *uuid.UUID, kind ArtifactKind, limit, offset int) ([]Artifact, int64, error) {
 	s.lastKindFilter = kind
-	return s.list, nil
+	s.lastLimit, s.lastOffset = limit, offset
+	total := s.total
+	if total == 0 {
+		total = int64(len(s.list))
+	}
+	return s.list, total, nil
+}
+func (s *stubArtifactStore) GetDiffContent(_ context.Context, _, _ uuid.UUID) ([]byte, error) {
+	if s.diffContentErr != nil {
+		return nil, s.diffContentErr
+	}
+	if s.diffContent != nil {
+		return s.diffContent, nil
+	}
+	return s.inlineContent, nil
 }
 func (s *stubArtifactStore) Get(_ context.Context, _, _ uuid.UUID) (*Artifact, error) {
 	return s.getResult, s.getErr
@@ -167,7 +191,18 @@ func (s *stubFeatureChecker) CheckFeatureAccess(_ uuid.UUID, feature string) (bo
 
 // --- test harness ----------------------------------------------------------
 
+type stubSigner struct{}
+
+func (stubSigner) KID() string                 { return "test-kid" }
+func (stubSigner) Algorithm() string           { return "ed25519" }
+func (stubSigner) Sign([]byte) (string, error) { return "sig", nil }
+func (stubSigner) Verify(context.Context, string, []byte, string) (bool, error) {
+	return true, nil
+}
+func (stubSigner) PublicKeys(context.Context) ([]SigningKey, error) { return nil, nil }
+
 type handlerDeps struct {
+	signer    Signer
 	artifacts artifactStore
 	scopes    *stubScopeGetter
 	builder   *stubBuilder
@@ -191,6 +226,7 @@ func newEngine(d handlerDeps) *gin.Engine {
 		scopeRepo: d.scopes,
 	}
 	h.SetFeatureChecker(d.features)
+	h.SetSigner(d.signer)
 	h.RegisterRoutes(grp)
 	return r
 }
@@ -344,6 +380,7 @@ func TestContract_GenerateCBOMArtifact_202(t *testing.T) {
 		builder:   &stubBuilder{out: &BuildOutput{CanonicalBytes: []byte("{}"), ContentHash: "deadbeef"}},
 		persister: persister,
 		features:  &stubFeatureChecker{allowed: true},
+		signer:    stubSigner{},
 	})
 	body := strings.NewReader(`{"scope_id":"` + scope.ID.String() + `"}`)
 	w := do(eng, http.MethodPost, "/api/v1/cbom-service/cbom/generate", body)

@@ -468,6 +468,12 @@ One exception is deliberate: a returning finding that you had **Resolved** goes
 back to **New**, because it is outstanding again. A finding you **Suppressed**
 stays suppressed — you muted the condition, not that particular sighting of it.
 
+A suppression always needs a reason, and it can carry an end date. When the end
+date passes, the finding goes back to the status it had before you suppressed it
+(the platform checks every ten minutes), is counted as open again, and the
+change is recorded in the finding's history. A suppression with no end date
+stays until someone lifts it.
+
 ## Where to find them
 
 - **Dashboard → Critical findings** — how many **open** findings are Critical

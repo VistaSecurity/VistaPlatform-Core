@@ -12,6 +12,7 @@ import { STag } from './kit';
 import { DraftControlsModal, useDraftingAvailability } from './draft-controls-modal';
 import { notAssessedReasonText } from '../findings/control-status';
 import type { complianceEngineComponents } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
 
 type Control = complianceEngineComponents['schemas']['TenantFrameworkControl'];
 type ControlInput = complianceEngineComponents['schemas']['TenantFrameworkControlInput'];
@@ -78,11 +79,9 @@ function ControlModal({ policyId, control, onClose, qc }: { policyId: string; co
     mutationFn: async () => {
       const body: ControlInput = { control_id: controlId.trim(), title: title.trim(), description, baseline_severity: severity, crypto_relevant: cryptoRelevant };
       if (editing) {
-        const { error, response } = await clients.compliance.PUT('/frameworks/tenant/{id}/controls/{controlId}', { params: { path: { id: policyId, controlId: control.id } }, body });
-        if (error || !response.ok) throw new Error('Update control failed');
+        unwrap(await clients.compliance.PUT('/frameworks/tenant/{id}/controls/{controlId}', { params: { path: { id: policyId, controlId: control.id } }, body }), 'Update control failed');
       } else {
-        const { error, response } = await clients.compliance.POST('/frameworks/tenant/{id}/controls', { params: { path: { id: policyId } }, body });
-        if (error || !response.ok) throw new Error('Add control failed');
+        unwrap(await clients.compliance.POST('/frameworks/tenant/{id}/controls', { params: { path: { id: policyId } }, body }), 'Add control failed');
       }
     },
     onSuccess: () => {
@@ -189,19 +188,16 @@ function RulesModal({ control, onClose }: { control: Control; onClose: () => voi
         : (() => { const p: Record<string, number> = {}; if (f.min.trim() !== '') p.min = Number(f.min); if (f.max.trim() !== '') p.max = Number(f.max); return p; })();
       const body: MeasurementInput = { measurement_type_id: f.mtId, rule_type: f.ruleType, predicate, weight: Number(f.weight), ...(f.severity ? { severity_override: f.severity } : {}) };
       if (f.editingId) {
-        const { error, response } = await clients.compliance.PUT('/frameworks/tenant/controls/{id}/measurements/{measurementId}', { params: { path: { id: control.id, measurementId: f.editingId } }, body });
-        if (error || !response.ok) throw new Error('Update rule failed');
+        unwrap(await clients.compliance.PUT('/frameworks/tenant/controls/{id}/measurements/{measurementId}', { params: { path: { id: control.id, measurementId: f.editingId } }, body }), 'Update rule failed');
       } else {
-        const { error, response } = await clients.compliance.POST('/frameworks/tenant/controls/{id}/measurements', { params: { path: { id: control.id } }, body });
-        if (error || !response.ok) throw new Error('Add rule failed (check the predicate fits the measurement type)');
+        unwrap(await clients.compliance.POST('/frameworks/tenant/controls/{id}/measurements', { params: { path: { id: control.id } }, body }), 'Add rule failed (check the predicate fits the measurement type)');
       }
     },
     onSuccess: () => { void invalidate(); setForm(null); },
   });
   const deleteMut = useMutation({
     mutationFn: async (measurementId: string) => {
-      const { error, response } = await clients.compliance.DELETE('/frameworks/tenant/controls/{id}/measurements/{measurementId}', { params: { path: { id: control.id, measurementId } } });
-      if (error || !response.ok) throw new Error('Delete rule failed');
+      unwrap(await clients.compliance.DELETE('/frameworks/tenant/controls/{id}/measurements/{measurementId}', { params: { path: { id: control.id, measurementId } } }), 'Delete rule failed');
     },
     onSuccess: invalidate,
   });
@@ -335,8 +331,7 @@ export function CustomPolicyControls({ policyId, policyName, canManage }: { poli
   });
   const removeMut = useMutation({
     mutationFn: async (controlId: string) => {
-      const { error, response } = await clients.compliance.DELETE('/frameworks/tenant/{id}/controls/{controlId}', { params: { path: { id: policyId, controlId } } });
-      if (error || !response.ok) throw new Error('Delete control failed');
+      unwrap(await clients.compliance.DELETE('/frameworks/tenant/{id}/controls/{controlId}', { params: { path: { id: policyId, controlId } } }), 'Delete control failed');
     },
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['custom-policy', policyId] }); void qc.invalidateQueries({ queryKey: ['settings', 'tenant-frameworks'] }); },
   });

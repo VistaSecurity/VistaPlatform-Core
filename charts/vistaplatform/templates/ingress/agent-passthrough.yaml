@@ -18,7 +18,7 @@
 */}}
 {{- if .Values.agentMtls.enabled }}
 {{- if not .Values.serviceMtls.enabled }}
-{{- fail "agentMtls.enabled requires serviceMtls.enabled — the agent/sensor mTLS listener reuses the per-service mesh cert (Secret <svc>-mtls mounted at /app/certs). Enable serviceMtls first." }}
+{{- fail "agentMtls.enabled requires serviceMtls.enabled — the agent/sensor mTLS listener reuses the per-service mesh cert (Secret <svc>-mtls mounted at /app/certs). Enable serviceMtls first, or opt out of the mesh entirely by setting serviceMtls.enabled, datastores.postgres.tls.enabled, datastores.nats.tls.enabled and agentMtls.enabled all to false." }}
 {{- end }}
 {{- if eq (.Values.ingress.controller | default "traefik") "traefik" }}
 {{- $fullname := include "vistaplatform.fullname" . -}}

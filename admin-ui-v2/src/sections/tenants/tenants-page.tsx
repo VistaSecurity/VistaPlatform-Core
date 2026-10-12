@@ -3,10 +3,11 @@
 // sort are real; the cross-service metric columns (Health, Assets, Sensors, MRR,
 // CSM) render "—" until enriched from tenant-health / inventory / fleet / billing
 // — no fabricated data. Row click opens the tenant drawer.
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { Search, ChevronRight } from 'lucide-react';
 import { Avatar, MiniBar, PlanTag, StatusTag, healthIndexPresentation, initialsFromName, relTime } from '../../components/ui/primitives';
-import { useTenants, useDeletedTenants, useTenantHealthMap, tenantStatus, planLabel, type Tenant, type TenantDisplayStatus } from './queries';
+import { useTenants, useTenantsTruncation, useDeletedTenants, useDeletedTenantsTruncation, useTenantHealthMap, tenantStatus, planLabel, type Tenant, type TenantDisplayStatus } from './queries';
 import { TenantDrawer } from './tenant-drawer';
 import { DeletedTenantDrawer } from './deleted-tenant-drawer';
 import { useScope } from '../../app/scope';
@@ -39,9 +40,12 @@ export function TenantsPage() {
   const { isMsp } = usePlatformEdition();
   const filters = useMemo<[ListFilter, string][]>(() => [...statusFilters(isMsp), ['deleted', 'Deleted']], [isMsp]);
   const deletedQ = useDeletedTenants();
+  const liveCut = useTenantsTruncation(scopeId).data;
+  const deletedCut = useDeletedTenantsTruncation().data;
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<ListFilter>('all');
   const showingDeleted = status === 'deleted';
+  const cut = showingDeleted ? deletedCut : liveCut;
   const [plan, setPlan] = useState('all');
   const [sort, setSort] = useState<Sort>('name');
   // The drawer holds the tenant's ID, not a copy of the row: the tenant it
@@ -50,7 +54,12 @@ export function TenantsPage() {
   // up there as soon as the query cache has it. A snapshot taken at row click
   // would keep showing the pre-change value — and a controlled checkbox bound
   // to it would re-send the same change on the next click.
-  const [openId, setOpenId] = useState<string | null>(null);
+  // `?open=<id>` (the ⌘K palette's tenant hits) opens that tenant's drawer.
+  const [searchParams] = useSearchParams();
+  const openParam = searchParams.get('open');
+  const [openId, setOpenId] = useState<string | null>(openParam);
+  // Also follow later changes, for a palette hit chosen while already here.
+  useEffect(() => { if (openParam) setOpenId(openParam); }, [openParam]);
 
   // Memoised so the fallback `[]` keeps a stable identity — otherwise every
   // render produces a fresh array and the useMemo blocks below never hit.
@@ -170,6 +179,11 @@ export function TenantsPage() {
 
       <div style={{ flex: 'none', padding: '9px 24px', borderTop: '1px solid var(--op-border)', display: 'flex', alignItems: 'center', gap: 14, fontSize: 12, color: 'var(--op-t3)' }}>
         <span>{rows.length} of {source.length} {showingDeleted ? 'deleted ' : ''}tenants</span>
+        {cut?.truncated && (
+          <span role="status" style={{ color: 'var(--warn)' }}>
+            List truncated: showing {cut.shown.toLocaleString()} of {cut.total.toLocaleString()} {showingDeleted ? 'deleted ' : ''}tenants. Narrow the filters to find the rest.
+          </span>
+        )}
         <span>·</span>
         <span>{isMsp ? 'Assets · Sensors · MRR enrich from inventory / fleet / billing — wiring next' : 'Assets · Sensors enrich from inventory / fleet — wiring next'}</span>
       </div>

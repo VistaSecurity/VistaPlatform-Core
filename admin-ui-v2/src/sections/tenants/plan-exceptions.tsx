@@ -11,6 +11,7 @@ import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { StatusTag, num } from '../../components/ui/primitives';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type TenantEntitlement = adminServiceComponents['schemas']['TenantEntitlement'];
 type TenantEntitlementInput = adminServiceComponents['schemas']['TenantEntitlementInput'];
@@ -42,10 +43,6 @@ function draftError(kind: string, draft: string): string | null {
   }
   if (kind === 'enum_choice' && !(draft ?? '').trim()) return 'Value cannot be blank';
   return null;
-}
-function apiDetail(err: unknown, fallback: string): string {
-  const d = (err as { detail?: unknown } | null)?.detail;
-  return typeof d === 'string' && d ? d : fallback;
 }
 function draftFrom(kind: string, v: unknown): string {
   const dv = (v ?? {}) as DV;
@@ -96,8 +93,7 @@ export function PlanExceptionsPanel({ tenantId }: { tenantId: string }) {
   const items = itemsQ.data ?? [];
   const del = useMutation({
     mutationFn: async (overrideId: string) => {
-      const { error } = await clients.admin.DELETE('/admin/tenants/{id}/entitlements/{overrideId}', { params: { path: { id: tenantId, overrideId } } });
-      if (error) throw new Error('Failed to remove');
+      unwrap(await clients.admin.DELETE('/admin/tenants/{id}/entitlements/{overrideId}', { params: { path: { id: tenantId, overrideId } } }), 'Failed to remove');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: KEY(tenantId) }),
   });
@@ -129,8 +125,8 @@ export function PlanExceptionsPanel({ tenantId }: { tenantId: string }) {
                   </div>
                 </div>
                 <StatusTag status={st === 'active' ? 'active' : st === 'scheduled' ? 'onboarding' : 'canceled'} />
-                <button onClick={() => setEditing(e)} className="op-btn icon sm" title="Edit"><Pencil size={12} /></button>
-                <button onClick={() => remove(e)} className="op-btn icon sm danger" title="Remove"><Trash2 size={12} /></button>
+                <button onClick={() => setEditing(e)} className="op-btn icon sm" title="Edit" aria-label="Edit"><Pencil size={12} /></button>
+                <button onClick={() => remove(e)} className="op-btn icon sm danger" title="Remove" aria-label="Remove"><Trash2 size={12} /></button>
               </div>
             );
           })}
@@ -169,11 +165,9 @@ function ExceptionModal({ tenantId, items, existing, onClose }: { tenantId: stri
         expires_at: expires ? new Date(expires).toISOString() : undefined,
       };
       if (isEdit) {
-        const { error: err } = await clients.admin.PUT('/admin/tenants/{id}/entitlements/{overrideId}', { params: { path: { id: tenantId, overrideId: existing!.id } }, body });
-        if (err) throw new Error(apiDetail(err, 'Failed to update exception'));
+        unwrap(await clients.admin.PUT('/admin/tenants/{id}/entitlements/{overrideId}', { params: { path: { id: tenantId, overrideId: existing!.id } }, body }), 'Failed to update exception');
       } else {
-        const { error: err } = await clients.admin.POST('/admin/tenants/{id}/entitlements', { params: { path: { id: tenantId } }, body });
-        if (err) throw new Error(apiDetail(err, 'Failed to grant exception'));
+        unwrap(await clients.admin.POST('/admin/tenants/{id}/entitlements', { params: { path: { id: tenantId } }, body }), 'Failed to grant exception');
       }
     },
     onSuccess: () => { toast.success(isEdit ? 'Exception updated' : 'Exception granted'); qc.invalidateQueries({ queryKey: KEY(tenantId) }); onClose(); },

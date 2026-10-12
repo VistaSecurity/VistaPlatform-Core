@@ -24,6 +24,7 @@ import { NetBoxUpgradeSection } from './netbox-upgrade';
 import { CmdbUpgradeSection } from './cmdb-upgrade';
 import type { SettingsNavItem } from './nav';
 import type { notificationServiceComponents as NC, complianceEngineComponents } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
 
 type Channel = NC['schemas']['TenantNotificationChannel'];
 type Rule = NC['schemas']['TenantNotificationRule'];
@@ -306,11 +307,10 @@ function RuleEnableToggle({ rule }: { rule: Rule }) {
   const queryClient = useQueryClient();
   const mutation = useMutation({
     mutationFn: async (enabled: boolean) => {
-      const { error, response } = await clients.notifications.PUT('/tenant/rules/{id}', {
+      unwrap(await clients.notifications.PUT('/tenant/rules/{id}', {
         params: { path: { id: rule.id } },
         body: { enabled },
-      });
-      if (error || !response.ok) throw new Error('Failed to update the rule');
+      }), 'Failed to update the rule');
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['settings', 'notification-rules'] }),
   });
@@ -423,11 +423,10 @@ function useCatalogUpdate() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (vars: { id: string; enabled: boolean; preference_rung?: AlertCatalogPreferenceRung | null }) => {
-      const { data, error } = await clients.compliance.PUT('/alert-catalog/{type}', {
+      const data = unwrap(await clients.compliance.PUT('/alert-catalog/{type}', {
         params: { path: { type: vars.id } },
         body: { enabled: vars.enabled, preference_rung: vars.preference_rung },
-      });
-      if (error || !data) throw new Error(error?.error ?? 'Failed to update the alert type');
+      }), 'Failed to update the alert type', { requireData: true });
       return data;
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to update the alert type'),

@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router';
 import toast from 'react-hot-toast';
 import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { PageWrap } from './kit';
@@ -62,8 +63,9 @@ export function SbomPage() {
   // `\u0001` is a token the query lexer does not know — so the picker would
   // answer a parse error instead of "no matching assets". The software lens
   // makes the same point about its drill-through link.
-  const searchQuery = search.trim() ? `display_name:${quoteValue(search.trim())}` : '';
-  const assetsQ = useAssetsQuery(searchQuery, 1, mode === 'asset' && search.trim().length >= 2);
+  const debouncedSearch = useDebouncedValue(search).trim();
+  const searchQuery = debouncedSearch ? `display_name:${quoteValue(debouncedSearch)}` : '';
+  const assetsQ = useAssetsQuery(searchQuery, 1, mode === 'asset' && debouncedSearch.length >= 2);
 
   const target: SbomTarget = mode === 'subject'
     ? { kind: 'subject' }
@@ -174,7 +176,7 @@ export function SbomPage() {
                 data-testid="sbom-asset-search"
                 onChange={(e) => { setPicked(null); setSearch(e.target.value); }}
               />
-              {!picked && search.trim().length >= 2 && (
+              {!picked && debouncedSearch.length >= 2 && (
                 <div style={{ marginTop: 6, border: '1px solid var(--app-border)', borderRadius: 9, maxHeight: 190, overflowY: 'auto' }}>
                   {assetsQ.isLoading && <div style={{ padding: 10, fontSize: 12, color: 'var(--app-t3)' }}>Searching…</div>}
                   {!assetsQ.isLoading && (assetsQ.data?.assets.length ?? 0) === 0 && (

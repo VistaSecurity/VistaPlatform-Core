@@ -231,25 +231,19 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 	}
 	log.Printf("[DiscoveryHandler] Parsed request: %d target(s), %d protocol(s), %d port(s), scan_depth=%q run_from=%q", len(req.Targets), len(req.Protocols), len(req.Ports), req.ScanDepth, req.RunFrom)
 
-	// Check rate limits. A dry run creates no job, so it consumes none of the
-	// allowance, but it is refused where a real create would be: a preview that
-	// says "fine" to a request Start will answer 429 is no preview.
+	// A dry run creates no job, so it consumes none of the allowance, but it is
+	// refused where a real create would be: a preview that says "fine" to a
+	// request Start will answer 429 is no preview. A real create is checked
+	// inside its own transaction (CreateJob), where the count and the insert
+	// are atomic; checking here as well would only be a racy second opinion.
 	if req.DryRun {
-		err = h.rateLimiter.CheckRateLimitReadOnly(tenantID)
-	} else {
-		err = h.rateLimiter.CheckRateLimit(tenantID)
-	}
-	var refused *services.RateLimitExceededError
-	if errors.As(err, &refused) {
-		// Which limit, and the count against it, is what a person needs to
-		// act on a 429. A failure to CHECK is not a refusal.
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded", "detail": refused.Error()})
-		return
-	}
-	if err != nil {
-		log.Printf("[DiscoveryHandler] rate-limit check failed for tenant %s: %v", tenantID, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not check rate limits"})
-		return
+		if err = h.rateLimiter.CheckRateLimitReadOnly(tenantID); err != nil {
+			if !writeRateLimitRefusal(c, err) {
+				log.Printf("[DiscoveryHandler] rate-limit check failed for tenant %s: %v", tenantID, err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "could not check rate limits"})
+			}
+			return
+		}
 	}
 
 	// A dry run ( WP3b) goes through the same service function as a real
@@ -276,8 +270,20 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 
 	// A person confirmed targets outside the tenant's registered networks:
 	// record who, when, what they named and what it resolved to ( W5.13b).
+	// The record is a precondition of the scan, not a courtesy: when it cannot
+	// be written the job is cancelled before it is announced, so nothing is
+	// ever scanned outside the tenant's networks without it.
 	if len(job.ExternalTargets) > 0 {
-		auditExternalTargets(c, tenantID, userID, job)
+		if err := auditExternalTargets(c, tenantID, userID, job); err != nil {
+			if cerr := h.discoveryService.CancelJob(job.ID); cerr != nil {
+				log.Printf("[DiscoveryHandler] job %s: audit failed (%v) and the job could not be cancelled: %v", job.ID, err, cerr)
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "audit_unavailable",
+				"message": "the confirmation of the external targets could not be recorded, so the scan was not started",
+			})
+			return
+		}
 	}
 
 	// Publish job to NATS queue
@@ -286,10 +292,30 @@ func (h *DiscoveryHandler) CreateJob(c *gin.Context) {
 	c.JSON(http.StatusAccepted, models.DiscoveryJobResponse{Job: *job})
 }
 
+// writeRateLimitRefusal answers a tenant at one of its limits with 429, naming
+// which limit and the count against it — what a person needs to act. It reports
+// whether err was such a refusal; a failure to CHECK is not one.
+func writeRateLimitRefusal(c *gin.Context, err error) bool {
+	var refused *services.RateLimitExceededError
+	if !errors.As(err, &refused) {
+		return false
+	}
+	c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded", "detail": refused.Error()})
+	return true
+}
+
 // writeCreateJobError answers a refused job creation. A real create and a dry
 // run share it, which is what makes a dry run's refusals the real create's:
 // the same status and the same code, because it is the same mapping.
 func writeCreateJobError(c *gin.Context, err error) {
+	if writeRateLimitRefusal(c, err) {
+		return
+	}
+	var tooMany *services.TooManyTargetsError
+	if errors.As(err, &tooMany) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "validation_error", "details": tooMany.Error()})
+		return
+	}
 	// A `sensors` job that cannot run is refused with a reason and a
 	// status a caller can act on, not collapsed into the generic message.
 	// A caller must be able to tell "that sensor is offline" (409, try
@@ -508,6 +534,11 @@ func (h *DiscoveryHandler) RetryJob(c *gin.Context) {
 				c.JSON(http.StatusConflict, gin.H{"error": "job can only be retried if status is queued or failed"})
 				return
 			}
+			// The targets are no longer authorized: the same answer a create
+			// gets for them (400 targets_refused, each target and why).
+			if writeTargetAuthorizationError(c, err) {
+				return
+			}
 			log.Printf("[DiscoveryHandler] requeue job %s for retry: %v", jobID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to requeue job"})
 			return
@@ -624,6 +655,11 @@ func (h *DiscoveryHandler) UpdateRateLimits(c *gin.Context) {
 
 	var req models.RateLimitConfigRequest
 	if !bindJSON(c, &req) {
+		return
+	}
+
+	if err := req.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "validation_error", "details": err.Error()})
 		return
 	}
 

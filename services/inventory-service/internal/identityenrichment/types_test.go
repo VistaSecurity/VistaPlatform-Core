@@ -135,3 +135,24 @@ func TestPolicyRequiresExplicitEnrichmentAndEnforcement(t *testing.T) {
 		t.Fatal("malformed exclusion silently accepted")
 	}
 }
+
+// A collector's own address is never a probe target, and an observation whose
+// only target is one settles with a distinct reason instead of "no target".
+func TestNetworkPlanNeverTargetsACollectorAddress(t *testing.T) {
+	segment := uuid.New()
+	scope := Scope{SegmentID: segment, SensorID: uuid.New(), ObserverSensorID: uuid.New(), CIDR: netip.MustParsePrefix("192.0.2.0/24"), Reachable: true,
+		CollectorAddresses: []netip.Prefix{netip.MustParsePrefix("192.0.2.173/32")}}
+	policy := Policy{Enabled: true, AdmissionMode: "enforce", Scan: autoscan.DefaultPolicy()}
+	ip := func(v string) identity.Identifier {
+		return identity.Identifier{Kind: identity.KindIPAddress, Value: v, Scope: segment.String()}
+	}
+	only := Observation{Evidence: identity.Observation{Identifiers: []identity.Identifier{ip("192.0.2.173")}}}
+	if plan, reason := NetworkPlan(only, policy, scope, nil, nil); reason != ReasonTargetIsCollector || len(plan.Addresses) != 0 {
+		t.Fatalf("plan=%+v reason=%q, want %s", plan, reason, ReasonTargetIsCollector)
+	}
+	mixed := Observation{Evidence: identity.Observation{Identifiers: []identity.Identifier{ip("192.0.2.173"), ip("192.0.2.50")}}}
+	plan, reason := NetworkPlan(mixed, policy, scope, nil, nil)
+	if reason != "" || len(plan.Addresses) != 1 || plan.Addresses[0] != "192.0.2.50" {
+		t.Fatalf("plan=%+v reason=%q, want only the non-collector address", plan, reason)
+	}
+}

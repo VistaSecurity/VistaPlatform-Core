@@ -5,6 +5,14 @@
 {
 	auto_https off
 	admin off
+	# The root filesystem is read-only in the chart (only /tmp is writable).
+	# Without these two lines Caddy logs error-level lines at every start:
+	# the config autosave cannot write /config/caddy/autosave.json, and the
+	# TLS storage clean cannot take /data/caddy/locks/storage_clean.lock.
+	# Neither matters here (static config, no certificates), so turn the
+	# autosave off and keep Caddy's storage on the writable /tmp.
+	persist_config off
+	storage file_system /tmp/caddy
 }
 
 :3007 {

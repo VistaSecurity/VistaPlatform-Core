@@ -233,6 +233,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "existingSecretName": {
+          "type": "string",
+          "description": "Pre-created Secret with install-id and signing-key.pem. Empty = chart-managed."
+        },
         "id": {
           "type": "string",
           "description": "Pinned install id (UUID). Empty = generate once and preserve with lookup. Required for GitOps renders (ArgoCD, helm template), which cannot lookup.",
@@ -241,6 +245,20 @@
         "signingKeyPEM": {
           "type": "string",
           "description": "Pinned install signing key (ECDSA P-256 private key, PEM). Empty = generate once and preserve with lookup. Required for GitOps renders, from an encrypted values file."
+        }
+      }
+    },
+    "cbomSigning": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keyPEM": {
+          "type": "string",
+          "description": "Pinned CBOM artifact signing key (Ed25519 private key, PKCS#8 PEM, a \"BEGIN PRIVATE KEY\" block). Empty = generate once and preserve with lookup. Required for GitOps renders, from an encrypted values file."
+        },
+        "existingSecretName": {
+          "type": "string",
+          "description": "Pre-created Secret holding the key under signing-key.pem. Required (or pin keyPEM) when platform.generateSecrets=false."
         }
       }
     },
@@ -296,6 +314,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "generateSecrets": {
+          "type": "boolean",
+          "description": "Generate platform/datastore Secrets in the chart (default true). false = GitOps: pre-create them and name them via existingSecretName / existingDatastoreSecretName; the render emits no generated Secret."
+        },
+        "existingDatastoreSecretName": {
+          "type": "string"
+        },
         "existingSecretName": {
           "type": "string"
         },
@@ -347,21 +372,17 @@
       "required": [
         "postgres",
         "redis",
-        "influxdb",
         "nats"
       ],
       "properties": {
         "storageClassName": {
           "type": "string",
-          "minLength": 1
+          "description": "Global storage class for the in-cluster datastores and chart PVCs. Empty (the default) omits storageClassName so the cluster's default StorageClass applies."
         },
         "postgres": {
           "$ref": "#/definitions/datastoreSpec"
         },
         "redis": {
-          "$ref": "#/definitions/datastoreSpec"
-        },
-        "influxdb": {
           "$ref": "#/definitions/datastoreSpec"
         },
         "nats": {
@@ -466,9 +487,6 @@
                 "type": "boolean"
               },
               "nats": {
-                "type": "boolean"
-              },
-              "influxdb": {
                 "type": "boolean"
               }
             }
@@ -727,6 +745,293 @@
         }
       }
     },
+    "serviceMtls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "platformCa": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "duration": {
+              "type": "string",
+              "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+            },
+            "privateKey": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "algorithm": {
+                  "type": "string",
+                  "enum": [
+                    "RSA",
+                    "ECDSA",
+                    "Ed25519"
+                  ]
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "rotationPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "Never",
+                    "Always"
+                  ]
+                }
+              }
+            },
+            "externalCaSecretName": {
+              "type": "string"
+            }
+          }
+        },
+        "certificate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "duration": {
+              "type": "string",
+              "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+            },
+            "renewBefore": {
+              "type": "string",
+              "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+            },
+            "privateKey": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "algorithm": {
+                  "type": "string",
+                  "enum": [
+                    "RSA",
+                    "ECDSA",
+                    "Ed25519"
+                  ]
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "rotationPolicy": {
+                  "type": "string",
+                  "enum": [
+                    "Never",
+                    "Always"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "postgres": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "disable",
+                "require",
+                "verify-ca",
+                "verify-full"
+              ]
+            },
+            "caSecretName": {
+              "type": "string"
+            },
+            "clientCertSecretName": {
+              "type": "string"
+            }
+          }
+        },
+        "nats": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mtlsEnabled": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "agentMtls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "entryPoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "backends": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "dnsName": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "serviceRls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "roleApp": {
+          "type": "string",
+          "minLength": 1
+        },
+        "roleBypass": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "jwtSigning": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecretName": {
+          "type": "string",
+          "description": "Pre-created Secret with signing-key.pem. Empty = chart-managed."
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "jwksUrl": {
+          "type": "string"
+        },
+        "jwksRefreshSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "existingPrivateKeyPEM": {
+          "type": "string"
+        },
+        "acceptLegacyHmac": {
+          "description": "auto, true or false. Left as bool-or-string here because the template validates the value and names the allowed ones (a schema enum would replace that message).",
+          "type": [
+            "boolean",
+            "string"
+          ]
+        },
+        "legacyHmacWindowHours": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "adminPlane": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "restrictToAdminHost": {
+          "type": "boolean"
+        },
+        "ipAllowList": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "sourceRange": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "ipStrategy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "depth": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "excludedIPs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "edgeRateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ipStrategy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "depth": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "excludedIPs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "api": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "average": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "burst": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "average": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "burst": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
     "pcapUploads": {
       "type": "object",
       "properties": {
@@ -789,6 +1094,13 @@
         },
         "ingressControllerNamespace": {
           "type": "string"
+        },
+        "externalDatastoreCIDRs": {
+          "type": "array",
+          "description": "CIDRs of an external Postgres/Redis, allowed as egress on 5432/6379 when egressEnabled is true and the bundled datastore is disabled.",
+          "items": {
+            "type": "string"
+          }
         }
       }
     }

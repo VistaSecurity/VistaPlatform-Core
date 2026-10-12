@@ -249,3 +249,11 @@ describe('Trusted CAs entry', () => {
     expect(policies).toContain('classes');
   });
 });
+
+describe('visibleSettingsNav — permissions', () => {
+  it('drops a page whose permission the viewer lacks, and keeps it when they hold it', () => {
+    const gated = SETTINGS_NAV.flatMap((s) => s.items).find((i) => i.built && i.permission && !i.feature)!;
+    expect(keysOf(visibleSettingsNav(allOn, () => true))).toContain(gated.key);
+    expect(keysOf(visibleSettingsNav(allOn, (p) => p !== gated.permission))).not.toContain(gated.key);
+  });
+});

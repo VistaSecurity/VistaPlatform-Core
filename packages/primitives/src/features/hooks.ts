@@ -1,10 +1,12 @@
 // Feature-flag hooks: useFeatures / useFeature. Loads the resolved feature map
 // + usage limits from the typed contract (/tenant/features). Independent of RBAC.
+import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { createAuthServiceClient } from '@vistasecurity/api-contract';
+import { primitivesQueryKeys } from '../shared/query-keys';
 import { defaultFeatures, type FeatureName, type FeaturesMap, type LimitsMap, type TenantPlan } from './types';
 
-const featuresKey = ['tenant', 'features'] as const;
+const featuresKey = primitivesQueryKeys.tenant.features();
 
 async function fetchFeatures() {
   const c = createAuthServiceClient();
@@ -13,19 +15,31 @@ async function fetchFeatures() {
   return data;
 }
 
-export function useFeatures(enabled = true): { features: FeaturesMap; limits: LimitsMap; isLoading: boolean } {
-  const { data, isLoading } = useQuery({
+export function useFeatures(enabled = true): {
+  features: FeaturesMap;
+  limits: LimitsMap;
+  isLoading: boolean;
+  /** The load FAILED; `features` is then the all-off defaults (fail-closed). */
+  isError: boolean;
+  refetch(): void;
+} {
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: featuresKey,
     queryFn: fetchFeatures,
     enabled,
     staleTime: 5 * 60 * 1000,
   });
 
-  return {
-    features: { ...defaultFeatures, ...((data?.features as Partial<FeaturesMap> | undefined) ?? {}) },
-    limits: (data?.limits ?? {}) as LimitsMap,
-    isLoading,
-  };
+  return useMemo(
+    () => ({
+      features: { ...defaultFeatures, ...((data?.features as Partial<FeaturesMap> | undefined) ?? {}) },
+      limits: (data?.limits ?? {}) as LimitsMap,
+      isLoading,
+      isError,
+      refetch: () => { void refetch(); },
+    }),
+    [data, isLoading, isError, refetch],
+  );
 }
 
 /**

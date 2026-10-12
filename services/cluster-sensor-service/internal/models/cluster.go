@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/lib/pq"
@@ -70,6 +71,11 @@ type DiscoveryJob struct {
 	// Active Scan) without parsing raw metadata itself. Empty for both — the
 	// distinction between those two is ExecutionMode/CreatedBy, not Origin.
 	Origin string `json:"origin,omitempty" db:"origin"`
+	// Note is a sentence about how the job ended that its status alone does
+	// not say (metadata.note): a job that asked for no active scanning ends
+	// completed having probed nothing, and one whose targets were withdrawn
+	// before dispatch names the ones that were not scanned.
+	Note string `json:"note,omitempty" db:"note"`
 	// Plan is what the server decided a scan-plan job does ( WP3):
 	// metadata.scan_plan, surfaced on the create response, the single-job
 	// read and the listing. Nil for a legacy protocols × ports job.
@@ -459,16 +465,38 @@ type DiscoveryRateLimit struct {
 	UpdatedAt        time.Time `json:"updated_at" db:"updated_at"`
 }
 
-// RateLimitConfigRequest represents a request to configure rate limits
+// Bounds for the rate-limit settings. max_targets_per_job above the platform's
+// per-job ceiling would never take effect, so it is refused rather than stored.
+const (
+	MaxScansPerHour     = 100000
+	MaxConcurrentJobs   = 1000
+	MaxTargetsPerJobCap = 1000
+)
+
+// RateLimitConfigRequest is the body of PUT /config/rate-limits. Every field is
+// optional; an omitted one keeps its current value.
 type RateLimitConfigRequest struct {
-	TenantID         string `json:"tenant_id" binding:"required"`
-	SensorID         string `json:"sensor_id" binding:"required"`
-	LimitType        string `json:"limit_type" binding:"required"`
-	LimitValue       int    `json:"limit_value" binding:"required"`
-	ScansPerHour     int    `json:"scans_per_hour"`
-	ConcurrentJobs   int    `json:"concurrent_jobs"`
-	MaxTargetsPerJob int    `json:"max_targets_per_job"`
-	IsActive         bool   `json:"is_active"`
+	ScansPerHour     *int  `json:"scans_per_hour"`
+	ConcurrentJobs   *int  `json:"concurrent_jobs"`
+	MaxTargetsPerJob *int  `json:"max_targets_per_job"`
+	IsActive         *bool `json:"is_active"`
+}
+
+// Validate names the first field that is out of range.
+func (r RateLimitConfigRequest) Validate() error {
+	check := func(name string, v *int, max int) error {
+		if v != nil && (*v < 1 || *v > max) {
+			return fmt.Errorf("%s must be between 1 and %d", name, max)
+		}
+		return nil
+	}
+	if err := check("scans_per_hour", r.ScansPerHour, MaxScansPerHour); err != nil {
+		return err
+	}
+	if err := check("concurrent_jobs", r.ConcurrentJobs, MaxConcurrentJobs); err != nil {
+		return err
+	}
+	return check("max_targets_per_job", r.MaxTargetsPerJob, MaxTargetsPerJobCap)
 }
 
 // DiscoveryJobsResponse represents a response containing multiple discovery jobs

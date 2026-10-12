@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/models"
 	"github.com/vistasecurity/vistaplatform/compliance-engine/internal/services"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	audithelpers "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 )
@@ -56,12 +57,16 @@ func (h *TicketHandlers) ListTickets(c *gin.Context) {
 		Overdue:       c.Query("overdue") == "true",
 	}
 
-	if p, err := strconv.Atoi(c.DefaultQuery("page", "1")); err == nil {
-		filters.Page = p
+	// Strict: a malformed page/page_size is a 400, and page_size above 100 is
+	// clamped to 100 (it used to fall back to 20, silently returning a fifth of
+	// what was asked for).
+	p, err := sharedapi.ParsePaginationStrict(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
-	if ps, err := strconv.Atoi(c.DefaultQuery("page_size", "20")); err == nil {
-		filters.PageSize = ps
-	}
+	filters.Page = p.Page
+	filters.PageSize = p.PageSize
 
 	tickets, total, err := h.ticketService.List(tenantUUID, filters)
 	if err != nil {
@@ -114,6 +119,9 @@ func (h *TicketHandlers) CreateTicket(c *gin.Context) {
 
 	ticket, err := h.ticketService.Create(tenantUUID, userUUID, input)
 	if err != nil {
+		if writeInputError(c, err) {
+			return
+		}
 		// Log the underlying error so the next 500 is diagnosable from the
 		// service logs without an extra rebuild round-trip.
 		log.Printf("CreateTicket: tenant=%s user=%s failed: %v", tenantUUID, userUUID, err)
@@ -185,6 +193,9 @@ func (h *TicketHandlers) UpdateTicket(c *gin.Context) {
 	if err != nil {
 		if err.Error() == "ticket not found" {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Ticket not found"})
+			return
+		}
+		if writeInputError(c, err) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update ticket"})
@@ -281,7 +292,14 @@ func (h *TicketHandlers) ListComments(c *gin.Context) {
 		return
 	}
 
-	comments, err := h.ticketService.ListComments(tenantUUID, ticketID)
+	// Bounded like every list. The default is the cap so the drawer, which sends
+	// no page_size, still gets up to 100 comments.
+	p, ok := parsePageDefaulting(c, sharedapi.MaxPageSize)
+	if !ok {
+		return
+	}
+
+	comments, hasNext, err := h.ticketService.ListComments(tenantUUID, ticketID, p.PageSize, p.Offset)
 	if err != nil {
 		if err.Error() == "ticket not found" {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Ticket not found"})
@@ -291,7 +309,12 @@ func (h *TicketHandlers) ListComments(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"comments": comments})
+	c.JSON(http.StatusOK, gin.H{
+		"comments":  comments,
+		"page":      p.Page,
+		"page_size": p.PageSize,
+		"has_next":  hasNext,
+	})
 }
 
 // AddComment adds a comment to a ticket
@@ -319,6 +342,10 @@ func (h *TicketHandlers) AddComment(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&input); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Content is required"})
+		return
+	}
+	if err := models.ValidateTicketCommentContent(input.Content); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 

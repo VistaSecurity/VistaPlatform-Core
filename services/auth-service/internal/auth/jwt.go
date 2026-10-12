@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/sirupsen/logrus"
+
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
@@ -149,6 +151,31 @@ func NewJWTServiceWithKeys(secretKey string, signer *jwtkeys.Signer, accessExpir
 		refreshExpiry: refreshExpiry,
 	}
 }
+
+// SetAcceptLegacyHMAC turns HS256 verification on or off. Off, the verifier is
+// rebuilt without the shared secret, so a token forged by anyone holding
+// JWT_SECRET is rejected here exactly as the chart's closed window rejects it on
+// every other service. Signing is unaffected, and so is CSRF binding (which keys
+// off the secret in config, not the verifier).
+//
+// Refused when there is no signing key: such a pod mints HS256 itself, and
+// turning acceptance off would make it reject every token it just issued.
+func (j *JWTService) SetAcceptLegacyHMAC(accept bool) {
+	if accept {
+		j.verifier = sharedmw.VerifierFromEnv(string(j.secretKey))
+		return
+	}
+	if j.signer == nil {
+		logrus.Warn("JWT_ACCEPT_LEGACY_HMAC=false ignored: no AUTH_JWT signing key is configured, so this service signs HS256 and must keep verifying it")
+		return
+	}
+	j.verifier = sharedmw.VerifierFromEnv("")
+}
+
+// tokenLeeway is the clock skew tolerated on nbf/iat (exp stays strict, see ValidateToken). Tokens are minted with
+// nbf = iat = now, so without it a verifier whose clock trails the issuer's by a
+// second rejects a token it was handed moments ago.
+const tokenLeeway = 30 * time.Second
 
 // SigningKID reports the key currently signing, or "" on the legacy HS256 path.
 // Logged at startup so "which key is this pod signing with" — the first
@@ -386,7 +413,8 @@ func (j *JWTService) ValidateToken(tokenString string) (*JWTClaims, error) {
 	// shared secret while one is configured, and neither can reach the other's
 	// key material. See shared/security/jwtkeys.Verifier.
 	opts := append(j.verifier.ParserOptions(),
-		jwt.WithIssuer("crypto-inventory-auth"), jwt.WithAudience("crypto-inventory"))
+		jwt.WithIssuer("crypto-inventory-auth"), jwt.WithAudience("crypto-inventory"),
+		jwt.WithLeeway(tokenLeeway))
 	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, j.verifier.Keyfunc(), opts...)
 
 	if err != nil {
@@ -399,6 +427,12 @@ func (j *JWTService) ValidateToken(tokenString string) (*JWTClaims, error) {
 	claims, ok := token.Claims.(*JWTClaims)
 	if !ok || !token.Valid {
 		return nil, ErrInvalidToken
+	}
+	// The leeway above is for clock skew on nbf/iat. The parser applies it to exp
+	// as well, which would keep an expired token alive for another tokenLeeway
+	// (and an impersonation token's minimum TTL is 60s), so exp stays strict.
+	if claims.ExpiresAt != nil && !claims.ExpiresAt.After(time.Now()) {
+		return nil, ErrExpiredToken
 	}
 
 	return claims, nil

@@ -12,6 +12,7 @@
 // at click time. After a successful toggle the checkbox snapped back to its
 // old value, and the next click re-sent the SAME change ("Mark … as your own
 // tenant?" again) — the admin could not unmark without reopening the drawer.
+import { MemoryRouter } from 'react-router';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -123,7 +124,7 @@ async function mountAndOpenDrawer() {
   root = createRoot(host);
   act(() => root!.render(
     <QueryClientProvider client={qc}>
-      <scope.ScopeProvider><page.TenantsPage /></scope.ScopeProvider>
+      <MemoryRouter><scope.ScopeProvider><page.TenantsPage /></scope.ScopeProvider></MemoryRouter>
     </QueryClientProvider>,
   ));
   const row = await until(() => Array.from(host.querySelectorAll('tr')).find((tr) => tr.textContent?.includes('Acme')), 'the tenant row');

@@ -5,9 +5,10 @@
 // These catalogues are PLATFORM data — no tenant_id, every tenant reads the same
 // rows — so they live beside Algorithms and Frameworks under Catalog. Reads and
 // writes are both gated server-side on `catalogs.manage`.
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export type EolEntry = adminServiceComponents['schemas']['EolCatalogueEntry'];
 export type VulnerabilityEntry = adminServiceComponents['schemas']['VulnerabilityCatalogueEntry'];
@@ -61,6 +62,9 @@ export function useEolCatalogue(filters: EolFilters) {
       if (error || !data) throw new Error('Failed to load the end-of-life catalogue');
       return { rows: data.entries, total: data.total, page: data.page, pageSize: data.page_size };
     },
+    // Keep the previous rows on screen while the next page / search loads,
+    // instead of dropping to an empty table on every key change.
+    placeholderData: keepPreviousData,
     staleTime: 60 * 1000,
   });
 }
@@ -95,6 +99,9 @@ export function useVulnerabilityCatalogue(filters: VulnFilters) {
         pageSize: data.page_size,
       };
     },
+    // Keep the previous rows on screen while the next page / search loads,
+    // instead of dropping to an empty table on every key change.
+    placeholderData: keepPreviousData,
     staleTime: 60 * 1000,
   });
 }
@@ -128,7 +135,7 @@ export function useSyncCatalogFeed() {
       const { error, response } = await clients.admin.POST('/admin/catalogs/feeds/{feed}/sync', {
         params: { path: { feed } },
       });
-      if (error) {
+      if (!response.ok || error) {
         // Each status means a different thing and has a different fix, so they
         // are not flattened into one "sync failed".
         const detail = (error as { error?: string })?.error;
@@ -291,6 +298,9 @@ export function useClassificationRules(filters: ClassificationRuleFilters) {
         kinds: data.kinds,
       };
     },
+    // Keep the previous rows on screen while the next page / search loads,
+    // instead of dropping to an empty table on every key change.
+    placeholderData: keepPreviousData,
     staleTime: 60 * 1000,
   });
 }
@@ -398,7 +408,7 @@ export function useDeleteClassificationRule() {
       const { error, response } = await clients.admin.DELETE('/admin/catalogs/classification-rules/{id}', {
         params: { path: { id } },
       });
-      if (error) throw ruleWriteError(error, response?.status, 'Failed to delete the rule');
+      if (!response.ok || error) throw ruleWriteError(error, response?.status, 'Failed to delete the rule');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: RULES_KEY }),
   });
@@ -569,7 +579,7 @@ export function useRunEnrichment() {
   return useMutation({
     mutationFn: async () => {
       const { error, response } = await clients.admin.POST('/admin/catalogs/eol/enrich', {});
-      if (error) {
+      if (!response.ok || error) {
         const detail = (error as { error?: string })?.error;
         if (response?.status === 409) throw new Error(detail ?? 'A proposal run is already in flight');
         if (response?.status === 503) throw new Error(detail ?? 'AI proposals are not available on this deployment');
@@ -603,10 +613,7 @@ export function useEolLookup() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: EolLookupInput): Promise<EolLookupResult> => {
-      const { data, error } = await clients.admin.POST('/admin/catalogs/eol/lookup', { body: input });
-      if (error || !data) {
-        throw new Error((error as { error?: string })?.error ?? 'Lookup failed');
-      }
+      const data = unwrap(await clients.admin.POST('/admin/catalogs/eol/lookup', { body: input }), 'Lookup failed', { requireData: true });
       return data;
     },
     onSuccess: (data) => {

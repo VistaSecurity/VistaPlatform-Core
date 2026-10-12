@@ -8,13 +8,15 @@
 //   DELETE /sensors/pending/{key}    (drop a pending registration)
 // Composes the shared Modal primitive. queries.ts is shared/off-limits, so the
 // pending-registrations query lives here as a local hook.
-import { useEffect, useState } from 'react';
+import { invalidateOnboarding } from '../onboarding/queries';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { CORE_RELEASES_URL, binaryUrl, installerUrl, releasePageUrl, usePlatformReleaseTag } from './agent-downloads';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { copyToClipboard } from '../../lib/clipboard';
 import { Icon, Modal, ModalField, ModalInput } from '../../components/ui';
+import { unwrap } from '../../lib/api-result';
 
 // Registration doesn't ask the operator to list NICs — the sensor is configured
 // on its own host post-install. It does ask which *kind* of agent (sensor vs
@@ -54,45 +56,61 @@ export function usePendingSensors() {
 // two existing tenant endpoints:
 //   - key still in GET /sensors/pending  → agent hasn't consumed it yet
 //   - key gone + a sensor matches name+ip → registered; last_heartbeat → data flowing
-type RegStatusState = 'waiting' | 'registered' | 'connected' | 'expired';
+type RegStatusState = 'waiting' | 'registered' | 'connected' | 'expired' | 'timeout';
 
-function useRegistrationStatus(
+/** Stop polling after this long; a sensor that has not shown up by now needs a person. */
+export const REGISTRATION_POLL_LIMIT_MS = 10 * 60_000;
+
+export function useRegistrationStatus(
   args: { open: boolean; key: string; name: string; ip: string } | null,
 ) {
+  // When polling for THIS key began (reset when the dialog reopens or the key changes).
+  const startedAt = useMemo(() => Date.now(), [args?.key, args?.open]); // eslint-disable-line react-hooks/exhaustive-deps
   return useQuery({
     queryKey: ['discovery', 'registration-status', args?.key ?? 'none'],
     enabled: !!args && args.open,
-    // Poll every 3s until the sensor is connected (or the code expired).
+    // A failed request is reported, not retried against forever.
+    retry: 1,
+    // Poll every 3s until the sensor is connected, the code expired, the poll
+    // limit was reached, or a check failed.
     refetchInterval: (q) => {
+      if (q.state.status === 'error') return false;
       const s = q.state.data as RegStatusState | undefined;
-      return s === 'connected' || s === 'expired' ? false : 3000;
+      return s === 'connected' || s === 'expired' || s === 'timeout' ? false : 3000;
     },
     queryFn: async (): Promise<RegStatusState> => {
       // Still in the pending list? Then the agent hasn't consumed the key yet.
       const pend = await clients.sensors.GET('/sensors/pending', {});
+      if (!pend.response.ok) throw new Error('Could not check the pending registrations');
       const rows = (pend.data?.pending_sensors ?? []) as Array<Record<string, unknown>>;
       const mine = rows.find((r) => r['registration_key'] === args!.key);
-      if (mine) return mine['status'] === 'expired' ? 'expired' : 'waiting';
+      if (mine) {
+        if (mine['status'] === 'expired') return 'expired';
+        return Date.now() - startedAt > REGISTRATION_POLL_LIMIT_MS ? 'timeout' : 'waiting';
+      }
 
       // Key consumed → the sensor exists. Has it reported its first data yet?
       const list = await clients.sensors.GET('/sensors', {});
+      if (!list.response.ok) throw new Error('Could not check the registered sensors');
       const sensors = (list.data?.sensors ?? []) as Array<Record<string, unknown>>;
       const s = sensors.find((x) => x['name'] === args!.name && x['ip_address'] === args!.ip);
       if (s && s['last_heartbeat']) return 'connected';
-      return 'registered';
+      return Date.now() - startedAt > REGISTRATION_POLL_LIMIT_MS ? 'timeout' : 'registered';
     },
   });
 }
 
-function RegistrationStatusBadge({ status }: { status?: RegStatusState }) {
-  const map: Record<RegStatusState | 'checking', { dot: string; label: string; pulse: boolean }> = {
+function RegistrationStatusBadge({ status, failed }: { status?: RegStatusState; failed?: boolean }) {
+  const map: Record<RegStatusState | 'checking' | 'error', { dot: string; label: string; pulse: boolean }> = {
     checking:   { dot: 'var(--neutral)', label: 'Checking status…', pulse: true },
     waiting:    { dot: 'var(--warn)', label: 'Not connected — waiting for the sensor to check in…', pulse: true },
     registered: { dot: 'var(--info)', label: 'Registered — waiting for the first data…', pulse: true },
     connected:  { dot: 'var(--ok)', label: 'Connected — receiving data', pulse: false },
+    timeout:    { dot: 'var(--neutral)', label: 'Still not reporting after 10 minutes — close and reopen this dialog to check again', pulse: false },
+    error:      { dot: 'var(--danger)', label: 'Could not check the sensor’s status — close and reopen this dialog to retry', pulse: false },
     expired:    { dot: 'var(--danger)', label: 'Registration code expired — mint a new one', pulse: false },
   };
-  const s = map[status ?? 'checking'];
+  const s = map[failed ? 'error' : (status ?? 'checking')];
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '10px 12px', borderRadius: 9, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', marginBottom: 14 }}>
       <span style={{ width: 9, height: 9, borderRadius: 50, flex: 'none', background: s.dot, animation: s.pulse ? 'vp-reg-pulse 1.4s ease-in-out infinite' : 'none' }} />
@@ -464,7 +482,7 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
       // Stamp the device-agent tags so the fleet/pending lists can distinguish
       // the kind; de-dupe against any the operator typed.
       const mergedTags = isDevice ? [...new Set([...DEVICE_AGENT_TAGS, ...tagList])] : tagList;
-      const { data, error } = await clients.sensors.POST('/sensors/pending', {
+      const data = unwrap(await clients.sensors.POST('/sensors/pending', {
         body: {
           name: name.trim(),
           ip_address: ipAddress.trim(),
@@ -472,8 +490,7 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
           tags: mergedTags.length ? mergedTags : undefined,
           description: description.trim() || undefined,
         },
-      });
-      if (error || !data) throw new Error(`Failed to register ${isDevice ? 'device agent' : 'sensor'}`);
+      }), `Failed to register ${isDevice ? 'device agent' : 'sensor'}`, { requireData: true });
       const ps = data.pending_sensor;
       const cmds: { linux: string; windows: string; macos?: string } = isDevice
         ? buildDeviceAgentCommands(ps.registration_key, releaseTag)
@@ -484,6 +501,7 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
       setResult(r);
       qc.invalidateQueries({ queryKey: ['discovery', 'sensors'] });
       qc.invalidateQueries({ queryKey: ['discovery', 'pending-sensors'] });
+      void invalidateOnboarding(qc);
     },
   });
 
@@ -512,7 +530,7 @@ export function RegisterSensorModal({ open, onClose }: { open: boolean; onClose:
           : 'Install the sensor on its host using the registration code below. The code expires — install soon. This window updates live as the sensor connects.'}
         primary={<button className="ui-btn accent" onClick={onClose}>Done</button>}
       >
-        {!deviceResult && <RegistrationStatusBadge status={regStatus.data} />}
+        {!deviceResult && <RegistrationStatusBadge status={regStatus.data} failed={regStatus.isError} />}
         <ModalField label="Registration code" hint={deviceResult ? 'Paste this into the agent config (registration_key).' : 'Paste this into the installer prompt or pass it to the install script.'}>
           <RegistrationCodeField code={result.key} />
         </ModalField>
@@ -634,10 +652,9 @@ export function DeleteSensorModal({ open, sensor, onClose }: {
   const del = useMutation({
     mutationFn: async () => {
       if (!sensor) throw new Error('No sensor selected');
-      const { error, response } = await clients.sensors.DELETE('/sensors/{sensor_id}', {
+      unwrap(await clients.sensors.DELETE('/sensors/{sensor_id}', {
         params: { path: { sensor_id: sensor.id } },
-      });
-      if (!response.ok || error) throw new Error('Failed to delete sensor');
+      }), 'Failed to delete sensor');
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['discovery', 'sensors'] });
@@ -682,10 +699,9 @@ export function DeleteAgentModal({ open, agent, onClose }: {
   const del = useMutation({
     mutationFn: async () => {
       if (!agent) throw new Error('No agent selected');
-      const { error, response } = await clients.devices.DELETE('/agents/{id}', {
+      unwrap(await clients.devices.DELETE('/agents/{id}', {
         params: { path: { id: agent.id } },
-      });
-      if (!response.ok || error) throw new Error('Failed to delete agent');
+      }), 'Failed to delete agent');
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['discovery', 'device-agents'] });
@@ -730,10 +746,9 @@ function DeletePendingModal({ open, pending, onClose }: {
   const del = useMutation({
     mutationFn: async () => {
       if (!pending) throw new Error('No registration selected');
-      const { error, response } = await clients.sensors.DELETE('/sensors/pending/{key}', {
+      unwrap(await clients.sensors.DELETE('/sensors/pending/{key}', {
         params: { path: { key: pending.registration_key } },
-      });
-      if (!response.ok || error) throw new Error('Failed to delete registration');
+      }), 'Failed to delete registration');
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['discovery', 'pending-sensors'] });

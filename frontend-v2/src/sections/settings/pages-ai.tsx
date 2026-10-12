@@ -22,6 +22,7 @@ import {
   AMBER, GREEN, SCard, SPage, SRow, SSection, STable, STableRow, STag, SToggle, StateNote,
   type STableCol,
 } from './kit';
+import { unwrap } from '../../lib/api-result';
 
 // The sentence the whole page is built around. It is stated once, at the top,
 // in the tenant's own words rather than the architecture's — and it is true of
@@ -221,10 +222,9 @@ function ControlsSection({ status }: { status: AIStatus }) {
 
   const save = useMutation({
     mutationFn: async () => {
-      const { data, error, response } = await clients.auth.PUT('/tenant/ai', {
+      const data = unwrap(await clients.auth.PUT('/tenant/ai', {
         body: { assistant_disabled: assistantDisabled, record_questions: recordQuestions },
-      });
-      if (!response.ok || error || !data) throw new Error('Failed to save the AI assistant settings');
+      }), 'Failed to save the AI assistant settings', { requireData: true });
       return data;
     },
     onSuccess: (next) => {

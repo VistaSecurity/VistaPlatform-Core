@@ -4,6 +4,7 @@
 // verification is required, so on success we show a "check your email" state
 // rather than routing to sign-in. Public route — mounted outside RequireAuth.
 // Spec: docsv4/internal/developer/standards/features/signup-entry.md
+import { orgNameValid } from './org-name';
 import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -11,6 +12,7 @@ import { clients } from '../lib/clients';
 import { Icon } from '../components/ui';
 import { AuthShell, AuthLabel, AuthSubmit, AuthError, authInputStyle } from './auth-shell';
 import { LegalLinks } from '../components/legal-links';
+import { unwrap } from '../lib/api-result';
 
 function socialLabel(t: string) {
   return t === 'google' ? 'Google' : t === 'microsoft' ? 'Microsoft' : t;
@@ -41,12 +43,19 @@ export function SignupPage() {
   const legalQ = useQuery({
     queryKey: ['signup', 'legal'],
     queryFn: async () => {
-      const { data } = await clients.auth.GET('/auth/legal/current', {});
+      const { data, response } = await clients.auth.GET('/auth/legal/current', {});
+      // A failed load must not read as "no documents published" — that would
+      // hide the terms checkbox and let the form look submittable.
+      if (!response.ok) throw new Error('Failed to load the terms of service');
       return data?.documents ?? [];
     },
   });
   const legalDocs = legalQ.data ?? [];
   const legalRequired = legalDocs.length > 0;
+  // Fail closed: until the terms have loaded (or if they failed to), submission is
+  // blocked — a failed load must not look like "no terms published".
+  const legalLoadFailed = legalQ.isError;
+  const legalBlocked = legalQ.isPending || legalLoadFailed;
 
   // Vista's configured social-signup providers (Google/Microsoft). Empty unless
   // a platform admin has configured one in admin → Settings → Identity Providers.
@@ -82,11 +91,11 @@ export function SignupPage() {
   const mismatch = confirm.length > 0 && confirm !== password;
   // Org name is required: the backend creates a new tenant from it (signup is a
   // founder flow, not an invite-accept).
-  const valid = !!email.trim() && !!firstName.trim() && !!lastName.trim() && !!orgName.trim() && password.length >= 8 && confirm === password && (!legalRequired || acceptedLegal);
+  const valid = !!email.trim() && !!firstName.trim() && !!lastName.trim() && orgNameValid(orgName) && password.length >= 8 && confirm === password && !legalBlocked && (!legalRequired || acceptedLegal);
 
   const submit = useMutation({
     mutationFn: async () => {
-      const { data, error } = await clients.auth.POST('/auth/register/complete', {
+      const data = unwrap(await clients.auth.POST('/auth/register/complete', {
         body: {
           email: email.trim(),
           password,
@@ -95,8 +104,7 @@ export function SignupPage() {
           tenant_name: orgName.trim(),
           accepted_legal: acceptedLegal,
         },
-      });
-      if (error || !data) throw new Error((error as { error?: string } | undefined)?.error || 'Could not create your account.');
+      }), 'Could not create your account.', { requireData: true });
       return data;
     },
     onSuccess: () => setDone(true),
@@ -104,8 +112,7 @@ export function SignupPage() {
 
   const resend = useMutation({
     mutationFn: async () => {
-      const { error } = await clients.auth.POST('/auth/resend-verification', { body: { email: email.trim() } });
-      if (error) throw new Error('Could not resend the email.');
+      unwrap(await clients.auth.POST('/auth/resend-verification', { body: { email: email.trim() } }), 'Could not resend the email.');
     },
   });
 
@@ -162,6 +169,7 @@ export function SignupPage() {
       )}
 
       <form onSubmit={onSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
+        {legalLoadFailed && <AuthError>Could not load the terms of service, so sign-up is paused. Reload the page to try again.</AuthError>}
         {submit.isError && <AuthError>{(submit.error as Error).message}</AuthError>}
 
         <div>

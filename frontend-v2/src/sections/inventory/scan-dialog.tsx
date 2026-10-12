@@ -22,6 +22,7 @@
 // discovery.create, which the server enforces.
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { invalidateAssetDetail } from './asset-queries';
 import toast from 'react-hot-toast';
 import { Link } from 'react-router';
 import { clients } from '../../lib/clients';
@@ -123,7 +124,7 @@ export function ScanDialog({ open, selection, onClose, onStarted }: {
     },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: ['inventory'] });
-      void qc.invalidateQueries({ queryKey: ['asset-detail'] });
+      invalidateAssetDetail(qc);
       void qc.invalidateQueries({ queryKey: ['discovery', 'scan-jobs'] });
     },
   });

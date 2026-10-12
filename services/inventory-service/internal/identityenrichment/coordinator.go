@@ -143,6 +143,12 @@ func (c *Coordinator) enrich(ctx context.Context, tenant uuid.UUID, o Observatio
 	}
 	excluded = append(excluded, c.Excluded...)
 	plan, reason := NetworkPlan(o, p, scope, nil, excluded)
+	if reason == ReasonTargetIsCollector {
+		// Settled, not blocked: a collector's own address is never probed, so
+		// re-planning in 15 minutes cannot change the answer. Re-examine on the
+		// rescan interval like every other completed outcome.
+		return c.Store.Summary(ctx, tenant, o.ID, "completed", reason, now, now.Add(time.Duration(p.Scan.RescanIntervalHours)*time.Hour))
+	}
 	if reason != "" {
 		return c.Store.Summary(ctx, tenant, o.ID, "blocked", reason, now, now.Add(15*time.Minute))
 	}

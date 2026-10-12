@@ -40,6 +40,10 @@ type SensorRepository interface {
 
 	// Commands
 	CreateCommand(ctx context.Context, cmd *models.SensorCommand) error
+	// CreateCommandIfUnderLimit inserts the command only while the sensor has
+	// fewer than maxPending pending commands (serialised per sensor). It
+	// returns false, nil when the cap is reached.
+	CreateCommandIfUnderLimit(ctx context.Context, cmd *models.SensorCommand, maxPending int) (bool, error)
 	GetPendingCommands(ctx context.Context, sensorID uuid.UUID) ([]*models.SensorCommand, error)
 	GetRecentCommands(ctx context.Context, sensorID uuid.UUID, limit int) ([]*models.SensorCommand, error)
 	UpdateCommandStatus(ctx context.Context, id uuid.UUID, status string) error
@@ -288,8 +292,8 @@ func (r *sensorRepository) UpdateSensor(ctx context.Context, sensor *models.Sens
 	query := `
 		UPDATE sensors
 		SET name = $2, description = $3, platform = $4, version = $5, profile = $6,
-		    status = $7, network_interfaces = $8, tags = $9, updated_at = $10,
-		    air_gapped = $11
+		    network_interfaces = $7, tags = $8, updated_at = $9,
+		    air_gapped = $10
 		WHERE id = $1 AND deleted_at IS NULL`
 
 	// RLS-scoped write on `sensors`: WithTenantTx sets app.tenant_id from the
@@ -299,7 +303,7 @@ func (r *sensorRepository) UpdateSensor(ctx context.Context, sensor *models.Sens
 	err := shareddatabase.WithTenantTx(ctx, r.db, sensor.TenantID, func(tx *sql.Tx) error {
 		_, e := tx.ExecContext(ctx, query,
 			sensor.ID, sensor.Name, sensor.Description, sensor.Platform,
-			sensor.Version, sensor.Profile, sensor.Status,
+			sensor.Version, sensor.Profile,
 			sensor.NetworkInterfaces, sensor.Tags, sensor.UpdatedAt,
 			sensor.AirGapped,
 		)
@@ -639,6 +643,51 @@ func (r *sensorRepository) CreateCommand(ctx context.Context, cmd *models.Sensor
 	}
 
 	return nil
+}
+
+func (r *sensorRepository) CreateCommandIfUnderLimit(ctx context.Context, cmd *models.SensorCommand, maxPending int) (bool, error) {
+	payloadJSON := []byte("{}")
+	if len(cmd.Payload) > 0 {
+		b, err := json.Marshal(cmd.Payload)
+		if err != nil {
+			return false, fmt.Errorf("failed to marshal command payload: %w", err)
+		}
+		payloadJSON = b
+	}
+	tenantID, err := r.resolveSensorTenant(ctx, cmd.SensorID)
+	if err != nil {
+		return false, err
+	}
+	created := false
+	err = shareddatabase.WithTenantTx(ctx, r.db, tenantID, func(tx *sql.Tx) error {
+		// Lock the sensor row so two concurrent creates cannot both pass the
+		// count and overshoot the cap.
+		var locked int
+		if e := tx.QueryRowContext(ctx,
+			`SELECT 1 FROM sensors WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`, cmd.SensorID).Scan(&locked); e != nil {
+			return e
+		}
+		var pending int
+		if e := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sensor_commands WHERE sensor_id = $1 AND status = 'pending'`, cmd.SensorID).Scan(&pending); e != nil {
+			return e
+		}
+		if pending >= maxPending {
+			return nil
+		}
+		if _, e := tx.ExecContext(ctx, `
+			INSERT INTO sensor_commands (id, sensor_id, command_type, payload, status, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			cmd.ID, cmd.SensorID, cmd.CommandType, string(payloadJSON), cmd.Status, cmd.CreatedAt); e != nil {
+			return e
+		}
+		created = true
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to create command: %w", err)
+	}
+	return created, nil
 }
 
 func (r *sensorRepository) GetPendingCommands(ctx context.Context, sensorID uuid.UUID) ([]*models.SensorCommand, error) {

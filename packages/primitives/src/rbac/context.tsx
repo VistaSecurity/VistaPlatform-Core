@@ -1,13 +1,19 @@
 // RBAC primitives: PermissionProvider / usePermissions / PermissionGate.
 // Router-free and headless — gating logic only. Loads the current user's
 // effective permission names from the typed contract (/user/permissions).
-import React, { createContext, useContext } from 'react';
+import React, { createContext, useContext, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { createAuthServiceClient } from '@vistasecurity/api-contract';
+import { primitivesQueryKeys } from '../shared/query-keys';
 
 export interface PermissionState {
   permissions: string[];
   isLoading: boolean;
+  /** The permission load FAILED. `permissions` is then empty (fail-closed), which is
+   *  indistinguishable from a real denial unless the caller checks this. */
+  isError: boolean;
+  /** Retry the permission load. */
+  refetch(): void;
   hasPermission(p: string): boolean;
   hasAnyPermission(ps: string[]): boolean;
   hasAllPermissions(ps: string[]): boolean;
@@ -28,8 +34,8 @@ export interface PermissionProviderProps {
 }
 
 export function PermissionProvider({ children, enabled = true }: PermissionProviderProps) {
-  const { data, isLoading } = useQuery({
-    queryKey: ['user-permissions'],
+  const { data, isLoading, isError, refetch } = useQuery({
+    queryKey: primitivesQueryKeys.auth.permissions(),
     queryFn: async (): Promise<string[]> => {
       const c = createAuthServiceClient();
       const { data, error } = await c.GET('/user/permissions', {});
@@ -40,14 +46,18 @@ export function PermissionProvider({ children, enabled = true }: PermissionProvi
     staleTime: 5 * 60 * 1000,
   });
 
-  const permissions = data ?? [];
-  const value: PermissionState = {
-    permissions,
-    isLoading,
-    hasPermission: (p) => permissions.includes(p),
-    hasAnyPermission: (ps) => ps.some((p) => permissions.includes(p)),
-    hasAllPermissions: (ps) => ps.every((p) => permissions.includes(p)),
-  };
+  const value = useMemo<PermissionState>(() => {
+    const permissions = data ?? [];
+    return {
+      permissions,
+      isLoading,
+      isError,
+      refetch: () => { void refetch(); },
+      hasPermission: (p) => permissions.includes(p),
+      hasAnyPermission: (ps) => ps.some((p) => permissions.includes(p)),
+      hasAllPermissions: (ps) => ps.every((p) => permissions.includes(p)),
+    };
+  }, [data, isLoading, isError, refetch]);
   return <PermissionContext.Provider value={value}>{children}</PermissionContext.Provider>;
 }
 

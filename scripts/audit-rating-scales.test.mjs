@@ -87,9 +87,8 @@ test('audit and CI execute the contract checker and its mutation tests', () => {
   assert.equal(wired(make), true);
   assert.equal(wired(make.replace('node ./scripts/audit-rating-scales.mjs', 'true')), false);
   assert.match(workflow, /make rating-contract-test/);
-  for (const trigger of ['api/openapi/**', 'shared/**', 'services/**', 'frontend-v2/src/**', 'admin-ui-v2/src/**', 'scripts/audit-rating-*.mjs']) {
-    assert.equal(workflow.split(`'${trigger}'`).length - 1, 2, `${trigger} must trigger pushes and PRs`);
-  }
+  // No paths filter: the contract checker must run on every PR and push.
+  assert.doesNotMatch(workflow.slice(0, workflow.indexOf('\njobs:')), /^\s+paths(-ignore)?:/m);
   for (const artifact of ['standards/generated/rating-definitions.json', 'packages/primitives/src/ratings/definitions.gen.ts']) assert.ok(workflow.includes(artifact));
 });
 

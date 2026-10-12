@@ -5,10 +5,11 @@
 // path below exists in the schema — sub-task A2 added `query` to the list and
 // the facets, the per-asset endpoint and identifier reads, saved views and the
 // merge-proposal endpoints — so there is nothing hand-rolled and nothing cast.
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient, type UseQueryResult } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import type { Asset, inventoryComponents, inventoryPaths } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { errorMessage, unwrap } from '../../lib/api-result';
 import { SCANNING_POLL_MS, anyScanning, isScanning } from '../discovery/active-scan-row-state';
 
 export type AssetHistoryEntry = inventoryComponents['schemas']['AssetHistory'];
@@ -26,14 +27,6 @@ export type QueryDiagnostic = inventoryComponents['schemas']['QueryDiagnostic'];
 
 export const ASSETS_PAGE_SIZE = 50;
 
-/**
- * Pull a server-supplied message out of an error envelope.
- *
- * A `query` the server rejects comes back as the structured `QueryError` — the
- * same `{code, message, span, suggestion}` diagnostics the editor renders
- * locally — so its first message is what the user needs to see. A generic
- * "Request failed" would hide the one thing that says how to fix the query.
- */
 /**
  * The structured `QueryError` envelope, when that is what came back.
  *
@@ -84,22 +77,8 @@ export class AssetQueryError extends Error {
   }
 }
 
-export function errorMessage(error: unknown): string | null {
-  if (!error || typeof error !== 'object') return null;
-  const e = error as Record<string, unknown>;
-  const diagnostics = e.errors;
-  if (Array.isArray(diagnostics) && diagnostics.length > 0) {
-    const first = diagnostics[0] as Record<string, unknown>;
-    const message = typeof first.message === 'string' ? first.message : null;
-    const suggestion = typeof first.suggestion === 'string' ? first.suggestion : '';
-    if (message) return suggestion ? `${message} — ${suggestion}` : message;
-  }
-  for (const key of ['message', 'error', 'detail']) {
-    const v = e[key];
-    if (typeof v === 'string' && v.trim()) return v.trim();
-  }
-  return null;
-}
+// One implementation, shared with every mutation via lib/api-result.
+export { errorMessage };
 
 // ------------------------------------------------------------------ assets --
 
@@ -143,7 +122,7 @@ export function appliedQueryOf(envelope: { query?: string }): string {
  * state and the URL drifted apart in the first place.
  */
 export function useAssetsQuery(query: string, page: number, enabled = true) {
-  return useQuery({
+  return useQuery<AssetsPage>({
     queryKey: ['inventory', 'assets', 'query', query, page],
     enabled,
     placeholderData: keepPreviousData,
@@ -151,8 +130,9 @@ export function useAssetsQuery(query: string, page: number, enabled = true) {
     // scan ends — and, on the "Never scanned" view, leaves the list (
     // what the retired Active Scan page did).
     refetchInterval: (q) => (anyScanning(q.state.data?.assets ?? []) ? SCANNING_POLL_MS : false),
-    queryFn: async (): Promise<AssetsPage> => {
+    queryFn: async ({ signal }): Promise<AssetsPage> => {
       const { data, error } = await clients.inventory.GET('/infrastructure-assets', {
+        signal,
         params: { query: { ...(query ? { query } : {}), page, page_size: ASSETS_PAGE_SIZE } },
       });
       if (error || !data) {
@@ -198,7 +178,7 @@ export function useAsset(id: string | undefined) {
  * a real answer, not an error: an at-rest cloud resource has no endpoint at all.
  */
 export function useAssetEndpoints(id: string | undefined, embedded?: AssetEndpoint[] | null) {
-  return useQuery({
+  const q = useQuery({
     queryKey: ['asset-endpoints', id],
     enabled: !!id && !embedded,
     queryFn: async (): Promise<AssetEndpoint[]> => {
@@ -208,13 +188,16 @@ export function useAssetEndpoints(id: string | undefined, embedded?: AssetEndpoi
       if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to load endpoints');
       return data.endpoints;
     },
-    initialData: embedded ?? undefined,
   });
+  // Embedded wins and is returned directly, not seeded into the cache: the
+  // parent re-reads `['asset-detail', id]` after a scan/edit/merge, and
+  // `initialData` would have kept the first list this tab ever saw.
+  return embedded ? embeddedResult(q, embedded) : q;
 }
 
 /** The asset's identifiers, strongest first, same embedded-first arrangement. */
 export function useAssetIdentifiers(id: string | undefined, embedded?: AssetIdentifier[] | null) {
-  return useQuery({
+  const q = useQuery({
     queryKey: ['asset-identifiers', id],
     enabled: !!id && !embedded,
     queryFn: async (): Promise<AssetIdentifier[]> => {
@@ -224,7 +207,42 @@ export function useAssetIdentifiers(id: string | undefined, embedded?: AssetIden
       if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to load identifiers');
       return data.identifiers;
     },
-    initialData: embedded ?? undefined,
+  });
+  return embedded ? embeddedResult(q, embedded) : q;
+}
+
+/** A query result that reports a list the parent already holds as settled data. */
+function embeddedResult<T>(q: UseQueryResult<T[]>, embedded: T[]): UseQueryResult<T[]> {
+  return { ...q, data: embedded, error: null, isError: false, isLoading: false, isPending: false, isSuccess: true, status: 'success' } as UseQueryResult<T[]>;
+}
+
+/** Roots re-read when an asset is replaced, merged or rescanned. */
+const ASSET_GRAPH_ROOTS = new Set([
+  'inventory', 'discovery', 'findings', 'dashboard', 'posture', 'identity-observations', 'identity-summary',
+]);
+
+/**
+ * Invalidate what one asset's detail page can show: the full read and its
+ * dedicated endpoint/identifier lists (used when the read does not embed them).
+ */
+export function invalidateAssetDetail(qc: QueryClient, assetId?: string) {
+  for (const root of ['asset-detail', 'asset-endpoints', 'asset-identifiers']) {
+    void qc.invalidateQueries({ queryKey: assetId ? [root, assetId] : [root] });
+  }
+}
+
+/**
+ * Invalidate everything a merge can change — asset children (every `asset-*`
+ * key), findings, topology, dashboard totals — without refetching the session,
+ * permissions, features, branding or notifications the way a bare
+ * `invalidateQueries()` does.
+ */
+export function invalidateAfterMerge(qc: QueryClient) {
+  return qc.invalidateQueries({
+    predicate: (query) => {
+      const root = query.queryKey[0];
+      return typeof root === 'string' && (root.startsWith('asset-') || ASSET_GRAPH_ROOTS.has(root));
+    },
   });
 }
 
@@ -434,10 +452,9 @@ export function useCreateSavedView() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (input: { name: string; query: string; is_shared?: boolean }): Promise<SavedView> => {
-      const { data, error } = await clients.inventory.POST('/saved-views', {
+      const data = unwrap(await clients.inventory.POST('/saved-views', {
         body: { name: input.name, query: input.query, target: 'asset', is_shared: input.is_shared ?? false },
-      });
-      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to save the view');
+      }), 'Failed to save the view', { requireData: true });
       return data.saved_view;
     },
     onSuccess: (v) => toast.success(`Saved view “${v.name}”`),
@@ -450,8 +467,7 @@ export function useDeleteSavedView() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.inventory.DELETE('/saved-views/{id}', { params: { path: { id } } });
-      if (error) throw new Error(errorMessage(error) ?? 'Failed to delete the view');
+      unwrap(await clients.inventory.DELETE('/saved-views/{id}', { params: { path: { id } } }), 'Failed to delete the view');
     },
     onSuccess: () => toast.success('View deleted'),
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to delete the view'),
@@ -529,6 +545,20 @@ export function useMergeProposals(enabled = true, offset = 0) {
   });
 }
 
+/** Just the size of the merge-proposal queue (the "awaiting review" banner). */
+export function useMergeProposalCount() {
+  return useQuery({
+    queryKey: ['discovery', 'merge-proposals', 'count'],
+    queryFn: async (): Promise<number> => {
+      const { data, error } = await clients.inventory.GET('/approvals/merge-proposals', {
+        params: { query: { limit: 1, offset: 0 } },
+      });
+      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to load merge proposals');
+      return readMergeProposalPage(data).total;
+    },
+  });
+}
+
 /**
  * What the platform merged WITHOUT asking, in the last thirty days: the
  * matcher's auto-accepts and the same-device rule's merges (each row's
@@ -595,10 +625,9 @@ export function useSetAutoAcceptThreshold() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (threshold: number) => {
-      const { data, error } = await clients.inventory.PUT('/settings/identification', {
+      const data = unwrap(await clients.inventory.PUT('/settings/identification', {
         body: { auto_accept_threshold: threshold },
-      });
-      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to save the threshold');
+      }), 'Failed to save the threshold', { requireData: true });
       return data.identification;
     },
     onSuccess: (s) => toast.success(
@@ -631,10 +660,9 @@ export function useSetAutoMergeExisting() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (enabled: boolean) => {
-      const { data, error } = await clients.inventory.PUT('/settings/identification', {
+      const data = unwrap(await clients.inventory.PUT('/settings/identification', {
         body: { auto_merge_existing: enabled },
-      });
-      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to save this setting');
+      }), 'Failed to save this setting', { requireData: true });
       return data.identification;
     },
     onSuccess: (s) => {
@@ -668,7 +696,7 @@ export async function mergeAsIs(proposalID: string, selection: AssetMergeSelecti
   const previewed = await clients.inventory.POST('/approvals/merge-proposals/{id}/preview', {
     params: { path: { id: proposalID } }, body: selection,
   });
-  if (previewed.error || !previewed.data?.preview) throw new Error(errorMessage(previewed.error) ?? 'Could not prepare the merge');
+  if (!previewed.response.ok || previewed.error || !previewed.data?.preview) throw new Error(errorMessage(previewed.error) ?? 'Could not prepare the merge');
   const preview = previewed.data.preview;
   const conflicted = preview.conflicts.filter((c) => c.requires_resolution).map((c) => c.field.replace(/_/g, ' '));
   if (conflicted.length > 0) {
@@ -679,7 +707,7 @@ export async function mergeAsIs(proposalID: string, selection: AssetMergeSelecti
     body: { ...selection, revision: preview.revision, reason: '' },
   });
   if (merged.response.status === 409) throw new Error('The records changed while merging. Review the merge and try again.');
-  if (merged.error) throw new Error(errorMessage(merged.error) ?? 'Could not merge the records');
+  if (!merged.response.ok || merged.error) throw new Error(errorMessage(merged.error) ?? 'Could not merge the records');
   return { outcome: 'merged' };
 }
 
@@ -692,7 +720,7 @@ export function useMergeAsIs() {
     onSettled: (r) => {
       if (r?.outcome !== 'merged') return;
       // A merge changes asset children, findings, topology and dashboard totals.
-      void qc.invalidateQueries();
+      void invalidateAfterMerge(qc);
     },
   });
 }
@@ -712,16 +740,14 @@ export function useResolveMergeProposal() {
       | { action: 'accept'; id: string; survivorAssetId: string }
       | { action: 'keep-separate'; id: string }) => {
       if (input.action === 'accept') {
-        const { error } = await clients.inventory.POST('/approvals/merge-proposals/{id}/accept', {
+        unwrap(await clients.inventory.POST('/approvals/merge-proposals/{id}/accept', {
           params: { path: { id: input.id } },
           body: { survivor_asset_id: input.survivorAssetId },
-        });
-        if (error) throw new Error(errorMessage(error) ?? 'Failed to merge');
+        }), 'Failed to merge');
       } else {
-        const { error } = await clients.inventory.POST('/approvals/merge-proposals/{id}/keep-separate', {
+        unwrap(await clients.inventory.POST('/approvals/merge-proposals/{id}/keep-separate', {
           params: { path: { id: input.id } },
-        });
-        if (error) throw new Error(errorMessage(error) ?? 'Failed to keep separate');
+        }), 'Failed to keep separate');
       }
       return input;
     },

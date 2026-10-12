@@ -64,7 +64,7 @@ export function CommandCenterPage() {
   const fleetError = sensorsQ.isError || statsQ.isError || agentsQ.isError;
   const running = jobStatsQ.data?.in_progress ?? 0;
   const failed = jobStatsQ.data?.failed ?? 0;
-  const pending = pendingQ.data?.length ?? 0;
+  const pending = pendingQ.data?.total ?? 0;
   const dash = (q: { isLoading: boolean }, v: string | number) => (q.isLoading ? '…' : v);
   const [discoverOpen, setDiscoverOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);

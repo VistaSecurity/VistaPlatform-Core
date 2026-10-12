@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import toast from 'react-hot-toast';
 import { useAuth } from '@vistasecurity/primitives/auth';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { ticketCategory } from '@vistasecurity/primitives/tickets';
@@ -10,6 +11,7 @@ import { PRIORITY_COLOR, SLA_META, STATUS_COLOR, dueDays, slaState, type Ticket 
 import { TicketEditForm } from './ticket-edit';
 import { useTenantUsers } from '../findings/queries';
 import { safeHttpUrl } from '../../lib/url';
+import { unwrap } from '../../lib/api-result';
 
 // Ticket detail drawer — fields, linked items, comments, and a status advance.
 // Status changes go through PUT /tickets/{id} (the unified ticketing API).
@@ -55,29 +57,29 @@ export function TicketDrawer({ ticket, onClose }: { ticket: Ticket; onClose: () 
 
   const advance = useMutation({
     mutationFn: async (to: string) => {
-      const { error } = await clients.compliance.PUT('/tickets/{id}', {
+      unwrap(await clients.compliance.PUT('/tickets/{id}', {
         params: { path: { id: t.id } },
         body: { status: to },
-      });
-      if (error) throw new Error('Failed to update ticket');
+      }), 'Failed to update ticket');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['remediation'] }),
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to update ticket'),
   });
 
   const [comment, setComment] = useState('');
   const postComment = useMutation({
     mutationFn: async (content: string) => {
-      const { data, error, response } = await clients.compliance.POST('/tickets/{id}/comments', {
+      const data = unwrap(await clients.compliance.POST('/tickets/{id}/comments', {
         params: { path: { id: t.id } },
         body: { content },
-      });
-      if (!response.ok || error || !data) throw new Error('Failed to post comment');
+      }), 'Failed to post comment', { requireData: true });
       return data;
     },
     onSuccess: () => {
       setComment('');
       void qc.invalidateQueries({ queryKey: ['remediation', 'ticket-comments', t.id] });
     },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to post comment'),
   });
 
   const next = NEXT_STATUS[t.status];

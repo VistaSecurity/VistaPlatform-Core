@@ -446,6 +446,8 @@ export interface paths {
          *     "Open" means `detection_state = ACTIVE` AND `workflow_status NOT IN (RESOLVED, SUPPRESSED)`: still detected, and nobody has closed it.
          *
          *     Every producer, not only `compliance` — read `producer` on each row to tell them apart. Compliance rows are additionally gated on the tenant having activated the framework their control belongs to; a producer with no control has no such gate.
+         *
+         *     Paginated: `page_size` defaults to 100 (the maximum) and a malformed `page` or `page_size` is a 400.
          */
         get: operations["getFindingsByAsset"];
         put?: never;
@@ -1265,13 +1267,13 @@ export interface paths {
         };
         /**
          * List the tenant's tickets
-         * @description Returns a page of tickets for the tenant, filtered by any combination of the query parameters. Page defaults to 1 and page_size to 20 (capped at 100 in the service layer; values outside 1..100 collapse to 20).
+         * @description Returns a page of tickets for the tenant, filtered by any combination of the query parameters. Page defaults to 1 and page_size to 20; page_size above 100 is clamped to 100, and a non-numeric or non-positive page or page_size is a 400.
          */
         get: operations["listTickets"];
         put?: never;
         /**
          * Create a ticket
-         * @description Creates a new ticket in the unified `tickets` table. `category` defaults to `general`, `priority` to `medium`, `source` to `manual`, `status` to `open`, `external_sync_status` to `none`. Inventory-link UUID fields (finding_id, asset_id, etc.) are silently dropped when malformed, same as the list filters.
+         * @description Creates a new ticket in the unified `tickets` table. `category` defaults to `general`, `priority` to `medium`, `source` to `manual`, `status` to `open`, `external_sync_status` to `none`. Inventory-link UUID fields (finding_id, asset_id, control_id, certificate_id, crypto_implementation_id, assigned_to) must parse as UUIDs (400 otherwise); `assigned_to`, `finding_id`, `asset_id` and `certificate_id` must also exist in the caller's tenant (422 otherwise). `title` is at most 200 characters and `description` at most 20000.
          */
         post: operations["createTicket"];
         delete?: never;
@@ -1376,7 +1378,10 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** List comments on a ticket */
+        /**
+         * List comments on a ticket
+         * @description Oldest first. `page_size` defaults to 100 (the maximum); a malformed `page` or `page_size` is a 400.
+         */
         get: operations["listTicketComments"];
         put?: never;
         /** Add a comment to a ticket */
@@ -2105,6 +2110,9 @@ export interface components {
         /** @description CURRENT envelope for GET /assets/{assetId}/findings — `{ "findings": [...] }`. On an empty/nil result `findings` can serialize as JSON null, so it is typed as a nullable array. */
         FindingsByAssetResponse: {
             findings: components["schemas"]["ComplianceFinding"][] | null;
+            page?: number;
+            page_size?: number;
+            has_next?: boolean;
         };
         /** @description CURRENT envelope for GET /findings/{id}/history — `{ "history": [...] }`. On an empty/nil result `history` can serialize as JSON null, so it is typed as a nullable array. */
         FindingHistoryResponse: {
@@ -2928,9 +2936,10 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** @description Body for PUT /findings/{id}/workflow-status. */
+        /** @description Body for PUT /findings/{id}/workflow-status. `workflow_status` must be one of NEW, NOTIFIED, RESOLVED, SUPPRESSED (400 otherwise). SUPPRESSED requires a non-empty `suppression_reason` (at most 2000 characters); when `suppressed_until` is given it must be in the future, and the finding returns to the status it held before once that time passes. */
         UpdateWorkflowStatusRequest: {
-            workflow_status: string;
+            /** @enum {string} */
+            workflow_status: "NEW" | "NOTIFIED" | "RESOLVED" | "SUPPRESSED";
             suppression_reason?: string;
             /** Format: date-time */
             suppressed_until?: string;
@@ -3300,6 +3309,9 @@ export interface components {
         /** @description CURRENT envelope for GET /tickets/{id}/comments. */
         TicketCommentListResponse: {
             comments: components["schemas"]["TicketComment"][];
+            page?: number;
+            page_size?: number;
+            has_next?: boolean;
         };
         /** @description CURRENT envelope for POST /tickets/{id}/comments (201). */
         TicketCommentCreatedResponse: {
@@ -3360,6 +3372,24 @@ export interface components {
     responses: {
         /** @description Invalid request. */
         LegacyBadRequest: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyError"];
+            };
+        };
+        /** @description The request body exceeds the 1 MiB limit. Answered before the body is read when Content-Length declares it, and when the stream passes the cap. */
+        LegacyPayloadTooLarge: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyError"];
+            };
+        };
+        /** @description The request parsed, but names a row that does not exist in this tenant (an assignee that is not one of the tenant's users, a finding, asset or certificate that is not the tenant's). The message names the field. */
+        LegacyUnprocessable: {
             headers: {
                 [name: string]: unknown;
             };
@@ -3526,7 +3556,7 @@ export interface components {
         /** @description When set to the literal string `true`, only overdue tickets are returned. */
         TicketOverdueFilter: "true";
         TicketPageParam: number;
-        /** @description 1..100; values outside this range silently fall back to the default 20. */
+        /** @description Positive integer, default 20; values above 100 are clamped to 100; a malformed value is a 400. */
         TicketPageSizeParam: number;
     };
     requestBodies: never;
@@ -4035,6 +4065,16 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description The tenant already has an override for this control and scenario. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
+            413: components["responses"]["LegacyPayloadTooLarge"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -4193,6 +4233,8 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            413: components["responses"]["LegacyPayloadTooLarge"];
+            422: components["responses"]["LegacyUnprocessable"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -4274,6 +4316,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            413: components["responses"]["LegacyPayloadTooLarge"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -4368,7 +4411,11 @@ export interface operations {
     };
     getFindingsByAsset: {
         parameters: {
-            query?: never;
+            query?: {
+                page?: components["parameters"]["TicketPageParam"];
+                /** @description Positive integer, default 20; values above 100 are clamped to 100; a malformed value is a 400. */
+                page_size?: components["parameters"]["TicketPageSizeParam"];
+            };
             header?: never;
             path: {
                 /** @description Asset UUID. */
@@ -5724,7 +5771,7 @@ export interface operations {
                 /** @description When set to the literal string `true`, only overdue tickets are returned. */
                 overdue?: components["parameters"]["TicketOverdueFilter"];
                 page?: components["parameters"]["TicketPageParam"];
-                /** @description 1..100; values outside this range silently fall back to the default 20. */
+                /** @description Positive integer, default 20; values above 100 are clamped to 100; a malformed value is a 400. */
                 page_size?: components["parameters"]["TicketPageSizeParam"];
             };
             header?: never;
@@ -5742,6 +5789,7 @@ export interface operations {
                     "application/json": components["schemas"]["TicketListResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
         };
@@ -5770,6 +5818,8 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            413: components["responses"]["LegacyPayloadTooLarge"];
+            422: components["responses"]["LegacyUnprocessable"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5877,6 +5927,8 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
+            413: components["responses"]["LegacyPayloadTooLarge"];
+            422: components["responses"]["LegacyUnprocessable"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -5909,7 +5961,11 @@ export interface operations {
     };
     listTicketComments: {
         parameters: {
-            query?: never;
+            query?: {
+                page?: components["parameters"]["TicketPageParam"];
+                /** @description Positive integer, default 20; values above 100 are clamped to 100; a malformed value is a 400. */
+                page_size?: components["parameters"]["TicketPageSizeParam"];
+            };
             header?: never;
             path: {
                 /** @description Ticket UUID. */
@@ -5962,6 +6018,7 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["LegacyNotFound"];
+            413: components["responses"]["LegacyPayloadTooLarge"];
             500: components["responses"]["LegacyServerError"];
         };
     };

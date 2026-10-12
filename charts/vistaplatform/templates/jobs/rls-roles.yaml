@@ -15,6 +15,9 @@ and fails (#421). Keep ALL pod-template content inside this define.
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
+      {{- with include "vistaplatform.pullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
       containers:
@@ -65,7 +68,7 @@ and fails (#421). Keep ALL pod-template content inside this define.
               until pg_isready -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE"; do
                 sleep 2
               done
-              echo "Waiting for RLS roles to exist (created by schema-migration)..."
+              echo "Waiting for RLS roles to exist (created by schema-migration, or by your own schema when schemaMigration.enabled=false)..."
               until [ "$(psql -tAc "SELECT count(*) FROM pg_roles WHERE rolname IN ('{{ .Values.serviceRls.roleApp }}','{{ .Values.serviceRls.roleBypass }}')")" = "2" ]; do
                 sleep 3
               done
@@ -99,12 +102,16 @@ and fails (#421). Keep ALL pod-template content inside this define.
                 path: ca.crt
         {{- end }}
 {{- end }}
-{{- if and .Values.serviceRls.enabled .Values.datastores.postgres.enabled .Values.schemaMigration.enabled }}
+{{- if and .Values.serviceRls.enabled .Values.datastores.postgres.enabled }}
 {{/*
 RLS role-login Job (ADR platform-0001, Phase 2 — issue #218).
 
 Rendered ONLY when serviceRls.enabled is true AND postgres is the in-cluster
-bundled one AND schemaMigration is enabled. When serviceRls is off (the
+bundled one. It does NOT depend on schemaMigration.enabled: the backends'
+wait-for-schema gate waits for crypto_app to be able to log in, so with
+schemaMigration.enabled=false this Job must still run or every backend sits in
+Init until it errors. In that mode it waits for the OPERATOR's schema to have
+created the two roles (see the note in values.yaml under serviceRls). When serviceRls is off (the
 default), this whole file emits nothing, so OFF-toggle output is byte-for-byte
 unchanged.
 
@@ -137,7 +144,9 @@ name, so Helm creates a fresh Job instead of attempting an in-place patch of
 the old one (which Kubernetes rejects). Previously the name was keyed only on
 a hash of the role names, so enabling postgres.tls on an existing release hit
 "spec.template: field is immutable". Superseded Jobs are removed by Helm on
-upgrade and completed ones also age out via ttlSecondsAfterFinished.
+upgrade. There is deliberately no ttlSecondsAfterFinished (#2443): a TTL makes a
+GitOps controller see its Job vanish and re-create it on every sync; see the
+same note in schema-migration.yaml for how superseded Jobs are cleaned up.
 */}}
 {{- $podTemplate := include "vistaplatform.rlsRoles.podTemplate" . }}
 {{- $jobHash := $podTemplate | sha256sum | trunc 10 }}
@@ -150,7 +159,6 @@ metadata:
     app.kubernetes.io/component: rls-roles
 spec:
   backoffLimit: 5
-  ttlSecondsAfterFinished: 600
   template:
     {{- $podTemplate }}
 {{- end }}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
@@ -41,7 +42,7 @@ func statusToIsActive(status string) (bool, bool) {
 // but derives the tenant from the path (with the same token-tenant-access check
 // used by ListTenantUsers / InviteTenantMember) and verifies the target user
 // belongs to :tenantId before mutating, preventing cross-tenant deletion.
-func DeleteTenantMember(db *sql.DB) gin.HandlerFunc {
+func DeleteTenantMember(db *sql.DB, access userSessionInvalidator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID, ok := requireTenantPathAccess(c)
 		if !ok {
@@ -81,18 +82,7 @@ func DeleteTenantMember(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Prevent deletion of the last admin in the tenant.
-		userRole := getUserRole(db, userID, tenantID)
-		isAdminRole := userRole == "tenant_admin" || userRole == "billing_admin"
-		if isAdminRole && isActive {
-			adminCount, countErr := countTenantAdmins(db, tenantID)
-			if countErr == nil && adminCount <= 1 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete last admin in tenant"})
-				return
-			}
-		}
-
-		// Soft delete.
+		// Soft delete. The last-admin guard runs in the SAME transaction.
 		// RLS-scoped write over users (tenant_isolation policy); tenant from path.
 		deleteQuery := `
 			UPDATE users
@@ -101,6 +91,9 @@ func DeleteTenantMember(db *sql.DB) gin.HandlerFunc {
 		`
 		var rowsAffected int64
 		err = shareddatabase.WithTenantTx(c.Request.Context(), db, tenantID, func(tx *sql.Tx) error {
+			if err := guardLastTenantAdmin(c.Request.Context(), tx, tenantID, userID); err != nil {
+				return err
+			}
 			result, e := tx.ExecContext(c.Request.Context(), deleteQuery, userID, tenantID)
 			if e != nil {
 				return e
@@ -108,6 +101,10 @@ func DeleteTenantMember(db *sql.DB) gin.HandlerFunc {
 			rowsAffected, e = result.RowsAffected()
 			return e
 		})
+		if errors.Is(err, errLastAdmin) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete last admin in tenant"})
+			return
+		}
 		if err != nil {
 			logrus.WithError(err).WithField("user_id", userID).Error("Failed to delete user")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
@@ -117,6 +114,8 @@ func DeleteTenantMember(db *sql.DB) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
+
+		revokeUserAccess(c.Request.Context(), access, userID, "deleted")
 
 		if rawMW, exists := c.Get("audit_middleware"); exists {
 			if mw, ok := rawMW.(*audithelpers.Middleware); ok {
@@ -134,7 +133,7 @@ func DeleteTenantMember(db *sql.DB) gin.HandlerFunc {
 // activates/deactivates (suspends) a member of the given tenant. It applies the
 // same token-tenant-access check as the sibling tenant-users routes and verifies
 // the target user belongs to :tenantId before mutating.
-func UpdateTenantMemberStatus(db *sql.DB) gin.HandlerFunc {
+func UpdateTenantMemberStatus(db *sql.DB, access userSessionInvalidator) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID, ok := requireTenantPathAccess(c)
 		if !ok {
@@ -186,19 +185,6 @@ func UpdateTenantMemberStatus(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 
-		// Prevent deactivating the last admin in the tenant.
-		if !isActive {
-			userRole := getUserRole(db, userID, tenantID)
-			isAdminRole := userRole == "tenant_admin" || userRole == "billing_admin"
-			if isAdminRole && existingIsActive {
-				adminCount, countErr := countTenantAdmins(db, tenantID)
-				if countErr == nil && adminCount <= 1 {
-					c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot deactivate last admin in tenant"})
-					return
-				}
-			}
-		}
-
 		// RLS-scoped write over users (tenant_isolation policy); tenant from path.
 		var user TenantUser
 		updateQuery := `
@@ -209,12 +195,23 @@ func UpdateTenantMemberStatus(db *sql.DB) gin.HandlerFunc {
 			          is_active, email_verified, last_login_at, created_at, updated_at
 		`
 		err = shareddatabase.WithTenantTx(c.Request.Context(), db, tenantID, func(tx *sql.Tx) error {
+			// Deactivating the last tenant_admin is refused, in the same
+			// transaction as the write (see guardLastTenantAdmin).
+			if !isActive {
+				if err := guardLastTenantAdmin(c.Request.Context(), tx, tenantID, userID); err != nil {
+					return err
+				}
+			}
 			return tx.QueryRowContext(c.Request.Context(), updateQuery, isActive, userID, tenantID).Scan(
 				&user.ID, &user.TenantID, &user.Email, &user.FirstName, &user.LastName,
 				&user.IsActive, &user.EmailVerified, &user.LastLoginAt,
 				&user.CreatedAt, &user.UpdatedAt,
 			)
 		})
+		if errors.Is(err, errLastAdmin) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot deactivate last admin in tenant"})
+			return
+		}
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
@@ -223,6 +220,10 @@ func UpdateTenantMemberStatus(db *sql.DB) gin.HandlerFunc {
 			logrus.WithError(err).WithField("user_id", userID).Error("Failed to update user status")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user status"})
 			return
+		}
+
+		if !isActive {
+			revokeUserAccess(c.Request.Context(), access, userID, "deactivated")
 		}
 
 		// Populate role from RBAC system (consistent with sibling handlers).

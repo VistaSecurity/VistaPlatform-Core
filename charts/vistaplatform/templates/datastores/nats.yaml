@@ -54,11 +54,26 @@ spec:
       {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "nats") | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.datastores.nats.tls.enabled }}
+      annotations:
+        # Stakater Reloader restarts this StatefulSet when cert-manager rotates
+        # its server cert Secret. NATS reads the cert at start only, so
+        # without a restart every verifying client fails at expiry. Requires
+        # Reloader installed in the cluster (see NOTES.txt).
+        secret.reloader.stakater.com/reload: nats-mtls
+      {{- end }}
+      # Selector labels + the static part-of label only. The full
+      # vistaplatform.labels set carries helm.sh/chart and the app version, so
+      # on a pod template every chart bump would roll this single-replica
+      # datastore. part-of is what the NetworkPolicies select on.
       labels:
-        {{- include "vistaplatform.labels" . | nindent 8 }}
-        app.kubernetes.io/component: nats
+        {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "nats") | nindent 8 }}
+        app.kubernetes.io/part-of: vistaplatform
     spec:
       automountServiceAccountToken: false
+      {{- with include "vistaplatform.pullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
       containers:

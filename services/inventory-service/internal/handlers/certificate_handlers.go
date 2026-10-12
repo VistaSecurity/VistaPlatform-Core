@@ -206,6 +206,13 @@ func (h *CertificateHandler) GetCertificateByID(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"certificate": certificate})
 }
 
+// Bounds for certificates/expiring: an unbounded days overflows Postgres'
+// interval arithmetic (a 500), and an unbounded limit is an unpaged dump.
+const (
+	maxExpiringDays  = 3650
+	maxExpiringLimit = 500
+)
+
 // GetExpiringCertificates handles GET /api/v1/inventory-service/certificates/expiring
 // Returns certificates expiring within a specified number of days
 func (h *CertificateHandler) GetExpiringCertificates(c *gin.Context) {
@@ -224,24 +231,33 @@ func (h *CertificateHandler) GetExpiringCertificates(c *gin.Context) {
 	// Default to 30 days if not specified
 	days := 30
 	if daysStr := c.Query("days"); daysStr != "" {
-		if d, err := strconv.Atoi(daysStr); err == nil && d > 0 {
-			days = d
+		d, err := strconv.Atoi(daysStr)
+		if err != nil || d < 1 || d > maxExpiringDays {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid days: must be an integer between 1 and %d", maxExpiringDays)})
+			return
 		}
+		days = d
 	}
 
 	limit := 100
 	if limitStr := c.Query("limit"); limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
-			limit = l
+		l, err := strconv.Atoi(limitStr)
+		if err != nil || l < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit: must be a positive integer"})
+			return
 		}
+		limit = min(l, maxExpiringLimit)
 	}
 
 	// lookback_days: include certs that expired within this many days in the past (default 30)
 	lookbackDays := 30
 	if lbStr := c.Query("lookback_days"); lbStr != "" {
-		if lb, err := strconv.Atoi(lbStr); err == nil && lb >= 0 {
-			lookbackDays = lb
+		lb, err := strconv.Atoi(lbStr)
+		if err != nil || lb < 0 || lb > maxExpiringDays {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid lookback_days: must be an integer between 0 and %d", maxExpiringDays)})
+			return
 		}
+		lookbackDays = lb
 	}
 
 	certificates, err := h.certificateService.GetExpiringCertificates(tenantUUID, days, limit, lookbackDays)

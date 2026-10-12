@@ -16,11 +16,15 @@ metadata:
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
+  {{- with include "vistaplatform.pullSecrets" . }}
+  {{- . | nindent 2 }}
+  {{- end }}
   securityContext:
     {{- include "vistaplatform.podSecurityContext" . | nindent 4 }}
   containers:
     - name: smoke
-      image: curlimages/curl:8.22.0
+      image: {{ include "vistaplatform.smokeImage" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
       securityContext:
         {{- include "vistaplatform.containerSecurityContext" . | nindent 8 }}
       command:

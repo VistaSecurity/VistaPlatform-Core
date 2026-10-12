@@ -2,13 +2,15 @@
 // notification-service /platform/notifications via the typed api-contract
 // client (clients.notifications — cookie auth + platform CSRF wired there).
 // Unread badge polls every 60s; the panel refetches on open.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import toast from 'react-hot-toast';
 import { useNavigate } from 'react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bell, CheckCheck } from 'lucide-react';
 import type { notificationServiceComponents } from '@vistasecurity/api-contract';
 import { Tag, relTime } from '../components/ui/primitives';
 import { clients } from '../lib/clients';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export type PlatformInAppNotification = notificationServiceComponents['schemas']['PlatformInAppNotification'];
 
@@ -36,18 +38,25 @@ export function NotificationBell() {
 
   const markRead = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.notifications.PUT('/platform/notifications/{id}/read', { params: { path: { id } } });
-      if (error) throw new Error('Mark read failed');
+      unwrap(await clients.notifications.PUT('/platform/notifications/{id}/read', { params: { path: { id } } }), 'Mark read failed');
     },
     onSuccess: invalidate,
+    onError: () => toast.error('Could not mark the notification as read.'),
   });
   const markAllRead = useMutation({
     mutationFn: async () => {
-      const { error } = await clients.notifications.PUT('/platform/notifications/read-all', {});
-      if (error) throw new Error('Mark all read failed');
+      unwrap(await clients.notifications.PUT('/platform/notifications/read-all', {}), 'Mark all read failed');
     },
     onSuccess: invalidate,
+    onError: () => toast.error('Could not mark all notifications as read.'),
   });
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open]);
 
   const list = data ?? [];
   const unread = list.filter((n) => !n.read_at).length;
@@ -62,7 +71,7 @@ export function NotificationBell() {
 
   return (
     <div style={{ position: 'relative' }}>
-      <button className="op-btn icon" title="Notifications" onClick={toggle} style={{ position: 'relative' }}>
+      <button className="op-btn icon" title="Notifications" aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'} aria-haspopup="true" aria-expanded={open} onClick={toggle} style={{ position: 'relative' }}>
         <Bell size={16} />
         {unread > 0 && (
           <span style={{ position: 'absolute', top: -4, right: -4, minWidth: 16, height: 16, padding: '0 4px', borderRadius: 9, background: 'var(--op-accent)', color: '#0A0A0A', fontSize: 9.5, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', lineHeight: 1, boxShadow: '0 0 0 2px var(--op-bg2)' }}>

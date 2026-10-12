@@ -111,7 +111,7 @@ func (s *AssetService) declaredIdentifiers(tenantID uuid.UUID, classKey string, 
 	for _, raw := range in.Identifiers {
 		kind := identity.Kind(strings.TrimSpace(strings.ToLower(raw.Kind)))
 		if !kind.Valid() {
-			return nil, fmt.Errorf("identifier kind %q is not one of the known kinds", raw.Kind)
+			return nil, fmt.Errorf("%w: identifier kind %q is not one of the known kinds", ErrInvalidInput, raw.Kind)
 		}
 		assignment := identity.AddressAssignment(strings.TrimSpace(strings.ToLower(raw.AddressAssignment)))
 		switch {
@@ -119,9 +119,9 @@ func (s *AssetService) declaredIdentifiers(tenantID uuid.UUID, classKey string, 
 		case assignment != identity.AssignmentStatic:
 			// A person pins an address; a lease is something only the host's
 			// own agent can report, so "dynamic" is not a thing to declare.
-			return nil, fmt.Errorf("address_assignment %q: only \"static\" can be declared", raw.AddressAssignment)
+			return nil, fmt.Errorf("%w: address_assignment %q: only \"static\" can be declared", ErrInvalidInput, raw.AddressAssignment)
 		case kind != identity.KindIPAddress:
-			return nil, fmt.Errorf("address_assignment applies to ip_address identifiers only, not %s", kind)
+			return nil, fmt.Errorf("%w: address_assignment applies to ip_address identifiers only, not %s", ErrInvalidInput, kind)
 		default:
 			if v, err := identity.Normalize(kind, raw.Value); err == nil {
 				pinned[string(kind)+"|"+v] = true
@@ -137,7 +137,7 @@ func (s *AssetService) declaredIdentifiers(tenantID uuid.UUID, classKey string, 
 	scoped.ClassKey = classKey
 	sg, explicit, err := declaredSighting(tenantID, scoped, identity.Source{Kind: identity.SourceDeclared, Ref: "manual"}, "")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidInput, err)
 	}
 	res, err := s.assessSighting(context.Background(), "identifier edit", sg)
 	if err != nil && !errors.Is(err, identity.ErrNoUsableIdentifier) {
@@ -145,12 +145,12 @@ func (s *AssetService) declaredIdentifiers(tenantID uuid.UUID, classKey string, 
 	}
 	if len(res.Rejected) > 0 {
 		r := res.Rejected[0]
-		return nil, fmt.Errorf("identifier %s=%q: %w", r.Identifier.Kind, r.Identifier.Value, r.Err)
+		return nil, fmt.Errorf("%w: identifier %s=%q: %w", ErrInvalidInput, r.Identifier.Kind, r.Identifier.Value, r.Err)
 	}
 	obs, rejected := withExplicitScopes(res, explicit)
 	if len(rejected) > 0 {
 		r := rejected[0]
-		return nil, fmt.Errorf("identifier %s=%q: %w", r.Identifier.Kind, r.Identifier.Value, r.Err)
+		return nil, fmt.Errorf("%w: identifier %s=%q: %w", ErrInvalidInput, r.Identifier.Kind, r.Identifier.Value, r.Err)
 	}
 	// In the order the form listed them, then the column aliases: the edit
 	// refuses on the FIRST identifier another asset owns, and which one it

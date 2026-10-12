@@ -27,7 +27,6 @@
       "postgres",
       "redis",
       "nats",
-      "influxdb",
       "api-gateway",
       "otel-collector",
       "prometheus",
@@ -55,7 +54,6 @@
       "default_ports": {
         "postgres": 5432,
         "redis": 6379,
-        "influxdb": 8086,
         "otel_grpc": 4317,
         "otel_http": 4318
       },
@@ -67,7 +65,6 @@
         "redis": "REDIS_HOST_PORT",
         "nats_client": "NATS_CLIENT_HOST_PORT",
         "nats_http": "NATS_HTTP_HOST_PORT",
-        "influxdb": "INFLUXDB_HOST_PORT",
         "grafana": "GRAFANA_HOST_PORT",
         "adminer": "ADMINER_HOST_PORT",
         "portainer": "PORTAINER_HTTPS_HOST_PORT",
@@ -163,6 +160,10 @@
       {
         "method": "POST",
         "path": "/inventory-service/discovery/jobs/:id/import"
+      },
+      {
+        "method": "GET",
+        "path": "/inventory-service/tenant/:id/activity-summary"
       }
     ],
     "service_overrides": {
@@ -269,12 +270,8 @@
         {
           "path": "/tenant/:id/activity-summary",
           "method": "GET",
-          "description": "Get activity metrics for a specific tenant (for tenant health service)",
-          "auth_required": true,
-          "rbac_permissions": [
-            "platform.analytics",
-            "platform.health"
-          ]
+          "description": "Get activity metrics for a specific tenant (internal: HMAC-signed tenant-health-service call only)",
+          "auth_required": true
         }
       ],
       "v2_routes": {
@@ -355,7 +352,6 @@
         "dependencies": [
           "postgres",
           "redis",
-          "influxdb",
           "nats"
         ],
         "env_template": "standard-go-service"
@@ -434,8 +430,7 @@
         "dependencies": [
           "postgres",
           "redis",
-          "nats",
-          "influxdb"
+          "nats"
         ],
         "env_template": "standard-go-service"
       },
@@ -671,7 +666,9 @@
       ],
       "docker": {
         "type": "go-service",
-        "dependencies": [],
+        "dependencies": [
+          "redis"
+        ],
         "env_template": "standard-go-service"
       }
     },

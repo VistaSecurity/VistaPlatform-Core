@@ -11,10 +11,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../lib/clients';
 import { STag, relTime, RED, AMBER, GREEN } from '../sections/settings/kit';
 import type { notificationServiceComponents as NC } from '@vistasecurity/api-contract';
+import { unwrap } from '../lib/api-result';
 
 type InAppNotification = NC['schemas']['InAppNotification'];
 
 const QK = ['notifications', 'in-app'];
+const BELL_STALE_MS = 30_000;
 
 /** Tone per notification type (alert / discovery / compliance / system / billing / security / other). */
 const TYPE_TONE: Record<string, string> = {
@@ -32,6 +34,7 @@ function useInAppNotifications() {
       return data?.notifications ?? [];
     },
     refetchInterval: 60_000,
+    staleTime: BELL_STALE_MS,
   });
 }
 
@@ -65,10 +68,21 @@ function NotificationRow({ n, onRead }: { n: InAppNotification; onRead: (id: str
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
-  const { data, refetch } = useInAppNotifications();
+  const { data } = useInAppNotifications();
 
-  // Fresh list every time the panel opens (on top of the 60s poll).
-  useEffect(() => { if (open) void refetch(); }, [open, refetch]);
+  // Opening the panel refreshes the list only if it is stale (older than
+  // staleTime), instead of refetching on every open.
+  useEffect(() => {
+    if (open) void queryClient.refetchQueries({ queryKey: QK, stale: true });
+  }, [open, queryClient]);
+
+  // Escape closes the popover.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open]);
 
   const items = data ?? [];
   const unread = items.filter((n) => !n.read_at).length;
@@ -76,22 +90,20 @@ export function NotificationBell() {
 
   const markRead = useMutation({
     mutationFn: async (id: string) => {
-      const { response } = await clients.notifications.PUT('/tenant/notifications/{id}/read', { params: { path: { id } } });
-      if (!response.ok) throw new Error('Failed to mark the notification read');
+      unwrap(await clients.notifications.PUT('/tenant/notifications/{id}/read', { params: { path: { id } } }), 'Failed to mark the notification read');
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: QK }),
   });
   const markAllRead = useMutation({
     mutationFn: async () => {
-      const { response } = await clients.notifications.PUT('/tenant/notifications/read-all', {});
-      if (!response.ok) throw new Error('Failed to mark all notifications read');
+      unwrap(await clients.notifications.PUT('/tenant/notifications/read-all', {}), 'Failed to mark all notifications read');
     },
     onSettled: () => queryClient.invalidateQueries({ queryKey: QK }),
   });
 
   return (
     <div style={{ position: 'relative' }}>
-      <button className="ui-btn ghost" title="Notifications" onClick={() => setOpen((v) => !v)} style={{ position: 'relative' }}>
+      <button className="ui-btn ghost" title="Notifications" aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'} aria-haspopup="true" aria-expanded={open} onClick={() => setOpen((v) => !v)} style={{ position: 'relative' }}>
         <Bell size={16} />
         {unread > 0 && (
           <span style={{

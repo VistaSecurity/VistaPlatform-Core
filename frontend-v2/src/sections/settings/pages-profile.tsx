@@ -12,6 +12,7 @@ import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, SRow, SInput, SAvatar, SDot, SToggle, SSelect, StateNote, STag, relTime, GREEN, AMBER } from './kit';
 import { ExportMyDataButton } from './data-subject';
 import type { SettingsNavItem } from './nav';
+import { unwrap } from '../../lib/api-result';
 
 export function ProfilePersonalPage({ meta }: { meta: SettingsNavItem }) {
   const { user } = useAuth();
@@ -28,10 +29,9 @@ export function ProfilePersonalPage({ meta }: { meta: SettingsNavItem }) {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const { error, response } = await clients.auth.PUT('/auth/me', {
+      unwrap(await clients.auth.PUT('/auth/me', {
         body: { first_name: firstName, last_name: lastName, timezone: timezone || undefined },
-      });
-      if (error || !response.ok) throw new Error('Failed to save profile');
+      }), 'Failed to save profile');
     },
   });
 
@@ -44,11 +44,10 @@ export function ProfilePersonalPage({ meta }: { meta: SettingsNavItem }) {
     mutationFn: async (file: File) => {
       const fd = new FormData();
       fd.append('avatar', file);
-      const { data, error, response } = await clients.auth.POST('/auth/upload-avatar', {
+      const data = unwrap(await clients.auth.POST('/auth/upload-avatar', {
         body: { avatar: file } as never,
         bodySerializer: () => fd,
-      });
-      if (error || !response.ok) throw new Error('Failed to upload avatar');
+      }), 'Failed to upload avatar');
       return (data as { avatar_url: string }).avatar_url;
     },
     onSuccess: (url) => setAvatarSrc(url),
@@ -308,10 +307,9 @@ export function ProfileNotificationsPage({ meta }: { meta: SettingsNavItem }) {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const { error, response } = await clients.auth.PUT('/auth/me/preferences/notifications', {
+      unwrap(await clients.auth.PUT('/auth/me/preferences/notifications', {
         body: view as Record<string, never>,
-      });
-      if (error || !response.ok) throw new Error('Failed to save preferences');
+      }), 'Failed to save preferences');
     },
     onSuccess: () => {
       setEdits(null);

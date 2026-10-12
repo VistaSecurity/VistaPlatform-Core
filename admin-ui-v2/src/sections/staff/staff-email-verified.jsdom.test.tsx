@@ -40,6 +40,7 @@ vi.mock('./queries', async (importOriginal) => {
   return {
     ...actual,
     useStaff: () => ({ data: staff, isLoading: false, isError: false, refetch: vi.fn() }),
+    useStaffTruncation: () => ({ data: undefined }),
     useRoles: () => ({ data: [] }),
     useCreateUser: () => mutation(),
     useInviteUser: () => mutation(),

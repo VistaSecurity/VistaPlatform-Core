@@ -24,8 +24,14 @@ type CredentialManager struct {
 //
 // An unsealed map is still accepted and returned as-is, so an agent running
 // against an older platform that sends plaintext keeps working.
-func DecryptCredentials(encryptedData map[string]interface{}, jobKey, credentialSecret string) (map[string]interface{}, error) {
-	creds, err := agentcreds.Open(encryptedData, jobKey, credentialSecret)
+//
+// credentialSecrets are the secrets the envelope may be sealed under, in the
+// order to try them (Config.CredentialSecrets): the agent secret and, briefly
+// after a rotation, the one it replaced — or, for an agent that has not rotated
+// since before agent secrets existed, its registration key. None at all is the
+// original job-id-only derivation.
+func DecryptCredentials(encryptedData map[string]interface{}, jobKey string, credentialSecrets ...string) (map[string]interface{}, error) {
+	creds, err := agentcreds.OpenAny(encryptedData, jobKey, credentialSecrets)
 	if errors.Is(err, agentcreds.ErrNotSealed) {
 		// Backward compatibility: credentials are pre-decrypted by the platform.
 		return encryptedData, nil

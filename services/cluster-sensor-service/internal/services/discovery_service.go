@@ -254,6 +254,14 @@ func (s *DiscoveryService) PreviewJob(tenantID, userID string, req models.Create
 	return preview, err
 }
 
+// TooManyTargetsError is a job request naming more targets than the tenant's
+// max_targets_per_job (or the platform ceiling) allows.
+type TooManyTargetsError struct{ Max, Got int }
+
+func (e *TooManyTargetsError) Error() string {
+	return fmt.Sprintf("too many targets (%d); limit is %d per job", e.Got, e.Max)
+}
+
 // errDryRunDone ends a dry run's transaction after the plan is built. It is
 // returned from inside the transaction so the transaction rolls back, and is
 // swallowed by createJob.
@@ -410,8 +418,10 @@ func (s *DiscoveryService) createJob(tenantID, userID string, req models.CreateD
 	if len(req.Targets) == 0 {
 		return nil, nil, fmt.Errorf("at least one target is required")
 	}
-	if len(req.Targets) > 1000 {
-		return nil, nil, fmt.Errorf("too many targets; limit is 1000 per job")
+	// The platform ceiling needs no lookup; the tenant's own (lower)
+	// max_targets_per_job is enforced just after the size check below.
+	if len(req.Targets) > maxTargetsPerJobCeiling {
+		return nil, nil, &TooManyTargetsError{Max: maxTargetsPerJobCeiling, Got: len(req.Targets)}
 	}
 
 	// Normalise every target (a URL becomes its host, an explicit port joins
@@ -442,6 +452,10 @@ func (s *DiscoveryService) createJob(tenantID, userID string, req models.CreateD
 	// quietly under-scanned.
 	if err := shareddisc.CheckTargetSizes(req.Targets); err != nil {
 		return nil, nil, err
+	}
+	// The tenant's max_targets_per_job, which can only lower the ceiling.
+	if maxTargets := NewRateLimiter(s.db).MaxTargetsFor(tenantID); len(req.Targets) > maxTargets {
+		return nil, nil, &TooManyTargetsError{Max: maxTargets, Got: len(req.Targets)}
 	}
 
 	// Explicit external targets are a PERSON's to confirm. The automatic
@@ -676,6 +690,13 @@ func (s *DiscoveryService) createJob(tenantID, userID string, req models.CreateD
 				return err
 			}
 		}
+		// The tenant's rate limits, counted on THIS transaction under a
+		// per-tenant lock so two concurrent creates cannot both pass a limit
+		// one of them then exceeds. Replays and refusals returned above; a
+		// dry run returned before (it checks read-only in the handler).
+		if err := NewRateLimiter(s.db).CheckAndReserveInTx(tx, tenantID); err != nil {
+			return err
+		}
 		// Insert job. ot_probe_protocols is the audit column — captures which
 		// OT probes the operator opted in to for forensic traceability, even
 		// after the per-target rows have been pruned by retention.
@@ -809,6 +830,7 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 	          j.retention_cap_mb, j.retention_ttl_hours, j.created_at, j.updated_at, j.started_at, j.completed_at,
 	          j.error_message, j.assigned_sensor_id, j.dispatched_at, s.name, s.last_heartbeat, c.delivered_at,
 	          COALESCE(j.metadata -> 'options' ->> 'origin', ''),
+	          COALESCE(j.metadata ->> 'note', ''),
 	          j.metadata -> '` + shareddisc.ScanPlanMetadataKey + `'
 	          FROM discovery_jobs j` + jobExecutorJoins + ` WHERE j.id = $1`
 	var planJSON []byte
@@ -837,6 +859,7 @@ func (s *DiscoveryService) GetJob(jobID string) (*models.DiscoveryJob, error) {
 		&job.AssignedSensorLastHeartbeat,
 		&job.PickedUpAt,
 		&job.Origin,
+		&job.Note,
 		&planJSON,
 	)
 	if err != nil {
@@ -1174,6 +1197,7 @@ func (s *DiscoveryService) GetJobs(tenantID string, page, pageSize int, status, 
 		       s.name AS assigned_sensor_name, s.last_heartbeat AS assigned_sensor_last_heartbeat,
 		       c.delivered_at AS picked_up_at,
 		       COALESCE(j.metadata -> 'options' ->> 'origin', '') AS origin,
+		       COALESCE(j.metadata ->> 'note', '') AS note,
 		       j.metadata -> '`+shareddisc.ScanPlanMetadataKey+`' AS plan_json
 		FROM discovery_jobs j %s %s
 		ORDER BY j.created_at DESC

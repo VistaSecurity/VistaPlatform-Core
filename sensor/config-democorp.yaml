@@ -1,6 +1,6 @@
 sensorId: "103accf5-b73e-4dd1-9dbd-00beac74dd3a"
 controlPlaneUrl: "http://localhost:8085"
-registrationKey: "REG-tenant-123-20250930-2ed6d1"
+registrationKey: "REG-<tenant>-<date>-<nonce>"
 reportingIntervalSeconds: 30
 
 storage:

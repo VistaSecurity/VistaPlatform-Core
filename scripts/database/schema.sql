@@ -2857,6 +2857,12 @@ CREATE TABLE IF NOT EXISTS public.device_agents (
     -- Primary address, self-reported by the agent (parity with sensors.ip_address,
     -- and typed to match it). The platform cannot observe this through NAT.
     ip_address character varying(45),
+    -- The per-agent secret issued at enrolment and at each certificate rotation
+    --wrapped under ENCRYPTION_MASTER_KEY. It is the root of the key
+    -- that seals a job's credentials for this agent. agent_secret_version 0 means
+    -- the agent has not been issued one and registration_key is still the root.
+    agent_secret_enc text,
+    agent_secret_version integer DEFAULT 0 NOT NULL,
     last_heartbeat timestamp with time zone,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
@@ -5244,6 +5250,10 @@ CREATE TABLE IF NOT EXISTS public.sensors (
     -- re-ingested (see services/sensor-manager/internal/services/self_observation.go).
     self_observation_hash text,
     self_observation_at timestamp with time zone,
+    -- The per-sensor secret issued at enrolment and at each certificate rotation
+    --wrapped under ENCRYPTION_MASTER_KEY. Version 0: none issued.
+    agent_secret_enc text,
+    agent_secret_version integer DEFAULT 0 NOT NULL,
     last_heartbeat timestamp with time zone,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
@@ -16216,9 +16226,9 @@ CREATE TABLE IF NOT EXISTS public.cbom_artifacts (
     generated_by uuid NOT NULL,
 
 
-    -- Phase 4 signing — populated when the tenant enables signing. Recompute
-    -- HMAC-SHA256(content_hash || tenant_id || scope_id) over the secret
-    -- with kid=signature_kid, compare against signature_hmac on verify.
+    -- LEGACY signing: a shared-secret HMAC under INTERNAL_AUTH_SECRET. No new
+    -- artifact writes it; /verify reports a row that has it as legacy-hmac
+    -- (regenerate). New signatures are the Ed25519 columns added below.
     signature_hmac character varying(128),
     signature_kid character varying(64),
 
@@ -16267,6 +16277,32 @@ CREATE TABLE IF NOT EXISTS public.cbom_artifacts (
 -- then has the table WITHOUT this column. Two edits, both required — the same
 -- treatment `findings`' workflow columns get.
 ALTER TABLE public.cbom_artifacts ADD COLUMN IF NOT EXISTS artifact_kind text DEFAULT 'cbom'::text NOT NULL;
+
+-- Ed25519 artifact signatures (platform ADR: signed envelope). The signature
+-- covers `signed_envelope` — a canonical JSON document binding content_hash to
+-- scope_id, scope_version, a hash of the layers, the kind and generated_by —
+-- stored verbatim so /verify checks the signature over the exact signed bytes
+-- and then recomputes each field from the row. `signature_kid` (above) names
+-- the key; the public keys live in cbom_signing_keys. Same two-edit rule as
+-- artifact_kind: the table exists on upgraded databases, so ADD COLUMN IF NOT
+-- EXISTS is the only edit that reaches them.
+ALTER TABLE public.cbom_artifacts ADD COLUMN IF NOT EXISTS signature text;
+ALTER TABLE public.cbom_artifacts ADD COLUMN IF NOT EXISTS signature_algorithm character varying(16);
+ALTER TABLE public.cbom_artifacts ADD COLUMN IF NOT EXISTS signed_envelope text;
+
+-- Public verification keys for artifact signatures, current and retired. A key
+-- is recorded when cbom-service first starts with it and is never removed, so
+-- an artifact signed before a key rotation still verifies under its own kid.
+-- Install-wide (no tenant_id): the key signs for the whole install. Public
+-- keys only; the private key lives in a Kubernetes Secret, never here.
+CREATE TABLE IF NOT EXISTS public.cbom_signing_keys (
+    kid character varying(64) NOT NULL,
+    algorithm character varying(16) NOT NULL,
+    public_key_pem text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT cbom_signing_keys_pkey PRIMARY KEY (kid)
+);
+
 
 -- The kind vocabulary is a CHECK rather than an enum: adding a kind is then one
 -- statement instead of the two-edit ALTER TYPE dance, and there is no ordering
@@ -23335,6 +23371,246 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_certificates_tenant_subject_dn
     ON public.certificates USING btree (tenant_id, subject_dn);
 
+-- ----------------------------------------------------------------------------
+-- crypto_risk_judgments: the judged crypto risk of every configuration
+-- ----------------------------------------------------------------------------
+-- The Crypto Risks list, summary tiles and CSV export used to re-judge EVERY
+-- configuration of the tenant in Go on each request. This table is that
+-- judgement, kept: one row per crypto_implementations row holding what the Go
+-- judge (inventory-service cryptoassess.Configuration.Judge plus certificate
+-- lifecycle policy) decided -- score, severity, categories, reasons -- so the
+-- readers page, sort and filter in SQL and judge nothing.
+--
+-- It is a DERIVED table, never a source of truth: every row can be recomputed
+-- from the configuration, its catalogue components, its certificates and the
+-- prior crypto finding. Staleness is therefore tracked, not trusted:
+--   * stale = true   an input changed (the triggers below) or the row was never
+--                    judged. Readers (and the background sweep) re-judge stale
+--                    rows before reading, so a read is always current.
+--   * valid_until    the next instant a certificate-lifecycle boundary or the
+--                    "expires in N days" text changes. A judgement is current
+--                    until then; a due row is marked stale and re-judged.
+-- Asset visibility, hostname and addresses are NOT persisted: readers join the
+-- live assets / asset_endpoints rows, so an asset rename, merge or retirement
+-- needs no invalidation.
+CREATE TABLE IF NOT EXISTS public.crypto_risk_judgments (
+    crypto_implementation_id uuid NOT NULL,
+    tenant_id uuid NOT NULL,
+    stale boolean DEFAULT true NOT NULL,
+    judged_at timestamp with time zone,
+    valid_until timestamp with time zone,
+    -- true when the row appears in the Crypto Risks feed at all
+    emitted boolean DEFAULT false NOT NULL,
+    -- canonical severity wire value (critical/high/medium/low/info); NULL is
+    -- "no numeric assessment" (unscored), which is not the same as info.
+    severity text,
+    -- severity.Rank of `severity`; 0 for NULL. Sort key.
+    severity_rank smallint DEFAULT 0 NOT NULL,
+    risk_score integer,
+    assessment_basis text DEFAULT '' NOT NULL,
+    assessment_limitations text[] DEFAULT '{}'::text[] NOT NULL,
+    score_sources text[] DEFAULT '{}'::text[] NOT NULL,
+    categories text[] DEFAULT '{}'::text[] NOT NULL,
+    category text DEFAULT '' NOT NULL,
+    issue_type text DEFAULT '' NOT NULL,
+    current_value text DEFAULT '' NOT NULL,
+    description text DEFAULT '' NOT NULL,
+    recommendation text DEFAULT '' NOT NULL,
+    CONSTRAINT crypto_risk_judgments_pkey PRIMARY KEY (crypto_implementation_id)
+);
+
+ALTER TABLE public.crypto_risk_judgments ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  CREATE POLICY crypto_risk_judgments_tenant_isolation ON public.crypto_risk_judgments
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+-- Default list order: severity rank descending, then the stable id tie-breaker.
+CREATE INDEX IF NOT EXISTS idx_crypto_risk_judgments_feed
+    ON public.crypto_risk_judgments USING btree (tenant_id, severity_rank DESC, crypto_implementation_id)
+    WHERE emitted;
+-- The re-judge queue.
+CREATE INDEX IF NOT EXISTS idx_crypto_risk_judgments_stale
+    ON public.crypto_risk_judgments USING btree (tenant_id, crypto_implementation_id)
+    WHERE stale;
+CREATE INDEX IF NOT EXISTS idx_crypto_risk_judgments_due
+    ON public.crypto_risk_judgments USING btree (tenant_id, valid_until)
+    WHERE valid_until IS NOT NULL;
+
+-- Search columns of the Crypto Risks list (hostname, addresses, cipher suite).
+-- pg_trgm is created at the top of this file, so these are always available.
+CREATE INDEX IF NOT EXISTS idx_assets_hostname_trgm
+    ON public.assets USING gin (hostname public.gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_assets_primary_host_trgm
+    ON public.assets USING gin ((host(primary_address)) public.gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_asset_endpoints_address_host_trgm
+    ON public.asset_endpoints USING gin ((host(address)) public.gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_crypto_impl_cipher_suite_trgm
+    ON public.crypto_implementations_partitioned USING gin (cipher_suite public.gin_trgm_ops);
+
+-- Invalidation. SECURITY DEFINER because the catalogue (algorithms) and
+-- certificate edits can run without a tenant context, and the rows to mark
+-- belong to many tenants; the functions only ever set stale = true.
+CREATE OR REPLACE FUNCTION public.crypto_risk_judgment_on_configuration() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = public, pg_catalog, pg_temp
+    AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        DELETE FROM public.crypto_risk_judgments WHERE crypto_implementation_id = OLD.id;
+        RETURN NULL;
+    END IF;
+    IF TG_OP = 'UPDATE'
+       AND OLD.tenant_id = NEW.tenant_id AND OLD.asset_id = NEW.asset_id
+       AND OLD.endpoint_id IS NOT DISTINCT FROM NEW.endpoint_id
+       AND OLD.protocol = NEW.protocol
+       AND OLD.protocol_version IS NOT DISTINCT FROM NEW.protocol_version
+       AND OLD.cipher_suite IS NOT DISTINCT FROM NEW.cipher_suite
+       AND OLD.key_exchange_algorithm IS NOT DISTINCT FROM NEW.key_exchange_algorithm
+       AND OLD.signature_algorithm IS NOT DISTINCT FROM NEW.signature_algorithm
+       AND OLD.symmetric_encryption IS NOT DISTINCT FROM NEW.symmetric_encryption
+       AND OLD.hash_algorithm IS NOT DISTINCT FROM NEW.hash_algorithm
+       AND OLD.key_size IS NOT DISTINCT FROM NEW.key_size
+       AND OLD.risk_score IS NOT DISTINCT FROM NEW.risk_score
+       AND OLD.deleted_at IS NOT DISTINCT FROM NEW.deleted_at THEN
+        RETURN NULL;
+    END IF;
+    INSERT INTO public.crypto_risk_judgments (crypto_implementation_id, tenant_id, stale)
+    VALUES (NEW.id, NEW.tenant_id, true)
+    ON CONFLICT (crypto_implementation_id) DO UPDATE SET stale = true;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.crypto_risk_judgment_on_junction() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = public, pg_catalog, pg_temp
+    AS $$
+BEGIN
+    -- No UPDATE ... WHERE NOT stale shortcut: the UPDATE must queue behind a
+    -- concurrent re-judge's row lock so the invalidation lands after it.
+    IF TG_OP <> 'INSERT' THEN
+        UPDATE public.crypto_risk_judgments SET stale = true
+         WHERE crypto_implementation_id = OLD.crypto_implementation_id;
+    END IF;
+    IF TG_OP <> 'DELETE' THEN
+        UPDATE public.crypto_risk_judgments SET stale = true
+         WHERE crypto_implementation_id = NEW.crypto_implementation_id;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.crypto_risk_judgment_on_algorithm() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = public, pg_catalog, pg_temp
+    AS $$
+BEGIN
+    UPDATE public.crypto_risk_judgments j SET stale = true
+     WHERE j.crypto_implementation_id IN (
+        SELECT cia.crypto_implementation_id FROM public.crypto_implementation_algorithms cia
+         WHERE cia.algorithm_id = COALESCE(NEW.id, OLD.id));
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.crypto_risk_judgment_on_certificate() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = public, pg_catalog, pg_temp
+    AS $$
+BEGIN
+    UPDATE public.crypto_risk_judgments j SET stale = true
+     WHERE j.crypto_implementation_id IN (
+        SELECT cic.crypto_implementation_id FROM public.crypto_implementation_certificates cic
+         WHERE cic.certificate_id = COALESCE(NEW.id, OLD.id));
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.crypto_risk_judgment_on_finding() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = public, pg_catalog, pg_temp
+    AS $$
+BEGIN
+    UPDATE public.crypto_risk_judgments SET stale = true
+     WHERE crypto_implementation_id = COALESCE(NEW.subject_id, OLD.subject_id);
+    RETURN NULL;
+END;
+$$;
+
+CREATE OR REPLACE TRIGGER crypto_risk_judgment_configuration
+    AFTER INSERT OR UPDATE OR DELETE ON public.crypto_implementations_partitioned
+    FOR EACH ROW EXECUTE FUNCTION public.crypto_risk_judgment_on_configuration();
+CREATE OR REPLACE TRIGGER crypto_risk_judgment_algorithms_link
+    AFTER INSERT OR UPDATE OR DELETE ON public.crypto_implementation_algorithms
+    FOR EACH ROW EXECUTE FUNCTION public.crypto_risk_judgment_on_junction();
+CREATE OR REPLACE TRIGGER crypto_risk_judgment_certificates_link
+    AFTER INSERT OR UPDATE OR DELETE ON public.crypto_implementation_certificates
+    FOR EACH ROW EXECUTE FUNCTION public.crypto_risk_judgment_on_junction();
+CREATE OR REPLACE TRIGGER crypto_risk_judgment_catalogue
+    AFTER UPDATE OF code, strength, risk_score OR DELETE ON public.algorithms
+    FOR EACH ROW EXECUTE FUNCTION public.crypto_risk_judgment_on_algorithm();
+CREATE OR REPLACE TRIGGER crypto_risk_judgment_certificate_expiry
+    AFTER UPDATE OF not_after OR DELETE ON public.certificates
+    FOR EACH ROW EXECUTE FUNCTION public.crypto_risk_judgment_on_certificate();
+-- Only the prior crypto finding's content matters to the judge; the producer
+-- re-stamping last_seen on every pass must not invalidate anything.
+CREATE OR REPLACE TRIGGER crypto_risk_judgment_finding_insert
+    AFTER INSERT ON public.findings
+    FOR EACH ROW WHEN (NEW.producer = 'crypto' AND NEW.kind = 'weak_configuration' AND NEW.subject_type = 'crypto_configuration')
+    EXECUTE FUNCTION public.crypto_risk_judgment_on_finding();
+CREATE OR REPLACE TRIGGER crypto_risk_judgment_finding_update
+    AFTER UPDATE ON public.findings
+    FOR EACH ROW WHEN ((NEW.producer = 'crypto' AND NEW.kind = 'weak_configuration' AND NEW.subject_type = 'crypto_configuration')
+        AND (OLD.score IS DISTINCT FROM NEW.score OR OLD.summary IS DISTINCT FROM NEW.summary
+          OR OLD.evidence IS DISTINCT FROM NEW.evidence OR OLD.detection_state IS DISTINCT FROM NEW.detection_state
+          OR OLD.subject_id IS DISTINCT FROM NEW.subject_id))
+    EXECUTE FUNCTION public.crypto_risk_judgment_on_finding();
+CREATE OR REPLACE TRIGGER crypto_risk_judgment_finding_delete
+    AFTER DELETE ON public.findings
+    FOR EACH ROW WHEN (OLD.producer = 'crypto' AND OLD.kind = 'weak_configuration' AND OLD.subject_type = 'crypto_configuration')
+    EXECUTE FUNCTION public.crypto_risk_judgment_on_finding();
+
+-- Every existing live configuration starts stale; the readers and the
+-- background sweep judge them. Re-applying inserts only the missing ones.
+INSERT INTO public.crypto_risk_judgments (crypto_implementation_id, tenant_id, stale)
+SELECT ci.id, ci.tenant_id, true
+  FROM public.crypto_implementations_partitioned ci
+ WHERE ci.deleted_at IS NULL
+ON CONFLICT (crypto_implementation_id) DO NOTHING;
+
+-- A judgement lives and dies with its tenant and its configuration. Both FKs
+-- follow the convention of "POST-MIGRATIONS: tenant-scoped tables cascade from
+-- tenants" (below): they live here rather than in the CREATE TABLE, because
+-- tenants_pkey is only added further down the pg_dump body. Without the tenant
+-- FK a purged tenant (`DELETE FROM tenants`) left its judgement rows behind;
+-- without the configuration FK a configuration deleted by a path that bypasses
+-- the crypto_risk_judgment_on_configuration trigger would. The table is
+-- derived, so orphans are simply deleted before the constraint goes on.
+DO $$ BEGIN
+  IF to_regclass('public.crypto_risk_judgments') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'crypto_risk_judgments_tenant_id_fkey' AND conrelid = to_regclass('public.crypto_risk_judgments')) THEN
+    LOCK TABLE public.tenants, public.crypto_risk_judgments IN SHARE ROW EXCLUSIVE MODE;
+    DELETE FROM public.crypto_risk_judgments c WHERE NOT EXISTS (SELECT 1 FROM public.tenants t WHERE t.id = c.tenant_id);
+    ALTER TABLE public.crypto_risk_judgments ADD CONSTRAINT crypto_risk_judgments_tenant_id_fkey
+        FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF to_regclass('public.crypto_risk_judgments') IS NOT NULL
+     AND to_regclass('public.crypto_implementations_partitioned') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'crypto_risk_judgments_configuration_fkey' AND conrelid = to_regclass('public.crypto_risk_judgments')) THEN
+    DELETE FROM public.crypto_risk_judgments j WHERE NOT EXISTS (
+        SELECT 1 FROM public.crypto_implementations_partitioned ci WHERE ci.tenant_id = j.tenant_id AND ci.id = j.crypto_implementation_id);
+    ALTER TABLE public.crypto_risk_judgments ADD CONSTRAINT crypto_risk_judgments_configuration_fkey
+        FOREIGN KEY (tenant_id, crypto_implementation_id)
+        REFERENCES public.crypto_implementations_partitioned(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
 -- `GRANT ... ON ALL TABLES IN SCHEMA x` is not a standing rule: Postgres
@@ -25749,3 +26025,21 @@ BEGIN
     END IF;
 END
 $audit_integration_category$;
+
+-- ----------------------------------------------------------------------------
+-- sensors / device_agents: the per-collector agent secret
+-- ----------------------------------------------------------------------------
+-- A collector used to keep its single-use registration key forever, because the
+-- key doubled as the root of the credential-sealing key. The platform now issues
+-- a random secret at enrolment and at every certificate rotation, stores it
+-- wrapped under ENCRYPTION_MASTER_KEY, and seals with it. The CREATE TABLEs
+-- above carry the columns for fresh installs; this adds them to an existing
+-- database. Existing rows read version 0 / NULL, which means "no secret issued
+-- yet": the platform keeps deriving from the registration key for that collector
+-- until its next certificate rotation issues one.
+ALTER TABLE public.device_agents
+    ADD COLUMN IF NOT EXISTS agent_secret_enc text,
+    ADD COLUMN IF NOT EXISTS agent_secret_version integer DEFAULT 0 NOT NULL;
+ALTER TABLE public.sensors
+    ADD COLUMN IF NOT EXISTS agent_secret_enc text,
+    ADD COLUMN IF NOT EXISTS agent_secret_version integer DEFAULT 0 NOT NULL;

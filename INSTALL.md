@@ -254,7 +254,7 @@ agentMtls:
   *resources*; it does not install the controller or the CRDs that define them.
   (k3s ships Traefik by default, which is why "Evaluate it" installs only the
   two above.)
-- **A StorageClass** for the PostgreSQL, InfluxDB and upload volumes.
+- **A StorageClass** for the PostgreSQL, Redis, NATS and upload volumes.
 - **A Traefik TLS-passthrough entrypoint for agents** — `agent-mtls` on port
   `8444` by default (`agentMtls.entryPoint` / `agentMtls.port`), plus DNS for
   the two `agentMtls` hostnames above pointing at it. Traefik must pass this

@@ -351,3 +351,36 @@ func TestConsent_IncompleteDeliveryDropsOwnershipKeepsExclusions(t *testing.T) {
 		t.Error("private space stopped counting")
 	}
 }
+
+// A result dropped because the discoveries channel is full must not be marked
+// as probed: the debounce would otherwise suppress the re-probe for its whole
+// TTL and the endpoint would never get its enrichment.
+func TestProbeAndEmit_DroppedResultIsNotDebounced(t *testing.T) {
+	f := newConsentFixture(t, true, nil)
+	full := make(chan *models.CryptoDiscovery) // unbuffered, no reader: always full
+	f.e.discoveries = full
+
+	obs := &models.CryptoDiscovery{
+		DiscoveryMethod: "passive", Protocol: "TLS", SourceIP: "10.0.0.5",
+		DestIP: "10.0.0.9", Port: 443, Version: "TLS 1.3",
+		RawMetadata: map[string]interface{}{"handshake_types": []string{"ClientHello"}},
+	}
+	f.e.MaybeEnrich(obs)
+	f.e.probeAndEmit(<-f.e.queue)
+
+	key := tlsEnrichDebounceKey("10.0.0.9", 443, "")
+	if f.e.recentlyProbed(key) {
+		t.Fatal("a dropped enrichment must not be marked as probed")
+	}
+	f.e.MaybeEnrich(obs)
+	if len(f.e.queue) != 1 {
+		t.Fatalf("queue = %d, want the endpoint re-queued after a dropped result", len(f.e.queue))
+	}
+
+	// Once the emit succeeds it is debounced as before.
+	f.e.discoveries = f.out
+	f.e.probeAndEmit(<-f.e.queue)
+	if !f.e.recentlyProbed(key) {
+		t.Fatal("a delivered enrichment must be marked as probed")
+	}
+}

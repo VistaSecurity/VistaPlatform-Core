@@ -18,6 +18,7 @@ import type { deviceInterrogationComponents } from '@vistasecurity/api-contract'
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import { deviceTypeLabel, isCloudSourced } from './kit';
+import { unwrap } from '../../lib/api-result';
 
 type Device = deviceInterrogationComponents['schemas']['Device'];
 type DiscoveryErrorCode = deviceInterrogationComponents['schemas']['DeviceDiscoveryError']['error'];
@@ -304,10 +305,9 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
           tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
           ...reinterrogationField,
         };
-        const { data, error } = await clients.devices.PUT('/devices/{id}', {
+        const data = unwrap(await clients.devices.PUT('/devices/{id}', {
           params: { path: { id: device!.id } }, body,
-        });
-        if (error || !data) throw new Error(apiErrorMessage(error, 'Failed to update device'));
+        }), 'Failed to update device', { requireData: true });
         return data;
       }
       const body: deviceInterrogationComponents['schemas']['CreateDeviceRequest'] = {
@@ -324,8 +324,7 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
         tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
         ...reinterrogationField,
       };
-      const { data, error } = await clients.devices.POST('/devices', { body });
-      if (error || !data) throw new Error(apiErrorMessage(error, 'Failed to create device'));
+      const data = unwrap(await clients.devices.POST('/devices', { body }), 'Failed to create device', { requireData: true });
       return data;
     },
     onSuccess: afterCreate,
@@ -491,8 +490,7 @@ export function DeviceDeleteModal({ open, device, onClose }: {
   const del = useMutation({
     mutationFn: async () => {
       if (!device) return;
-      const { data, error } = await clients.devices.DELETE('/devices/{id}', { params: { path: { id: device.id } } });
-      if (error || !data) throw new Error('Failed to stop managing this asset');
+      const data = unwrap(await clients.devices.DELETE('/devices/{id}', { params: { path: { id: device.id } } }), 'Failed to stop managing this asset', { requireData: true });
       return data;
     },
     onSuccess: () => {

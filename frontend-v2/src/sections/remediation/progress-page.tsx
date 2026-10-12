@@ -19,6 +19,7 @@ import { useNavigate } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { ticketCategory } from '@vistasecurity/primitives/tickets';
 import { clients } from '../../lib/clients';
+import { usePqcProgress } from '../../lib/shared-queries';
 import { Icon, MiniBar, PercentageGauge } from '../../components/ui';
 
 const WINDOWS = [7, 30, 90] as const;
@@ -38,14 +39,7 @@ export function ProgressPage() {
     },
   });
 
-  const pqcQ = useQuery({
-    queryKey: ['remediation', 'pqc-progress'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/pqc/progress', {});
-      if (error || !data) throw new Error('Failed to load PQC progress');
-      return data.progress;
-    },
-  });
+  const pqcQ = usePqcProgress();
 
   const p = progressQ.data;
   const trend = p?.trend ?? [];

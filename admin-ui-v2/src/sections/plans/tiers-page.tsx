@@ -20,7 +20,8 @@ import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { money, num } from '../../components/ui/primitives';
 import { PlanBuilder } from './plan-builder';
-import { apiDetail, fetchTierComposition, storeTierComposition, tierCompositionKey, type TierEntitlement } from './composition';
+import { fetchTierComposition, storeTierComposition, tierCompositionKey, type TierEntitlement } from './composition';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type SubscriptionTier = adminServiceComponents['schemas']['SubscriptionTier'];
 type BillableItem = adminServiceComponents['schemas']['BillableItem'];
@@ -111,11 +112,10 @@ export function TiersPage() {
   // stale or half-loaded page holds can leak into the save.
   const setCell = useMutation({
     mutationFn: async ({ tierId, itemKey, included_value }: { tierId: string; itemKey: string; included_value: unknown }) => {
-      const { data, error } = await clients.admin.PUT('/admin/tiers/{id}/entitlements/{key}', {
+      const data = unwrap(await clients.admin.PUT('/admin/tiers/{id}/entitlements/{key}', {
         params: { path: { id: tierId, key: itemKey } },
         body: { included_value },
-      });
-      if (error || !data) throw new Error(apiDetail(error, 'Failed to save'));
+      }), 'Failed to save', { requireData: true });
       return data;
     },
     onSuccess: (data, v) => storeTierComposition(qc, v.tierId, data),

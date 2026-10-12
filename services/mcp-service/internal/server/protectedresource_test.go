@@ -43,7 +43,7 @@ func resourceMetadataParam(t *testing.T, header string) string {
 // never reaches the wire is the failure mode this package has form for.
 func challenge(t *testing.T, disc Discovery, mutate func(*http.Request)) string {
 	t.Helper()
-	router := NewRouter(NewHandler(NewMCPServer(nil), nil, nil, disc), disc)
+	router, _ := NewRouter(NewHandler(NewMCPServer(nil), nil, nil, disc), disc)
 	req := httptest.NewRequest(http.MethodPost, MCPPath, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
 	req.Header.Set("Content-Type", "application/json")
 	if mutate != nil {
@@ -150,7 +150,7 @@ func TestChallengeParameterCannotBeForged(t *testing.T) {
 // shape, and the HTML sniff below is explicit.
 func fetchMetadata(t *testing.T, path string) ProtectedResourceMetadata {
 	t.Helper()
-	router := NewRouter(NewHandler(NewMCPServer(nil), nil, nil, testDiscovery), testDiscovery)
+	router, _ := NewRouter(NewHandler(NewMCPServer(nil), nil, nil, testDiscovery), testDiscovery)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	router.ServeHTTP(rec, req)
@@ -230,7 +230,7 @@ func TestWellKnownPathMatchesTheResourceIdentifier(t *testing.T) {
 // one. Gating them behind the bearer check would deadlock discovery.
 func TestMetadataEndpointsNeedNoCredential(t *testing.T) {
 	for _, path := range []string{ProtectedResourceMetadataPath, ProtectedResourceMetadataRoot} {
-		router := NewRouter(NewHandler(NewMCPServer(nil), nil, nil, testDiscovery), testDiscovery)
+		router, _ := NewRouter(NewHandler(NewMCPServer(nil), nil, nil, testDiscovery), testDiscovery)
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code == http.StatusUnauthorized {

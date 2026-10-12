@@ -7,8 +7,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
+	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -21,6 +21,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/auth"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
@@ -49,6 +50,10 @@ type Handler struct {
 	// than through that middleware, so it applies the same check here
 	// ( item 1). nil skips it (no database).
 	tenantState tenantSessionChecker
+	// revocation is the jti / per-user denylist RequireAuth consults. The
+	// cookie session here is read outside that middleware, so it checks the
+	// same denylist (nil = no Redis, fail open like the middleware).
+	revocation sharedmw.RevocationChecker
 }
 
 // tenantSessionChecker is *tenantstate.Checker's session check: the tenant's
@@ -61,6 +66,9 @@ type tenantSessionChecker interface {
 // revoked: treated like no session at all.
 var errSessionRevoked = errors.New("session revoked")
 
+// errInvalidSessionToken is a cookie token that is not an access token.
+var errInvalidSessionToken = errors.New("invalid session token type")
+
 // errTenantStateUnavailable is a tenant-state lookup failure. Enforcement
 // fails CLOSED: an unreadable state is not permission.
 var errTenantStateUnavailable = errors.New("tenant state unavailable")
@@ -72,6 +80,7 @@ func NewHandler(db *sql.DB, bypassDB *sql.DB, jwtService *auth.JWTService, cfg *
 		jwtService: jwtService,
 		patService: apitokens.NewService(db, bypassDB),
 		cfg:        cfg,
+		revocation: sharedmw.RedisRevocationCheckerFromEnv(),
 	}
 	if db != nil {
 		// `tenants` is global, so the app-role pool reads it (as the login
@@ -288,13 +297,18 @@ func (h *Handler) Token(c *gin.Context) {
 		return
 	}
 
-	// Mark the code as used before minting the token (prevents replay on error).
-	_, err = h.bypassDB.ExecContext(c.Request.Context(),
-		`UPDATE oauth_authorization_codes SET used_at = now() WHERE code_hash = $1`,
+	// Atomically claim the code: only one concurrent redemption can flip
+	// used_at from NULL, so a code can never mint two tokens.
+	res, err := h.bypassDB.ExecContext(c.Request.Context(),
+		`UPDATE oauth_authorization_codes SET used_at = now() WHERE code_hash = $1 AND used_at IS NULL`,
 		codeHash,
 	)
 	if err != nil {
 		tokenError(c, "server_error", "")
+		return
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		tokenError(c, "invalid_grant", "code already used")
 		return
 	}
 
@@ -364,6 +378,20 @@ func (h *Handler) sessionFromCookie(c *gin.Context) (*auth.JWTClaims, error) {
 	claims, err := h.jwtService.ValidateToken(token)
 	if err != nil {
 		return nil, err
+	}
+	// Same two checks as middleware.RequireAuth (internal/middleware): access
+	// tokens only (a refresh or impersonation token is not a browser session),
+	// and not on the revocation denylist that Logout writes to.
+	if claims.Type != "access" {
+		return nil, errInvalidSessionToken
+	}
+	if h.revocation != nil {
+		if claims.ID != "" && h.revocation.IsRevoked(c.Request.Context(), claims.ID) {
+			return nil, errSessionRevoked
+		}
+		if sharedmw.IsUserTokenRevoked(c.Request.Context(), h.revocation, claims.UserID, sharedmw.NumericDateTime(claims.IssuedAt)) {
+			return nil, errSessionRevoked
+		}
 	}
 	if err := h.checkTenantSession(c.Request.Context(), claims); err != nil {
 		return nil, err
@@ -559,16 +587,5 @@ func renderConsent(w http.ResponseWriter, d consentData) {
 	_, _ = w.Write([]byte(page))
 }
 
-// escapeHTML replaces the five characters that need escaping in HTML contexts.
-func escapeHTML(s string) string {
-	b, _ := json.Marshal(s)
-	s = string(b[1 : len(b)-1]) // strip JSON quotes
-	r := strings.NewReplacer(
-		`&`, "&amp;",
-		`<`, "&lt;",
-		`>`, "&gt;",
-		`"`, "&#34;",
-		`'`, "&#39;",
-	)
-	return r.Replace(s)
-}
+// escapeHTML escapes s for HTML text and attribute contexts.
+func escapeHTML(s string) string { return html.EscapeString(s) }

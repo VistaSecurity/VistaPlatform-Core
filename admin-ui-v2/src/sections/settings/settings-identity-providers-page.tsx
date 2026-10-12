@@ -32,6 +32,7 @@ import type { adminServiceComponents as AdminC } from '@vistasecurity/api-contra
 import { allowedDomainsApply, isSingleTenantEntraUrl, parseAllowedDomains } from './identity-provider-domains';
 import { defaultPurpose, purposeOptions, signupPurposeOffered } from './identity-provider-purpose';
 import { usePlatformEdition } from '../../lib/edition';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type Provider = AdminC['schemas']['PlatformIdentityProvider'];
 
@@ -221,11 +222,9 @@ export function IdpModal({ provider, onClose }: { provider: Provider | null; onC
   const mutation = useMutation({
     mutationFn: async () => {
       if (isEdit) {
-        const { error, response } = await clients.admin.PUT('/admin/identity-providers/{id}', { params: { path: { id: provider!.id } }, body: body() });
-        if (error || !response.ok) throw new Error((error as { error?: string })?.error ?? 'Failed to save');
+        unwrap(await clients.admin.PUT('/admin/identity-providers/{id}', { params: { path: { id: provider!.id } }, body: body() }), 'Failed to save');
       } else {
-        const { error, response } = await clients.admin.POST('/admin/identity-providers', { body: body() });
-        if (error || !response.ok) throw new Error((error as { error?: string })?.error ?? 'Failed to create');
+        unwrap(await clients.admin.POST('/admin/identity-providers', { body: body() }), 'Failed to create');
       }
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: KEY }); toast.success(isEdit ? 'Provider saved' : 'Provider created'); onClose(); },
@@ -234,8 +233,7 @@ export function IdpModal({ provider, onClose }: { provider: Provider | null; onC
 
   const del = useMutation({
     mutationFn: async () => {
-      const { error, response } = await clients.admin.DELETE('/admin/identity-providers/{id}', { params: { path: { id: provider!.id } } });
-      if (error || !response.ok) throw new Error('Failed to delete');
+      unwrap(await clients.admin.DELETE('/admin/identity-providers/{id}', { params: { path: { id: provider!.id } } }), 'Failed to delete');
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: KEY }); toast.success('Provider deleted'); onClose(); },
     onError: () => toast.error('Failed to delete'),

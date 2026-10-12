@@ -60,10 +60,7 @@ func (s *stubEvaluationStore) EvaluateFramework(_, _ uuid.UUID, _ string, _ mode
 func (s *stubEvaluationStore) GetControlDetails(_, _ uuid.UUID, _ *uuid.UUID, _ models.ScenarioFilters, _, _ int) (*services.ControlDetailsResponse, error) {
 	return nil, nil
 }
-func (s *stubEvaluationStore) GetControlDetailsTotalCount(_, _ uuid.UUID, _ models.ScenarioFilters) (int, error) {
-	return 0, nil
-}
-func (s *stubEvaluationStore) ResolveControlID(_, _ string) (uuid.UUID, error) {
+func (s *stubEvaluationStore) ResolveControlID(_ uuid.UUID, _, _ string) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
 

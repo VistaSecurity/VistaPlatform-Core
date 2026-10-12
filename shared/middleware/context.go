@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -22,6 +24,12 @@ const (
 	CtxKeyActorID             = "actorID"
 	CtxKeyActorEmail          = "actorEmail"
 	CtxKeyImpersonationReason = "impersonationReason"
+	// CtxKeyTokenID holds the jti (string) of the access token RequireJWTAuth
+	// verified for this request; absent when the token carries no jti.
+	CtxKeyTokenID = "tokenID"
+	// CtxKeyTokenExpiresAt holds the exp (time.Time) of that verified token;
+	// absent when the token carries no exp.
+	CtxKeyTokenExpiresAt = "tokenExpiresAt"
 
 	UserTypePlatform = "platform"
 	UserTypeTenant   = "tenant"
@@ -124,4 +132,27 @@ func IsInternalCall(c *gin.Context) bool {
 		}
 	}
 	return false
+}
+
+// GetTokenIDFromContext returns the jti of the access token the auth middleware
+// verified for this request. It is never read from the request itself, so it is
+// always the jti of a signature-checked token.
+func GetTokenIDFromContext(c *gin.Context) (string, bool) {
+	if val, exists := c.Get(CtxKeyTokenID); exists {
+		if s, ok := val.(string); ok && s != "" {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// GetTokenExpiresAtFromContext returns the exp of the access token the auth
+// middleware verified for this request.
+func GetTokenExpiresAtFromContext(c *gin.Context) (time.Time, bool) {
+	if val, exists := c.Get(CtxKeyTokenExpiresAt); exists {
+		if t, ok := val.(time.Time); ok && !t.IsZero() {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }

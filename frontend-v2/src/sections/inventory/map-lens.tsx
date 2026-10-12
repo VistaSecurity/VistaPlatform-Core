@@ -14,6 +14,7 @@
 // 2.8 left `useAssetNeighbourhood` as the seam, and this mounts onto it exactly
 // — same hook, same cache key, no second endpoint.
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import {
   Background, BackgroundVariant, BaseEdge, Controls, EdgeLabelRenderer, Handle,
@@ -33,10 +34,11 @@ import {
   type MapEdge, type MapGraph, type MapNode,
 } from './map-model';
 import {
-  DIRECTION_LABEL, HANDLE_SIDES, NODE_HEIGHT, NODE_WIDTH, flipDirection, layoutGraph,
+  DIRECTION_LABEL, HANDLE_SIDES, NODE_HEIGHT, NODE_WIDTH, flipDirection,
   offsetEdgePath, parallelEdgeOffsets,
   type HandleSide, type LayoutDirection,
 } from './map-layout';
+import { useMapLayout } from './use-map-layout';
 import { closesOnKey, closesOnOutsidePointer, downloadText, mapExportFilename, toCytoscapeJSON, toGraphML } from './map-export';
 import { QueryEditor } from './query-editor';
 import { useAssetsQuery, AssetQueryError } from './asset-queries';
@@ -47,27 +49,11 @@ const MAX_DEPTH = 3;
 
 export const clampDepth = (n: number): number => Math.min(MAX_DEPTH, Math.max(MIN_DEPTH, Math.round(n) || MIN_DEPTH));
 
-/** Hold a value still for `ms` after it stops changing.
- *
- *  Used on the depth control. Dragging 1 → 3 otherwise fires a fetch and a
- *  layout at every step, and the intermediate graphs are work nobody asked
- *  for. The LAYOUT itself is a `useMemo`, not an effect, so it never re-runs on
- *  a hover or a selection — only when the graph or the direction changes. */
-function useDebounced<T>(value: T, ms: number): T {
-  const [held, setHeld] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setHeld(value), ms);
-    return () => clearTimeout(t);
-  }, [value, ms]);
-  return held;
-}
-
 // --------------------------------------------------------------- the node --
 
 type AssetNodeData = {
   node: MapNode;
   focused: boolean;
-  selected: boolean;
   dimmed: boolean;
   tintStrength: number;
   impactDepth: number | null;
@@ -90,8 +76,11 @@ const HANDLE_POSITION: Readonly<Record<HandleSide, Position>> = {
  * `memo`'d: React Flow re-renders every node on a viewport change, and the
  * comparison here is cheap while the render is not.
  */
-const AssetNode = memo(function AssetNode({ data }: NodeProps<Node<AssetNodeData>>) {
-  const { node, focused, selected, dimmed, tintStrength, impactDepth, handles } = data;
+const AssetNode = memo(function AssetNode({ data, selected }: NodeProps<Node<AssetNodeData>>) {
+  // `selected` is xyflow's own node flag, NOT part of `data`: putting it in
+  // `data` made every node's data object depend on the selection, so one click
+  // re-rendered all of them (up to the 500-node cap).
+  const { node, focused, dimmed, tintStrength, impactDepth, handles } = data;
   const style = CLASS_GROUP_STYLES[node.group];
   const isAsset = isAssetNode(node);
   const ring = statusRing(node.status);
@@ -612,7 +601,7 @@ function AssetMapViewInner(props: AssetMapViewProps) {
   const [impactDirection, setImpactDirection] = useState<'downstream' | 'upstream'>('downstream');
   const [hoverEdge, setHoverEdge] = useState<{ edge: MapEdge; x: number; y: number } | null>(null);
 
-  const heldDepth = useDebounced(depth, 220);
+  const heldDepth = useDebouncedValue(depth, 220);
   const nbh = useAssetNeighbourhood(assetId, { depth: heldDepth, includePending });
   const impact = useAssetImpact(assetId, impactDirection, impactOn);
 
@@ -632,7 +621,12 @@ function AssetMapViewInner(props: AssetMapViewProps) {
   // The expensive step, memoised on exactly what changes it. Hovering an edge,
   // selecting a node and toggling the impact overlay all leave this untouched,
   // so none of them re-lay-out the graph.
-  const layout = useMemo(() => layoutGraph(graph, direction), [graph, direction]);
+  //
+  // Off the main thread once the graph is big enough for dagre to be felt (see
+  // `use-map-layout.ts`). While a run is in flight the last finished layout stays
+  // up and nodes it has no position for are held back rather than drawn at 0,0.
+  const { layout, pending: layoutPending } = useMapLayout(graph, direction);
+  const laidOut = !layoutPending || Object.keys(layout.positions).length > 0;
 
   const overlay = useMemo(
     () => (impactOn ? buildImpactOverlay(impact.data) : null),
@@ -641,12 +635,14 @@ function AssetMapViewInner(props: AssetMapViewProps) {
 
   const handles = HANDLE_SIDES[direction];
 
-  const rfNodes = useMemo<Node<AssetNodeData>[]>(() => graph.nodes.map((n) => {
+  const baseNodes = useMemo<Node<AssetNodeData>[]>(() => graph.nodes.flatMap((n) => {
+    const position = layout.positions[n.id];
+    if (!position) return [];
     const tint = impactTint(overlay, n.id, graph.rootId);
     return {
       id: n.id,
       type: 'asset',
-      position: layout.positions[n.id] ?? { x: 0, y: 0 },
+      position,
       width: NODE_WIDTH,
       height: NODE_HEIGHT,
       draggable: false,
@@ -660,7 +656,6 @@ function AssetMapViewInner(props: AssetMapViewProps) {
       data: {
         node: n,
         focused: n.isRoot,
-        selected: n.id === selectedId,
         // A grouping node is never dimmed by the impact overlay. It is not an
         // asset, so it cannot be in or out of a blast radius, and dimming it as
         // "not affected" would answer a question nobody asked about a region.
@@ -670,7 +665,17 @@ function AssetMapViewInner(props: AssetMapViewProps) {
         handles,
       },
     };
-  }), [graph, layout, overlay, selectedId, handles]);
+  }), [graph, layout, overlay, handles]);
+
+  // Selection is layered on top, so a click changes ONE node object (and the
+  // previously selected one reverts to its stable base object). Every other
+  // node keeps its identity, and its memoised `AssetNode` does not re-render.
+  const rfNodes = useMemo<Node<AssetNodeData>[]>(
+    () => (selectedId === null
+      ? baseNodes
+      : baseNodes.map((n) => (n.id === selectedId ? { ...n, selected: true } : n))),
+    [baseNodes, selectedId],
+  );
 
   // Handle POSITIONS are measured once, when a node mounts — changing one
   // without saying so leaves xyflow drawing to where the handle used to be, so
@@ -686,7 +691,9 @@ function AssetMapViewInner(props: AssetMapViewProps) {
     // one line with a hidden twin. Computed over the WHOLE edge list, because
     // an offset only means anything relative to the other edges of its pair.
     const offsets = parallelEdgeOffsets(graph.edges);
-    return graph.edges.map((e) => {
+    return graph.edges.flatMap((e) => {
+    // An end the pending layout has no position for is not on the canvas yet.
+    if (!layout.positions[e.source] || !layout.positions[e.target]) return [];
     const dimmed = !!overlay
       && !impactTint(overlay, e.source, graph.rootId).inImpact
       && !impactTint(overlay, e.target, graph.rootId).inImpact;
@@ -715,7 +722,7 @@ function AssetMapViewInner(props: AssetMapViewProps) {
       markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: e.pending ? 'var(--warn)' : 'var(--app-border2)' },
     };
     });
-  }, [graph, overlay]);
+  }, [graph, overlay, layout]);
 
   const edgeById = useMemo(() => new Map(graph.edges.map((e) => [e.id, e])), [graph.edges]);
   const selectedNode = useMemo(() => graph.nodes.find((n) => n.id === selectedId) ?? null, [graph.nodes, selectedId]);
@@ -876,7 +883,11 @@ function AssetMapViewInner(props: AssetMapViewProps) {
             />
           )}
 
-          {(state === 'graph' || state === 'empty') && (
+          {(state === 'graph' || state === 'empty') && !laidOut && (
+            <Centered testId="map-laying-out" icon="loader" title="Laying out the map…" message="Arranging a large neighbourhood without freezing the page." />
+          )}
+
+          {(state === 'graph' || state === 'empty') && laidOut && (
             <ReactFlow
               nodes={rfNodes}
               edges={rfEdges}

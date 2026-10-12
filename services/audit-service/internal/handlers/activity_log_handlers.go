@@ -99,9 +99,13 @@ func (h *ActivityLogHandler) LogActivity(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"id": logEntry.ID, "message": "Activity logged successfully"})
 }
 
-// GetActivityLogs handles GET /api/v1/audit-service/activity-logs
-func (h *ActivityLogHandler) GetActivityLogs(c *gin.Context) {
-	filters := models.ActivityLogFilters{
+// parseActivityLogFilters reads the filter query params shared by the list
+// (GET /activity-logs) and export (GET /activity-logs/export) endpoints, so the
+// two cannot drift apart. Tenant users are forced onto their own tenant. When a
+// tenant user has no tenant context it writes the 403 itself and returns
+// ok=false.
+func parseActivityLogFilters(c *gin.Context) (filters models.ActivityLogFilters, ok bool) {
+	filters = models.ActivityLogFilters{
 		Page:      1,
 		PageSize:  50,
 		SortBy:    "occurred_at",
@@ -123,7 +127,7 @@ func (h *ActivityLogHandler) GetActivityLogs(c *gin.Context) {
 		tenantID := middleware.GetTenantID(c)
 		if tenantID == nil {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Tenant context required"})
-			return
+			return filters, false
 		}
 		// Override any tenant_id filter with the user's actual tenant
 		filters.TenantID = tenantID
@@ -224,6 +228,16 @@ func (h *ActivityLogHandler) GetActivityLogs(c *gin.Context) {
 	if sortOrder := c.Query("sort_order"); sortOrder != "" {
 		// Normalize to lowercase for consistency
 		filters.SortOrder = strings.ToLower(sortOrder)
+	}
+
+	return filters, true
+}
+
+// GetActivityLogs handles GET /api/v1/audit-service/activity-logs
+func (h *ActivityLogHandler) GetActivityLogs(c *gin.Context) {
+	filters, ok := parseActivityLogFilters(c)
+	if !ok {
+		return
 	}
 
 	logs, total, err := h.service.GetActivityLogs(c.Request.Context(), filters)
@@ -483,76 +497,13 @@ func (h *ActivityLogHandler) ExportActivityLogs(c *gin.Context) {
 		return
 	}
 
-	// Parse filters (same as GetActivityLogs)
-	filters := models.ActivityLogFilters{
-		Page:      1,
-		PageSize:  10000, // Large page size for export
-		SortBy:    "occurred_at",
-		SortOrder: "DESC",
+	// Same filters as GetActivityLogs; paging is replaced by one large page.
+	filters, ok := parseActivityLogFilters(c)
+	if !ok {
+		return
 	}
-
-	// Get user type and apply appropriate scoping
-	userType := middleware.GetUserType(c)
-
-	// Parse all filter parameters (same as GetActivityLogs)
-	if tenantIDStr := c.Query("tenant_id"); tenantIDStr != "" {
-		if tenantID, err := uuid.Parse(tenantIDStr); err == nil {
-			filters.TenantID = &tenantID
-		}
-	}
-
-	// Tenant users are automatically scoped to their own tenant
-	if userType == middleware.UserTypeTenant {
-		tenantID := middleware.GetTenantID(c)
-		if tenantID == nil {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Tenant context required"})
-			return
-		}
-		filters.TenantID = tenantID
-	}
-	if userIDStr := c.Query("user_id"); userIDStr != "" {
-		if userID, err := uuid.Parse(userIDStr); err == nil {
-			filters.UserID = &userID
-		}
-	}
-	if userType := c.Query("user_type"); userType != "" {
-		filters.UserType = &userType
-	}
-	if eventTypes := c.QueryArray("event_type"); len(eventTypes) > 0 {
-		filters.EventType = eventTypes
-	}
-	if categories := c.QueryArray("event_category"); len(categories) > 0 {
-		filters.EventCategory = categories
-	}
-	if actions := c.QueryArray("action"); len(actions) > 0 {
-		filters.Action = actions
-	}
-	if resourceType := c.Query("resource_type"); resourceType != "" {
-		filters.ResourceType = &resourceType
-	}
-	if resourceIDStr := c.Query("resource_id"); resourceIDStr != "" {
-		if resourceID, err := uuid.Parse(resourceIDStr); err == nil {
-			filters.ResourceID = &resourceID
-		}
-	}
-	if complianceTags := c.QueryArray("compliance_tag"); len(complianceTags) > 0 {
-		filters.ComplianceTags = complianceTags
-	}
-	if successStr := c.Query("success"); successStr != "" {
-		if success, err := strconv.ParseBool(successStr); err == nil {
-			filters.Success = &success
-		}
-	}
-	if startDateStr := c.Query("start_date"); startDateStr != "" {
-		if startDate, err := time.Parse(time.RFC3339, startDateStr); err == nil {
-			filters.StartDate = &startDate
-		}
-	}
-	if endDateStr := c.Query("end_date"); endDateStr != "" {
-		if endDate, err := time.Parse(time.RFC3339, endDateStr); err == nil {
-			filters.EndDate = &endDate
-		}
-	}
+	filters.Page = 1
+	filters.PageSize = 10000 // Large page size for export
 
 	logs, _, err := h.service.GetActivityLogs(c.Request.Context(), filters)
 	if err != nil {

@@ -249,7 +249,7 @@ func (bp *BatchProcessor) sendSingleRequest(request *BatchRequest) error {
 				"service":       bp.config.ServiceName,
 				"api_calls":     request.APICalls,
 				"network_bytes": request.NetworkBytes,
-			}).Info("Successfully sent metrics request")
+			}).Debug("Successfully sent metrics request")
 			return nil
 		}
 

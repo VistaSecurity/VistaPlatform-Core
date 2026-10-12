@@ -106,6 +106,19 @@ func (f *KerberosTCPStreamFactory) New(netFlow, transportFlow gopacket.Flow) tcp
 	return &KerberosTCPStream{factory: f, key: key, state: state}
 }
 
+// FlushOldSessions drops sessions idle for longer than maxAge. Without it a flow
+// that never sends FIN/RST left its entry in sessions for the life of the process.
+func (f *KerberosTCPStreamFactory) FlushOldSessions(maxAge time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	for key, state := range f.sessions {
+		if state.lastSeen.Before(cutoff) {
+			delete(f.sessions, key)
+		}
+	}
+}
+
 func (s *KerberosTCPStream) Reassembled(reassembly []tcpassembly.Reassembly) {
 	for _, r := range reassembly {
 		if r.Skip != 0 {

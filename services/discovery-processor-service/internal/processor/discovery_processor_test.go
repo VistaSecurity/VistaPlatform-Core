@@ -36,10 +36,17 @@ func TestIsPermanentError(t *testing.T) {
 
 		// Typed status errors — classified on the code, at any wrap depth.
 		{"400 client error is permanent", status(400), true},
-		{"401 client error is permanent", status(401), true},
-		{"403 client error is permanent", status(403), true},
-		{"404 client error is permanent", status(404), true},
+		{"413 client error is permanent", status(413), true},
 		{"422 client error is permanent", status(422), true},
+		// HMAC clock skew / a secret mid-rotation (401, 403), a route that does
+		// not exist yet during an inventory rollout (404), a conflict or lock
+		// that clears (409, 423): the far side's state, nothing about the rows.
+		{"401 is transient", status(401), false},
+		{"403 is transient", status(403), false},
+		{"404 is transient", status(404), false},
+		{"409 is transient", status(409), false},
+		{"423 is transient", status(423), false},
+		{"wrapped 404 is transient", fmt.Errorf("chunk 0-50 of 80: %w", status(404)), false},
 		{"wrapped 400 is permanent", fmt.Errorf("failed to import monitoring findings: %w", status(400)), true},
 		{"408 request timeout is transient", status(408), false},
 		{"425 too early is transient", status(425), false},

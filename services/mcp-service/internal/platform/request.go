@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"strings"
 
 	"github.com/vistasecurity/vistaplatform/mcp-service/internal/auditlog"
 )
@@ -37,17 +36,23 @@ func RequestContextOf(r *http.Request) auditlog.RequestContext {
 	}
 }
 
-// clientIP prefers the gateway-forwarded address; every MCP call arrives
-// through Traefik, so RemoteAddr alone would record the proxy on every event.
+type clientIPCtxKey struct{}
+
+// WithClientIP carries the client address resolved at the router, where gin's
+// trusted-proxy handling is available (see server.WithTrustedProxies).
+func WithClientIP(ctx context.Context, ip string) context.Context {
+	return context.WithValue(ctx, clientIPCtxKey{}, ip)
+}
+
+// clientIP returns the address the router resolved. X-Forwarded-For is NOT
+// read here: the first entry is whatever the client wrote, and this value
+// lands in audit rows and keys the auth rate limits. Only gin's trusted-proxy
+// walk (right to left, past configured proxies) may believe that header.
+// Without a resolved address (a handler used outside the router) the TCP peer
+// is the honest answer.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		first, _, _ := strings.Cut(xff, ",")
-		if ip := strings.TrimSpace(first); ip != "" {
-			return ip
-		}
-	}
-	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
-		return xr
+	if ip, _ := r.Context().Value(clientIPCtxKey{}).(string); ip != "" {
+		return ip
 	}
 	// RemoteAddr is host:port and audit stores ip_address as inet, so the port
 	// has to come off — via SplitHostPort, which also unwraps the [::1] form an

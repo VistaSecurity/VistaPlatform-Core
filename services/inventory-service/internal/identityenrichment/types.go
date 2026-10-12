@@ -269,10 +269,13 @@ type Scope struct {
 	// OBSERVER, for provenance and for the UI's "advertised by X, which has no
 	// interface on this network" explanation. ObserverReason is one of
 	//'s reasons and is empty exactly when ObserverReachable is true.
-	ObserverSensorID  uuid.UUID
-	ObserverReachable bool
-	ObserverReason    string
-	Sensitive         bool
+	ObserverSensorID uuid.UUID
+	// CollectorAddresses are every address of every collector of the tenant,
+	// as host prefixes. NetworkPlan never targets one (ReasonTargetIsCollector).
+	CollectorAddresses []netip.Prefix
+	ObserverReachable  bool
+	ObserverReason     string
+	Sensitive          bool
 }
 
 // ReasonNoEligibleCollector is D8's block reason: the target network is
@@ -281,6 +284,12 @@ type Scope struct {
 // wrong collector — the observer's reachability stopped being the question the
 // moment any sensor could execute.
 const ReasonNoEligibleCollector = "no_eligible_collector_in_target_network"
+
+// ReasonTargetIsCollector is the terminal reason for an observation whose only
+// probe targets are collectors' own addresses (typically a sensor's own
+// address, seen by itself). The dispatch guard refuses such a target for good,
+// so the observation is settled rather than planned and retried.
+const ReasonTargetIsCollector = "target_is_collector"
 
 func NetworkPlan(o Observation, p Policy, s Scope, dnsAddresses []string, excluded []netip.Prefix) (Plan, string) {
 	plan := Plan{CollectorVersion: s.SensorVersion, SensorID: s.SensorID, ObserverSensorID: s.ObserverSensorID, SegmentID: s.SegmentID, SegmentCIDR: s.CIDR.String(), Executor: "sensor:" + s.SensorID.String()}
@@ -315,6 +324,7 @@ func NetworkPlan(o Observation, p Policy, s Scope, dnsAddresses []string, exclud
 		excluded = append(excluded, prefix)
 	}
 	seen := map[string]bool{}
+	collectorTarget := false
 	appendAddress := func(raw string) {
 		a, err := netip.ParseAddr(raw)
 		if err != nil {
@@ -323,6 +333,12 @@ func NetworkPlan(o Observation, p Policy, s Scope, dnsAddresses []string, exclud
 		a = a.Unmap()
 		if !a.IsGlobalUnicast() || a.IsLoopback() || a.IsLinkLocalUnicast() || !s.CIDR.Contains(a) {
 			return
+		}
+		for _, prefix := range s.CollectorAddresses {
+			if prefix.Contains(a) {
+				collectorTarget = true
+				return
+			}
 		}
 		for _, prefix := range excluded {
 			if prefix.Contains(a) {
@@ -361,6 +377,9 @@ func NetworkPlan(o Observation, p Policy, s Scope, dnsAddresses []string, exclud
 		}
 	}
 	if plan.Hostname == "" {
+		if collectorTarget {
+			return plan, ReasonTargetIsCollector
+		}
 		return plan, "no_authorized_target"
 	}
 	if strings.ContainsAny(plan.Hostname, "/*:@ ") {

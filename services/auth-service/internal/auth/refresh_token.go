@@ -40,9 +40,36 @@ func (r *RefreshTokenService) hashToken(token string) string {
 	return hex.EncodeToString(hash[:])
 }
 
+// rotationGrace is how long after a token was rotated a second presentation of
+// the OLD token is treated as a lost race rather than a theft. Two tabs (or a
+// client retry after a dropped response) legitimately present the same token
+// within milliseconds of each other; killing the whole family for that logs the
+// real user out everywhere. Beyond the window a replay is reuse and revokes the
+// family. The window never helps a thief obtain a session: the loser of the race
+// is refused (ErrInvalidToken), it only avoids punishing the legitimate holder.
+const rotationGrace = 10 * time.Second
+
+// queryRower is the subset of *sql.DB and *sql.Tx the token INSERT needs, so
+// the rotation can store the successor inside its transaction.
+type queryRower interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // StoreRefreshToken stores a refresh token in the database with device fingerprint
 // If familyID is nil, creates a new token family
 func (r *RefreshTokenService) StoreRefreshToken(
+	userID uuid.UUID,
+	token string,
+	familyID *uuid.UUID,
+	expiresAt time.Time,
+	clientIP string,
+	userAgent string,
+) (*uuid.UUID, error) {
+	return r.storeRefreshToken(r.db, userID, token, familyID, expiresAt, clientIP, userAgent)
+}
+
+func (r *RefreshTokenService) storeRefreshToken(
+	q queryRower,
 	userID uuid.UUID,
 	token string,
 	familyID *uuid.UUID,
@@ -65,7 +92,7 @@ func (r *RefreshTokenService) StoreRefreshToken(
 	`
 
 	var tokenID uuid.UUID
-	err := r.db.QueryRow(query, userID, tokenHash, familyID, expiresAt, clientIP, userAgent).Scan(&tokenID)
+	err := q.QueryRow(query, userID, tokenHash, familyID, expiresAt, clientIP, userAgent).Scan(&tokenID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to store refresh token: %w", err)
 	}
@@ -76,6 +103,15 @@ func (r *RefreshTokenService) StoreRefreshToken(
 // ValidateAndRotateToken validates a refresh token and rotates it
 // Returns: newRefreshToken, newFamilyID, error
 // If reuse is detected, returns ErrTokenReuseDetected and revokes the entire family
+//
+// Rotation is ATOMIC. The old token is claimed with a single
+// `UPDATE ... WHERE token_hash = $1 AND is_revoked = false ... RETURNING`, and
+// its successor is inserted in the same transaction. The previous
+// SELECT-then-UPDATE-by-id-then-INSERT let two parallel refreshes both pass the
+// check and both mint a live successor (a thief got a second branch), and a
+// failure between the UPDATE and the INSERT left the user with no token at all.
+// Now the row lock serialises the claimants: exactly one UPDATE matches, the rest
+// match zero rows and are classified by classifyRejectedRefresh.
 func (r *RefreshTokenService) ValidateAndRotateToken(
 	oldToken string,
 	userID uuid.UUID,
@@ -86,86 +122,101 @@ func (r *RefreshTokenService) ValidateAndRotateToken(
 ) (*uuid.UUID, error) {
 	oldTokenHash := r.hashToken(oldToken)
 
-	// Find the refresh token in database.
-	//
-	// SECURITY: the lookup is intentionally NOT filtered by
-	// `is_revoked = false`. A successful rotation marks the old token revoked, so
-	// when a stolen-then-rotated token is replayed it must still be FOUND here —
-	// otherwise it matches zero rows, returns a generic ErrInvalidToken, and the
-	// reuse-detection branch below never runs (the breach signal never fires).
-	query := `
-		SELECT id, family_id, expires_at, is_revoked, last_used_at, created_at
-		FROM refresh_tokens
-		WHERE token_hash = $1 AND user_id = $2
-	`
-
-	var tokenID uuid.UUID
-	var familyID uuid.UUID
-	var storedExpiresAt time.Time
-	var isRevoked bool
-	var lastUsedAt time.Time
-	var createdAt time.Time
-
-	err := r.db.QueryRow(query, oldTokenHash, userID).Scan(&tokenID, &familyID, &storedExpiresAt, &isRevoked, &lastUsedAt, &createdAt)
-	if err == sql.ErrNoRows {
-		return nil, ErrInvalidToken
-	}
+	tx, err := r.db.Begin()
 	if err != nil {
-		return nil, fmt.Errorf("failed to query refresh token: %w", err)
+		return nil, fmt.Errorf("failed to begin refresh rotation: %w", err)
 	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
 
-	// Reuse detection runs BEFORE the expiry check: a replayed token that is
-	// already revoked — or whose last_used_at has advanced past created_at —
-	// means the same refresh token was presented twice. That is the classic
-	// stolen-token signal and outranks "expired".
-	//
-	//   - reuseByRevoked: the token was already rotated/revoked once. Replaying
-	//     it is the real attack path this fix restores (previously unreachable).
-	//   - reuseByTiming:  last_used_at moved past created_at (allowing 1s of
-	//     clock skew) — the original synthetic check, kept as a backstop.
-	reuseByRevoked := isRevoked
-	reuseByTiming := !lastUsedAt.IsZero() && lastUsedAt.After(createdAt.Add(1*time.Second))
-	if reuseByRevoked || reuseByTiming {
-		// Revoke the entire family as a security measure.
-		if err := r.revokeTokenFamily(familyID, userID); err != nil {
-			return nil, fmt.Errorf("failed to revoke token family after reuse detection: %w", err)
-		}
-		logrus.WithFields(logrus.Fields{
-			"event":       "refresh_token_reuse_detected",
-			"user_id":     userID,
-			"family_id":   familyID,
-			"token_id":    tokenID,
-			"via_revoked": reuseByRevoked,
-			"via_timing":  reuseByTiming,
-		}).Warn("Refresh-token reuse detected — revoked the entire token family")
-		return nil, ErrTokenReuseDetected
-	}
-
-	// Not a reuse — enforce expiry on the live token.
-	if time.Now().After(storedExpiresAt) {
-		return nil, ErrExpiredToken
-	}
-
-	// Update last_used_at to mark this token as used (for reuse detection)
-	// Then mark as revoked (instead of deleting, we keep it for audit)
-	updateQuery := `
+	var tokenID, familyID uuid.UUID
+	err = tx.QueryRow(`
 		UPDATE refresh_tokens
 		SET last_used_at = NOW(), is_revoked = true, revoked_at = NOW()
-		WHERE id = $1
-	`
-
-	_, err = r.db.Exec(updateQuery, tokenID)
+		WHERE token_hash = $1 AND user_id = $2 AND is_revoked = false AND expires_at > NOW()
+		RETURNING id, family_id
+	`, oldTokenHash, userID).Scan(&tokenID, &familyID)
+	if err == sql.ErrNoRows {
+		_ = tx.Rollback()
+		return nil, r.classifyRejectedRefresh(oldTokenHash, userID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to revoke old token: %w", err)
 	}
 
-	// Create new token in the same family (rotation)
-	newFamilyID, err := r.StoreRefreshToken(userID, newRefreshToken, &familyID, expiresAt, clientIP, userAgent)
+	// Create new token in the same family (rotation), in the same transaction.
+	newFamilyID, err := r.storeRefreshToken(tx, userID, newRefreshToken, &familyID, expiresAt, clientIP, userAgent)
 	if err != nil {
 		return nil, err
 	}
-
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit refresh rotation: %w", err)
+	}
 	return newFamilyID, nil
+}
+
+// classifyRejectedRefresh explains why the claiming UPDATE matched no row.
+//
+//   - no such token for this user            -> ErrInvalidToken
+//   - live but expired                       -> ErrExpiredToken
+//   - revoked by a rotation within rotationGrace
+//     (last_used_at == revoked_at, i.e. the
+//     rotation statement set both)           -> ErrInvalidToken, family untouched:
+//     this is the loser of a parallel refresh / a client retry
+//   - revoked any other time or way          -> reuse: revoke the family,
+// ErrTokenReuseDetected (the breach signal)
+//
+// Reuse detection runs BEFORE the expiry check for revoked rows, as before: a
+// replayed already-rotated token outranks "expired".
+func (r *RefreshTokenService) classifyRejectedRefresh(oldTokenHash string, userID uuid.UUID) error {
+	var tokenID, familyID uuid.UUID
+	var storedExpiresAt, lastUsedAt time.Time
+	var revokedAt sql.NullTime
+	var isRevoked bool
+	err := r.db.QueryRow(`
+		SELECT id, family_id, expires_at, is_revoked, revoked_at, last_used_at
+		FROM refresh_tokens
+		WHERE token_hash = $1 AND user_id = $2
+	`, oldTokenHash, userID).Scan(&tokenID, &familyID, &storedExpiresAt, &isRevoked, &revokedAt, &lastUsedAt)
+	if err == sql.ErrNoRows {
+		return ErrInvalidToken
+	}
+	if err != nil {
+		return fmt.Errorf("failed to query refresh token: %w", err)
+	}
+
+	if !isRevoked {
+		if time.Now().After(storedExpiresAt) {
+			return ErrExpiredToken
+		}
+		// Live and unexpired yet unclaimed: only possible if a concurrent
+		// rotation committed between the two statements. Treat as the race loser.
+		return ErrInvalidToken
+	}
+
+	rotatedRecently := revokedAt.Valid &&
+		!lastUsedAt.Before(revokedAt.Time) && // a rotation sets both to the same NOW()
+		time.Since(revokedAt.Time) <= rotationGrace
+	if rotatedRecently {
+		logrus.WithFields(logrus.Fields{
+			"event":     "refresh_token_rotation_race",
+			"user_id":   userID,
+			"family_id": familyID,
+			"token_id":  tokenID,
+		}).Info("Refresh token presented again within the rotation grace window — refused without revoking the family")
+		return ErrInvalidToken
+	}
+
+	// Revoke the entire family as a security measure.
+	if err := r.revokeTokenFamily(familyID, userID); err != nil {
+		return fmt.Errorf("failed to revoke token family after reuse detection: %w", err)
+	}
+	logrus.WithFields(logrus.Fields{
+		"event":     "refresh_token_reuse_detected",
+		"user_id":   userID,
+		"family_id": familyID,
+		"token_id":  tokenID,
+	}).Warn("Refresh-token reuse detected — revoked the entire token family")
+	return ErrTokenReuseDetected
 }
 
 // revokeTokenFamily revokes all tokens in a token family (used when reuse is detected)

@@ -70,19 +70,39 @@ func Logging() gin.HandlerFunc {
 	}
 }
 
-// internalVerifier validates HMAC-signed internal service calls.
+// internalVerifier validates HMAC-signed internal service calls. It is resolved
+// lazily from INTERNAL_AUTH_SECRET on first use and then kept for the life of
+// the process (a secret changed at runtime is deliberately not picked up).
+// SetInternalVerifier replaces it explicitly; passing nil forgets the cached
+// value so the next call re-resolves from the environment.
 var (
-	internalVerifier     *serviceauth.Verifier
-	internalVerifierOnce sync.Once
+	internalVerifierMu       sync.Mutex
+	internalVerifier         *serviceauth.Verifier
+	internalVerifierResolved bool
 )
 
 func getInternalVerifier() *serviceauth.Verifier {
-	internalVerifierOnce.Do(func() {
+	internalVerifierMu.Lock()
+	defer internalVerifierMu.Unlock()
+	if !internalVerifierResolved {
 		if secret := os.Getenv("INTERNAL_AUTH_SECRET"); secret != "" {
 			internalVerifier = serviceauth.NewVerifier(secret)
 		}
-	})
+		internalVerifierResolved = true
+	}
 	return internalVerifier
+}
+
+// SetInternalVerifier installs the verifier used for HMAC-signed internal
+// calls, overriding the lazily cached INTERNAL_AUTH_SECRET one. Passing nil
+// clears the cache so the next internal call re-resolves from the environment.
+// Production never calls it; tests use it so that which test first builds a
+// router cannot pin the secret for the rest of the package.
+func SetInternalVerifier(v *serviceauth.Verifier) {
+	internalVerifierMu.Lock()
+	defer internalVerifierMu.Unlock()
+	internalVerifier = v
+	internalVerifierResolved = v != nil
 }
 
 // isInternalServiceCall checks if the request is from an internal service.
@@ -205,6 +225,15 @@ func resolveTenantState() sharedmw.TenantStateChecker {
 	c := tenantStateChecker
 	tenantStateMu.Unlock()
 	return sharedmw.ResolveTenantStateChecker(c, "auth-service")
+}
+
+// SetDefaultRevocationChecker replaces the process-wide denylist reader that
+// RequireAuth uses when a call site does not pass WithRevocationChecker. It
+// exists so an integration test can point the REAL router at a Redis: the
+// default is otherwise resolved once, from REDIS_URL, on first use.
+func SetDefaultRevocationChecker(rc sharedmw.RevocationChecker) {
+	defaultRevocationOnce.Do(func() {})
+	defaultRevocation = rc
 }
 
 func getDefaultRevocationChecker() sharedmw.RevocationChecker {
@@ -346,9 +375,7 @@ func RequireAuth(cfg *config.Config, jwtService *auth.JWTService, options ...Aut
 			c.Abort()
 			return
 		}
-		if userRevocation, ok := revocation.(sharedmw.UserRevocationChecker); ok &&
-			claims.UserID != uuid.Nil &&
-			userRevocation.IsUserRevoked(c.Request.Context(), claims.UserID) {
+		if sharedmw.IsUserTokenRevoked(c.Request.Context(), revocation, claims.UserID, sharedmw.NumericDateTime(claims.IssuedAt)) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
 			c.Abort()
 			return
@@ -383,6 +410,13 @@ func RequireAuth(cfg *config.Config, jwtService *auth.JWTService, options ...Aut
 		}
 		if claims.ID != "" {
 			c.Set("jti", claims.ID)
+		}
+		// A PAT-derived token carries the scopes it was minted with.
+		// Surface them so RequirePermission & co. authorize each request against
+		// intersect(role permissions, token scopes) — without this a read-only PAT
+		// acts as the full user it belongs to.
+		if len(claims.Scopes) > 0 {
+			c.Set(sharedmw.CtxKeyTokenScopes, append([]string(nil), claims.Scopes...))
 		}
 
 		// Extract actor claims if present (for impersonation tokens)
@@ -434,6 +468,40 @@ func extractActorClaims(c *gin.Context, token string) {
 	}
 	if ua, ok := actClaims["ua"].(string); ok {
 		c.Set("act.ua", ua)
+	}
+}
+
+// RejectInternalCalls refuses HMAC-signed service-to-service calls. Mount it on
+// routes that exist for a signed-in human and must never be reachable with the
+// platform-wide INTERNAL_AUTH_SECRET: impersonation (which mints a session as
+// any user) and the platform-admin tenant configuration writes. RequireAuth
+// still lets an internal call through as userID "system"; the platform gates
+// below it (RequirePlatformIdentity, RequirePlatformPermission) honour that for
+// the few routes a service legitimately calls, so on the rest this is the line
+// that closes it. Place it right after RequireAuth.
+func RejectInternalCalls() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if internal, _ := c.Get("isInternalCall"); internal == true {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Not available to internal service calls"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// RejectScopedTokens refuses PAT-derived (scope-narrowed) tokens. For routes a
+// personal access token must never drive, such as minting or revoking API
+// tokens themselves — they carry no permission string the scope list could
+// be intersected with.
+func RejectScopedTokens() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if _, scoped := sharedmw.TokenScopesFromContext(c); scoped {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Not available to API tokens"})
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
 }
 
@@ -542,7 +610,8 @@ func RequireTenant() gin.HandlerFunc {
 // RateLimiting applies rate limiting using Redis-backed fixed-window counters.
 //
 // Failure semantics on Redis errors are endpoint-class-dependent:
-//   - Login / password-reset / register endpoints fail CLOSED (503). A silent
+//   - Every unauthenticated credential, token and signup endpoint
+//     (isAuthEndpoint) fails CLOSED (503). A silent
 //     bypass of brute-force protection during a Redis blip is exactly the
 //     class of bug this middleware exists to prevent.
 //   - All other endpoints fail OPEN — a transient Redis outage shouldn't
@@ -563,7 +632,7 @@ func RateLimiting(limiter *RateLimiter) gin.HandlerFunc {
 		// Check rate limit
 		allowed, retryAfter, err := limiter.Allow(c.Request.Context(), tenantID, endpoint)
 		if err != nil {
-			if isLoginEndpoint(endpoint) {
+			if isAuthEndpoint(endpoint) {
 				logrus.WithError(err).WithField("endpoint", endpoint).
 					Error("Rate limiter error on auth endpoint — failing closed")
 				c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -589,5 +658,11 @@ func RateLimiting(limiter *RateLimiter) gin.HandlerFunc {
 		}
 
 		c.Next()
+
+		// Give back the per-account attempts (AllowAction) that turned out to be
+		// successes: those limits count failures only.
+		if v, ok := c.Get(refundKeysCtx); ok && c.Writer.Status() < http.StatusBadRequest {
+			limiter.refund(c.Request.Context(), asStrings(v))
+		}
 	}
 }

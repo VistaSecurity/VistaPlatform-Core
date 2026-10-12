@@ -54,7 +54,7 @@ async function main() {
   
   const header = `# GENERATED: DO NOT EDIT. Source: standards/service-registry.yaml
 # This file contains application service definitions generated from the service registry.
-# Infrastructure services (postgres, redis, nats, influxdb) are defined in docker-compose.yml
+# Infrastructure services (postgres, redis, nats) are defined in docker-compose.yml
 # Last generated: ${new Date().toISOString()}
 
 `;
@@ -220,15 +220,6 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
     );
   }
 
-  if (['inventory-service', 'sensor-manager', 'cbom-service'].includes(service.name)) {
-    baseEnv.push(
-      'INFLUXDB_URL=http://influxdb:8086',
-      'INFLUXDB_TOKEN=${INFLUXDB_TOKEN:?Set INFLUXDB_TOKEN in .env}',
-      'INFLUXDB_ORG=crypto-inventory',
-      'INFLUXDB_BUCKET=metrics'
-    );
-  }
-  
   return baseEnv;
 }
 
@@ -239,10 +230,6 @@ function generateDependencies(service) {
   // Add service-specific dependencies
   if (declared.has('redis')) {
     deps.push('redis');
-  }
-  
-  if (['inventory-service', 'sensor-manager', 'cbom-service'].includes(service.name)) {
-    deps.push('influxdb');
   }
   
   if ([

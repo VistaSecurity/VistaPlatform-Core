@@ -334,14 +334,20 @@ func (h *CertificateHandler) SearchCertificates(c *gin.Context) {
 		filters.Algorithm = &algorithm
 	}
 	if ks := c.Query("key_size_min"); ks != "" {
-		if n, err := strconv.Atoi(ks); err == nil {
-			filters.KeySizeMin = &n
+		n, err := strconv.Atoi(ks)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid key_size_min: must be an integer"})
+			return
 		}
+		filters.KeySizeMin = &n
 	}
 	if ed := c.Query("expiring_days"); ed != "" {
-		if n, err := strconv.Atoi(ed); err == nil {
-			filters.ExpiringDays = &n
+		n, err := strconv.Atoi(ed)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid expiring_days: must be an integer"})
+			return
 		}
+		filters.ExpiringDays = &n
 	}
 
 	certificates, total, err := h.certificateService.GetCertificates(tenantUUID, filters)

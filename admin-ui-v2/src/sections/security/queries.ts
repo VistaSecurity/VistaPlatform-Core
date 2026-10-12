@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export type SecurityEvent = adminServiceComponents['schemas']['SecurityEvent'];
 export type PlatformSettings = adminServiceComponents['schemas']['PlatformSettings'];
@@ -80,8 +81,7 @@ export function useUpdateSecuritySettings() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (patch: Record<string, unknown>) => {
-      const { data, error } = await clients.admin.PUT('/admin/settings', { body: patch });
-      if (error || !data) throw error ?? new Error('Failed to save settings');
+      const data = unwrap(await clients.admin.PUT('/admin/settings', { body: patch }), 'Failed to save settings', { requireData: true });
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['platform', 'settings'] }),

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 	"github.com/vistasecurity/vistaplatform/shared/version"
@@ -274,7 +276,7 @@ func (h *AssetHandler) GetAssetByID(c *gin.Context) {
 
 	asset, err := h.assetService.GetAssetByID(tenantUUID, assetID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
+		h.writeAssetError(c, "get asset", "Asset not found", "Failed to get asset", err)
 		return
 	}
 
@@ -706,7 +708,7 @@ func (h *AssetHandler) CreateAsset(c *gin.Context) {
 			c.JSON(http.StatusAccepted, retained.Result)
 			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to create asset"})
+		h.writeAssetError(c, "create asset", "Asset not found", "Failed to create asset", err)
 		return
 	}
 
@@ -800,8 +802,14 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 		return
 	}
 
-	// Get old asset for audit logging
-	oldAsset, _ := h.assetService.GetAssetByID(tenantUUID, assetID)
+	// Get old asset for audit logging. A missing asset is a 404 before the body
+	// is even looked at; any other lookup failure only costs the audit its
+	// "old values" and is left for the write to report.
+	oldAsset, getErr := h.assetService.GetAssetByID(tenantUUID, assetID)
+	if getErr != nil && (errors.Is(getErr, sql.ErrNoRows) || errors.Is(getErr, services.ErrNotFound)) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
+		return
+	}
 
 	var input models.AssetInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -845,7 +853,7 @@ func (h *AssetHandler) UpdateAsset(c *gin.Context) {
 			})
 			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to update asset"})
+		h.writeAssetError(c, "update asset", "Asset not found", "Failed to update asset", err)
 		return
 	}
 
@@ -959,6 +967,28 @@ func (h *AssetHandler) EnrichAllAssets(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"updated": updated})
 }
 
+// writeAssetError maps a service error to the status it deserves: a missing
+// row is 404, something the caller sent wrong is 400, and everything else is
+// the server's fault, logged and answered 500. Mapping every error to one code
+// told clients their retry would help (or not) for the wrong reason.
+func (h *AssetHandler) writeAssetError(c *gin.Context, op, notFoundMsg, internalMsg string, err error) {
+	switch {
+	case errors.Is(err, sql.ErrNoRows), errors.Is(err, services.ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": notFoundMsg})
+	case errors.Is(err, services.ErrInvalidInput):
+		c.JSON(http.StatusBadRequest, gin.H{"error": validationMessage(err)})
+	default:
+		log.Printf("[AssetHandler] %s: %v", op, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": internalMsg})
+	}
+}
+
+// validationMessage is the caller-safe text of a validation error: the
+// service-authored message without the sentinel prefix.
+func validationMessage(err error) string {
+	return strings.TrimPrefix(err.Error(), services.ErrInvalidInput.Error()+": ")
+}
+
 // DeleteAsset handles DELETE /api/v1/assets/:id
 // Soft-deletes the asset and returns 204 on success.
 func (h *AssetHandler) DeleteAsset(c *gin.Context) {
@@ -984,7 +1014,7 @@ func (h *AssetHandler) DeleteAsset(c *gin.Context) {
 	oldAsset, _ := h.assetService.GetAssetByID(tenantUUID, assetID)
 
 	if err := h.assetService.DeleteAsset(tenantUUID, assetID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete asset"})
+		h.writeAssetError(c, "delete asset", "Asset not found", "Failed to delete asset", err)
 		return
 	}
 
@@ -1034,7 +1064,7 @@ func (h *AssetHandler) RestoreAsset(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to restore asset"})
+		h.writeAssetError(c, "restore asset", "Asset not found", "Failed to restore asset", err)
 		return
 	}
 
@@ -1211,6 +1241,14 @@ func (h *AssetHandler) GetAssetFacets(c *gin.Context) {
 // GetTenantActivitySummary handles GET /api/v1/inventory-service/tenant/:id/activity-summary
 // Returns activity metrics for a specific tenant (for tenant health service)
 func (h *AssetHandler) GetTenantActivitySummary(c *gin.Context) {
+	// INTERNAL ONLY. The tenant is named by the URL, not by the caller's token,
+	// so on the tenant JWT group any tenant user who learned another tenant's
+	// UUID could read that tenant's counts. Only tenant-health-service (a signed
+	// service call) reads this; the edge denies it too (internal_routes).
+	if !sharedmw.IsInternalCall(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "tenant activity summary is an internal service call"})
+		return
+	}
 	tenantIDStr := c.Param("id")
 	tenantID, err := uuid.Parse(tenantIDStr)
 	if err != nil {

@@ -13,16 +13,22 @@ vi.mock('@vistasecurity/primitives/platform-auth', () => ({
   usePlatformPermissions: () => ({ hasPermission: (p: string) => state.perms.has(p) }),
 }));
 vi.mock('react-hot-toast', () => ({ default: { success: vi.fn(), error: vi.fn() } }));
-vi.mock('./support-queries', () => ({
+vi.mock('../jobs/queries', async (orig) => ({
+  ...(await orig<typeof import('../jobs/queries')>()),
   useAdminJobs: () => ({
-    data: [
-      { id: 'j1', status: 'failed', job_type: 'interrogate', tenant_name: 'Acme', created_at: '2026-09-01T00:00:00Z' },
-      { id: 'j2', status: 'pending', job_type: 'interrogate', tenant_name: 'Acme', created_at: '2026-09-01T00:00:00Z' },
-    ],
+    data: {
+      jobs: [
+        { id: 'j1', status: 'failed', job_type: 'interrogate', tenant_name: 'Acme', created_at: '2026-09-01T00:00:00Z' },
+        { id: 'j2', status: 'pending', job_type: 'interrogate', tenant_name: 'Acme', created_at: '2026-09-01T00:00:00Z' },
+      ],
+      total: 2, page: 1, pageSize: 50,
+    },
     isLoading: false,
     isError: false,
     refetch: vi.fn(),
   }),
+}));
+vi.mock('./support-queries', () => ({
   useJobRepairMutations: () => ({
     retry: { mutate: vi.fn(), isPending: false },
     cancel: { mutate: vi.fn(), isPending: false },

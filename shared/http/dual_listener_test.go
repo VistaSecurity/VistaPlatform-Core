@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -134,9 +135,12 @@ func freePort(t *testing.T) string {
 
 func waitForListener(t *testing.T, addr string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	// Generous deadline: under heavy load the serving goroutine can be
+	// scheduled seconds late. The loop exits on the real condition (a
+	// successful dial), so the deadline is only ever spent on failure.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
 		if err == nil {
 			_ = conn.Close()
 			return
@@ -144,6 +148,60 @@ func waitForListener(t *testing.T, addr string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("listener at %s did not come up in time", addr)
+}
+
+// startPlainListener starts the UseMTLS=false listener on a fresh port and
+// returns once that listener is accepting. freePort releases its port before
+// the server binds it, so under load another process can take it in between;
+// when the server reports a bind failure on errCh, retry on a new port rather
+// than dialling whatever stole it and reporting a phantom pass or failure.
+func startPlainListener(t *testing.T, handler http.Handler) (*DualListeners, string) {
+	t.Helper()
+	const attempts = 5
+	for i := 0; i < attempts; i++ {
+		port := freePort(t)
+		dl, err := StartDualListeners(DualListenerConfig{
+			APIHandler: handler,
+			UseMTLS:    false,
+			APIPort:    port,
+			Logger:     log.New(io.Discard, "", 0),
+		})
+		if err != nil {
+			t.Fatalf("StartDualListeners: %v", err)
+		}
+		addr := "127.0.0.1:" + port
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case err := <-dl.errCh:
+				t.Logf("attempt %d on port %s failed to bind (%v); retrying on a new port", i+1, port, err)
+				_ = dl.Shutdown(context.Background())
+				goto retry
+			default:
+			}
+			conn, derr := net.DialTimeout("tcp", addr, time.Second)
+			if derr == nil {
+				_ = conn.Close()
+				// A dial can succeed against a thief that bound the port
+				// first; only accept it if our server did not report failure.
+				select {
+				case err := <-dl.errCh:
+					t.Logf("attempt %d on port %s failed to bind (%v); retrying on a new port", i+1, port, err)
+					_ = dl.Shutdown(context.Background())
+					goto retry
+				default:
+				}
+				t.Cleanup(func() { _ = dl.Shutdown(context.Background()) })
+				return dl, port
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		_ = dl.Shutdown(context.Background())
+		t.Fatalf("listener at %s did not come up in time", addr)
+	retry:
+	}
+	t.Fatalf("no listener bound after %d attempts", attempts)
+	return nil, ""
 }
 
 // TestStartDualListeners_MTLSSelectsTwoListeners is the load-bearing
@@ -241,33 +299,20 @@ func TestStartDualListeners_MTLSSelectsTwoListeners(t *testing.T) {
 // branch: a single plaintext listener on APIPort serving APIHandler, and
 // no separate probe listener is started (ProbeHandler is ignored).
 func TestStartDualListeners_PlainHTTPSingleListener(t *testing.T) {
-	port := freePort(t)
-
 	apiHandler := http.NewServeMux()
 	apiHandler.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, `{"status":"healthy"}`)
 	})
 
-	dl, err := StartDualListeners(DualListenerConfig{
-		APIHandler: apiHandler,
-		UseMTLS:    false,
-		APIPort:    port,
-	})
-	if err != nil {
-		t.Fatalf("StartDualListeners: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = dl.Shutdown(context.Background())
-	})
-
-	waitForListener(t, "127.0.0.1:"+port)
+	dl, port := startPlainListener(t, apiHandler)
 
 	if dl.probeServer != nil {
 		t.Fatalf("expected no probe server when UseMTLS is false")
 	}
 
-	resp, err := http.Get("http://127.0.0.1:" + port + "/health")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/health")
 	if err != nil {
 		t.Fatalf("plain HTTP request failed: %v", err)
 	}

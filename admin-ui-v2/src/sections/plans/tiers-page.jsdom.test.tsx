@@ -102,6 +102,10 @@ const realFetch = globalThis.fetch;
 const realRequest = globalThis.Request;
 
 const toastError = vi.fn();
+vi.mock('@vistasecurity/primitives/platform-auth', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, usePlatformPermissions: () => ({ hasPermission: () => true }) };
+});
 vi.mock('react-hot-toast', () => ({ default: { success: vi.fn(), error: (m: string) => toastError(m) } }));
 
 type PageModule = typeof import('./tiers-page');

@@ -15,9 +15,10 @@
 // and the agent check-in gates cannot come to disagree about who is blocked.
 //
 // Platform administrators are unaffected: they carry no tenant. A platform
-// administrator impersonating a user of a blocked tenant is also allowed — the
-// callers skip the check for impersonation tokens — so support can still look
-// at a suspended tenant's data.
+// administrator impersonating a user of a SUSPENDED tenant is allowed, so
+// support can still look at its data. Impersonating a deleted or purged tenant
+// is not: the middleware applies the same checker to impersonation tokens and
+// refuses CodeDeleted.
 package tenantstate
 
 import (
@@ -47,6 +48,13 @@ const (
 	// CodeUnavailable is returned with HTTP 503 when the state could not be
 	// read. Enforcement fails CLOSED: an unreadable state is not permission.
 	CodeUnavailable = "tenant_status_unavailable"
+	// CodeSSORequired is not a tenant-state block: the tenant is healthy, but
+	// its authentication policy is sso_only, so a LOCAL PASSWORD sign-in is
+	// refused. It rides the same BlockedError -> 403 plumbing the login
+	// handlers already have, so the refusal needs no new handler case. It is
+	// deliberately outside the tenant_suspended/tenant_deleted pair the web UI
+	// treats as "your session is dead".
+	CodeSSORequired = "sso_required"
 )
 
 // BlockedPaymentStatuses are the tenants.payment_status values that make a
@@ -93,6 +101,8 @@ func Message(code string) string {
 		return "Your organization's account has been deleted."
 	case CodeUnavailable:
 		return "Unable to verify your organization's account status. Please try again shortly."
+	case CodeSSORequired:
+		return "Your organization requires single sign-on. Sign in with your organization's identity provider."
 	default:
 		return "Your organization's account is not available."
 	}

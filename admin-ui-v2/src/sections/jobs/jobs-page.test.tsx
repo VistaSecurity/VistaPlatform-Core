@@ -29,7 +29,7 @@ const ok = (data: unknown): QState => ({ data, isLoading: false, isError: false,
 const render = () => renderToStaticMarkup(createElement(JobsPage));
 
 beforeEach(() => {
-  state.jobs = ok([]);
+  state.jobs = ok({ jobs: [], total: 0, page: 1, pageSize: 50 });
   state.queues = ok([]);
 });
 

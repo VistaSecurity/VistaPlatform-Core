@@ -36,9 +36,11 @@ export function validateInternalRoute(entry) {
 
 const hasParam = (p) => p.split('/').some((s) => s.startsWith(':'));
 
-// Escape a literal path segment for a Go regexp. Literal segments are limited
-// by validateInternalRoute to [a-z0-9._-], so only "." needs it.
-const reLiteral = (s) => s.replace(/[.]/g, '\\.');
+// Escape a literal path segment for a Go regexp: every RE2 metacharacter,
+// including the backslash itself, in one pass. Literal segments are limited by
+// validateInternalRoute to [a-z0-9._-], so today only "." is ever rewritten;
+// the escaper is complete so it stays correct if that charset widens.
+export const reLiteral = (s) => s.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&');
 
 /**
  * The Traefik matcher (no host clause) for one internal route at one API

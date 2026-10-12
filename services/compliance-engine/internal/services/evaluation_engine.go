@@ -59,6 +59,11 @@ type EvaluationSummary struct {
 	ControlsEvaluated   int
 	FindingsActivated   int
 	FindingsInactivated int
+	// FindingsWritten is the rows a pass created or rewrote (FindingsActivated
+	// also counts pairs confirmed already-correct). Meaningful only when
+	// WritesMeasured: the per-subject path sets both, the others leave them zero.
+	FindingsWritten int
+	WritesMeasured  bool
 }
 
 // reconcilePlan diffs the currently-stored ACTIVE (control, asset) findings against
@@ -130,11 +135,11 @@ func activationBatch(toActivate []controlSubject, findingByPair map[controlSubje
 // logFindingWrites reports what a pass actually wrote. `skipped` is the W2-13 signal: on
 // a converged tenant it should dominate, because a reconcile that changes nothing should
 // cost no row versions.
-func logFindingWrites(path string, tenantID uuid.UUID, stats findingWriteStats) {
+func logFindingWrites(ctx context.Context, path string, tenantID uuid.UUID, stats findingWriteStats) {
 	if stats.Processed() == 0 && stats.Failed == 0 {
 		return
 	}
-	log.Printf("[EvalEngine] %s finding writes tenant=%s created=%d updated=%d skipped=%d failed=%d",
+	passLogf(ctx, "[EvalEngine] %s finding writes tenant=%s created=%d updated=%d skipped=%d failed=%d",
 		path, tenantID, stats.Created, stats.Updated, stats.Skipped, stats.Failed)
 }
 
@@ -239,7 +244,7 @@ func (s *FindingsService) EvaluateTenantFrameworks(ctx context.Context, tenantID
 		}
 		summary.FindingsInactivated++
 	}
-	logFindingWrites("tenant", tenantID, stats)
+	logFindingWrites(ctx, "tenant", tenantID, stats)
 
 	// Score rollups for EVERY published framework (preview score for unactivated too),
 	// recomputed from the findings just persisted above — the same DB fold the scoped
@@ -361,7 +366,7 @@ func (s *FindingsService) EvaluateTenantFrameworkScoped(ctx context.Context, ten
 		}
 		summary.FindingsInactivated++
 	}
-	logFindingWrites("scoped", tenantID, stats)
+	logFindingWrites(ctx, "scoped", tenantID, stats)
 
 	// Refresh only this framework's score rollup, from persisted findings (DB fold).
 	if err := s.recomputeFrameworkScore(ctx, tenantID, frameworkID, controls); err != nil {
@@ -550,14 +555,17 @@ func (s *FindingsService) evaluateSubjects(ctx context.Context, tenantID uuid.UU
 	toActivate, toInactivate := reconcilePlan(storedActive, newViolations)
 	stats := s.upsertFindings(ctx, tenantID, activationBatch(toActivate, findingByPair))
 	summary.FindingsActivated = stats.Processed()
+	summary.FindingsWritten = stats.Created + stats.Updated
+	summary.WritesMeasured = stats.Failed == 0
 	for _, ca := range toInactivate {
 		if err := s.markFindingInactive(ctx, tenantID, ca.ControlID, ca.SubjectID); err != nil {
 			log.Printf("[EvalEngine] mark inactive failed (control=%s subject=%s): %v", ca.ControlID, ca.SubjectID, err)
+			summary.WritesMeasured = false
 			continue
 		}
 		summary.FindingsInactivated++
 	}
-	logFindingWrites(path, tenantID, stats)
+	logFindingWrites(ctx, path, tenantID, stats)
 
 	// Refresh score rollups for EVERY published framework from PERSISTED findings (a DB
 	// fold, not a re-evaluation) — see the doc comment for why not affected-only.
@@ -567,7 +575,7 @@ func (s *FindingsService) evaluateSubjects(ctx context.Context, tenantID uuid.UU
 		}
 	}
 
-	log.Printf("[EvalEngine] %s tenant=%s subjects=%d controls=%d activated=+%d inactivated=%d frameworks=%d",
+	passLogf(ctx, "[EvalEngine] %s tenant=%s subjects=%d controls=%d activated=+%d inactivated=%d frameworks=%d",
 		path, tenantID, len(subjects), summary.ControlsEvaluated, summary.FindingsActivated, summary.FindingsInactivated, len(controlsByFramework))
 	return summary, nil
 }
@@ -585,23 +593,15 @@ func (s *FindingsService) recomputeFrameworkScore(ctx context.Context, tenantID,
 		// A framework with no controls has nothing to assess: no score, not 100.
 		return s.upsertFrameworkScore(ctx, tenantID, frameworkID, scoreBreakdown{})
 	}
-	controlIDs := make([]uuid.UUID, len(controls))
+	scored := make([]scoredControl, len(controls))
 	for i, c := range controls {
-		controlIDs[i] = c.ID
+		scored[i] = scoredControl{ID: c.ID, BaselineSeverity: c.BaselineSeverity}
 	}
 	// evaluatedAt = now: this fold runs immediately after the reconcile evaluated
 	// these controls, and the rollup timestamp it is about to write does not exist
 	// yet. Passing it stops a control the reconcile just checked from being scored
 	// as "not evaluated since it changed" for one extra pass.
-	assessments, err := loadControlAssessmentsAt(ctx, s.db.DB, tenantID, controlIDs, "platform", time.Now())
-	if err != nil {
-		return err
-	}
-	outcomes := outcomesFromAssessments(controls,
-		func(c models.Control) uuid.UUID { return c.ID },
-		func(c models.Control) string { return c.BaselineSeverity },
-		assessments)
-	breakdown, err := frameworkScore(outcomes)
+	breakdown, err := scoreControls(ctx, s.db, tenantID, scored, "platform", time.Now())
 	if err != nil {
 		return err
 	}

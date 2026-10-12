@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -23,19 +22,11 @@ func ListPlatformUsers(db *sql.DB) gin.HandlerFunc {
 
 func listPlatformUsersWithStore(store platformUserStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		if page < 1 {
-			page = 1
+		paging, ok := ParseListPaging(c)
+		if !ok {
+			return
 		}
-		pageSizeStr := c.Query("page_size")
-		if pageSizeStr == "" {
-			pageSizeStr = c.DefaultQuery("limit", "20")
-		}
-		pageSize, _ := strconv.Atoi(pageSizeStr)
-		if pageSize == 0 || pageSize > 100 {
-			pageSize = 20
-		}
-		offset := (page - 1) * pageSize
+		page, pageSize, offset := paging.Page, paging.PageSize, paging.Offset
 
 		users, total, err := store.ListPlatformUsers(c.Request.Context(), platformUserListFilters{
 			Search:    strings.TrimSpace(c.Query("search")),

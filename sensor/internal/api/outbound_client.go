@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/hostid"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/httpclient"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch/planrun"
 )
@@ -110,7 +111,7 @@ func buildTLSTransport(cfg *config.Config) *http.Transport {
 	if !configured {
 		return nil
 	}
-	return &http.Transport{TLSClientConfig: tlsConfig}
+	return httpclient.NewTransport(tlsConfig)
 }
 
 // reconfigureTLS rebuilds the HTTP transport from the current cfg.Security.
@@ -118,7 +119,7 @@ func buildTLSTransport(cfg *config.Config) *http.Transport {
 // (heartbeat, command poll, discovery submit) use mTLS.
 func (c *OutboundClient) reconfigureTLS() {
 	if transport := buildTLSTransport(c.config); transport != nil {
-		c.httpClient.Transport = transport
+		httpclient.Swap(c.httpClient, transport)
 	}
 }
 

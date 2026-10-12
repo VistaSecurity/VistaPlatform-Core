@@ -31,7 +31,7 @@ type VersionAggregator struct {
 // NewVersionAggregator builds an aggregator from the peer URLs already
 // configured in monitoring-service. The runtime config keeps URLs for
 // the platform's infrastructure dependencies too (postgres, redis,
-// influxdb, api-gateway); those are not Go services we control, so the
+// api-gateway); those are not Go services we control, so the
 // caller filters them out.
 //
 // client is the HTTP client used to probe peers. The caller MUST inject an

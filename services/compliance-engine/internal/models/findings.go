@@ -20,19 +20,6 @@ type Finding struct {
 	UpdatedAt time.Time      `json:"updated_at" db:"updated_at"`
 }
 
-// RuleVulnerabilityMapping links a compliance rule to a class of findings
-type RuleVulnerabilityMapping struct {
-	ID               uuid.UUID      `json:"id" db:"id"`
-	RuleID           uuid.UUID      `json:"rule_id" db:"rule_id"`
-	FindingType      string         `json:"finding_type" db:"finding_type"`
-	Predicate        map[string]any `json:"predicate" db:"predicate"` // JSON logic-style filter
-	Weight           int            `json:"weight" db:"weight"`
-	FrameworkID      string         `json:"framework_id" db:"framework_id"`
-	FrameworkVersion string         `json:"framework_version" db:"framework_version"`
-	CreatedAt        time.Time      `json:"created_at" db:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at" db:"updated_at"`
-}
-
 // ComplianceFinding is the compliance producer's row in the ONE `findings`
 // table (ADR-0005 D3, workstream 3.1). It is not a table of its own any more:
 // every row it reads or writes carries `producer = 'compliance'` and

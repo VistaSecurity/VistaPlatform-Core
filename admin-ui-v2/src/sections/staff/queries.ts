@@ -2,9 +2,11 @@
 // admin client. Read hooks (useStaff/useRoles/usePermissions) + the full mutation
 // set for user lifecycle and role-metadata CRUD. All mutations go through
 // clients.admin (typed @vistasecurity/api-contract); no hand-rolled fetch.
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { fetchAllPages, type Paged } from '../../lib/paged';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export type PlatformUser = adminServiceComponents['schemas']['PlatformUser'];
 export type Role = adminServiceComponents['schemas']['Role'];
@@ -30,15 +32,30 @@ export function errMsg(e: unknown, fallback = 'Action failed'): string {
 
 // ── reads ─────────────────────────────────────────────────────────────────────
 
+const STAFF_PAGE = 200;
+const staffListQuery = {
+  queryKey: STAFF_KEY,
+  queryFn: (): Promise<Paged<PlatformUser>> =>
+    fetchAllPages(
+      async (page) => {
+        const { data, error } = await clients.admin.GET('/admin/users', { params: { query: { page, page_size: STAFF_PAGE } } });
+        if (error || !data) throw new Error('Failed to load staff');
+        return { items: data.users ?? [], total: data.pagination?.total };
+      },
+      { pageSize: STAFF_PAGE },
+    ),
+  staleTime: 60 * 1000,
+};
+
 export function useStaff() {
+  return useQuery({ ...staffListQuery, select: (r): PlatformUser[] => r.items });
+}
+
+/** Whether the roster hit the ceiling — same cache entry as `useStaff`. */
+export function useStaffTruncation() {
   return useQuery({
-    queryKey: STAFF_KEY,
-    queryFn: async (): Promise<PlatformUser[]> => {
-      const { data, error } = await clients.admin.GET('/admin/users', { params: { query: { page_size: 100 } } });
-      if (error || !data) throw new Error('Failed to load staff');
-      return data.users ?? [];
-    },
-    staleTime: 60 * 1000,
+    ...staffListQuery,
+    select: (r) => ({ truncated: r.truncated, total: r.total, shown: r.items.length }),
   });
 }
 
@@ -72,8 +89,7 @@ export function useCreateUser() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: CreateUserBody) => {
-      const { data, error } = await clients.admin.POST('/admin/users', { body });
-      if (error || !data) throw error ?? new Error('Failed to create user');
+      const data = unwrap(await clients.admin.POST('/admin/users', { body }), 'Failed to create user', { requireData: true });
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: STAFF_KEY }),
@@ -84,8 +100,7 @@ export function useInviteUser() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: InviteUserBody) => {
-      const { data, error } = await clients.admin.POST('/admin/users/invite', { body });
-      if (error || !data) throw error ?? new Error('Failed to invite user');
+      const data = unwrap(await clients.admin.POST('/admin/users/invite', { body }), 'Failed to invite user', { requireData: true });
       return data; // may carry invite_link when SMTP unconfigured
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: STAFF_KEY }),
@@ -96,8 +111,7 @@ export function useUpdateUser() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, body }: { id: string; body: UpdateUserBody }) => {
-      const { error } = await clients.admin.PUT('/admin/users/{id}', { params: { path: { id } }, body });
-      if (error) throw error;
+      unwrap(await clients.admin.PUT('/admin/users/{id}', { params: { path: { id } }, body }), 'Failed to update user');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: STAFF_KEY }),
   });
@@ -107,8 +121,7 @@ export function useDeleteUser() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.admin.DELETE('/admin/users/{id}', { params: { path: { id } } });
-      if (error) throw error;
+      unwrap(await clients.admin.DELETE('/admin/users/{id}', { params: { path: { id } } }), 'Failed to delete user');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: STAFF_KEY }),
   });
@@ -118,8 +131,7 @@ export function useSetPassword() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, body }: { id: string; body: SetPasswordBody }) => {
-      const { error } = await clients.admin.PUT('/admin/users/{id}/set-password', { params: { path: { id } }, body });
-      if (error) throw error;
+      unwrap(await clients.admin.PUT('/admin/users/{id}/set-password', { params: { path: { id } }, body }), 'Failed to set password');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: STAFF_KEY }),
   });
@@ -128,11 +140,18 @@ export function useSetPassword() {
 export function useSendPasswordReset() {
   return useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await clients.admin.POST('/admin/users/{id}/send-password-reset', { params: { path: { id } } });
-      if (error || !data) throw error ?? new Error('Failed to send reset');
+      const data = unwrap(await clients.admin.POST('/admin/users/{id}/send-password-reset', { params: { path: { id } } }), 'Failed to send reset', { requireData: true });
       return data; // may carry reset_link when SMTP unconfigured
     },
   });
+}
+
+/** Staff rows render role.display_name, so a role change must refresh them too. */
+function invalidateRolesAndStaff(qc: QueryClient) {
+  return Promise.all([
+    qc.invalidateQueries({ queryKey: ROLES_KEY }),
+    qc.invalidateQueries({ queryKey: STAFF_KEY }),
+  ]);
 }
 
 // ── role mutations (metadata only; permission-matrix write is BLOCKED) ─────
@@ -141,11 +160,10 @@ export function useCreateRole() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: CreateRoleBody) => {
-      const { data, error } = await clients.admin.POST('/admin/roles', { body });
-      if (error || !data) throw error ?? new Error('Failed to create role');
+      const data = unwrap(await clients.admin.POST('/admin/roles', { body }), 'Failed to create role', { requireData: true });
       return data;
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ROLES_KEY }),
+    onSuccess: () => invalidateRolesAndStaff(qc),
   });
 }
 
@@ -153,10 +171,9 @@ export function useUpdateRole() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, body }: { id: string; body: UpdateRoleBody }) => {
-      const { error } = await clients.admin.PUT('/admin/roles/{id}', { params: { path: { id } }, body });
-      if (error) throw error;
+      unwrap(await clients.admin.PUT('/admin/roles/{id}', { params: { path: { id } }, body }), 'Failed to update role');
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ROLES_KEY }),
+    onSuccess: () => invalidateRolesAndStaff(qc),
   });
 }
 
@@ -164,10 +181,9 @@ export function useDeleteRole() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.admin.DELETE('/admin/roles/{id}', { params: { path: { id } } });
-      if (error) throw error;
+      unwrap(await clients.admin.DELETE('/admin/roles/{id}', { params: { path: { id } } }), 'Failed to delete role');
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ROLES_KEY }),
+    onSuccess: () => invalidateRolesAndStaff(qc),
   });
 }
 
@@ -176,11 +192,10 @@ export function useSetRolePermissions() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, permissionIds }: { id: string; permissionIds: string[] }) => {
-      const { data, error } = await clients.admin.PUT('/admin/roles/{id}/permissions', {
+      const data = unwrap(await clients.admin.PUT('/admin/roles/{id}/permissions', {
         params: { path: { id } },
         body: { permission_ids: permissionIds },
-      });
-      if (error || !data) throw error ?? new Error('Failed to update role permissions');
+      }), 'Failed to update role permissions', { requireData: true });
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ROLES_KEY }),

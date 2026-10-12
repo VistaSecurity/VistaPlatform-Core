@@ -11,6 +11,7 @@ import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { StatusTag, money, num } from '../../components/ui/primitives';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type BillableItem = adminServiceComponents['schemas']['BillableItem'];
 type BillableItemInput = adminServiceComponents['schemas']['BillableItemInput'];
@@ -41,21 +42,14 @@ function useBillableItems() {
     staleTime: 5 * 60 * 1000,
   });
 }
-/** The server's 400 for a malformed default_value carries a `detail` naming the expected shape. */
-function apiDetail(err: unknown, fallback: string): string {
-  const d = (err as { detail?: unknown } | null)?.detail;
-  return typeof d === 'string' && d ? d : fallback;
-}
 function useSaveBillableItem() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, body }: { id?: string; body: BillableItemInput }) => {
       if (id) {
-        const { error } = await clients.admin.PUT('/admin/billable-items/{id}', { params: { path: { id } }, body });
-        if (error) throw new Error(apiDetail(error, 'Failed to update entitlement'));
+        unwrap(await clients.admin.PUT('/admin/billable-items/{id}', { params: { path: { id } }, body }), 'Failed to update entitlement');
       } else {
-        const { error } = await clients.admin.POST('/admin/billable-items', { body });
-        if (error) throw new Error(apiDetail(error, 'Failed to create entitlement'));
+        unwrap(await clients.admin.POST('/admin/billable-items', { body }), 'Failed to create entitlement');
       }
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
@@ -65,8 +59,7 @@ function useDeleteBillableItem() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.admin.DELETE('/admin/billable-items/{id}', { params: { path: { id } } });
-      if (error) throw new Error('Delete failed — the entitlement may be in use by a tier or tenant');
+      unwrap(await clients.admin.DELETE('/admin/billable-items/{id}', { params: { path: { id } } }), 'Delete failed — the entitlement may be in use by a tier or tenant');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
   });
@@ -179,8 +172,8 @@ function Group({ group, items, onEdit, onDelete }: {
               <td className="t-muted">{b.is_addon_eligible ? (b.default_addon_price_cents != null ? `${money(b.default_addon_price_cents / 100)}/mo` : 'yes') : '—'}</td>
               <td><StatusTag status={b.is_active ? 'active' : 'canceled'} /></td>
               <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                <button onClick={() => onEdit(b)} className="op-btn icon sm" title="Edit"><Pencil size={13} /></button>
-                <button onClick={() => onDelete(b)} className="op-btn icon sm danger" title="Delete" style={{ marginLeft: 4 }}><Trash2 size={13} /></button>
+                <button onClick={() => onEdit(b)} className="op-btn icon sm" title="Edit" aria-label="Edit"><Pencil size={13} /></button>
+                <button onClick={() => onDelete(b)} className="op-btn icon sm danger" title="Delete" aria-label="Delete" style={{ marginLeft: 4 }}><Trash2 size={13} /></button>
               </td>
             </tr>
           ))}

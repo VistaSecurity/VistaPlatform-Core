@@ -116,7 +116,12 @@ export function SensorsPage() {
   // no agents, this is the one place that says so. When there are agents but no
   // sensors, the note correctly reports the sensor fleet as empty and the agents
   // table renders below it.
-  const note = queryNote(q, bothLoaded && total === 0, {
+  //
+  // "Nothing registered" is a claim about BOTH fleets, so it is never made while
+  // the agents read has failed: with zero sensors, a failed device_agents fetch
+  // would otherwise say "No sensors or agents" over an unknown number of agents.
+  // (A failed sensors read is the error note itself, below.)
+  const note = queryNote(q, bothLoaded && total === 0 && !agentsQ.isError, {
     thing: 'sensors',
     emptyMessage: 'No sensors or agents are registered for this tenant yet.',
   });
@@ -205,6 +210,13 @@ export function SensorsPage() {
             );
           }}
         />
+      )}
+      {q.isError && (
+        // The sensors read failed (sensor-manager answers 503 when its store
+        // errors): say so, and offer the retry, rather than an empty fleet.
+        <div style={{ display: 'flex', justifyContent: 'center', marginTop: 12 }}>
+          <button className="ui-btn sm" onClick={() => { void q.refetch(); }}>Retry</button>
+        </div>
       )}
 
       {/* B-28: a failed agents fetch must say so, not silently render as "no

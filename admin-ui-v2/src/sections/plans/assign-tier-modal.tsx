@@ -29,7 +29,8 @@ import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { usePlatformEdition } from '../../lib/edition';
-import { serverError, useTenants } from '../tenants/queries';
+import { useTenants } from '../tenants/queries';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type SubscriptionTier = adminServiceComponents['schemas']['SubscriptionTier'];
 
@@ -68,11 +69,10 @@ export function AssignTierModal({ tier, onClose }: { tier: SubscriptionTier; onC
 
   const assign = useMutation({
     mutationFn: async () => {
-      const { error: apiError } = await clients.admin.POST('/admin/tiers/{id}/assign', {
+      unwrap(await clients.admin.POST('/admin/tiers/{id}/assign', {
         params: { path: { id: tier.id } },
         body: { tenant_id: effectiveTenantId, reason: reason.trim() },
-      });
-      if (apiError) throw new Error(serverError(apiError, 'Failed to assign plan'));
+      }), 'Failed to assign plan');
     },
     onSuccess: () => {
       toast.success(`Assigned ${tier.display_name || tier.name}${selected ? ` to ${selected.name}` : ''}`);

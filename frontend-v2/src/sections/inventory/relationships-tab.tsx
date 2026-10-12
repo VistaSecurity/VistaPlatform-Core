@@ -16,6 +16,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import type { Asset } from '@vistasecurity/api-contract';
 import { Icon } from '../../components/ui';
 import {
@@ -300,7 +301,7 @@ function AddRelationshipModal({ asset, onClose }: { asset: Asset; onClose: () =>
   // The asset picker speaks the query language, like everything else that
   // searches inventory here — a quoted free-text term, which is what the
   // search box compiles to.
-  const term = search.trim();
+  const term = useDebouncedValue(search).trim();
   const results = useAssetsQuery(term ? JSON.stringify(term) : '', 1, term.length >= 2);
   const candidates = useMemo(
     () => (results.data?.assets ?? []).filter((a) => a.id !== asset.id).slice(0, 8),

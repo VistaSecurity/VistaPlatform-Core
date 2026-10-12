@@ -15,6 +15,7 @@ import type { QueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { clients } from '../../lib/clients';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
 
 export type ClassProposal = inventoryComponents['schemas']['ClassProposal'];
 export type ClassOption = inventoryComponents['schemas']['ClassOption'];
@@ -79,6 +80,20 @@ export function useClassProposals(enabled = true, offset = 0) {
   });
 }
 
+/** Just the size of the pending class queue (the "awaiting review" banner). */
+export function useClassProposalCount() {
+  return useQuery({
+    queryKey: ['discovery', 'class-proposals', 'count'],
+    queryFn: async (): Promise<number> => {
+      const { data, error } = await clients.inventory.GET('/approvals/classes', {
+        params: { query: { status: 'pending', limit: 1, offset: 0 } },
+      });
+      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to load class proposals');
+      return readClassProposalPage(data).total;
+    },
+  });
+}
+
 function invalidateClassProposals(qc: QueryClient) {
   void qc.invalidateQueries({ queryKey: ['discovery', 'class-proposals'] });
   // Accepting one changes the asset's class, so anything showing a class is
@@ -100,16 +115,14 @@ export function useDecideClassProposal() {
   return useMutation({
     mutationFn: async (input: { id: string; action: 'accept' | 'reject'; classKey?: string }) => {
       if (input.action === 'accept') {
-        const { error } = await clients.inventory.POST('/approvals/classes/{id}/accept', {
+        unwrap(await clients.inventory.POST('/approvals/classes/{id}/accept', {
           params: { path: { id: input.id } },
           body: input.classKey ? { class_key: input.classKey } : {},
-        });
-        if (error) throw new Error(errorMessage(error) ?? 'Failed to accept the class');
+        }), 'Failed to accept the class');
       } else {
-        const { error } = await clients.inventory.POST('/approvals/classes/{id}/reject', {
+        unwrap(await clients.inventory.POST('/approvals/classes/{id}/reject', {
           params: { path: { id: input.id } },
-        });
-        if (error) throw new Error(errorMessage(error) ?? 'Failed to reject the class');
+        }), 'Failed to reject the class');
       }
       return input;
     },

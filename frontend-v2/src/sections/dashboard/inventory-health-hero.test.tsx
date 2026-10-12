@@ -32,7 +32,7 @@ const FACET_KEY = ['inventory', 'assets', 'facets', '', 'class,status,stale_stat
  * live hero read 0.
  */
 const PENDING_KEY = ['inventory', 'assets', 'facets', HERO_PENDING_QUERY, 'status'];
-const HYGIENE_KEY = ['posture', 'available-frameworks'];
+const HYGIENE_KEY = ['compliance', 'frameworks-available'];
 
 type Facets = { buckets: Record<string, { value: string; count: number; label?: string }[]>; failed: string[] };
 

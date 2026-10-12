@@ -202,7 +202,7 @@ func main() {
 	// artifacts — the supported Core outcome.
 	var cbomSigner cbom.Signer
 	if hooks.NewSigner != nil {
-		s, signerErr := hooks.NewSigner()
+		s, signerErr := hooks.NewSigner(db.SQLDB())
 		if signerErr != nil {
 			log.Printf("[cbom-sign] %v — artifacts will be generated unsigned", signerErr)
 		} else {

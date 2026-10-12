@@ -2,6 +2,7 @@
 // SSO) — ported from the mock's settings/sectionF.jsx with live typed queries:
 // tenant users + roles from auth-service RBAC, SSO providers + authentication
 // policy from the tenant SSO surface. Read views; invite/edit flows follow.
+import { rolesQuery } from './roles-query';
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@vistasecurity/primitives/auth';
@@ -18,6 +19,7 @@ import type { TenantRole } from './role-logic';
 import { ssoProvidersQuery, authPolicyQuery } from './sso-queries';
 import type { SettingsNavItem } from './nav';
 import type { authServiceComponents as AuthC } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
 
 // Stable role accent — fixed hues for the common role archetypes (mirrors the
 // mock's ROLE_COLOR), hashed fallback for tenant-defined roles.
@@ -159,15 +161,13 @@ function PendingInvitations({ tenantId }: { tenantId: string }) {
 
   const revoke = useMutation({
     mutationFn: async (id: string) => {
-      const { error, response } = await clients.auth.DELETE('/tenant/{tenantId}/invitations/{id}', { params: { path: { tenantId, id } } });
-      if (error || !response.ok) throw new Error('Failed to revoke');
+      unwrap(await clients.auth.DELETE('/tenant/{tenantId}/invitations/{id}', { params: { path: { tenantId, id } } }), 'Failed to revoke');
     },
     onSuccess: invalidate,
   });
   const resend = useMutation({
     mutationFn: async (id: string) => {
-      const { error, response } = await clients.auth.POST('/tenant/{tenantId}/invitations/{id}/resend', { params: { path: { tenantId, id } } });
-      if (error || !response.ok) throw new Error('Failed to resend');
+      unwrap(await clients.auth.POST('/tenant/{tenantId}/invitations/{id}/resend', { params: { path: { tenantId, id } } }), 'Failed to resend');
     },
     onSuccess: invalidate,
   });
@@ -214,17 +214,7 @@ export function RolesPage({ meta }: { meta: SettingsNavItem }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteRole, setDeleteRole] = useState<TenantRole | null>(null);
 
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ['settings', 'roles', tenantId],
-    enabled: !!tenantId,
-    queryFn: async () => {
-      const { data, error } = await clients.auth.GET('/tenant/{tenantId}/roles', {
-        params: { path: { tenantId: tenantId! } },
-      });
-      if (error || !data) throw new Error('Failed to load roles');
-      return data;
-    },
-  });
+  const { data, isLoading, isError } = useQuery(rolesQuery(tenantId));
   const roles = data?.roles ?? [];
 
   return (
@@ -345,8 +335,7 @@ function ProviderTestButton({ provider }: { provider: SSOProvider }) {
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
   const mutation = useMutation({
     mutationFn: async () => {
-      const { data, error, response } = await clients.auth.POST('/tenant/sso/providers/{id}/test', { params: { path: { id: provider.id } } });
-      if (error || !response.ok || !data) throw new Error('Test request failed');
+      const data = unwrap(await clients.auth.POST('/tenant/sso/providers/{id}/test', { params: { path: { id: provider.id } } }), 'Test request failed', { requireData: true });
       return data;
     },
     onSuccess: (d) => setResult({ ok: d.status === 'success', message: d.message || d.status }),

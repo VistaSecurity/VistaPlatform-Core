@@ -277,7 +277,7 @@ func TestIntegration_UpdateUser_RefusesRoleAboveActorCeiling(t *testing.T) {
 	target := e.newUserWithRole(t, "target-update@example.com", "viewer")
 
 	eng := e.engine(actor, func(g *gin.RouterGroup) {
-		g.PUT("/users/:id", UpdateUser(e.owner))
+		g.PUT("/users/:id", UpdateUser(e.owner, nil))
 	})
 	w := do(eng, http.MethodPut, "/api/v1/auth-service/users/"+target.String(), strings.NewReader(`{"role":"tenant_admin"}`))
 
@@ -293,7 +293,7 @@ func TestIntegration_UpdateUser_AllowsRoleWithinActorCeiling(t *testing.T) {
 	target := e.newUserWithRole(t, "target-update-ok@example.com", "viewer")
 
 	eng := e.engine(actor, func(g *gin.RouterGroup) {
-		g.PUT("/users/:id", UpdateUser(e.owner))
+		g.PUT("/users/:id", UpdateUser(e.owner, nil))
 	})
 	w := do(eng, http.MethodPut, "/api/v1/auth-service/users/"+target.String(), strings.NewReader(`{"role":"security_admin"}`))
 

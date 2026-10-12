@@ -99,14 +99,93 @@ previous release's row.
 SELECT 1 FROM public.schema_migration_status WHERE schema_hash = '{{ include "vistaplatform.schemaHash" . }}'
 {{- end -}}
 
-{{/* Name of the chart-managed Secret holding generated datastore creds. */}}
-{{- define "vistaplatform.generatedSecretName" -}}
-{{- printf "%s-generated" (include "vistaplatform.fullname" .) -}}
+{{/*
+The query used when schemaMigration.enabled=false: this chart then never writes
+the completion marker, so a reader (seed-data, each backend's wait-for-schema)
+can only check that the operator's own schema exists. Prints 1 once
+public.tenants does. One definition, so the readers cannot drift apart.
+*/}}
+{{- define "vistaplatform.schemaSentinelQuery" -}}
+SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='tenants'
 {{- end -}}
 
-{{/* Name of the chart-managed Secret holding this install's identity (secrets-install.yaml). */}}
+{{/*
+Name of the Secret holding the datastore credentials (postgres-password,
+redis-password, nats-token). The chart-managed `<fullname>-generated` unless
+platform.existingDatastoreSecretName names a Secret you pre-created (GitOps).
+*/}}
+{{- define "vistaplatform.generatedSecretName" -}}
+{{- if .Values.platform.existingDatastoreSecretName -}}
+{{- .Values.platform.existingDatastoreSecretName -}}
+{{- else -}}
+{{- printf "%s-generated" (include "vistaplatform.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Name of the Secret holding this install's identity (install-id, signing-key.pem):
+the chart-managed `<fullname>-install` (secrets-install.yaml) unless
+install.existingSecretName names a pre-created one.
+*/}}
 {{- define "vistaplatform.installSecretName" -}}
+{{- if (.Values.install | default dict).existingSecretName -}}
+{{- .Values.install.existingSecretName -}}
+{{- else -}}
 {{- printf "%s-install" (include "vistaplatform.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+platform.generateSecrets (default true). When false the chart renders NO
+Secret whose content it would have to generate, so a template-only render
+(Argo CD, Flux, `helm template | kubectl apply`) can never regenerate a
+credential. Prints "true" or nothing, for use in `if`.
+*/}}
+{{- define "vistaplatform.generateSecrets" -}}
+{{- if or (kindIs "invalid" .Values.platform.generateSecrets) .Values.platform.generateSecrets -}}true{{- end -}}
+{{- end -}}
+
+{{/*
+Render-time guard for platform.generateSecrets=false: every Secret the chart
+would otherwise have generated must be named, and pre-created by you. Called
+once from secrets-platform.yaml so it fires on every render.
+*/}}
+{{- define "vistaplatform.requirePrecreatedSecrets" -}}
+{{- if not (include "vistaplatform.generateSecrets" .) -}}
+{{- $missing := list -}}
+{{- if not .Values.platform.existingSecretName -}}
+{{- $missing = append $missing "platform.existingSecretName (keys: jwt-secret, internal-auth-secret, encryption-master-key)" -}}
+{{- end -}}
+{{- if not .Values.platform.existingDatastoreSecretName -}}
+{{- $missing = append $missing "platform.existingDatastoreSecretName (keys: postgres-password, redis-password, nats-token)" -}}
+{{- end -}}
+{{- $inst := .Values.install | default dict -}}
+{{- if not (or $inst.existingSecretName (and $inst.id $inst.signingKeyPEM)) -}}
+{{- $missing = append $missing "install.existingSecretName (keys: install-id, signing-key.pem) — or pin BOTH install.id and install.signingKeyPEM" -}}
+{{- end -}}
+{{- if and .Values.jwtSigning.enabled (not .Values.jwtSigning.existingSecretName) -}}
+{{- $missing = append $missing "jwtSigning.existingSecretName (key: signing-key.pem) — or set jwtSigning.enabled=false" -}}
+{{- end -}}
+{{- $cs := .Values.cbomSigning | default dict -}}
+{{- if not (or $cs.existingSecretName $cs.keyPEM) -}}
+{{- $missing = append $missing "cbomSigning.existingSecretName (key: signing-key.pem) — or pin cbomSigning.keyPEM" -}}
+{{- end -}}
+{{- if eq .Values.tls.mode "selfSigned" -}}
+{{- $missing = append $missing "tls.mode=certManager or existingSecret (selfSigned generates a certificate into a Secret on every template-only render)" -}}
+{{- end -}}
+{{- if $missing -}}
+{{- fail (printf "platform.generateSecrets=false: the chart will not generate any Secret, so you must pre-create these and name them:\n  - %s\nSee docsv4/core/operate/deployment/production-checklist.md (GitOps)." (join "\n  - " $missing)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Name of the chart-managed Secret holding the CBOM artifact signing key (secrets-cbom-signing.yaml). */}}
+{{- define "vistaplatform.cbomSigningSecretName" -}}
+{{- if (.Values.cbomSigning | default dict).existingSecretName -}}
+{{- .Values.cbomSigning.existingSecretName -}}
+{{- else -}}
+{{- printf "%s-cbom-signing" (include "vistaplatform.fullname" .) -}}
+{{- end -}}
 {{- end -}}
 
 {{/* Name of the PVC admin-service writes licence usage reports to (license-reports-pvc.yaml). */}}
@@ -263,18 +342,50 @@ database layer directly. */}}
 {{- end -}}
 {{- end -}}
 
+{{/* External-datastore and storage coupling checks (pure render-time).
+
+The bundled datastores write their connection material into the generated
+Secret (secrets-generated.yaml). The PLATFORM Secret (secrets-platform.yaml)
+only ever carries jwt-secret, internal-auth-secret and encryption-master-key,
+yet with datastores.postgres.enabled=false every backend, the schema-migration
+Job and the seed Job read `database-url` from it, and with
+datastores.redis.enabled=false the backends read `redis-url`. Rendered green,
+the pods then sit in CreateContainerConfigError. So an external Postgres or
+Redis requires the operator's own Secret (platform.existingSecretName) carrying
+those keys.
+
+NATS has no external path at all: the URL is hardcoded to the bundled service
+(configmap-app.yaml, backend/_deployment.tpl) and the token comes from the
+generated Secret, so datastores.nats.enabled=false would yield pods that cannot
+connect to anything. Refuse it instead of rendering a broken install. */}}
+{{- define "vistaplatform.validateDatastores" -}}
+{{- if not .Values.datastores.postgres.enabled -}}
+{{- if not .Values.platform.existingSecretName -}}
+{{- fail "datastores.postgres.enabled=false (external PostgreSQL) requires platform.existingSecretName: the chart-generated platform Secret has no `database-url` key, so every backend and the schema-migration/seed Jobs would fail with CreateContainerConfigError. Pre-create a Secret holding jwt-secret, internal-auth-secret, encryption-master-key and database-url (plus redis-url when datastores.redis.enabled=false) and set platform.existingSecretName to its name." -}}
+{{- end -}}
+{{- end -}}
+{{- if not .Values.datastores.redis.enabled -}}
+{{- if not .Values.platform.existingSecretName -}}
+{{- fail "datastores.redis.enabled=false (external Redis) requires platform.existingSecretName: the chart-generated platform Secret has no `redis-url` key, so backends that use Redis would fail with CreateContainerConfigError. Pre-create a Secret holding jwt-secret, internal-auth-secret, encryption-master-key and redis-url (plus database-url when datastores.postgres.enabled=false) and set platform.existingSecretName to its name." -}}
+{{- end -}}
+{{- end -}}
+{{- if not .Values.datastores.nats.enabled -}}
+{{- fail "datastores.nats.enabled=false is not supported: the NATS URL and token are wired to the bundled NATS service, and there is no external-NATS path yet, so the install would render but no service could connect to the event bus. Keep datastores.nats.enabled=true." -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "vistaplatform.validateMtls" -}}
 {{- $pgTls := .Values.datastores.postgres.tls.enabled -}}
 {{- $natsTls := .Values.datastores.nats.tls.enabled -}}
 {{- if and $pgTls (not .Values.serviceMtls.enabled) -}}
-{{- fail "datastores.postgres.tls.enabled=true requires serviceMtls.enabled=true (Postgres TLS reuses the Platform-CA client certs serviceMtls provisions). To turn encrypted internal transport OFF, set serviceMtls.enabled, datastores.postgres.tls.enabled and datastores.nats.tls.enabled all to false." -}}
+{{- fail "datastores.postgres.tls.enabled=true requires serviceMtls.enabled=true (Postgres TLS reuses the Platform-CA client certs serviceMtls provisions). To turn encrypted internal transport OFF, set serviceMtls.enabled, datastores.postgres.tls.enabled, datastores.nats.tls.enabled and agentMtls.enabled all to false." -}}
 {{- end -}}
 {{- if and $natsTls (not .Values.serviceMtls.enabled) -}}
-{{- fail "datastores.nats.tls.enabled=true requires serviceMtls.enabled=true (NATS mTLS reuses the per-service certs serviceMtls provisions). To turn encrypted internal transport OFF, set serviceMtls.enabled, datastores.postgres.tls.enabled and datastores.nats.tls.enabled all to false." -}}
+{{- fail "datastores.nats.tls.enabled=true requires serviceMtls.enabled=true (NATS mTLS reuses the per-service certs serviceMtls provisions). To turn encrypted internal transport OFF, set serviceMtls.enabled, datastores.postgres.tls.enabled, datastores.nats.tls.enabled and agentMtls.enabled all to false." -}}
 {{- end -}}
 {{- if .Values.agentMtls.enabled -}}
 {{- if not .Values.serviceMtls.enabled -}}
-{{- fail "agentMtls.enabled=true requires serviceMtls.enabled=true — the agent/sensor mTLS listener reuses the per-service mesh cert (Secret <svc>-mtls mounted at /app/certs). Enable serviceMtls first." -}}
+{{- fail "agentMtls.enabled=true requires serviceMtls.enabled=true — the agent/sensor mTLS listener reuses the per-service mesh cert (Secret <svc>-mtls mounted at /app/certs). Enable serviceMtls first, or opt out of the mesh entirely by setting serviceMtls.enabled, datastores.postgres.tls.enabled, datastores.nats.tls.enabled and agentMtls.enabled all to false." -}}
 {{- end -}}
 {{/*
   Every configured agentMtls backend needs a dnsName. Without one,
@@ -344,7 +455,7 @@ database layer directly. */}}
      kube-system is only ever absent when we're offline (template/dry-run). */}}
 {{- $ns := lookup "v1" "Namespace" "" "kube-system" -}}
 {{- if $ns -}}
-{{- fail (printf "serviceMtls.enabled=true but cert-manager is not installed in this cluster (CRD certificates.cert-manager.io not found). Encrypted internal transport is ON by default (#965) and REQUIRES cert-manager v1.13+ (issues the Platform CA + per-service certs) and Stakater Reloader (restarts pods on cert rotation). Install both prerequisites, or opt out by setting serviceMtls.enabled, datastores.postgres.tls.enabled and datastores.nats.tls.enabled all to false. See docsv4/core/operate/deployment/rke2-v1/deployment-guide.md.") -}}
+{{- fail (printf "serviceMtls.enabled=true but cert-manager is not installed in this cluster (CRD certificates.cert-manager.io not found). Encrypted internal transport is ON by default (#965) and REQUIRES cert-manager v1.13+ (issues the Platform CA + per-service certs) and Stakater Reloader (restarts pods on cert rotation). Install both prerequisites, or opt out by setting serviceMtls.enabled, datastores.postgres.tls.enabled, datastores.nats.tls.enabled and agentMtls.enabled all to false. See docsv4/core/operate/deployment/production-checklist.md (Cluster prerequisites the chart does not install).") -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -433,4 +544,43 @@ OPENAI_API_KEY
 {{- else -}}
 ANTHROPIC_API_KEY
 {{- end -}}
+{{- end -}}
+
+{{/* imagePullSecrets block for a pod spec, from image.pullSecrets. Emits nothing when
+   the list is empty. Include it in EVERY pod spec (backends, frontends, datastores,
+   Jobs, the helm-test pod): a private registry needs it on all of them.
+   Usage: {{- with include "vistaplatform.pullSecrets" . }}{{- . | nindent 6 }}{{- end }} */}}
+{{- define "vistaplatform.pullSecrets" -}}
+{{- with .Values.image.pullSecrets -}}
+imagePullSecrets:
+{{- range . }}
+  - name: {{ . }}
+{{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/* helm-test (smoke) pod image: smokeTest.image.registry (default image.registry) / repository : tag, or @digest when set. */}}
+{{- define "vistaplatform.smokeImage" -}}
+{{- $img := .Values.smokeTest.image -}}
+{{- $registry := default .Values.image.registry $img.registry -}}
+{{- if $img.digest -}}
+{{- printf "%s/%s@%s" $registry $img.repository $img.digest -}}
+{{- else -}}
+{{- printf "%s/%s:%s" $registry $img.repository $img.tag -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Comma-separated peers auth-service trusts to supply X-Forwarded-For
+(TRUSTED_PROXY_CIDRS). Defaults to the private ranges, which is where an in-cluster
+ingress controller lives; a values file written before trustedProxyCIDRs existed
+(--reuse-values) gets the same default rather than an empty list, because an empty
+list makes every client share the ingress's address.
+*/}}
+{{- define "vistaplatform.trustedProxyCIDRs" -}}
+{{- $cidrs := list "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "fc00::/7" -}}
+{{- if hasKey .Values "trustedProxyCIDRs" -}}
+{{- $cidrs = .Values.trustedProxyCIDRs | default list -}}
+{{- end -}}
+{{- join "," $cidrs -}}
 {{- end -}}

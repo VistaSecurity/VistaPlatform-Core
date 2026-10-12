@@ -43,9 +43,18 @@ func (s *stubLegacySensorService) GetSensor(uuid.UUID) (*models.Sensor, error) {
 	return s.getSensor, s.getSensorErr
 }
 func (s *stubLegacySensorService) UpdateSensor(*models.Sensor) error { return s.updateErr }
+func (s *stubLegacySensorService) UpdateSensorFields(uuid.UUID, uuid.UUID, models.SensorEdit) error {
+	return s.updateErr
+}
+func (s *stubLegacySensorService) ApplySensorInterfaceChange(_ context.Context, _, _ uuid.UUID, add, _ []string) ([]string, error) {
+	if s.updateErr != nil {
+		return nil, s.updateErr
+	}
+	return add, nil
+}
 
 func (s *stubLegacySensorService) AcknowledgeCommand(string, string, *models.CommandResponse) error {
-	return nil
+	return s.updateErr
 }
 func (s *stubLegacySensorService) CountPendingSensors(uuid.UUID) (int, error) { return 0, nil }
 func (s *stubLegacySensorService) CreatePendingSensor(*models.PendingSensorRegistration) error {
@@ -76,8 +85,7 @@ func (s *stubLegacySensorService) MarkCommandsAsDelivered(string, []string) erro
 func (s *stubLegacySensorService) RegisterSensor(*models.SensorRegistration) (*models.Sensor, error) {
 	return nil, nil
 }
-func (s *stubLegacySensorService) StoreAirGappedExport(*models.AirGappedExport) error { return nil }
-func (s *stubLegacySensorService) StoreDiscoveries(*models.DiscoveryBatch) error      { return nil }
+func (s *stubLegacySensorService) StoreDiscoveries(*models.DiscoveryBatch) error { return nil }
 func (s *stubLegacySensorService) UpdateSensorHealth(string, *models.SensorHealth) error {
 	return nil
 }

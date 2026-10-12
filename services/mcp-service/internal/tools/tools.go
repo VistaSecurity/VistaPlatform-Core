@@ -13,7 +13,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -34,11 +33,21 @@ type Deps struct {
 	// bulk tenant data to a non-human consumer — so successful reads are logged,
 	// not just failures.
 	Audit *auditlog.Recorder
+	// AuditFailOpen lets a read succeed when its audit record cannot be
+	// written. The zero value fails closed: the read is the sensitive act, so a
+	// read nobody can later account for is not served.
+	AuditFailOpen bool
+	// MaxResultBytes caps one tool result; zero means DefaultMaxResultBytes.
+	MaxResultBytes int
 }
 
 // pruneKeys are stripped from every tool response — large payload fields
 // that exist for machine re-verification, not for conversational use.
 var pruneKeys = []string{"certificate_pem", "raw_data", "inline_content"}
+
+// ErrAuditUnavailable is returned in place of data when the audit record for a
+// read could not be written and MCP_AUDIT_FAIL_OPEN is not set.
+var ErrAuditUnavailable = errors.New("audit unavailable: this read was not served because it could not be recorded; retry shortly")
 
 var errPermission = errors.New("api token lacks the permission required by this tool")
 
@@ -65,40 +74,48 @@ func (d *Deps) run(ctx context.Context, req *mcp.CallToolRequest, perm string, a
 	}
 
 	started := time.Now()
-	record := func(tc auditlog.ToolCall) {
+	record := func(tc auditlog.ToolCall) error {
 		tc.Tool = tool
 		tc.Permission = perm
 		tc.Identity = g.Identity()
 		tc.Request = platform.RequestContextFrom(ctx)
 		tc.Args = args
 		tc.Duration = time.Since(started)
-		d.Audit.RecordToolCall(ctx, tc)
+		return d.Audit.RecordToolCall(ctx, tc)
 	}
 
 	if !g.HasPermission(perm) {
 		err := fmt.Errorf("%w: needs %q (token has %v) — mint a token including this permission in My Profile → API Tokens", errPermission, perm, g.Permissions)
-		record(auditlog.ToolCall{Denied: true, Err: err})
+		_ = record(auditlog.ToolCall{Denied: true, Err: err})
 		return nil, nil, err
 	}
 
 	v, err := body()
 	if err != nil {
-		record(auditlog.ToolCall{Err: err})
+		_ = record(auditlog.ToolCall{Err: err})
 		return nil, nil, err
 	}
 
 	v = platform.Prune(v, pruneKeys...)
-	b, err := json.Marshal(v)
+	maxBytes := d.MaxResultBytes
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxResultBytes
+	}
+	_, b, forCount, _, err := envelope(v, maxBytes)
 	if err != nil {
 		err = fmt.Errorf("failed to encode result: %w", err)
-		record(auditlog.ToolCall{Err: err})
+		_ = record(auditlog.ToolCall{Err: err})
 		return nil, nil, err
 	}
 
 	// Size, never contents: how much of the tenant's inventory this call
 	// handed over is the auditable fact; the inventory itself is not.
-	count, counted := auditlog.CountRecords(v)
-	record(auditlog.ToolCall{ResultBytes: len(b), ResultCount: count, Counted: counted})
+	count, counted := auditlog.CountRecords(forCount)
+	if aerr := record(auditlog.ToolCall{ResultBytes: len(b), ResultCount: count, Counted: counted}); aerr != nil && !d.AuditFailOpen {
+		// Reading is the sensitive act here, and the data has not left yet:
+		// withhold it rather than serve a read no record accounts for.
+		return nil, nil, ErrAuditUnavailable
+	}
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: string(b)}},
@@ -119,11 +136,33 @@ func readOnly(title string) *mcp.ToolAnnotations {
 	}
 }
 
+// maxPage and maxOffset bound caller-chosen paging so a model (or whatever is
+// steering it) cannot ask the platform to skip millions of rows.
+const (
+	maxPage   = 10000
+	maxOffset = 100000
+)
+
+// clampOffset normalizes a row offset to 0..maxOffset.
+func clampOffset(offset int) int {
+	switch {
+	case offset < 0:
+		return 0
+	case offset > maxOffset:
+		return maxOffset
+	default:
+		return offset
+	}
+}
+
 // clampPage normalizes pagination inputs: page >= 1, 1 <= page_size <= 100
 // (default 25).
 func clampPage(page, pageSize int) (string, string) {
 	if page < 1 {
 		page = 1
+	}
+	if page > maxPage {
+		page = maxPage
 	}
 	switch {
 	case pageSize < 1:

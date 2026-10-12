@@ -964,8 +964,10 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 	}
 
 	if f.SortBy == "strength" {
-		sortOrder += " NULLS LAST, id"
+		sortOrder += " NULLS LAST"
 	}
+	// id is the unique tie-breaker for every sort, so pages never repeat or drop rows.
+	sortOrder += ", id"
 
 	args := []interface{}{tenantID}
 	argIdx := 2
@@ -1032,7 +1034,7 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 			cert_subject, cert_issuer, cert_san,
 			cert_not_before, cert_not_after, cert_fingerprint_sha256,
 			cert_public_key_algorithm, cert_public_key_size, cert_signature_algorithm,
-			cert_is_expired, cert_validation_status, cert_sct_source, cert_pem,
+			cert_is_expired, cert_validation_status, cert_sct_source,
 			first_seen_at, last_seen_at, observation_count, sensor_id,
 			created_at, updated_at, elevated_asset_id
 		FROM external_connections
@@ -1071,7 +1073,7 @@ func (s *ExternalConnectionsService) List(tenantID uuid.UUID, f models.ExternalC
 				&conn.CertSubject, &conn.CertIssuer, &certSAN,
 				&conn.CertNotBefore, &conn.CertNotAfter, &conn.CertFingerprintSHA256,
 				&conn.CertPublicKeyAlgorithm, &conn.CertPublicKeySize, &conn.CertSignatureAlgorithm,
-				&conn.CertIsExpired, &conn.CertValidationStatus, &conn.CertSCTSource, &conn.CertPEM,
+				&conn.CertIsExpired, &conn.CertValidationStatus, &conn.CertSCTSource,
 				&conn.FirstSeenAt, &conn.LastSeenAt, &conn.ObservationCount, &conn.SensorID,
 				&conn.CreatedAt, &conn.UpdatedAt, &conn.ElevatedAssetID,
 			); e != nil {
@@ -1229,7 +1231,7 @@ func (s *ExternalConnectionsService) GetHistory(tenantID, connectionID uuid.UUID
                 strength_vocabulary_version, created_at
 			FROM external_connection_history
 			WHERE external_connection_id = $1 AND tenant_id = $2
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC, id
 			LIMIT $3 OFFSET $4`,
 			connectionID, tenantID, pageSize, offset,
 		)

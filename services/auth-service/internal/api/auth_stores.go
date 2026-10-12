@@ -75,6 +75,7 @@ type authServiceStore interface {
 	ResetPassword(req *models.ResetPasswordRequest) error
 	VerifyEmail(token string) error
 	SendEmailVerification(userID uuid.UUID) error
+	AllowResendVerification(ctx context.Context, email string) bool
 	GetUserSessions(userID uuid.UUID) ([]models.Session, error)
 	RevokeRefreshToken(userID, sessionID uuid.UUID) error
 	GetUserAuthMethods(userID uuid.UUID) ([]models.Connection, error)

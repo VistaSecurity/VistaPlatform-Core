@@ -31,6 +31,7 @@ import type { complianceEngineComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, ModalField } from '../../components/ui';
 import { STag } from './kit';
+import { unwrap } from '../../lib/api-result';
 
 type MeasurementType = complianceEngineComponents['schemas']['MeasurementType'];
 
@@ -100,11 +101,10 @@ export function buildAcceptDeps(
       return data.control.id;
     },
     addMeasurement: async (controlId, body) => {
-      const { error } = await compliance.POST('/frameworks/tenant/controls/{id}/measurements', {
+      unwrap(await compliance.POST('/frameworks/tenant/controls/{id}/measurements', {
         params: { path: { id: controlId } },
         body,
-      });
-      if (error) throw new Error((error as { error?: string } | undefined)?.error ?? 'Could not add the rule');
+      }), 'Could not add the rule');
     },
     measurementTypeId: (code) => typeIdByCode.get(code),
   };

@@ -179,6 +179,12 @@ export function useJobStats() {
   });
 }
 
+/** Poll every 15 s while any PCAP job is unsettled; stop once all have settled. */
+export function pcapRefetchInterval(query: { state: { data?: { jobs?: Array<{ status?: string | null }> | null } } }): number | false {
+  const jobs = query.state.data?.jobs ?? [];
+  return jobs.some((j) => !SETTLED.has((j.status ?? '').toLowerCase())) ? 15_000 : false;
+}
+
 export function usePcapJobs() {
   return useQuery({
     queryKey: ['discovery', 'pcap-jobs'],
@@ -187,8 +193,9 @@ export function usePcapJobs() {
       if (error || !data) throw new Error('Failed to load PCAP jobs');
       return data;
     },
-    // Uploads land as queued jobs and progress server-side; poll while open.
-    refetchInterval: 15_000,
+    // Uploads land as queued jobs and progress server-side; poll only while a
+    // job is unsettled (same rule as useDiscoveryJobs).
+    refetchInterval: pcapRefetchInterval,
   });
 }
 
@@ -228,16 +235,23 @@ export function useIntegrations() {
 // Pending-approval assets — the approval queue. The asset_status filter is
 // required: without it the service returns its monitoring-only default view,
 // which EXCLUDES pending assets (see the listInfrastructureAssets spec note).
-export function usePendingAssets() {
+//
+// Server-paged: `total` is the tenant's whole pending count, which is NOT the
+// length of `assets` once more than PENDING_ASSETS_PAGE_SIZE are waiting.
+export const PENDING_ASSETS_PAGE_SIZE = 100;
+export function usePendingAssets(page = 1) {
   return useQuery({
-    queryKey: ['discovery', 'pending-assets'],
+    // Prefix ['discovery','pending-assets'] still matches every page for invalidation.
+    queryKey: ['discovery', 'pending-assets', page],
     queryFn: async () => {
       const { data, error } = await clients.inventory.GET('/infrastructure-assets', {
-        params: { query: { asset_status: 'pending_approval', page: 1, page_size: 100 } },
+        params: { query: { asset_status: 'pending_approval', page, page_size: PENDING_ASSETS_PAGE_SIZE } },
       });
       if (error || !data) throw new Error('Failed to load pending assets');
-      return data.assets ?? [];
+      const assets = data.assets ?? [];
+      return { assets, total: data.pagination?.total ?? assets.length };
     },
+    placeholderData: keepPreviousData,
   });
 }
 

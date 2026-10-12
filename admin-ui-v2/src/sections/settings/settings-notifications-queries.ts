@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { notificationServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { testFailureReason } from './notification-channel-types';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export type PlatformChannel = notificationServiceComponents['schemas']['PlatformNotificationChannel'];
 export type PlatformRule = notificationServiceComponents['schemas']['PlatformNotificationRule'];
@@ -46,22 +47,19 @@ export function useChannelMutations() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['platform', 'notif', 'channels'] });
   const create = useMutation({
     mutationFn: async (body: CreateChannelRequest) => {
-      const { error } = await clients.notifications.POST('/platform/channels', { body });
-      if (error) throw new Error('Create failed');
+      unwrap(await clients.notifications.POST('/platform/channels', { body }), 'Create failed');
     },
     onSuccess: invalidate,
   });
   const update = useMutation({
     mutationFn: async ({ id, body }: { id: string; body: UpdateChannelRequest }) => {
-      const { error } = await clients.notifications.PUT('/platform/channels/{id}', { params: { path: { id } }, body });
-      if (error) throw new Error('Update failed');
+      unwrap(await clients.notifications.PUT('/platform/channels/{id}', { params: { path: { id } }, body }), 'Update failed');
     },
     onSuccess: invalidate,
   });
   const remove = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.notifications.DELETE('/platform/channels/{id}', { params: { path: { id } } });
-      if (error) throw new Error('Delete failed');
+      unwrap(await clients.notifications.DELETE('/platform/channels/{id}', { params: { path: { id } } }), 'Delete failed');
     },
     onSuccess: invalidate,
   });
@@ -92,22 +90,19 @@ export function useRuleMutations() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['platform', 'notif', 'rules'] });
   const create = useMutation({
     mutationFn: async (body: CreateRuleRequest) => {
-      const { error } = await clients.notifications.POST('/platform/rules', { body });
-      if (error) throw new Error('Create failed');
+      unwrap(await clients.notifications.POST('/platform/rules', { body }), 'Create failed');
     },
     onSuccess: invalidate,
   });
   const update = useMutation({
     mutationFn: async ({ id, body }: { id: string; body: UpdateRuleRequest }) => {
-      const { error } = await clients.notifications.PUT('/platform/rules/{id}', { params: { path: { id } }, body });
-      if (error) throw new Error('Update failed');
+      unwrap(await clients.notifications.PUT('/platform/rules/{id}', { params: { path: { id } }, body }), 'Update failed');
     },
     onSuccess: invalidate,
   });
   const remove = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.notifications.DELETE('/platform/rules/{id}', { params: { path: { id } } });
-      if (error) throw new Error('Delete failed');
+      unwrap(await clients.notifications.DELETE('/platform/rules/{id}', { params: { path: { id } } }), 'Delete failed');
     },
     onSuccess: invalidate,
   });

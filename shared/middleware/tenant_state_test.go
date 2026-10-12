@@ -184,6 +184,18 @@ func TestRequireJWTAuth_TenantStateExemptions(t *testing.T) {
 		t.Errorf("impersonation of a suspended tenant = %d, want 204 (platform support access is allowed)", w.Code)
 	}
 
+	// A DELETED tenant is not supportable: impersonation is refused there.
+	// Mutation: restore the blanket impersonation exemption and this is 204.
+	gone := uuid.New()
+	stub.blocked[gone] = tenantstate.CodeDeleted
+	if w := doGet(r, "/api/v1/inventory-service/assets", signTenantToken(t, gone, "impersonation")); w.Code != http.StatusForbidden || codeOf(t, w) != tenantstate.CodeDeleted {
+		t.Errorf("impersonation of a deleted tenant = %d code=%q, want 403 %q", w.Code, codeOf(t, w), tenantstate.CodeDeleted)
+	}
+	// ...and an unreadable state fails closed for impersonation too.
+	if w := doGet(tenantStateRouter(&stubTenantState{err: errors.New("db down")}), "/api/v1/inventory-service/assets", signTenantToken(t, blocked, "impersonation")); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("impersonation with unreadable state = %d, want 503", w.Code)
+	}
+
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth-service/auth/logout", nil)
 	req.Header.Set("Authorization", "Bearer "+signTenantToken(t, blocked, "access"))
 	w := httptest.NewRecorder()

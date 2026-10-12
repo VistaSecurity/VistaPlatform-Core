@@ -192,18 +192,26 @@ func (s *NetworkSegmentService) EnrichAssetByID(tenantID, assetID uuid.UUID, ipA
 // EnrichAssetByIDIn is EnrichAssetByID over a segment set the caller already
 // loaded; a nil set is read here.
 func (s *NetworkSegmentService) EnrichAssetByIDIn(set *SegmentSet, tenantID, assetID uuid.UUID, ipAddress, hostname *string) error {
+	_, err := s.EnrichAssetByIDInTracked(set, tenantID, assetID, ipAddress, hostname)
+	return err
+}
+
+// EnrichAssetByIDInTracked is EnrichAssetByIDIn that also reports whether the
+// asset's segment-derived context (environment, location, segment, business
+// unit, site, tags) actually moved, judged against the row as stored.
+func (s *NetworkSegmentService) EnrichAssetByIDInTracked(set *SegmentSet, tenantID, assetID uuid.UUID, ipAddress, hostname *string) (bool, error) {
 	if home, ok := s.homeAddress(tenantID, assetID); ok {
 		ipAddress, hostname = &home, nil
 	}
 	if set == nil {
 		var err error
 		if set, err = s.LoadSegmentSet(tenantID); err != nil {
-			return err
+			return false, err
 		}
 	}
 	seg := set.Match(ipAddress, hostname)
 	if seg == nil {
-		return nil
+		return false, nil
 	}
 	// location_id and site are optional defaults: when the segment has no location,
 	// pass NULL and COALESCE so the asset keeps whatever location it already had.
@@ -213,19 +221,32 @@ func (s *NetworkSegmentService) EnrichAssetByIDIn(set *SegmentSet, tenantID, ass
 	}
 	bu := seg.BusinessUnit
 	// RLS-scoped read of current tags + write over assets, in one tenant tx.
-	return database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+	changed := false
+	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		var currentTags models.JSONB
 		_ = tx.QueryRow(`SELECT tags FROM assets WHERE id = $1 AND tenant_id = $2`, assetID, tenantID).Scan(&currentTags)
 		merged := mergeSegmentTags(currentTags, seg.Tags)
 		tagsVal := toJSONB(merged)
-		_, e := tx.Exec(`
-		UPDATE assets SET
-			environment = $1, location_id = COALESCE($2, location_id), network_segment_id = $3,
-			business_unit = COALESCE($4, business_unit), site = COALESCE($5, site), tags = $6, updated_at = NOW()
-		WHERE id = $7 AND tenant_id = $8`,
-			seg.Environment, seg.LocationID, seg.ID, bu, locName, tagsVal, assetID, tenantID)
+		e := tx.QueryRow(`
+		WITH prior AS (
+			SELECT environment, location_id, network_segment_id, business_unit, site, tags
+			  FROM assets WHERE id = $7 AND tenant_id = $8
+		)
+		UPDATE assets a SET
+			environment = $1, location_id = COALESCE($2, a.location_id), network_segment_id = $3,
+			business_unit = COALESCE($4, a.business_unit), site = COALESCE($5, a.site), tags = $6, updated_at = NOW()
+		  FROM prior p
+		WHERE a.id = $7 AND a.tenant_id = $8
+		RETURNING p.environment IS DISTINCT FROM a.environment OR p.location_id IS DISTINCT FROM a.location_id
+		       OR p.network_segment_id IS DISTINCT FROM a.network_segment_id OR p.business_unit IS DISTINCT FROM a.business_unit
+		       OR p.site IS DISTINCT FROM a.site OR p.tags IS DISTINCT FROM a.tags`,
+			seg.Environment, seg.LocationID, seg.ID, bu, locName, tagsVal, assetID, tenantID).Scan(&changed)
+		if errors.Is(e, sql.ErrNoRows) {
+			return nil
+		}
 		return e
 	})
+	return changed, err
 }
 
 // List returns network segments for a tenant with optional filters.
@@ -259,7 +280,7 @@ func (s *NetworkSegmentService) List(tenantID uuid.UUID, filters models.NetworkS
 	countArgs := append([]interface{}{}, args...)
 	args = append(args, pageSize, (page-1)*pageSize)
 	sel := `SELECT ns.*, l.name as location_name, l.full_path as location_full_path `
-	query := sel + baseQuery + fmt.Sprintf(` ORDER BY ns.name LIMIT $%d OFFSET $%d`, argIdx, argIdx+1)
+	query := sel + baseQuery + fmt.Sprintf(` ORDER BY ns.name, ns.id LIMIT $%d OFFSET $%d`, argIdx, argIdx+1)
 
 	var total int
 	var list []models.NetworkSegment

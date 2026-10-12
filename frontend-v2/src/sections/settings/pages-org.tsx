@@ -13,6 +13,7 @@ import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, SRow, SInput, StateNote, STag, GREEN } from './kit';
 import type { SettingsNavItem } from './nav';
+import { unwrap } from '../../lib/api-result';
 
 export function OrgOverviewPage({ meta }: { meta: SettingsNavItem }) {
   const { tenant } = useAuth();
@@ -34,14 +35,13 @@ export function OrgOverviewPage({ meta }: { meta: SettingsNavItem }) {
 
   const mutation = useMutation({
     mutationFn: async () => {
-      const { error, response } = await clients.auth.PUT('/tenant', {
+      unwrap(await clients.auth.PUT('/tenant', {
         body: {
           ...(draft.name !== null ? { name: draft.name.trim() } : {}),
           ...(draft.domain !== null ? { domain: draft.domain.trim() } : {}),
           ...(draft.billing_email !== null ? { billing_email: draft.billing_email.trim() } : {}),
         },
-      });
-      if (error || !response.ok) throw new Error('Failed to save organization details');
+      }), 'Failed to save organization details');
     },
     onSuccess: () => setDraft({ name: null, domain: null, billing_email: null }),
   });
@@ -131,7 +131,7 @@ function BrandingUpload({ kind, url, size, canEdit }: { kind: 'logo' | 'favicon'
   const fileRef = useRef<HTMLInputElement>(null);
   const mutation = useMutation({
     mutationFn: async (file: File) => {
-      const { error, response } = await clients.auth.POST('/tenant/branding/upload', {
+      unwrap(await clients.auth.POST('/tenant/branding/upload', {
         body: { type: kind, file: '' },
         bodySerializer: () => {
           const fd = new FormData();
@@ -139,8 +139,7 @@ function BrandingUpload({ kind, url, size, canEdit }: { kind: 'logo' | 'favicon'
           fd.append('file', file);
           return fd;
         },
-      });
-      if (error || !response.ok) throw new Error('Upload failed');
+      }), 'Upload failed');
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['settings', 'branding'] }),
   });
@@ -202,7 +201,7 @@ export function OrgBrandingPage({ meta }: { meta: SettingsNavItem }) {
     mutationFn: async () => {
       // The Branding schema always carries the three colors — send the
       // current values merged with any edits, plus the name when touched.
-      const { error, response } = await clients.auth.PUT('/tenant/branding', {
+      unwrap(await clients.auth.PUT('/tenant/branding', {
         body: {
           primary_color: colors.primary_color ?? data?.primary_color ?? '#000000',
           secondary_color: colors.secondary_color ?? data?.secondary_color ?? '#000000',
@@ -212,8 +211,7 @@ export function OrgBrandingPage({ meta }: { meta: SettingsNavItem }) {
           // would take the (Core) colour save down with it.
           ...(whiteLabel && name !== null ? { company_name: name.trim() } : {}),
         },
-      });
-      if (error || !response.ok) throw new Error('Failed to save branding');
+      }), 'Failed to save branding');
     },
     onSuccess: () => {
       setName(null);

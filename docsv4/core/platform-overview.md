@@ -166,7 +166,6 @@ notifications, and system health monitoring.
 - Redis for caching and session management
 - NATS JetStream for event-driven workflows (discovery processing, finding
   generation)
-- InfluxDB for time-series metrics
 - S3-compatible storage for artifacts and reports
 
 **Networking and security:**

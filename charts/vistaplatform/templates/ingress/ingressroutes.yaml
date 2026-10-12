@@ -45,6 +45,7 @@ metadata:
 spec:
   entryPoints: {{ $entryPoints | toJson }}
   routes:
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/admin-service/admin/billing/webhook/`) || Path(`/api/v1/admin-service/admin/billing/webhook`))
       kind: Rule
       priority: 950
@@ -66,6 +67,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/admin-service/admin/billing/webhook/`) || Path(`/api/v2/admin-service/admin/billing/webhook`))
       kind: Rule
       priority: 950
@@ -88,6 +91,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-admin-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v1/auth-service/platform/config`)
       kind: Rule
       priority: 950
@@ -109,6 +114,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v2/auth-service/platform/config`)
       kind: Rule
       priority: 950
@@ -131,6 +138,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-auth-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v1/auth-service/platform/ui-config`)
       kind: Rule
       priority: 950
@@ -152,6 +161,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v2/auth-service/platform/ui-config`)
       kind: Rule
       priority: 950
@@ -174,6 +185,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-auth-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v1/auth-service/platform/sso-providers`)
       kind: Rule
       priority: 950
@@ -195,6 +208,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v2/auth-service/platform/sso-providers`)
       kind: Rule
       priority: 950
@@ -217,6 +232,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-auth-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/admin-service/auth/`) || Path(`/api/v1/admin-service/auth`))
       kind: Rule
       priority: 900
@@ -241,6 +258,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/admin-service/auth/`) || Path(`/api/v1/admin-service/auth`))
       kind: Rule
       priority: 900
@@ -255,6 +274,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/admin-service/auth/`) || Path(`/api/v2/admin-service/auth`))
       kind: Rule
       priority: 900
@@ -280,6 +301,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-admin-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/admin-service/auth/`) || Path(`/api/v2/admin-service/auth`))
       kind: Rule
       priority: 900
@@ -294,6 +317,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/admin-service/admin/`) || Path(`/api/v1/admin-service/admin`))
       kind: Rule
       priority: 900
@@ -318,6 +343,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/admin-service/admin/`) || Path(`/api/v1/admin-service/admin`))
       kind: Rule
       priority: 900
@@ -332,6 +359,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/admin-service/admin/`) || Path(`/api/v2/admin-service/admin`))
       kind: Rule
       priority: 900
@@ -357,6 +386,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-admin-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/admin-service/admin/`) || Path(`/api/v2/admin-service/admin`))
       kind: Rule
       priority: 900
@@ -371,6 +402,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/admin-service/status/`) || Path(`/api/v1/admin-service/status`))
       kind: Rule
       priority: 900
@@ -395,6 +428,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/admin-service/status/`) || Path(`/api/v1/admin-service/status`))
       kind: Rule
       priority: 900
@@ -409,6 +444,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/admin-service/status/`) || Path(`/api/v2/admin-service/status`))
       kind: Rule
       priority: 900
@@ -434,6 +471,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-admin-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/admin-service/status/`) || Path(`/api/v2/admin-service/status`))
       kind: Rule
       priority: 900
@@ -448,6 +487,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/auth-service/admin/`) || Path(`/api/v1/auth-service/admin`))
       kind: Rule
       priority: 900
@@ -472,6 +513,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/auth-service/admin/`) || Path(`/api/v1/auth-service/admin`))
       kind: Rule
       priority: 900
@@ -486,6 +529,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/auth-service/admin/`) || Path(`/api/v2/auth-service/admin`))
       kind: Rule
       priority: 900
@@ -511,6 +556,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-auth-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/auth-service/admin/`) || Path(`/api/v2/auth-service/admin`))
       kind: Rule
       priority: 900
@@ -525,6 +572,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/auth-service/platform/`) || Path(`/api/v1/auth-service/platform`))
       kind: Rule
       priority: 900
@@ -549,6 +598,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/auth-service/platform/`) || Path(`/api/v1/auth-service/platform`))
       kind: Rule
       priority: 900
@@ -563,6 +614,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/auth-service/platform/`) || Path(`/api/v2/auth-service/platform`))
       kind: Rule
       priority: 900
@@ -588,6 +641,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-auth-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/auth-service/platform/`) || Path(`/api/v2/auth-service/platform`))
       kind: Rule
       priority: 900
@@ -602,6 +657,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: Host(`{{ $adminDnsName }}`) && PathPrefix(`/api/v1/sensor-manager/admin/sensors`)
       kind: Rule
       priority: 900
@@ -626,6 +683,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v1/sensor-manager/admin/sensors`)
       kind: Rule
       priority: 900
@@ -640,6 +699,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: Host(`{{ $adminDnsName }}`) && PathPrefix(`/api/v2/sensor-manager/admin/sensors`)
       kind: Rule
       priority: 900
@@ -665,6 +726,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-sensor-manager
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: Host(`{{ $dnsName }}`) && PathPrefix(`/api/v2/sensor-manager/admin/sensors`)
       kind: Rule
       priority: 900
@@ -679,6 +742,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/sensor-manager/platform/`) || Path(`/api/v1/sensor-manager/platform`))
       kind: Rule
       priority: 900
@@ -703,6 +768,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/sensor-manager/platform/`) || Path(`/api/v1/sensor-manager/platform`))
       kind: Rule
       priority: 900
@@ -717,6 +784,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/sensor-manager/platform/`) || Path(`/api/v2/sensor-manager/platform`))
       kind: Rule
       priority: 900
@@ -742,6 +811,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-sensor-manager
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/sensor-manager/platform/`) || Path(`/api/v2/sensor-manager/platform`))
       kind: Rule
       priority: 900
@@ -756,6 +827,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/platform/`) || Path(`/api/v1/monitoring-service/platform`))
       kind: Rule
       priority: 900
@@ -780,6 +853,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/platform/`) || Path(`/api/v1/monitoring-service/platform`))
       kind: Rule
       priority: 900
@@ -794,6 +869,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/platform/`) || Path(`/api/v2/monitoring-service/platform`))
       kind: Rule
       priority: 900
@@ -819,6 +896,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-monitoring-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/platform/`) || Path(`/api/v2/monitoring-service/platform`))
       kind: Rule
       priority: 900
@@ -833,6 +912,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/logs/`) || Path(`/api/v1/monitoring-service/logs`))
       kind: Rule
       priority: 900
@@ -857,6 +938,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/logs/`) || Path(`/api/v1/monitoring-service/logs`))
       kind: Rule
       priority: 900
@@ -871,6 +954,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/logs/`) || Path(`/api/v2/monitoring-service/logs`))
       kind: Rule
       priority: 900
@@ -896,6 +981,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-monitoring-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/logs/`) || Path(`/api/v2/monitoring-service/logs`))
       kind: Rule
       priority: 900
@@ -910,6 +997,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/alerting/`) || Path(`/api/v1/monitoring-service/alerting`))
       kind: Rule
       priority: 900
@@ -934,6 +1023,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/alerting/`) || Path(`/api/v1/monitoring-service/alerting`))
       kind: Rule
       priority: 900
@@ -948,6 +1039,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/alerting/`) || Path(`/api/v2/monitoring-service/alerting`))
       kind: Rule
       priority: 900
@@ -973,6 +1066,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-monitoring-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/alerting/`) || Path(`/api/v2/monitoring-service/alerting`))
       kind: Rule
       priority: 900
@@ -987,6 +1082,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/trends/`) || Path(`/api/v1/monitoring-service/trends`))
       kind: Rule
       priority: 900
@@ -1011,6 +1108,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/trends/`) || Path(`/api/v1/monitoring-service/trends`))
       kind: Rule
       priority: 900
@@ -1025,6 +1124,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/trends/`) || Path(`/api/v2/monitoring-service/trends`))
       kind: Rule
       priority: 900
@@ -1050,6 +1151,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-monitoring-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/trends/`) || Path(`/api/v2/monitoring-service/trends`))
       kind: Rule
       priority: 900
@@ -1064,6 +1167,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/gateway/`) || Path(`/api/v1/monitoring-service/gateway`))
       kind: Rule
       priority: 900
@@ -1088,6 +1193,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/gateway/`) || Path(`/api/v1/monitoring-service/gateway`))
       kind: Rule
       priority: 900
@@ -1102,6 +1209,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/gateway/`) || Path(`/api/v2/monitoring-service/gateway`))
       kind: Rule
       priority: 900
@@ -1127,6 +1236,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-monitoring-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/gateway/`) || Path(`/api/v2/monitoring-service/gateway`))
       kind: Rule
       priority: 900
@@ -1141,6 +1252,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/admin/`) || Path(`/api/v1/monitoring-service/admin`))
       kind: Rule
       priority: 900
@@ -1165,6 +1278,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/admin/`) || Path(`/api/v1/monitoring-service/admin`))
       kind: Rule
       priority: 900
@@ -1179,6 +1294,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/admin/`) || Path(`/api/v2/monitoring-service/admin`))
       kind: Rule
       priority: 900
@@ -1204,6 +1321,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-monitoring-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/admin/`) || Path(`/api/v2/monitoring-service/admin`))
       kind: Rule
       priority: 900
@@ -1218,6 +1337,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/tenant/`) || Path(`/api/v1/monitoring-service/tenant`))
       kind: Rule
       priority: 900
@@ -1242,6 +1363,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/monitoring-service/tenant/`) || Path(`/api/v1/monitoring-service/tenant`))
       kind: Rule
       priority: 900
@@ -1256,6 +1379,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/tenant/`) || Path(`/api/v2/monitoring-service/tenant`))
       kind: Rule
       priority: 900
@@ -1281,6 +1406,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-monitoring-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/monitoring-service/tenant/`) || Path(`/api/v2/monitoring-service/tenant`))
       kind: Rule
       priority: 900
@@ -1295,6 +1422,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/inventory-service/admin/`) || Path(`/api/v1/inventory-service/admin`))
       kind: Rule
       priority: 900
@@ -1319,6 +1448,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/inventory-service/admin/`) || Path(`/api/v1/inventory-service/admin`))
       kind: Rule
       priority: 900
@@ -1333,6 +1464,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/inventory-service/admin/`) || Path(`/api/v2/inventory-service/admin`))
       kind: Rule
       priority: 900
@@ -1357,6 +1490,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/inventory-service/admin/`) || Path(`/api/v2/inventory-service/admin`))
       kind: Rule
       priority: 900
@@ -1371,6 +1506,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/compliance-engine/admin/`) || Path(`/api/v1/compliance-engine/admin`))
       kind: Rule
       priority: 900
@@ -1395,6 +1532,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/compliance-engine/admin/`) || Path(`/api/v1/compliance-engine/admin`))
       kind: Rule
       priority: 900
@@ -1409,6 +1548,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/compliance-engine/admin/`) || Path(`/api/v2/compliance-engine/admin`))
       kind: Rule
       priority: 900
@@ -1434,6 +1575,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-compliance-engine
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/compliance-engine/admin/`) || Path(`/api/v2/compliance-engine/admin`))
       kind: Rule
       priority: 900
@@ -1448,6 +1591,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/device-interrogation-service/admin/`) || Path(`/api/v1/device-interrogation-service/admin`))
       kind: Rule
       priority: 900
@@ -1472,6 +1617,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/device-interrogation-service/admin/`) || Path(`/api/v1/device-interrogation-service/admin`))
       kind: Rule
       priority: 900
@@ -1486,6 +1633,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/device-interrogation-service/admin/`) || Path(`/api/v2/device-interrogation-service/admin`))
       kind: Rule
       priority: 900
@@ -1511,6 +1660,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-device-interrogation-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/device-interrogation-service/admin/`) || Path(`/api/v2/device-interrogation-service/admin`))
       kind: Rule
       priority: 900
@@ -1525,6 +1676,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/notification-service/platform/`) || Path(`/api/v1/notification-service/platform`))
       kind: Rule
       priority: 900
@@ -1549,6 +1702,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/notification-service/platform/`) || Path(`/api/v1/notification-service/platform`))
       kind: Rule
       priority: 900
@@ -1563,6 +1718,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/notification-service/platform/`) || Path(`/api/v2/notification-service/platform`))
       kind: Rule
       priority: 900
@@ -1588,6 +1745,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-notification-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/notification-service/platform/`) || Path(`/api/v2/notification-service/platform`))
       kind: Rule
       priority: 900
@@ -1602,6 +1761,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/tenant-health-service/`) || Path(`/api/v1/tenant-health-service`))
       kind: Rule
       priority: 900
@@ -1626,6 +1787,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/tenant-health-service/`) || Path(`/api/v1/tenant-health-service`))
       kind: Rule
       priority: 900
@@ -1640,6 +1803,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
     - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/tenant-health-service/`) || Path(`/api/v2/tenant-health-service`))
       kind: Rule
       priority: 900
@@ -1665,6 +1830,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-tenant-health-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
     - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/tenant-health-service/`) || Path(`/api/v2/tenant-health-service`))
       kind: Rule
       priority: 900
@@ -1679,6 +1846,7 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-admin-plane
+    {{- end }}
   {{- if $tlsSecret }}
   tls:
     secretName: {{ $tlsSecret }}
@@ -1697,6 +1865,7 @@ metadata:
 spec:
   entryPoints: {{ $entryPoints | toJson }}
   routes:
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/notification-service/internal/`) || Path(`/api/v1/notification-service/internal`))
       kind: Rule
       priority: 900
@@ -1711,6 +1880,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/notification-service/internal/`) || Path(`/api/v2/notification-service/internal`))
       kind: Rule
       priority: 900
@@ -1725,6 +1896,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/sensor-manager/internal/`) || Path(`/api/v1/sensor-manager/internal`))
       kind: Rule
       priority: 900
@@ -1739,6 +1912,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/sensor-manager/internal/`) || Path(`/api/v2/sensor-manager/internal`))
       kind: Rule
       priority: 900
@@ -1753,6 +1928,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/auth-service/internal/`) || Path(`/api/v1/auth-service/internal`))
       kind: Rule
       priority: 900
@@ -1767,6 +1944,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/auth-service/internal/`) || Path(`/api/v2/auth-service/internal`))
       kind: Rule
       priority: 900
@@ -1781,6 +1960,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/audit-service/internal/`) || Path(`/api/v1/audit-service/internal`))
       kind: Rule
       priority: 900
@@ -1795,6 +1976,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/audit-service/internal/`) || Path(`/api/v2/audit-service/internal`))
       kind: Rule
       priority: 900
@@ -1809,6 +1992,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/inventory-service/internal/`) || Path(`/api/v1/inventory-service/internal`))
       kind: Rule
       priority: 900
@@ -1823,6 +2008,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/inventory-service/internal/`) || Path(`/api/v2/inventory-service/internal`))
       kind: Rule
       priority: 900
@@ -1837,6 +2024,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v1/audit-service/activity-logs`) || Path(`/api/v1/audit-service/activity-logs/`))
       kind: Rule
       priority: 900
@@ -1851,6 +2040,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v2/audit-service/activity-logs`) || Path(`/api/v2/audit-service/activity-logs/`))
       kind: Rule
       priority: 900
@@ -1865,6 +2056,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v1/audit-service/job-execution-logs/start`) || Path(`/api/v1/audit-service/job-execution-logs/start/`))
       kind: Rule
       priority: 900
@@ -1879,6 +2072,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v2/audit-service/job-execution-logs/start`) || Path(`/api/v2/audit-service/job-execution-logs/start/`))
       kind: Rule
       priority: 900
@@ -1893,6 +2088,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v1/audit-service/job-execution-logs/[^/]+/progress/?$`)
       kind: Rule
       priority: 900
@@ -1907,6 +2104,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v2/audit-service/job-execution-logs/[^/]+/progress/?$`)
       kind: Rule
       priority: 900
@@ -1921,6 +2120,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v1/audit-service/job-execution-logs/[^/]+/complete/?$`)
       kind: Rule
       priority: 900
@@ -1935,6 +2136,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v2/audit-service/job-execution-logs/[^/]+/complete/?$`)
       kind: Rule
       priority: 900
@@ -1949,6 +2152,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v1/inventory-service/assets/auto-approve/agent-host`) || Path(`/api/v1/inventory-service/assets/auto-approve/agent-host/`))
       kind: Rule
       priority: 900
@@ -1963,6 +2168,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v2/inventory-service/assets/auto-approve/agent-host`) || Path(`/api/v2/inventory-service/assets/auto-approve/agent-host/`))
       kind: Rule
       priority: 900
@@ -1977,6 +2184,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v1/inventory-service/keys/cloud`) || Path(`/api/v1/inventory-service/keys/cloud/`))
       kind: Rule
       priority: 900
@@ -1991,6 +2200,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v2/inventory-service/keys/cloud`) || Path(`/api/v2/inventory-service/keys/cloud/`))
       kind: Rule
       priority: 900
@@ -2005,6 +2216,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v1/inventory-service/discovery/jobs/[^/]+/import/?$`)
       kind: Rule
       priority: 900
@@ -2019,6 +2232,8 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && PathRegexp(`^/api/v2/inventory-service/discovery/jobs/[^/]+/import/?$`)
       kind: Rule
       priority: 900
@@ -2033,6 +2248,39 @@ spec:
           {{- end }}
       middlewares:
         - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
+    - match: {{ $apiHost }} && Method(`GET`) && PathRegexp(`^/api/v1/inventory-service/tenant/[^/]+/activity-summary/?$`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
+    - match: {{ $apiHost }} && Method(`GET`) && PathRegexp(`^/api/v2/inventory-service/tenant/[^/]+/activity-summary/?$`)
+      kind: Rule
+      priority: 900
+      services:
+        - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    {{- end }}
   {{- if $tlsSecret }}
   tls:
     secretName: {{ $tlsSecret }}
@@ -2050,6 +2298,7 @@ metadata:
 spec:
   entryPoints: {{ $entryPoints | toJson }}
   routes:
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/auth-service/health`))
       kind: Rule
       priority: 950
@@ -2065,6 +2314,8 @@ spec:
       middlewares:
         - name: rewrite-auth-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/auth-service/auth/sso/providers`))
       kind: Rule
       priority: 200
@@ -2085,6 +2336,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v2/auth-service/auth/sso/providers`))
       kind: Rule
       priority: 200
@@ -2106,6 +2359,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-auth-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (Path(`/.well-known/oauth-authorization-server`))
       kind: Rule
       priority: 200
@@ -2126,6 +2381,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (Path(`/.well-known/jwks.json`))
       kind: Rule
       priority: 200
@@ -2146,6 +2403,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/auth-service/`))
       kind: Rule
       priority: 100
@@ -2167,6 +2426,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/auth-service/`))
       kind: Rule
       priority: 100
@@ -2189,6 +2450,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-auth-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/inventory-service/health`))
       kind: Rule
       priority: 950
@@ -2204,6 +2467,8 @@ spec:
       middlewares:
         - name: rewrite-inventory-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && PathPrefix(`/api/v1/inventory-service/discovery/jobs/`) && PathRegexp(`^/api/v1/inventory-service/discovery/jobs/[^/]+/import$`)
       kind: Rule
       priority: 200
@@ -2225,6 +2490,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && PathPrefix(`/api/v2/inventory-service/discovery/jobs/`) && PathRegexp(`^/api/v2/inventory-service/discovery/jobs/[^/]+/import$`)
       kind: Rule
       priority: 200
@@ -2246,6 +2513,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/inventory-service/`))
       kind: Rule
       priority: 100
@@ -2267,6 +2536,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/inventory-service/`))
       kind: Rule
       priority: 100
@@ -2288,6 +2559,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/compliance-engine/health`))
       kind: Rule
       priority: 950
@@ -2303,6 +2576,8 @@ spec:
       middlewares:
         - name: rewrite-compliance-engine-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/compliance-engine/`))
       kind: Rule
       priority: 100
@@ -2324,6 +2599,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/compliance-engine/`))
       kind: Rule
       priority: 100
@@ -2346,6 +2623,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-compliance-engine
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cbom-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/cbom-service/health`))
       kind: Rule
       priority: 950
@@ -2361,6 +2640,8 @@ spec:
       middlewares:
         - name: rewrite-cbom-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cbom-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/cbom-service/`))
       kind: Rule
       priority: 100
@@ -2382,6 +2663,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cbom-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/cbom-service/`))
       kind: Rule
       priority: 100
@@ -2404,6 +2687,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-cbom-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/sensor-manager/health`))
       kind: Rule
       priority: 950
@@ -2419,6 +2704,8 @@ spec:
       middlewares:
         - name: rewrite-sensor-manager-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/sensor-manager/`))
       kind: Rule
       priority: 100
@@ -2440,6 +2727,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/sensor-manager/`))
       kind: Rule
       priority: 100
@@ -2462,6 +2751,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-sensor-manager
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cluster-sensor-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/cluster-sensor-service/health`))
       kind: Rule
       priority: 950
@@ -2477,6 +2768,8 @@ spec:
       middlewares:
         - name: rewrite-cluster-sensor-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && PathPrefix(`/api/v1/discovery/jobs/`) && PathRegexp(`^/api/v1/discovery/jobs/[^/]+/import$`)
       kind: Rule
       priority: 200
@@ -2498,6 +2791,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cluster-sensor-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/discovery/`))
       kind: Rule
       priority: 110
@@ -2519,6 +2814,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cluster-sensor-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/cluster-sensor-service/`))
       kind: Rule
       priority: 100
@@ -2540,6 +2837,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cluster-sensor-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/cluster-sensor-service/`))
       kind: Rule
       priority: 100
@@ -2562,6 +2861,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-cluster-sensor-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/admin-service/health`))
       kind: Rule
       priority: 950
@@ -2577,6 +2878,8 @@ spec:
       middlewares:
         - name: rewrite-admin-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/admin-service/`))
       kind: Rule
       priority: 100
@@ -2598,6 +2901,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/admin-service/`))
       kind: Rule
       priority: 100
@@ -2620,6 +2925,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-admin-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/monitoring-service/health`))
       kind: Rule
       priority: 950
@@ -2635,6 +2942,8 @@ spec:
       middlewares:
         - name: rewrite-monitoring-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/admin-service/status/`))
       kind: Rule
       priority: 300
@@ -2656,6 +2965,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/admin-service/status/`))
       kind: Rule
       priority: 300
@@ -2678,6 +2989,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-admin-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/monitoring-service/`))
       kind: Rule
       priority: 100
@@ -2699,6 +3012,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/monitoring-service/`))
       kind: Rule
       priority: 100
@@ -2721,6 +3036,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-monitoring-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "resource-tracker-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/resource-tracker-service/health`))
       kind: Rule
       priority: 950
@@ -2736,6 +3053,8 @@ spec:
       middlewares:
         - name: rewrite-resource-tracker-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "resource-tracker-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/resource-tracker-service/`))
       kind: Rule
       priority: 100
@@ -2757,6 +3076,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "resource-tracker-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/resource-tracker-service/`))
       kind: Rule
       priority: 100
@@ -2779,6 +3100,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-resource-tracker-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/tenant-health-service/health`))
       kind: Rule
       priority: 950
@@ -2794,6 +3117,8 @@ spec:
       middlewares:
         - name: rewrite-tenant-health-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/tenant-health-service/`))
       kind: Rule
       priority: 100
@@ -2815,6 +3140,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/tenant-health-service/`))
       kind: Rule
       priority: 100
@@ -2837,6 +3164,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-tenant-health-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/device-interrogation-service/health`))
       kind: Rule
       priority: 950
@@ -2852,6 +3181,8 @@ spec:
       middlewares:
         - name: rewrite-device-interrogation-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/device-interrogation-service/`))
       kind: Rule
       priority: 100
@@ -2873,6 +3204,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/device-interrogation-service/`))
       kind: Rule
       priority: 100
@@ -2895,6 +3228,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-device-interrogation-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/audit-service/health`))
       kind: Rule
       priority: 950
@@ -2910,6 +3245,8 @@ spec:
       middlewares:
         - name: rewrite-audit-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/audit-service/`))
       kind: Rule
       priority: 100
@@ -2931,6 +3268,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/audit-service/`))
       kind: Rule
       priority: 100
@@ -2953,6 +3292,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-audit-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/notification-service/health`))
       kind: Rule
       priority: 950
@@ -2968,6 +3309,8 @@ spec:
       middlewares:
         - name: rewrite-notification-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/notification-service/`))
       kind: Rule
       priority: 100
@@ -2989,6 +3332,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/notification-service/`))
       kind: Rule
       priority: 100
@@ -3011,6 +3356,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-notification-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "discovery-processor-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/discovery-processor-service/health`))
       kind: Rule
       priority: 950
@@ -3026,6 +3373,8 @@ spec:
       middlewares:
         - name: rewrite-discovery-processor-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "discovery-processor-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/discovery-processor-service/`))
       kind: Rule
       priority: 100
@@ -3047,6 +3396,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "discovery-processor-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/discovery-processor-service/`))
       kind: Rule
       priority: 100
@@ -3069,6 +3420,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-discovery-processor-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "mcp-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/mcp-service/health`))
       kind: Rule
       priority: 950
@@ -3084,6 +3437,8 @@ spec:
       middlewares:
         - name: rewrite-mcp-service-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "mcp-service") }}
     - match: {{ $apiHost }} && (Path(`/.well-known/oauth-protected-resource`) || PathPrefix(`/.well-known/oauth-protected-resource/`))
       kind: Rule
       priority: 200
@@ -3104,6 +3459,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "mcp-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/mcp-service/`))
       kind: Rule
       priority: 100
@@ -3125,6 +3482,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "mcp-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/mcp-service/`))
       kind: Rule
       priority: 100
@@ -3147,6 +3506,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-mcp-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "pcap-processor") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/pcap-processor/health`))
       kind: Rule
       priority: 950
@@ -3162,6 +3523,8 @@ spec:
       middlewares:
         - name: rewrite-pcap-processor-health
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "pcap-processor") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v1/pcap-processor/`))
       kind: Rule
       priority: 100
@@ -3183,6 +3546,8 @@ spec:
         - name: compress
         - name: body-size-limit
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "pcap-processor") }}
     - match: {{ $apiHost }} && (PathPrefix(`/api/v2/pcap-processor/`))
       kind: Rule
       priority: 100
@@ -3205,6 +3570,8 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-pcap-processor
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "admin-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/uploads/platform-branding/`))
       kind: Rule
       priority: 120
@@ -3224,6 +3591,8 @@ spec:
         - name: security-headers
         - name: compress
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/uploads/branding/`))
       kind: Rule
       priority: 120
@@ -3243,6 +3612,8 @@ spec:
         - name: security-headers
         - name: compress
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/uploads/avatars/`))
       kind: Rule
       priority: 120
@@ -3262,6 +3633,8 @@ spec:
         - name: security-headers
         - name: compress
         - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
     - match: {{ $apiHost }} && (PathPrefix(`/ws/`))
       kind: Rule
       priority: 120
@@ -3276,6 +3649,7 @@ spec:
           {{- end }}
       middlewares:
         - name: retry
+    {{- end }}
   {{- if $tlsSecret }}
   tls:
     secretName: {{ $tlsSecret }}

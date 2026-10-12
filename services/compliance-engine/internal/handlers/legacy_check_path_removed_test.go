@@ -68,10 +68,6 @@ func TestLegacyComplianceCheckTablesHaveNoWriters(t *testing.T) {
 			return nil
 		}
 		src := string(mustRead(t, path))
-		// compliance_rules is deliberately absent from this list: MappingsService
-		// still validates a rule id against it. That reader is itself orphaned
-		// (no UI or client calls /mappings, and nothing can create a rule any
-		// more) but retiring it is a separate decision.
 		for _, frag := range []string{"INTO compliance_checks", "FROM compliance_checks", "INTO compliance_reports", "FROM compliance_reports", "UPDATE compliance_reports"} {
 			if strings.Contains(src, frag) {
 				offenders = append(offenders, path+": "+frag)

@@ -23,6 +23,7 @@ import {
 } from './unified-jobs';
 import type { ScanJob } from './scan-job-state';
 import type { InterrogationJob } from './unified-jobs';
+import { unwrap } from '../../lib/api-result';
 
 // Discovery → Discovery Jobs — the unified job list (morning-notes decision
 // 7b): every discovery_jobs row (Active Scan, the Discover wizard, the
@@ -132,8 +133,7 @@ export function JobsPage() {
 
   const retryInterrogation = useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await clients.devices.POST('/jobs/{id}/retry', { params: { path: { id } } });
-      if (error || !data) throw new Error('Failed to retry job');
+      const data = unwrap(await clients.devices.POST('/jobs/{id}/retry', { params: { path: { id } } }), 'Failed to retry job', { requireData: true });
       return data;
     },
     onSettled: invalidateInterrogation,
@@ -141,8 +141,7 @@ export function JobsPage() {
 
   const cancelInterrogation = useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await clients.devices.POST('/jobs/{id}/cancel', { params: { path: { id } } });
-      if (error || !data) throw new Error('Failed to cancel job');
+      const data = unwrap(await clients.devices.POST('/jobs/{id}/cancel', { params: { path: { id } } }), 'Failed to cancel job', { requireData: true });
       return data;
     },
     onSettled: invalidateInterrogation,
@@ -268,6 +267,11 @@ export function JobsPage() {
                   {r.statusDetail && (
                     <span style={{ fontSize: 10, color: 'var(--app-t3)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.statusDetail}>
                       {r.statusDetail}
+                    </span>
+                  )}
+                  {r.note && (
+                    <span data-testid="job-note" style={{ fontSize: 10, color: 'var(--app-t3)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.note}>
+                      ⓘ {r.note}
                     </span>
                   )}
                   {r.errorDetail && (

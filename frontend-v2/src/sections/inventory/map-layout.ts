@@ -13,7 +13,7 @@
 // graph and direction give byte-identical coordinates, which is what
 // `map-layout.test.ts` pins.
 import dagre from '@dagrejs/dagre';
-import type { MapGraph } from './map-model';
+import { layoutForce } from './map-layout-force';
 
 /** Left-to-right reads like a dependency chain; top-to-bottom like a hierarchy.
  *  Both are offered because which one is legible depends on the shape of the
@@ -43,6 +43,24 @@ export interface LayoutResult {
   height: number;
 }
 
+/** The part of a `MapGraph` layout reads: ids and endpoints, nothing else. Narrow
+ *  on purpose — this is what crosses to the layout worker, and a full graph
+ *  (labels, timestamps, ...) would be structured-cloned for no reason. */
+export interface LayoutInput {
+  rootId?: string;
+  nodes: ReadonlyArray<{ id: string; depth?: number }>;
+  edges: ReadonlyArray<{ id: string; source: string; target: string }>;
+}
+
+/** Nodes + edges above which `layoutGraph` leaves dagre for the fixed-budget
+ *  force layout. Equal to the worker threshold in `use-map-layout.ts`: the
+ *  graphs small enough to stay inline are the ones dagre lays out in
+ *  milliseconds, and their golden coordinates stay as they were. */
+export const FORCE_LAYOUT_THRESHOLD = 120;
+
+export const usesForceLayout = (g: LayoutInput): boolean =>
+  g.nodes.length + g.edges.length > FORCE_LAYOUT_THRESHOLD;
+
 /**
  * Lay the graph out.
  *
@@ -51,12 +69,13 @@ export interface LayoutResult {
  * `buildMapGraph` already drops dangling edges, so this is the second belt.
  */
 export function layoutGraph(
-  graph: MapGraph,
+  graph: LayoutInput,
   direction: LayoutDirection = 'LR',
   opts: LayoutOptions = {},
 ): LayoutResult {
   const nodeWidth = opts.nodeWidth ?? NODE_WIDTH;
   const nodeHeight = opts.nodeHeight ?? NODE_HEIGHT;
+  if (usesForceLayout(graph)) return layoutForce(graph, direction, nodeWidth, nodeHeight, opts);
 
   const g = new dagre.graphlib.Graph({ multigraph: true });
   g.setGraph({

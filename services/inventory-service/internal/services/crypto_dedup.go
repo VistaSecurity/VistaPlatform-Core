@@ -514,11 +514,34 @@ func clearCryptoRiskScore(tx *sqlx.Tx, implID uuid.UUID) error {
 // row exactly as it was — which is the honest outcome: it has no opinion to
 // record, and overwriting a real earlier verdict with a 0 it cannot justify
 // would be a worse lie than the stale score this change removes.
-func persistCryptoRiskScore(tx *sqlx.Tx, implID uuid.UUID, score int) error {
-	if _, err := tx.Exec(setCryptoRiskScoreSQL, score, implID); err != nil {
-		return fmt.Errorf("set risk score on crypto implementation %s: %w", implID, err)
+//
+// It reports whether the stored score MOVED (including from unassessed), which
+// is the part of a re-observation an evaluator can read: a re-sighting that
+// resolves to the score the row already holds changed nothing.
+func persistCryptoRiskScore(tx *sqlx.Tx, implID uuid.UUID, score int) (bool, error) {
+	moved, err := cryptoRiskScoreMoves(tx, implID, score)
+	if err != nil {
+		return false, err
 	}
-	return nil
+	if _, err := tx.Exec(setCryptoRiskScoreSQL, score, implID); err != nil {
+		return false, fmt.Errorf("set risk score on crypto implementation %s: %w", implID, err)
+	}
+	return moved, nil
+}
+
+// cryptoRiskScoreMoves reports whether writing score (nil = unassessed) would
+// change what the configuration's row holds. Read on the caller's transaction,
+// immediately before the write.
+func cryptoRiskScoreMoves(tx *sqlx.Tx, implID uuid.UUID, score interface{}) (bool, error) {
+	var moves bool
+	err := tx.QueryRow(`SELECT risk_score IS DISTINCT FROM $1::integer FROM crypto_implementations WHERE id = $2`, score, implID).Scan(&moves)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read risk score of crypto implementation %s: %w", implID, err)
+	}
+	return moves, nil
 }
 
 // linkLeafCertificateSQL writes the `leaf` row of the certificate↔configuration
@@ -689,6 +712,42 @@ func upsertCryptoImplementation(
 	rawJSON []byte,
 	observationTimes ...time.Time,
 ) (uuid.UUID, cryptoUpsertOutcome, error) {
+	id, outcome, _, err := upsertCryptoImplementationTracked(tx, tenantID, k, certificateID, sourceSensorID, rawJSON, observationTimes...)
+	return id, outcome, err
+}
+
+// leafCertificateMoves reports whether refreshing configuration implID with
+// the observed certificate would change which certificate the row names as its
+// leaf. Read before the refresh statement; false when the observation carried
+// no certificate.
+func leafCertificateMoves(tx *sqlx.Tx, implID uuid.UUID, certificateID interface{}) (bool, error) {
+	if certificateID == nil {
+		return false, nil
+	}
+	var moves bool
+	if err := tx.QueryRow(`SELECT certificate_id IS DISTINCT FROM $2::uuid FROM crypto_implementations WHERE id = $1`, implID, certificateID).Scan(&moves); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read leaf certificate of crypto implementation %s: %w", implID, err)
+	}
+	return moves, nil
+}
+
+// upsertCryptoImplementationTracked is upsertCryptoImplementation that also
+// reports whether a REFRESH or partial re-observation moved the row's leaf
+// certificate. (Created, enriched and retracted rows are changes by their
+// outcome alone.) asset.changed uses it to tell a re-sighting from a server
+// that now presents a different, already-known certificate.
+func upsertCryptoImplementationTracked(
+	tx *sqlx.Tx,
+	tenantID uuid.UUID,
+	k cryptoImplementationKey,
+	certificateID interface{},
+	sourceSensorID interface{},
+	rawJSON []byte,
+	observationTimes ...time.Time,
+) (uuid.UUID, cryptoUpsertOutcome, bool, error) {
 	endpoint := nullUUIDValue(k.EndpointID)
 	observedAt := time.Now().UTC()
 	if len(observationTimes) > 0 && !observationTimes[0].IsZero() {
@@ -704,16 +763,20 @@ func upsertCryptoImplementation(
 		endpoint,
 	).Scan(&existing)
 	if err == nil {
+		leafMoved, e := leafCertificateMoves(tx, existing, certificateID)
+		if e != nil {
+			return uuid.Nil, cryptoUpsertRefreshed, false, e
+		}
 		if _, e := tx.Exec(refreshCryptoImplementationSQL, existing, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod, observedAt); e != nil {
-			return uuid.Nil, cryptoUpsertRefreshed, fmt.Errorf("refresh crypto implementation %s: %w", existing, e)
+			return uuid.Nil, cryptoUpsertRefreshed, false, fmt.Errorf("refresh crypto implementation %s: %w", existing, e)
 		}
 		if e := linkLeafCertificate(tx, existing, certificateID); e != nil {
-			return uuid.Nil, cryptoUpsertRefreshed, e
+			return uuid.Nil, cryptoUpsertRefreshed, false, e
 		}
-		return existing, cryptoUpsertRefreshed, nil
+		return existing, cryptoUpsertRefreshed, leafMoved, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up crypto implementation: %w", err)
+		return uuid.Nil, cryptoUpsertCreated, false, fmt.Errorf("look up crypto implementation: %w", err)
 	}
 
 	// The subset lookups bind the same values in the same order; only the
@@ -747,18 +810,18 @@ func upsertCryptoImplementation(
 		).Scan(&twin)
 		if e == nil {
 			if e := foldCryptoImplementation(tx, tenantID, partial, twin); e != nil {
-				return uuid.Nil, cryptoUpsertRefreshed, e
+				return uuid.Nil, cryptoUpsertRefreshed, false, e
 			}
 			if _, e := tx.Exec(refreshCryptoImplementationSQL, twin, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod, observedAt); e != nil {
-				return uuid.Nil, cryptoUpsertRefreshed, fmt.Errorf("refresh crypto implementation %s: %w", twin, e)
+				return uuid.Nil, cryptoUpsertRefreshed, false, fmt.Errorf("refresh crypto implementation %s: %w", twin, e)
 			}
 			if e := linkLeafCertificate(tx, twin, certificateID); e != nil {
-				return uuid.Nil, cryptoUpsertRefreshed, e
+				return uuid.Nil, cryptoUpsertRefreshed, false, e
 			}
-			return twin, cryptoUpsertRefreshed, nil
+			return twin, cryptoUpsertRefreshed, true, nil
 		}
 		if !errors.Is(e, sql.ErrNoRows) {
-			return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up crypto implementation key twin: %w", e)
+			return uuid.Nil, cryptoUpsertCreated, false, fmt.Errorf("look up crypto implementation key twin: %w", e)
 		}
 
 		if _, e := tx.Exec(
@@ -767,15 +830,15 @@ func upsertCryptoImplementation(
 			k.ProtocolVersion, k.CipherSuite, k.KeyExchange, k.Signature,
 			k.Symmetric, k.Hash, k.KeySize, observedAt,
 		); e != nil {
-			return uuid.Nil, cryptoUpsertEnriched, fmt.Errorf("enrich crypto implementation %s: %w", partial, e)
+			return uuid.Nil, cryptoUpsertEnriched, false, fmt.Errorf("enrich crypto implementation %s: %w", partial, e)
 		}
 		if e := linkLeafCertificate(tx, partial, certificateID); e != nil {
-			return uuid.Nil, cryptoUpsertEnriched, e
+			return uuid.Nil, cryptoUpsertEnriched, false, e
 		}
-		return partial, cryptoUpsertEnriched, nil
+		return partial, cryptoUpsertEnriched, false, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up partial crypto implementation: %w", err)
+		return uuid.Nil, cryptoUpsertCreated, false, fmt.Errorf("look up partial crypto implementation: %w", err)
 	}
 
 	// A version this producer used to invent ( W1.2). Checked before
@@ -796,34 +859,38 @@ func upsertCryptoImplementation(
 		).Scan(&retract)
 		if err == nil {
 			if _, e := tx.Exec(reobserveCryptoImplementationSQL, retract, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod, observedAt); e != nil {
-				return uuid.Nil, cryptoUpsertVersionRetracted, fmt.Errorf("re-observe crypto implementation %s: %w", retract, e)
+				return uuid.Nil, cryptoUpsertVersionRetracted, false, fmt.Errorf("re-observe crypto implementation %s: %w", retract, e)
 			}
 			if _, e := tx.Exec(retractProtocolVersionSQL, retract); e != nil {
-				return uuid.Nil, cryptoUpsertVersionRetracted, fmt.Errorf("retract protocol version of %s: %w", retract, e)
+				return uuid.Nil, cryptoUpsertVersionRetracted, false, fmt.Errorf("retract protocol version of %s: %w", retract, e)
 			}
 			if e := linkLeafCertificate(tx, retract, certificateID); e != nil {
-				return uuid.Nil, cryptoUpsertVersionRetracted, e
+				return uuid.Nil, cryptoUpsertVersionRetracted, false, e
 			}
-			return retract, cryptoUpsertVersionRetracted, nil
+			return retract, cryptoUpsertVersionRetracted, false, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up version retraction: %w", err)
+			return uuid.Nil, cryptoUpsertCreated, false, fmt.Errorf("look up version retraction: %w", err)
 		}
 	}
 
 	var superset uuid.UUID
 	err = tx.QueryRow(findSupersetCryptoImplementationSQL, subsetArgs...).Scan(&superset)
 	if err == nil {
+		leafMoved, e := leafCertificateMoves(tx, superset, certificateID)
+		if e != nil {
+			return uuid.Nil, cryptoUpsertPartialReobserved, false, e
+		}
 		if _, e := tx.Exec(reobserveCryptoImplementationSQL, superset, certificateID, sourceSensorID, rawJSON, k.DiscoveryMethod, observedAt); e != nil {
-			return uuid.Nil, cryptoUpsertPartialReobserved, fmt.Errorf("re-observe crypto implementation %s: %w", superset, e)
+			return uuid.Nil, cryptoUpsertPartialReobserved, false, fmt.Errorf("re-observe crypto implementation %s: %w", superset, e)
 		}
 		if e := linkLeafCertificate(tx, superset, certificateID); e != nil {
-			return uuid.Nil, cryptoUpsertPartialReobserved, e
+			return uuid.Nil, cryptoUpsertPartialReobserved, false, e
 		}
-		return superset, cryptoUpsertPartialReobserved, nil
+		return superset, cryptoUpsertPartialReobserved, leafMoved, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("look up superset crypto implementation: %w", err)
+		return uuid.Nil, cryptoUpsertCreated, false, fmt.Errorf("look up superset crypto implementation: %w", err)
 	}
 
 	id := uuid.New()
@@ -834,12 +901,12 @@ func upsertCryptoImplementation(
 		k.KeyExchange, k.Signature, k.Symmetric,
 		k.DiscoveryMethod, endpoint, observedAt,
 	); e != nil {
-		return uuid.Nil, cryptoUpsertCreated, fmt.Errorf("insert crypto implementation: %w", e)
+		return uuid.Nil, cryptoUpsertCreated, false, fmt.Errorf("insert crypto implementation: %w", e)
 	}
 	if e := linkLeafCertificate(tx, id); e != nil {
-		return uuid.Nil, cryptoUpsertCreated, e
+		return uuid.Nil, cryptoUpsertCreated, false, e
 	}
-	return id, cryptoUpsertCreated, nil
+	return id, cryptoUpsertCreated, false, nil
 }
 
 // linkLeafCertificate is the one call site shape of linkLeafCertificateSQL, so

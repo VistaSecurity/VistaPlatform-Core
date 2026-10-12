@@ -3,7 +3,9 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
@@ -69,8 +71,7 @@ func (r *RateLimiter) getRateLimit(tenantID string, persistDefault bool) (*model
 	}
 
 	rateLimit := &models.DiscoveryRateLimit{}
-	query := `SELECT id, tenant_id, scans_per_hour, concurrent_jobs, max_targets_per_job, is_active, created_at, updated_at
-	          FROM discovery_rate_limits WHERE tenant_id = $1 AND is_active = true`
+	query := rateLimitSelect
 
 	found := true
 	err = r.withTenantTxx(context.Background(), tenantUUID, func(tx *sqlx.Tx) error {
@@ -91,7 +92,97 @@ func (r *RateLimiter) getRateLimit(tenantID string, persistDefault bool) (*model
 		// Create default rate limit
 		return r.createDefaultRateLimit(tenantID)
 	}
-	return rateLimit, nil
+	return effectiveLimits(tenantID, rateLimit), nil
+}
+
+// rateLimitSelect reads the tenant's stored row whatever its is_active. Reading
+// only active rows made a stored inactive row indistinguishable from no row:
+// the default insert then hit ON CONFLICT, the re-read (is_active = true again)
+// found nothing, and every job creation failed with sql.ErrNoRows.
+const rateLimitSelect = `SELECT id, tenant_id, scans_per_hour, concurrent_jobs, max_targets_per_job, is_active, created_at, updated_at
+	FROM discovery_rate_limits WHERE tenant_id = $1`
+
+// maxTargetsPerJobCeiling is the most targets one job may ever carry; a tenant's
+// max_targets_per_job can lower it, never raise it.
+const maxTargetsPerJobCeiling = 1000
+
+// effectiveLimits is the limits a tenant is actually held to. An inactive row
+// means the tenant's configuration is switched off, so the defaults apply (a
+// "disabled" limit is not "no limit"). A stored value below 1 — written by an
+// earlier version that accepted anything — would refuse every request, so that
+// field falls back to its default too: a limits-config problem must never stop
+// jobs being created.
+func effectiveLimits(tenantID string, stored *models.DiscoveryRateLimit) *models.DiscoveryRateLimit {
+	def := defaultRateLimit(tenantID)
+	if stored == nil || !stored.IsActive {
+		return def
+	}
+	out := *stored
+	if out.ScansPerHour < 1 {
+		out.ScansPerHour = def.ScansPerHour
+	}
+	if out.ConcurrentJobs < 1 {
+		out.ConcurrentJobs = def.ConcurrentJobs
+	}
+	if out.MaxTargetsPerJob < 1 {
+		out.MaxTargetsPerJob = def.MaxTargetsPerJob
+	}
+	return &out
+}
+
+// MaxTargetsFor is the number of targets one job may carry for this tenant: the
+// lower of its max_targets_per_job and the platform ceiling. Read-only; a
+// failure to read falls back to the ceiling's default rather than failing the
+// request.
+func (r *RateLimiter) MaxTargetsFor(tenantID string) int {
+	limits, err := r.getRateLimit(tenantID, false)
+	if err != nil {
+		log.Printf("[RateLimiter] reading limits for tenant %s failed, using defaults: %v", tenantID, err)
+		limits = defaultRateLimit(tenantID)
+	}
+	if limits.MaxTargetsPerJob < maxTargetsPerJobCeiling {
+		return limits.MaxTargetsPerJob
+	}
+	return maxTargetsPerJobCeiling
+}
+
+// CheckAndReserveInTx is the rate check made atomic with the job insert. It
+// takes a per-tenant transaction-scoped advisory lock, then counts the tenant's
+// jobs on the caller's transaction: a concurrent create for the same tenant
+// waits for this transaction to commit (its job row visible) before it counts,
+// so the limits hold under concurrency. Call it immediately before the INSERT.
+func (r *RateLimiter) CheckAndReserveInTx(tx *sql.Tx, tenantID string) error {
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1, 72048))`, tenantID); err != nil {
+		return fmt.Errorf("lock tenant rate limit: %w", err)
+	}
+	stored := &models.DiscoveryRateLimit{}
+	err := tx.QueryRow(rateLimitSelect, tenantID).Scan(&stored.ID, &stored.TenantID, &stored.ScansPerHour,
+		&stored.ConcurrentJobs, &stored.MaxTargetsPerJob, &stored.IsActive, &stored.CreatedAt, &stored.UpdatedAt)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		stored = nil
+	case err != nil:
+		return fmt.Errorf("failed to get rate limit: %w", err)
+	}
+	limits := effectiveLimits(tenantID, stored)
+	var concurrentJobs, scansThisHour int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM discovery_jobs WHERE tenant_id = $1 AND status IN ('queued', 'running')`, tenantID).Scan(&concurrentJobs); err != nil {
+		return fmt.Errorf("failed to check concurrent jobs: %w", err)
+	}
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM discovery_jobs WHERE tenant_id = $1 AND created_at > NOW() - INTERVAL '1 hour'`, tenantID).Scan(&scansThisHour); err != nil {
+		return fmt.Errorf("failed to check scans per hour: %w", err)
+	}
+	return compareLimits(limits, concurrentJobs, scansThisHour)
+}
+
+func compareLimits(limits *models.DiscoveryRateLimit, concurrentJobs, scansThisHour int) error {
+	if concurrentJobs >= limits.ConcurrentJobs {
+		return &RateLimitExceededError{Limit: "concurrent jobs", Count: concurrentJobs, Max: limits.ConcurrentJobs}
+	}
+	if scansThisHour >= limits.ScansPerHour {
+		return &RateLimitExceededError{Limit: "scans this hour", Count: scansThisHour, Max: limits.ScansPerHour}
+	}
+	return nil
 }
 
 // defaultRateLimit is what a tenant with no stored limits is held to.
@@ -144,17 +235,19 @@ func (r *RateLimiter) createDefaultRateLimit(tenantID string) (*models.Discovery
 	if !inserted {
 		existing := &models.DiscoveryRateLimit{}
 		err = r.withTenantTxx(context.Background(), tenantUUID, func(tx *sqlx.Tx) error {
-			return tx.Get(existing, `SELECT id, tenant_id, scans_per_hour, concurrent_jobs, max_targets_per_job, is_active, created_at, updated_at
-			          FROM discovery_rate_limits WHERE tenant_id = $1 AND is_active = true`, tenantID)
+			return tx.Get(existing, rateLimitSelect, tenantID)
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create default rate limit: %w", err)
 		}
-		return existing, nil
+		return effectiveLimits(tenantID, existing), nil
 	}
 	return rateLimit, nil
 }
 
+// UpdateRateLimit stores the tenant's limits. A field the request omits keeps
+// its stored value (or the default, for a tenant with no row yet), so a partial
+// PUT cannot zero the rest. The caller validates req first.
 func (r *RateLimiter) UpdateRateLimit(tenantID string, req models.RateLimitConfigRequest) error {
 	tenantUUID, err := uuid.Parse(tenantID)
 	if err != nil {
@@ -162,13 +255,18 @@ func (r *RateLimiter) UpdateRateLimit(tenantID string, req models.RateLimitConfi
 	}
 
 	query := `
-		UPDATE discovery_rate_limits
-		SET scans_per_hour = $1, concurrent_jobs = $2, max_targets_per_job = $3, is_active = $4, updated_at = NOW()
-		WHERE tenant_id = $5`
+		INSERT INTO discovery_rate_limits (tenant_id, scans_per_hour, concurrent_jobs, max_targets_per_job, is_active, created_at, updated_at)
+		VALUES ($1, COALESCE($2::int, 100), COALESCE($3::int, 5), COALESCE($4::int, 1000), COALESCE($5::boolean, true), NOW(), NOW())
+		ON CONFLICT (tenant_id) DO UPDATE SET
+			scans_per_hour = COALESCE($2::int, discovery_rate_limits.scans_per_hour),
+			concurrent_jobs = COALESCE($3::int, discovery_rate_limits.concurrent_jobs),
+			max_targets_per_job = COALESCE($4::int, discovery_rate_limits.max_targets_per_job),
+			is_active = COALESCE($5::boolean, discovery_rate_limits.is_active),
+			updated_at = NOW()`
 
-	// RLS-scoped UPDATE over discovery_rate_limits.
+	// RLS-scoped upsert over discovery_rate_limits.
 	err = shareddatabase.WithTenantTx(context.Background(), r.db.DB, tenantUUID, func(tx *sql.Tx) error {
-		_, e := tx.Exec(query, req.ScansPerHour, req.ConcurrentJobs, req.MaxTargetsPerJob, req.IsActive, tenantID)
+		_, e := tx.Exec(query, tenantID, req.ScansPerHour, req.ConcurrentJobs, req.MaxTargetsPerJob, req.IsActive)
 		return e
 	})
 	if err != nil {
@@ -239,13 +337,5 @@ func (r *RateLimiter) checkRateLimit(tenantID string, persistDefault bool, exclu
 		return err
 	}
 
-	if concurrentJobs >= rateLimit.ConcurrentJobs {
-		return &RateLimitExceededError{Limit: "concurrent jobs", Count: concurrentJobs, Max: rateLimit.ConcurrentJobs}
-	}
-
-	if scansThisHour >= rateLimit.ScansPerHour {
-		return &RateLimitExceededError{Limit: "scans this hour", Count: scansThisHour, Max: rateLimit.ScansPerHour}
-	}
-
-	return nil
+	return compareLimits(rateLimit, concurrentJobs, scansThisHour)
 }

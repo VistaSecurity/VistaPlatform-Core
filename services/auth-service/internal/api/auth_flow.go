@@ -31,6 +31,17 @@ import (
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/middleware"
 	"github.com/vistasecurity/vistaplatform/auth-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
+)
+
+// authInitiatePerIPLimit caps /auth/initiate sessions per client IP per
+// window. Each call stores a Redis key for 15 minutes; without a cap an
+// unauthenticated caller can fill Redis. Generous enough for NAT'd offices.
+const (
+	authInitiatePerIPLimit  = 60
+	authInitiateIPWindow    = time.Minute
+	authInitiateSessionTTL  = 15 * time.Minute
+	authInitiateIPKeyPrefix = "auth:initiate:ip:"
 )
 
 // passwordMethod is the one login method every edition always offers.
@@ -53,6 +64,20 @@ func AuthInitiate(bypassDB *sql.DB, redisClient *redis.Client, ssoMethods SSOMet
 			return
 		}
 
+		// Per-IP cap on stored sessions. Fails open on a Redis error (the
+		// Set below would fail too), matching the other limiters.
+		ipKey := authInitiateIPKeyPrefix + c.ClientIP()
+		if n, err := redisClient.Incr(c.Request.Context(), ipKey).Result(); err == nil {
+			if n == 1 {
+				redisClient.Expire(c.Request.Context(), ipKey, authInitiateIPWindow)
+			}
+			if n > authInitiatePerIPLimit {
+				c.Header("Retry-After", "60")
+				c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many requests"})
+				return
+			}
+		}
+
 		// Create session
 		sessionID := uuid.New().String()
 		sessionData := map[string]interface{}{
@@ -63,7 +88,7 @@ func AuthInitiate(bypassDB *sql.DB, redisClient *redis.Client, ssoMethods SSOMet
 
 		// Store session in Redis (expires in 15 minutes)
 		sessionKey := fmt.Sprintf("auth:session:%s", sessionID)
-		redisClient.Set(context.Background(), sessionKey, sessionJSON, 15*time.Minute)
+		redisClient.Set(context.Background(), sessionKey, sessionJSON, authInitiateSessionTTL)
 
 		// Get available auth methods for this email
 		methods := []map[string]interface{}{}
@@ -221,7 +246,7 @@ func AuthAuthenticate(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisCli
 			// exact gap AllowByEmail exists to close. Fails closed on a limiter
 			// outage, as /auth/login does.
 			if rateLimiter != nil {
-				allowed, retryAfter, rlErr := rateLimiter.AllowByEmail(c.Request.Context(), email)
+				allowed, retryAfter, rlErr := rateLimiter.AllowAction(c, middleware.ActionLogin, email)
 				if rlErr != nil {
 					c.JSON(http.StatusServiceUnavailable, gin.H{
 						"error": "Authentication is temporarily unavailable. Please try again shortly.",
@@ -249,7 +274,7 @@ func AuthAuthenticate(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisCli
 			authResponse, err := authService.Login(loginReq, clientIP, userAgent)
 
 			if err != nil {
-				if respondTenantBlocked(c, err) {
+				if respondTenantBlocked(c, err) || respondPlatformAccount(c, err) {
 					return
 				}
 				switch err {
@@ -319,6 +344,10 @@ func AuthAuthenticate(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisCli
 
 // AuthComplete handles POST /auth/complete - Complete authentication
 func AuthComplete(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisClient *redis.Client, jwtService *auth.JWTService) gin.HandlerFunc {
+	return authCompleteHandler(cfg, db, bypassDB, redisClient, jwtService, sharedmw.RedisRevocationCheckerFromEnv())
+}
+
+func authCompleteHandler(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisClient *redis.Client, jwtService *auth.JWTService, revocation sharedmw.RevocationChecker) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req struct {
 			SessionID string `json:"session_id" binding:"required"`
@@ -352,13 +381,30 @@ func AuthComplete(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redisClient 
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 				return
 			}
+			// This endpoint is public and echoes user data, so it must hold
+			// the token to the same bar as RequireAuth: access tokens only
+			// (a refresh token is not a session), not on the denylist.
+			if claims.Type != "access" {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+				return
+			}
+			if revocation != nil {
+				revoked := claims.ID != "" && revocation.IsRevoked(c.Request.Context(), claims.ID)
+				if !revoked {
+					revoked = sharedmw.IsUserTokenRevoked(c.Request.Context(), revocation, claims.UserID, sharedmw.NumericDateTime(claims.IssuedAt))
+				}
+				if revoked {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
+					return
+				}
+			}
 
 			// Get user
 			// RLS: cross-tenant — runs on the bypass role (Phase 4). Looks up the user by primary key (id) from the validated token; tenant_id is not an input. Wrapping would fail closed.
 			var userEmail string
 			var userID, tenantID uuid.UUID
 			err = bypassDB.QueryRow(`
-				SELECT id, tenant_id, email FROM users WHERE id = $1
+				SELECT id, tenant_id, email FROM users WHERE id = $1 AND deleted_at IS NULL AND COALESCE(is_active, true)
 			`, claims.UserID).Scan(&userID, &tenantID, &userEmail)
 
 			if err != nil {

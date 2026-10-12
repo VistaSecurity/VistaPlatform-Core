@@ -2,6 +2,9 @@ package api
 
 import (
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -58,5 +61,70 @@ func TestAgentRoutesAreRegisteredAndPlatformAutoRegistrationIsRetired(t *testing
 	retired := "POST /api/v1/device-interrogation-service/agents/auto-register"
 	if got[retired] {
 		t.Errorf("%s is registered; platform device-agent auto-registration is retired", retired)
+	}
+}
+
+// gin resolves a static segment ahead of a param at the same level, whatever
+// order the two were registered in. The router comment once claimed the
+// host-inventory route had to precede the `/:id/...` routes; this pins that it
+// does not. The real SetupRouter fixes one order, so the two route shapes are
+// built here in both orders on a bare engine, and the real router is checked to
+// register host-inventory against the host-inventory handler.
+func TestHostInventoryStaticRouteBeatsIDParamInEitherOrder(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	marker := func(name string) gin.HandlerFunc {
+		return func(c *gin.Context) { c.String(http.StatusOK, name) }
+	}
+	staticFirst := func(g *gin.RouterGroup) {
+		g.POST("/host-inventory", marker("host-inventory"))
+		g.POST("/:id/results", marker("id-results"))
+		g.GET("/:id/jobs", marker("id-jobs"))
+	}
+	staticLast := func(g *gin.RouterGroup) {
+		g.GET("/:id/jobs", marker("id-jobs"))
+		g.POST("/:id/results", marker("id-results"))
+		g.POST("/host-inventory", marker("host-inventory"))
+	}
+	for name, register := range map[string]func(*gin.RouterGroup){
+		"static registered first": staticFirst,
+		"static registered last":  staticLast,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := gin.New()
+			register(r.Group("/agents"))
+			for path, want := range map[string]string{
+				"/agents/host-inventory": "host-inventory",
+				"/agents/abc/results":    "id-results",
+			} {
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, nil))
+				if got := w.Body.String(); got != want {
+					t.Errorf("POST %s resolved to %q, want %q", path, got, want)
+				}
+			}
+		})
+	}
+
+	// Real router: the route exists, is POST, and is the host-inventory handler.
+	t.Setenv("ENCRYPTION_MASTER_KEY", "test-key-for-route-registration-only")
+	t.Setenv("NATS_URL", "")
+	db, err := sql.Open("postgres", "postgres://invalid:invalid@127.0.0.1:1/none?sslmode=disable")
+	if err != nil {
+		t.Fatalf("opening a lazy handle: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	router, _ := SetupRouter(&config.Config{}, db, db, nil)
+	found := false
+	for _, r := range router.Routes() {
+		if r.Method == http.MethodPost && r.Path == "/api/v1/device-interrogation-service/agents/host-inventory" {
+			found = true
+			if !strings.Contains(r.Handler, "HostInventoryHandler") {
+				t.Errorf("host-inventory route handler = %q, want the HostInventoryHandler", r.Handler)
+			}
+		}
+	}
+	if !found {
+		t.Error("POST .../agents/host-inventory is not registered")
 	}
 }

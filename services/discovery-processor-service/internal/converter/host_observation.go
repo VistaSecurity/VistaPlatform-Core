@@ -52,7 +52,7 @@ func discoveryTypeOf(metadata map[string]interface{}) string {
 // hostObservationFinding renders a stored host_observation row as a
 // pass-through finding.
 func hostObservationFinding(sd *models.SensorDiscovery, metadata map[string]interface{}) *IngestFinding {
-	rawData := make(map[string]interface{}, len(metadata)+6)
+	rawData := make(map[string]interface{}, len(metadata))
 	if nested, ok := metadata["raw_metadata"].(map[string]interface{}); ok {
 		for k, v := range nested {
 			rawData[k] = v

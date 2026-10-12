@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	rbacsvc "github.com/vistasecurity/vistaplatform/auth-service/internal/rbac"
+	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
 )
 
 // RequirePermission ensures the authenticated user has a specific tenant permission
@@ -34,6 +35,12 @@ func RequirePermission(rbacService *rbacsvc.RBACService, permission string) gin.
 		tenantID, err := uuid.Parse(tenantIDStr.(string))
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid tenant ID format"})
+			c.Abort()
+			return
+		}
+
+		if !sharedmw.PermissionWithinTokenScope(c, permission) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions", "required_permission": permission})
 			c.Abort()
 			return
 		}
@@ -84,6 +91,9 @@ func RequireAnyPermission(rbacService *rbacsvc.RBACService, permissions ...strin
 		}
 
 		for _, p := range permissions {
+			if !sharedmw.PermissionWithinTokenScope(c, p) {
+				continue
+			}
 			has, err := rbacService.CheckPermission(tenantID, userID, p)
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check permission"})
@@ -130,6 +140,12 @@ func RequirePlatformPermission(rbacService interface {
 		userID, err := uuid.Parse(userIDStr.(string))
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user ID format"})
+			c.Abort()
+			return
+		}
+
+		if !sharedmw.PermissionWithinTokenScope(c, permission) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient platform permissions", "required_permission": permission})
 			c.Abort()
 			return
 		}

@@ -177,7 +177,7 @@ func TestContract_ListEOLCatalogue_200_empty(t *testing.T) {
 // The response must echo the page it SERVED, not the one that was asked for.
 func TestContract_ListEOLCatalogue_clampsPageSize(t *testing.T) {
 	eng := catalogEngine(&stubCatalogStore{}, &stubFeedRunner{}, nil)
-	w := doRequest(eng, http.MethodGet, catalogBase+"/eol?page=0&page_size=100000", nil)
+	w := doRequest(eng, http.MethodGet, catalogBase+"/eol?page=1&page_size=100000", nil)
 	var body struct {
 		Page     int `json:"page"`
 		PageSize int `json:"page_size"`

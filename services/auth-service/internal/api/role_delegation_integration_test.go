@@ -103,7 +103,7 @@ func TestIntegration_RoleDelegation_TenantAdminCanGrantBillingAdmin(t *testing.T
 	target := e.newUserWithRole(t, "finance-contact@example.com", "viewer")
 
 	eng := e.engine(actor, func(g *gin.RouterGroup) {
-		g.PUT("/users/:id", UpdateUser(e.owner))
+		g.PUT("/users/:id", UpdateUser(e.owner, nil))
 	})
 	w := do(eng, http.MethodPut, "/api/v1/auth-service/users/"+target.String(),
 		strings.NewReader(`{"role":"billing_admin"}`))
@@ -214,7 +214,7 @@ func TestIntegration_RoleDelegation_SecurityAdminCannotGrantBillingAdmin(t *test
 	target := e.newUserWithRole(t, "target-sec-billing@example.com", "viewer")
 
 	eng := e.engine(actor, func(g *gin.RouterGroup) {
-		g.PUT("/users/:id", UpdateUser(e.owner))
+		g.PUT("/users/:id", UpdateUser(e.owner, nil))
 	})
 	w := do(eng, http.MethodPut, "/api/v1/auth-service/users/"+target.String(),
 		strings.NewReader(`{"role":"billing_admin"}`))
@@ -363,7 +363,7 @@ func TestIntegration_RoleDelegation_ExemptionDoesNotCrossTenants(t *testing.T) {
 
 	// And the end-to-end refusal that follows from it.
 	eng := foreign.engine(actor, func(g *gin.RouterGroup) {
-		g.PUT("/users/:id", UpdateUser(foreign.owner))
+		g.PUT("/users/:id", UpdateUser(foreign.owner, nil))
 	})
 	w := do(eng, http.MethodPut, "/api/v1/auth-service/users/"+foreignTarget.String(),
 		strings.NewReader(`{"role":"billing_admin"}`))

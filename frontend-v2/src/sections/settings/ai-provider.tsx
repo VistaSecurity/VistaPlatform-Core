@@ -18,6 +18,7 @@ import { clients } from '../../lib/clients';
 import { AI_QUERY_KEY, type AIStatus } from '../../lib/ai-seams';
 import { Icon } from '../../components/ui';
 import { AMBER, GREEN, SCard, SInput, SRow, SSelect, STag, StateNote } from './kit';
+import { unwrap } from '../../lib/api-result';
 
 /** Display names for the provider kinds. UI copy, so it lives here, not on the wire. */
 export const PROVIDER_KIND_LABELS: Record<string, string> = {
@@ -167,11 +168,6 @@ export function providerRequestBody(form: ProviderForm, hasSavedKey: boolean) {
   return body;
 }
 
-function errorMessage(error: unknown, fallback: string): string {
-  const msg = (error as { error?: unknown } | undefined)?.error;
-  return typeof msg === 'string' && msg ? msg : fallback;
-}
-
 type TestResult = { ok: boolean; model_id?: string; latency_ms?: number; message?: string };
 
 export function ProviderRow({ status }: { status: AIStatus }) {
@@ -182,8 +178,7 @@ export function ProviderRow({ status }: { status: AIStatus }) {
 
   const disconnect = useMutation({
     mutationFn: async () => {
-      const { data, error, response } = await clients.auth.DELETE('/tenant/ai/provider', {});
-      if (!response.ok || error || !data) throw new Error(errorMessage(error, 'Couldn’t disconnect — try again.'));
+      const data = unwrap(await clients.auth.DELETE('/tenant/ai/provider', {}), 'Couldn’t disconnect — try again.', { requireData: true });
       return data;
     },
     onSuccess: (next) => {
@@ -280,10 +275,9 @@ function ProviderFormCard({ status, onDone }: { status: AIStatus; onDone: () => 
 
   const save = useMutation({
     mutationFn: async () => {
-      const { data, error, response } = await clients.auth.PUT('/tenant/ai/provider', {
+      const data = unwrap(await clients.auth.PUT('/tenant/ai/provider', {
         body: providerRequestBody(form, hasSavedKey),
-      });
-      if (!response.ok || error || !data) throw new Error(errorMessage(error, 'Couldn’t save the provider — try again.'));
+      }), 'Couldn’t save the provider — try again.', { requireData: true });
       return data;
     },
     onSuccess: (next) => {
@@ -294,10 +288,9 @@ function ProviderFormCard({ status, onDone }: { status: AIStatus; onDone: () => 
 
   const runTest = useMutation({
     mutationFn: async (): Promise<TestResult> => {
-      const { data, error, response } = await clients.auth.POST('/tenant/ai/provider/test', {
+      const data = unwrap(await clients.auth.POST('/tenant/ai/provider/test', {
         body: providerRequestBody(form, hasSavedKey),
-      });
-      if (!response.ok || error || !data) throw new Error(errorMessage(error, 'Couldn’t run the test — try again.'));
+      }), 'Couldn’t run the test — try again.', { requireData: true });
       return data;
     },
     onSuccess: (result) => setTest(result),

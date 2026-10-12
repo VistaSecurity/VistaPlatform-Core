@@ -9,6 +9,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Mail, Send, MailCheck } from 'lucide-react';
 import { clients } from '../lib/clients';
 import { AuthShell, AuthBackToLogin } from './auth-shell';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export function ForgotPasswordPage() {
   const navigate = useNavigate();
@@ -17,9 +18,10 @@ export function ForgotPasswordPage() {
 
   const submit = useMutation({
     mutationFn: async () => {
-      // Anti-enumeration: treat any non-network outcome as success (the backend
-      // returns 200 whether or not the address matched).
-      await clients.admin.POST('/auth/forgot-password', { body: { email } });
+      // Anti-enumeration: the backend returns 200 whether or not the address
+      // matched, so a non-2xx here is a real failure (rate limit, outage), not
+      // a hint about the address — surface it instead of claiming an email went out.
+      unwrap(await clients.admin.POST('/auth/forgot-password', { body: { email } }), 'Could not send the reset link');
     },
     onSuccess: () => setSent(true),
   });

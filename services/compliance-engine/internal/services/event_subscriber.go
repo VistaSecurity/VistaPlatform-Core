@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"runtime/debug"
 	"sync"
@@ -217,19 +218,26 @@ func (s *EventSubscriberService) handleAssetChanged(ctx context.Context, msg *na
 		return nil // Don't redeliver on bad data
 	}
 
-	log.Printf("[EventSubscriber] Received asset changed: event_id=%s, tenant_id=%s, asset_id=%s, change_type=%s",
+	// The evaluation's log lines are held until its outcome is known: a pass
+	// that wrote nothing logs ONE line, one that changed something logs them
+	// all. The context is the pass's, so it reaches the evaluation the
+	// coalescer runs on this request's behalf.
+	ctx, pass := withEvalPassLog(ctx)
+	passLogf(ctx, "[EventSubscriber] Received asset changed: event_id=%s, tenant_id=%s, asset_id=%s, change_type=%s",
 		event.EventID, event.TenantID, event.AssetID, event.ChangeType)
 
 	err := s.evaluateAsset(ctx, event)
 	latency := time.Since(startTime)
 
 	if err != nil {
-		log.Printf("[EventSubscriber] ERROR: Failed to process asset changed: event_id=%s, error=%v, latency_ms=%d",
+		passLogf(ctx, "[EventSubscriber] ERROR: Failed to process asset changed: event_id=%s, error=%v, latency_ms=%d",
 			event.EventID, err, latency.Milliseconds())
 	} else {
-		log.Printf("[EventSubscriber] Processed asset changed: event_id=%s, latency_ms=%d",
+		passLogf(ctx, "[EventSubscriber] Processed asset changed: event_id=%s, latency_ms=%d",
 			event.EventID, latency.Milliseconds())
 	}
+	pass.release(err != nil, fmt.Sprintf("[EventSubscriber] Asset change evaluated, nothing written: event_id=%s, tenant_id=%s, asset_id=%s, latency_ms=%d",
+		event.EventID, event.TenantID, event.AssetID, latency.Milliseconds()))
 
 	if s.metricsService != nil {
 		s.metricsService.RecordEventProcessed("asset.changed", err == nil, latency.Milliseconds(), err)
@@ -559,7 +567,13 @@ outer:
 				Metadata:   event.Metadata,
 			}
 
-			if err := s.evaluateAssetGated(ctx, assetEvent, semaphore); err != nil {
+			// Same collapse as handleAssetChanged: a bulk member that wrote
+			// nothing is one line, not four.
+			passCtx, pass := withEvalPassLog(ctx)
+			err := s.evaluateAssetGated(passCtx, assetEvent, semaphore)
+			pass.release(err != nil, fmt.Sprintf("[EventSubscriber] Bulk asset change evaluated, nothing written: event_id=%s, tenant_id=%s, asset_id=%s",
+				event.EventID, event.TenantID, aid))
+			if err != nil {
 				log.Printf("[EventSubscriber] Failed to process bulk asset %s: %v", aid, err)
 				countMu.Lock()
 				errorCount++

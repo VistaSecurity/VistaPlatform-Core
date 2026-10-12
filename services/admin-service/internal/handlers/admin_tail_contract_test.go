@@ -42,6 +42,7 @@ type stubPlatformSettingsStore struct {
 	permErr        error
 	permAsked      []string
 	upserted       []string
+	upsertedValues []platformSettingKV
 	// signup is what SignupState answers; signupErr fails it.
 	signup    entitlements.SignupState
 	signupErr error
@@ -54,9 +55,15 @@ func (s *stubPlatformSettingsStore) SignupState(context.Context) (entitlements.S
 func (s *stubPlatformSettingsStore) ListSettings(context.Context) ([]platformSettingKV, error) {
 	return s.list, s.listErr
 }
-func (s *stubPlatformSettingsStore) UpsertSetting(_ context.Context, key string, _ []byte, _ uuid.UUID) error {
-	s.upserted = append(s.upserted, key)
-	return s.upsertErr
+func (s *stubPlatformSettingsStore) UpsertSettings(_ context.Context, settings []platformSettingKV, _ uuid.UUID) error {
+	if s.upsertErr != nil {
+		return s.upsertErr // all-or-nothing: a failed save records nothing
+	}
+	for _, kv := range settings {
+		s.upserted = append(s.upserted, kv.Key)
+		s.upsertedValues = append(s.upsertedValues, kv)
+	}
+	return nil
 }
 func (s *stubPlatformSettingsStore) HasPlatformPermission(_ context.Context, _ uuid.UUID, perm string) (bool, error) {
 	s.permAsked = append(s.permAsked, perm)
@@ -365,7 +372,7 @@ func TestContract_UpdatePlatformSettings_UngatedKeysNeedNoSecurityManage(t *test
 	store := &stubPlatformSettingsStore{securityManage: false}
 	eng := newSettingsEngine(store, true)
 	w := doRequest(eng, http.MethodPut, apiBase+"/admin/settings",
-		strings.NewReader(`{"platform_name":"Acme","registration_enabled":true,"email_verification_required":true,"block_personal_email_domains":false,"admin_ui_base_url":""}`))
+		strings.NewReader(`{"platform_name":"Acme","registration_enabled":true,"email_verification_required":true,"block_personal_email_domains":false}`))
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}

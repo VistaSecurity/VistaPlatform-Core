@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -29,7 +30,7 @@ type findingsStore interface {
 	AssignFindingOwner(tenantID, findingID, assignedTo, assignedBy uuid.UUID, notes *string) error
 	UnassignFindingOwner(tenantID, findingID uuid.UUID) error
 	GetFinding(tenantID, findingID uuid.UUID) (*models.ComplianceFinding, error)
-	GetFindingsByAsset(tenantID, assetID uuid.UUID) ([]models.ComplianceFinding, error)
+	GetFindingsByAsset(tenantID, assetID uuid.UUID, limit, offset int) ([]models.ComplianceFinding, bool, error)
 	GetFindingStatistics(tenantID uuid.UUID) (*services.FindingStatistics, error)
 	GetFindingsByControl(tenantID uuid.UUID, limit int) ([]services.FindingsByControlGroup, error)
 	GetEvidenceID(tenantID, findingID uuid.UUID) (string, string, error)
@@ -68,9 +69,8 @@ type evaluationStore interface {
 	EvaluateMultipleFrameworks(tenantID uuid.UUID, frameworkIDs []uuid.UUID, frameworkVersions map[string]string, filters models.ScenarioFilters, entityType string) ([]services.MultiFrameworkEvaluationResult, error)
 	GetComplianceScore(tenantID uuid.UUID, frameworkID *uuid.UUID) (*services.ComplianceScoreResponse, error)
 	GetControlDetails(tenantID, controlID uuid.UUID, scenarioID *uuid.UUID, filters models.ScenarioFilters, page, pageSize int) (*services.ControlDetailsResponse, error)
-	GetControlDetailsTotalCount(tenantID, controlID uuid.UUID, filters models.ScenarioFilters) (int, error)
 	GetFrameworkStatus(tenantID uuid.UUID) (*services.FrameworkStatusResponse, error)
-	ResolveControlID(controlIDStr, frameworkIDStr string) (uuid.UUID, error)
+	ResolveControlID(tenantID uuid.UUID, controlIDStr, frameworkIDStr string) (uuid.UUID, error)
 }
 
 func writeFindingNotFound(c *gin.Context, err error) bool {
@@ -78,6 +78,22 @@ func writeFindingNotFound(c *gin.Context, err error) bool {
 		return false
 	}
 	c.JSON(http.StatusNotFound, gin.H{"error": "Finding not found"})
+	return true
+}
+
+// writeInputError answers a services.InputError with its 4xx: 400 for input
+// that is malformed or out of range, 422 for a well-formed reference to
+// something the tenant does not have. It reports whether err was one.
+func writeInputError(c *gin.Context, err error) bool {
+	ie, ok := services.AsInputError(err)
+	if !ok {
+		return false
+	}
+	status := http.StatusBadRequest
+	if ie.Missing {
+		status = http.StatusUnprocessableEntity
+	}
+	c.JSON(status, gin.H{"error": ie.Error()})
 	return true
 }
 
@@ -194,7 +210,7 @@ func (h *WorkspaceHandlers) GetControlDetails(c *gin.Context) {
 	controlID, err := uuid.Parse(controlIDStr)
 	if err != nil {
 		// Not a UUID — try resolving string control_id (e.g., "BP-002") to UUID
-		resolvedID, resolveErr := h.evaluationService.ResolveControlID(controlIDStr, frameworkIDStr)
+		resolvedID, resolveErr := h.evaluationService.ResolveControlID(tenantUUID, controlIDStr, frameworkIDStr)
 		if resolveErr != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid control ID"})
 			return
@@ -222,35 +238,30 @@ func (h *WorkspaceHandlers) GetControlDetails(c *gin.Context) {
 		Owner:          c.Query("owner"),
 	}
 
-	// Parse pagination
-	page := 1
-	pageSize := 25
-	if pageStr := c.Query("page"); pageStr != "" {
-		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
-			page = p
-		}
+	// Parse pagination. Strict: garbage is a 400, not page 1.
+	pg, pgErr := sharedapi.ParsePaginationStrict(c)
+	if pgErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": pgErr.Error()})
+		return
 	}
-	if pageSizeStr := c.Query("page_size"); pageSizeStr != "" {
-		if ps, err := strconv.Atoi(pageSizeStr); err == nil && ps > 0 && ps <= 100 {
-			pageSize = ps
-		}
+	page, pageSize := pg.Page, pg.PageSize
+	if _, present := c.GetQuery("page_size"); !present {
+		pageSize = 25
 	}
 
 	// Get control details from evaluation service
 	details, err := h.evaluationService.GetControlDetails(tenantUUID, controlID, scenarioID, filters, page, pageSize)
 	if err != nil {
+		if errors.Is(err, services.ErrControlNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Control not found"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to get control details",
 		})
 		return
 	}
-
-	// Get total findings count for pagination
-	totalFindings, err := h.evaluationService.GetControlDetailsTotalCount(tenantUUID, controlID, filters)
-	if err != nil {
-		// Fallback to estimated count
-		totalFindings = len(details.Findings) + (page-1)*pageSize
-	}
+	totalFindings := details.TotalFindings
 
 	c.JSON(http.StatusOK, gin.H{
 		"control":          details.Control,
@@ -458,6 +469,9 @@ func (h *WorkspaceHandlers) DeleteScenario(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Scenario deleted successfully"})
 }
 
+// maxOverrideRationaleLen bounds the free-text justification on an override.
+const maxOverrideRationaleLen = 5000
+
 // CreateOverride creates a new compliance override
 func (h *WorkspaceHandlers) CreateOverride(c *gin.Context) {
 	tenantUUID, ok := sharedmw.GetTenantIDFromContext(c)
@@ -520,10 +534,25 @@ func (h *WorkspaceHandlers) CreateOverride(c *gin.Context) {
 	if frameworkType == "" {
 		frameworkType = "platform"
 	}
+	// The service refuses anything else with a plain error, which would reach
+	// the caller as a 500 that names no field.
+	if frameworkType != "platform" && frameworkType != "tenant" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "framework_type: must be platform or tenant"})
+		return
+	}
+	if utf8.RuneCountInString(input.Rationale) > maxOverrideRationaleLen {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("rationale: must be at most %d characters", maxOverrideRationaleLen)})
+		return
+	}
 
 	// Create override
 	override, err := h.overrideService.CreateOverride(tenantUUID, userUUID, scenarioID, controlID, overrideType, input.SeverityFrom, input.SeverityTo, input.Rationale, frameworkType)
 	if err != nil {
+		if errors.Is(err, services.ErrDuplicateOverride) {
+			c.JSON(http.StatusConflict, gin.H{"error": "An override already exists for this control and scenario"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to create override",
 		})
@@ -789,7 +818,7 @@ func (h *WorkspaceHandlers) AssignFindingOwner(c *gin.Context) {
 	// Assign finding
 	err = h.findingsService.AssignFindingOwner(tenantUUID, findingID, assignedToUUID, userUUID, input.Notes)
 	if err != nil {
-		if writeFindingNotFound(c, err) {
+		if writeFindingNotFound(c, err) || writeInputError(c, err) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -931,7 +960,7 @@ func (h *WorkspaceHandlers) UpdateFindingWorkflowStatus(c *gin.Context) {
 	// Update workflow status
 	err = h.findingsService.UpdateWorkflowStatus(tenantUUID, findingID, userID, req.WorkflowStatus, req.SuppressionReason, suppressedUntil)
 	if err != nil {
-		if writeFindingNotFound(c, err) {
+		if writeFindingNotFound(c, err) || writeInputError(c, err) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -1001,8 +1030,22 @@ func (h *WorkspaceHandlers) ListFindings(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+	// Strict: a malformed page/page_size is a 400, not a silent fall back to
+	// page 1 (a caller paging with a typo would loop on the first page forever).
+	pg, pgErr := sharedapi.ParsePaginationStrict(c)
+	if pgErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": pgErr.Error()})
+		return
+	}
+	page, pageSize := pg.Page, 50
+	if v, present := c.GetQuery("page_size"); present {
+		// Already validated as a positive integer above. This endpoint's ceiling
+		// is 200 (the remediation plan picker asks for it), above the shared 100.
+		pageSize, _ = strconv.Atoi(v)
+		if pageSize > 200 {
+			pageSize = 200
+		}
+	}
 
 	filters := services.FindingListFilters{
 		WorkflowStatus: c.Query("workflow_status"),
@@ -1131,8 +1174,14 @@ func (h *WorkspaceHandlers) GetFindingsByAsset(c *gin.Context) {
 		return
 	}
 
-	// Get findings
-	findings, err := h.findingsService.GetFindingsByAsset(tenantUUID, assetID)
+	// Bounded: an asset can carry thousands of findings. The default page is the
+	// cap, so a caller that sends no page_size (the UI) still gets up to 100.
+	p, ok := parsePageDefaulting(c, sharedapi.MaxPageSize)
+	if !ok {
+		return
+	}
+
+	findings, hasNext, err := h.findingsService.GetFindingsByAsset(tenantUUID, assetID, p.PageSize, p.Offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed to get findings",
@@ -1140,7 +1189,12 @@ func (h *WorkspaceHandlers) GetFindingsByAsset(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"findings": findings})
+	c.JSON(http.StatusOK, gin.H{
+		"findings":  findings,
+		"page":      p.Page,
+		"page_size": p.PageSize,
+		"has_next":  hasNext,
+	})
 }
 
 // GetFindingStatistics returns aggregated statistics for findings

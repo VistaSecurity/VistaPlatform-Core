@@ -19,30 +19,10 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { Icon, probabilityConfidencePercent, MiniBar } from '../../components/ui';
 import { relTime } from './kit';
 import { safeHttpUrl } from '../../lib/url';
+import { ruleKindLabel } from './class-rule-labels';
 import type {
   ClassModelReason, ClassOption, ClassificationRuleRef, ClassProposal,
 } from './class-proposal-queries';
-
-/** How a rule kind reads to somebody who has never opened the rule table. */
-const KIND_LABEL: Readonly<Record<string, string>> = {
-  oui: 'MAC prefix',
-  oui_vendor: 'MAC manufacturer',
-  sysobjectid: 'SNMP object ID',
-  enip: 'EtherNet/IP vendor',
-  cloud_type: 'Cloud resource type',
-  banner: 'Service banner',
-  port_profile: 'Open ports',
-  model: 'Model prefix',
-  platform: 'Management API',
-  cdp_capabilities: 'CDP capabilities',
-  lldp_capability: 'LLDP capabilities',
-  mdns_service: 'Advertised service',
-  dhcp_vendor_class: 'DHCP vendor class',
-};
-
-function ruleKindLabel(kind: string): string {
-  return KIND_LABEL[kind] ?? kind;
-}
 
 /** The first value that is actually there.
  *

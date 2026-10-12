@@ -16,6 +16,7 @@ import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { MeasurementRulesModal } from './measurement-rules-modal';
 import { DraftControlsModal, useDraftingAvailability } from './draft-controls-modal';
 import { AcceptUpdateButton, SeededContentBadges } from './seeded-content';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type AdminFramework = complianceEngineComponents['schemas']['PublishedFramework'];
 type FrameworkInput = complianceEngineComponents['schemas']['PlatformFrameworkInput'];
@@ -44,29 +45,25 @@ function useFrameworkMutations() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['platform', 'admin-frameworks'] });
   const create = useMutation({
     mutationFn: async (body: FrameworkInput) => {
-      const { error } = await clients.compliance.POST('/admin/frameworks', { body });
-      if (error) throw new Error('Create failed (platform-admin required)');
+      unwrap(await clients.compliance.POST('/admin/frameworks', { body }), 'Create failed (platform-admin required)');
     },
     onSuccess: invalidate,
   });
   const update = useMutation({
     mutationFn: async ({ id, body }: { id: string; body: FrameworkInput }) => {
-      const { error } = await clients.compliance.PUT('/admin/frameworks/{id}', { params: { path: { id } }, body });
-      if (error) throw new Error('Update failed (drafts only)');
+      unwrap(await clients.compliance.PUT('/admin/frameworks/{id}', { params: { path: { id } }, body }), 'Update failed (drafts only)');
     },
     onSuccess: invalidate,
   });
   const publish = useMutation({
     mutationFn: async ({ id, status }: { id: string; status: 'published' | 'archived' }) => {
-      const { error } = await clients.compliance.POST('/admin/frameworks/{id}/publish', { params: { path: { id } }, body: { status } });
-      if (error) throw new Error('Status change failed');
+      unwrap(await clients.compliance.POST('/admin/frameworks/{id}/publish', { params: { path: { id } }, body: { status } }), 'Status change failed');
     },
     onSuccess: invalidate,
   });
   const remove = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await clients.compliance.DELETE('/admin/frameworks/{id}', { params: { path: { id } } });
-      if (error) throw new Error('Delete failed');
+      unwrap(await clients.compliance.DELETE('/admin/frameworks/{id}', { params: { path: { id } } }), 'Delete failed');
     },
     onSuccess: invalidate,
   });
@@ -75,7 +72,7 @@ function useFrameworkMutations() {
   const acceptUpdate = useMutation({
     mutationFn: async (id: string) => {
       const { error, response } = await clients.compliance.POST('/admin/frameworks/{id}/accept-update', { params: { path: { id } } });
-      if (error) throw new Error(response?.status === 409 ? 'No update available any more' : 'Accepting the update failed');
+      if (!response.ok || error) throw new Error(response.status === 409 ? 'No update available any more' : 'Accepting the update failed');
     },
     onSuccess: invalidate,
   });
@@ -91,29 +88,26 @@ function useControlMutations() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['platform', 'admin-frameworks'] });
   const create = useMutation({
     mutationFn: async ({ frameworkId, body }: { frameworkId: string; body: ControlInput }) => {
-      const { error } = await clients.compliance.POST('/admin/frameworks/{id}/controls', { params: { path: { id: frameworkId } }, body });
-      if (error) throw new Error('Add control failed (platform-admin required)');
+      unwrap(await clients.compliance.POST('/admin/frameworks/{id}/controls', { params: { path: { id: frameworkId } }, body }), 'Add control failed (platform-admin required)');
     },
     onSuccess: invalidate,
   });
   const update = useMutation({
     mutationFn: async ({ frameworkId, controlId, body }: { frameworkId: string; controlId: string; body: ControlInput }) => {
-      const { error } = await clients.compliance.PUT('/admin/frameworks/{id}/controls/{controlId}', { params: { path: { id: frameworkId, controlId } }, body });
-      if (error) throw new Error('Update control failed');
+      unwrap(await clients.compliance.PUT('/admin/frameworks/{id}/controls/{controlId}', { params: { path: { id: frameworkId, controlId } }, body }), 'Update control failed');
     },
     onSuccess: invalidate,
   });
   const remove = useMutation({
     mutationFn: async ({ frameworkId, controlId }: { frameworkId: string; controlId: string }) => {
-      const { error } = await clients.compliance.DELETE('/admin/frameworks/{id}/controls/{controlId}', { params: { path: { id: frameworkId, controlId } } });
-      if (error) throw new Error('Delete control failed');
+      unwrap(await clients.compliance.DELETE('/admin/frameworks/{id}/controls/{controlId}', { params: { path: { id: frameworkId, controlId } } }), 'Delete control failed');
     },
     onSuccess: invalidate,
   });
   const acceptUpdate = useMutation({
     mutationFn: async ({ frameworkId, controlId }: { frameworkId: string; controlId: string }) => {
       const { error, response } = await clients.compliance.POST('/admin/frameworks/{id}/controls/{controlId}/accept-update', { params: { path: { id: frameworkId, controlId } } });
-      if (error) throw new Error(response?.status === 409 ? 'No update available any more' : 'Accepting the update failed');
+      if (!response.ok || error) throw new Error(response.status === 409 ? 'No update available any more' : 'Accepting the update failed');
     },
     onSuccess: invalidate,
   });
@@ -243,7 +237,7 @@ export function FrameworksPage() {
                   <tr>
                     <td>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <button className="op-btn icon sm" title={expanded ? 'Hide controls' : 'Manage controls'} onClick={() => setExpandedFw(expanded ? null : f.id)}>
+                        <button className="op-btn icon sm" title={expanded ? 'Hide controls' : 'Manage controls'} aria-label={expanded ? 'Hide controls' : 'Manage controls'} onClick={() => setExpandedFw(expanded ? null : f.id)}>
                           {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                         </button>
                         <div>
@@ -259,13 +253,13 @@ export function FrameworksPage() {
                     <td>
                       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                         <AcceptUpdateButton row={f} label={f.name} pending={fwMut.acceptUpdate.isPending} onAccept={() => fwMut.acceptUpdate.mutate(f.id, { onSuccess: () => toast.success('Update accepted'), onError: (e) => toast.error(errMsg(e)) })} />
-                        {status === 'draft' && <button className="op-btn icon sm" title="Edit metadata" onClick={() => setFwModal({ kind: 'edit', framework: f })}><Pencil size={13} /></button>}
+                        {status === 'draft' && <button className="op-btn icon sm" title="Edit metadata" aria-label="Edit metadata" onClick={() => setFwModal({ kind: 'edit', framework: f })}><Pencil size={13} /></button>}
                         {published ? (
-                          <button className="op-btn icon sm" title="Unpublish (archive)" disabled={fwMut.publish.isPending} onClick={() => fwMut.publish.mutate({ id: f.id, status: 'archived' }, { onSuccess: () => toast.success('Unpublished'), onError: (e) => toast.error(errMsg(e)) })}><Archive size={13} /></button>
+                          <button className="op-btn icon sm" title="Unpublish (archive)" aria-label="Unpublish (archive)" disabled={fwMut.publish.isPending} onClick={() => fwMut.publish.mutate({ id: f.id, status: 'archived' }, { onSuccess: () => toast.success('Unpublished'), onError: (e) => toast.error(errMsg(e)) })}><Archive size={13} /></button>
                         ) : (
-                          <button className="op-btn icon sm" title="Publish" disabled={fwMut.publish.isPending} onClick={() => fwMut.publish.mutate({ id: f.id, status: 'published' }, { onSuccess: () => toast.success('Published — tenants can now activate it'), onError: (e) => toast.error(errMsg(e)) })}><Send size={13} /></button>
+                          <button className="op-btn icon sm" title="Publish" aria-label="Publish" disabled={fwMut.publish.isPending} onClick={() => fwMut.publish.mutate({ id: f.id, status: 'published' }, { onSuccess: () => toast.success('Published — tenants can now activate it'), onError: (e) => toast.error(errMsg(e)) })}><Send size={13} /></button>
                         )}
-                        <button className="op-btn icon sm" title="Delete" disabled={fwMut.remove.isPending} onClick={() => { if (window.confirm(`Delete framework "${f.name}"? This cannot be undone.`)) fwMut.remove.mutate(f.id, { onSuccess: () => toast.success('Deleted'), onError: (e) => toast.error(errMsg(e)) }); }}><Trash2 size={13} /></button>
+                        <button className="op-btn icon sm" title="Delete" aria-label="Delete" disabled={fwMut.remove.isPending} onClick={() => { if (window.confirm(`Delete framework "${f.name}"? This cannot be undone.`)) fwMut.remove.mutate(f.id, { onSuccess: () => toast.success('Deleted'), onError: (e) => toast.error(errMsg(e)) }); }}><Trash2 size={13} /></button>
                       </div>
                     </td>
                   </tr>
@@ -309,8 +303,8 @@ export function FrameworksPage() {
                                   </span>
                                   <AcceptUpdateButton row={ctrl} label={ctrl.control_id} pending={ctrlMut.acceptUpdate.isPending} onAccept={() => ctrlMut.acceptUpdate.mutate({ frameworkId: f.id, controlId: ctrl.id }, { onSuccess: () => toast.success('Update accepted'), onError: (e) => toast.error(errMsg(e)) })} />
                                   <button className="op-btn sm ghost" title="Manage measurement rules" onClick={() => setRulesControl({ id: ctrl.id, control_id: ctrl.control_id, title: ctrl.title })}>Rules</button>
-                                  <button className="op-btn icon sm" title="Edit control" onClick={() => setControlModal({ kind: 'edit', frameworkId: f.id, control: ctrl })}><Pencil size={12} /></button>
-                                  <button className="op-btn icon sm" title="Delete control" disabled={ctrlMut.remove.isPending} onClick={() => { if (window.confirm(`Delete control "${ctrl.control_id}"?`)) ctrlMut.remove.mutate({ frameworkId: f.id, controlId: ctrl.id }, { onSuccess: () => toast.success('Control deleted'), onError: (e) => toast.error(errMsg(e)) }); }}><Trash2 size={12} /></button>
+                                  <button className="op-btn icon sm" title="Edit control" aria-label="Edit control" onClick={() => setControlModal({ kind: 'edit', frameworkId: f.id, control: ctrl })}><Pencil size={12} /></button>
+                                  <button className="op-btn icon sm" title="Delete control" aria-label="Delete control" disabled={ctrlMut.remove.isPending} onClick={() => { if (window.confirm(`Delete control "${ctrl.control_id}"?`)) ctrlMut.remove.mutate({ frameworkId: f.id, controlId: ctrl.id }, { onSuccess: () => toast.success('Control deleted'), onError: (e) => toast.error(errMsg(e)) }); }}><Trash2 size={12} /></button>
                                 </div>
                               ))}
                             </div>

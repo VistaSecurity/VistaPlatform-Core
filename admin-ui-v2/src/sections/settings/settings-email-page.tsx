@@ -13,6 +13,7 @@ import { Mail, CheckCircle, XCircle, Send, Lock } from 'lucide-react';
 import { usePlatformPermissions, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
 import { clients } from '../../lib/clients';
 import { SecurityManageNotice } from './settings-identity-providers-page';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -50,10 +51,9 @@ function useSaveEmailConfig() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (cfg: EmailConfig) => {
-      const { error } = await clients.admin.PUT('/admin/settings', {
+      unwrap(await clients.admin.PUT('/admin/settings', {
         body: { email_config: cfg } as any,
-      });
-      if (error) throw new Error((error as any)?.error ?? 'Save failed');
+      }), 'Save failed');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['platform', 'settings', 'email'] }),
   });
@@ -62,10 +62,9 @@ function useSaveEmailConfig() {
 function useSendTestEmail() {
   return useMutation({
     mutationFn: async (to: string) => {
-      const { error } = await clients.admin.POST('/admin/settings/test-email', {
+      unwrap(await clients.admin.POST('/admin/settings/test-email', {
         body: { to },
-      });
-      if (error) throw new Error((error as any)?.error ?? 'Send failed');
+      }), 'Send failed');
     },
   });
 }

@@ -10,6 +10,7 @@
 //     then sends DELETE /purge — remove the name check and the "disabled until
 //     typed" assertion goes red;
 //   - Restore sends POST /restore after a confirmation.
+import { MemoryRouter } from 'react-router';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -123,7 +124,7 @@ async function mountAndOpenDeleted() {
   root = createRoot(host);
   act(() => root!.render(
     <QueryClientProvider client={qc}>
-      <scope.ScopeProvider><page.TenantsPage /></scope.ScopeProvider>
+      <MemoryRouter><scope.ScopeProvider><page.TenantsPage /></scope.ScopeProvider></MemoryRouter>
     </QueryClientProvider>,
   ));
   await until(() => rowNamed('Live Co'), 'the live tenant row');

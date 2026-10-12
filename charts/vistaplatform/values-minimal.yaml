@@ -18,6 +18,51 @@
 # blocking the only replica from draining would deadlock node maintenance).
 #
 # Cluster requirement: 1 node with at least 4 vCPU / 8 GiB RAM, 60 GiB disk.
+#
+# Update strategy: every backend is Recreate. With the default RollingUpdate a
+# helm upgrade starts a new pod beside every old one, and on this node that
+# surge pushes CPU *requests* past what is allocatable (steady state is about
+# 2.5 vCPU of requests; a full surge adds about 1.9 vCPU more, over the 4 vCPU
+# minimum node). A recreated postgres-0 then cannot schedule and every
+# backend's wait-for-schema init container hangs behind it. Recreate stops the
+# old pod first, so requests never exceed the steady-state total, at the price
+# of a brief outage per backend during an upgrade. The two frontends keep the
+# default rolling update (their surge is 100m).
+#
+# Moving an ALREADY-DEPLOYED backend to Recreate needs a one-time
+# `kubectl patch` under Helm's server-side apply; see "Single-node clusters" in
+# docsv4/core/operate/deployment/production-checklist.md. A fresh install needs
+# nothing.
 
 enableSpreadAcrossNodes: false
 defaultReplicas: 1
+
+backends:
+  auth-service:
+    strategy: Recreate
+  inventory-service:
+    strategy: Recreate
+  compliance-engine:
+    strategy: Recreate
+  cbom-service:
+    strategy: Recreate
+  admin-service:
+    strategy: Recreate
+  monitoring-service:
+    strategy: Recreate
+  cluster-sensor-service:
+    strategy: Recreate
+  resource-tracker-service:
+    strategy: Recreate
+  tenant-health-service:
+    strategy: Recreate
+  device-interrogation-service:
+    strategy: Recreate
+  audit-service:
+    strategy: Recreate
+  notification-service:
+    strategy: Recreate
+  discovery-processor-service:
+    strategy: Recreate
+  mcp-service:
+    strategy: Recreate

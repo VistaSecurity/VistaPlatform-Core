@@ -89,6 +89,8 @@ export interface UnifiedJobRow {
   depth?: string;
   /** A running scan-plan job's progress: the bar's percent and the live line ("112 of 254 hosts · 31 responded"). */
   progress?: { pct: number; line?: string };
+  /** A scan job's `note` (why nothing was probed, which targets were dropped); shown as a subtle marker in the list. */
+  note?: string;
   sortKey: number;
   raw: { source: 'interrogation'; job: InterrogationJob } | { source: 'discovery'; job: ScanJob };
 }
@@ -150,6 +152,7 @@ export function discoveryRow(job: ScanJob): UnifiedJobRow {
     statusLabel: state.label,
     statusColor: state.color,
     statusDetail: state.detail,
+    note: job.note || undefined,
     bucket: statusBucket(job.status),
     source: kindLabel(kind),
     found: '—',

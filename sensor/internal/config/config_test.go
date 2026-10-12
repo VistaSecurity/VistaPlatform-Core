@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadFromFilePreservesEnrolledMTLSControlPlaneURLOverEnv(t *testing.T) {
@@ -119,5 +120,29 @@ capture:
 	}
 	if len(cfg.Capture.Interfaces) != 1 || cfg.Capture.Interfaces[0] != "eth0" {
 		t.Errorf("Capture.Interfaces = %v, want [eth0]", cfg.Capture.Interfaces)
+	}
+}
+
+// A negative interval used to survive the "== 0" defaulting and reach
+// time.NewTicker, which panics on a non-positive duration.
+func TestLoadFromFileClampsNonPositiveIntervals(t *testing.T) {
+	for _, secs := range []string{"-5", "0"} {
+		configPath := filepath.Join(t.TempDir(), "sensor-config.yaml")
+		body := "sensorId: \"8d08afae-1a43-4c56-99b0-f462754d152d\"\n" +
+			"reportingIntervalSeconds: " + secs + "\n" +
+			"heartbeatIntervalSeconds: " + secs + "\n"
+		if err := os.WriteFile(configPath, []byte(body), 0644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := LoadFromFile(configPath)
+		if err != nil {
+			t.Fatalf("LoadFromFile: %v", err)
+		}
+		if cfg.HeartbeatInterval != 60*time.Second {
+			t.Errorf("secs=%s: HeartbeatInterval = %v, want 60s", secs, cfg.HeartbeatInterval)
+		}
+		if cfg.ReportingInterval != 30*time.Second {
+			t.Errorf("secs=%s: ReportingInterval = %v, want 30s", secs, cfg.ReportingInterval)
+		}
 	}
 }

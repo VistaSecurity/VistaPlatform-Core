@@ -12,6 +12,7 @@ import { SPage, SCard, STag, StateNote } from './kit';
 import { CustomPolicyControls } from './custom-policy-detail';
 import type { SettingsNavItem } from './nav';
 import type { complianceEngineComponents } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
 
 type TenantFramework = complianceEngineComponents['schemas']['TenantFramework'];
 type TenantFrameworkInput = complianceEngineComponents['schemas']['TenantFrameworkInput'];
@@ -33,22 +34,19 @@ function useTenantFrameworkMutations() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['settings', 'tenant-frameworks'] });
   const create = useMutation({
     mutationFn: async (body: TenantFrameworkInput) => {
-      const { error, response } = await clients.compliance.POST('/frameworks/tenant', { body });
-      if (error || !response.ok) throw new Error('Failed to create custom policy');
+      unwrap(await clients.compliance.POST('/frameworks/tenant', { body }), 'Failed to create custom policy');
     },
     onSuccess: invalidate,
   });
   const update = useMutation({
     mutationFn: async ({ id, body }: { id: string; body: TenantFrameworkInput }) => {
-      const { error, response } = await clients.compliance.PUT('/frameworks/tenant/{id}', { params: { path: { id } }, body });
-      if (error || !response.ok) throw new Error('Failed to update custom policy');
+      unwrap(await clients.compliance.PUT('/frameworks/tenant/{id}', { params: { path: { id } }, body }), 'Failed to update custom policy');
     },
     onSuccess: invalidate,
   });
   const remove = useMutation({
     mutationFn: async (id: string) => {
-      const { error, response } = await clients.compliance.DELETE('/frameworks/tenant/{id}', { params: { path: { id } } });
-      if (error || !response.ok) throw new Error('Failed to delete custom policy');
+      unwrap(await clients.compliance.DELETE('/frameworks/tenant/{id}', { params: { path: { id } } }), 'Failed to delete custom policy');
     },
     onSuccess: invalidate,
   });

@@ -17,6 +17,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
@@ -150,6 +151,21 @@ func (s *Store) Scope(ctx context.Context, tenant uuid.UUID, o Observation, now 
 			return err
 		}
 		excluded = append(excluded, observerAddresses...)
+
+		// Every address of every collector of the tenant is out of bounds as a
+		// probe target, whatever its interface or freshness. The reachability
+		// filters above and in EligibleCollectors (DNS interface, 5-minute
+		// report) answer "can this collector run work here", which is a
+		// different question: a Windows sensor reports no DNS interface, and a
+		// docker bridge or secondary NIC is not one either, yet the dispatch
+		// guard refuses any agent_addresses row of the observer or the
+		// executor. Taking the whole tenant's sensors (the executor is not
+		// chosen yet, and may be any of them) keeps this a superset of that
+		// refusal, built from the guard's own rule.
+		out.CollectorAddresses, err = dispatchguard.TenantCollectorAddresses(ctx, tx, tenant)
+		if err != nil {
+			return err
+		}
 
 		// The current network probe intake resolves scopes by address. Until a
 		// trusted job scope is carried through that intake, ambiguous/overlapping

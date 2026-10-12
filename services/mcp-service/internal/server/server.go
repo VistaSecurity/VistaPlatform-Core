@@ -3,6 +3,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -62,6 +64,10 @@ func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, disc Discove
 			// Recorded here rather than in the exchanger: a malformed bearer
 			// never reaches auth-service, so this is the only place the refusal
 			// is visible at all.
+			if !ex.AllowUnauthenticated(ctx) {
+				rateLimited(w)
+				return
+			}
 			rec.RecordAuth(ctx, auditlog.AuthEvent{
 				Outcome: auditlog.OutcomeTokenMissing,
 				Request: reqCtx,
@@ -74,6 +80,10 @@ func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, disc Discove
 		// credential decision.
 		grant, err := ex.Exchange(ctx, token)
 		if err != nil {
+			if errors.Is(err, platform.ErrRateLimited) {
+				rateLimited(w)
+				return
+			}
 			if err == platform.ErrUnauthorized {
 				unauthorized(w, disc.ResourceMetadataURL(r), "Invalid, expired or revoked API token.")
 				return
@@ -86,6 +96,16 @@ func authMiddleware(ex *platform.Exchanger, rec *auditlog.Recorder, disc Discove
 		}
 		next.ServeHTTP(w, r.WithContext(platform.WithGrant(ctx, grant)))
 	})
+}
+
+// rateLimited refuses an authentication attempt over its allowance. It writes
+// no audit row: the flood is the thing the limit exists to keep out of the
+// audit database.
+func rateLimited(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "30")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusTooManyRequests)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": "too many authentication attempts; slow down"})
 }
 
 func bearerToken(r *http.Request) (string, bool) {
@@ -106,16 +126,44 @@ func bearerToken(r *http.Request) (string, bool) {
 // abandons the flow. TestChallengeCarriesAResolvableResourceMetadataURL pins
 // it non-empty.
 func unauthorized(w http.ResponseWriter, resourceMetadata, msg string) {
-	w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+resourceMetadata+`"`)
+	challenge := "Bearer"
+	if resourceMetadata != "" {
+		challenge += ` resource_metadata="` + resourceMetadata + `"`
+	}
+	w.Header().Set("WWW-Authenticate", challenge)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// RouterOption customises NewRouter.
+type RouterOption func(*routerOptions)
+
+type routerOptions struct{ trustedProxies []string }
+
+// WithTrustedProxies lists the peers (IPs or CIDRs) whose X-Forwarded-For is
+// believed. With none — the default — the client address is the TCP peer.
+func WithTrustedProxies(cidrs []string) RouterOption {
+	return func(o *routerOptions) { o.trustedProxies = cidrs }
+}
+
 // NewRouter builds the Gin router: health endpoints plus the MCP endpoint.
-func NewRouter(handler http.Handler, disc Discovery) *gin.Engine {
+// It returns an error when a trusted-proxy entry does not parse: silently
+// falling back to gin's trust-everyone default would turn a typo into the
+// forgeable-address bug this exists to close.
+func NewRouter(handler http.Handler, disc Discovery, opts ...RouterOption) (*gin.Engine, error) {
+	var o routerOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
 	router := gin.New()
 	router.Use(gin.Recovery())
+	if len(o.trustedProxies) == 0 {
+		o.trustedProxies = nil
+	}
+	if err := router.SetTrustedProxies(o.trustedProxies); err != nil {
+		return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS is not a list of valid IPs/CIDRs: %w", err)
+	}
 
 	health := func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -137,7 +185,14 @@ func NewRouter(handler http.Handler, disc Discovery) *gin.Engine {
 
 	// MCP streamable HTTP: POST carries JSON-RPC; GET/DELETE are part of
 	// the transport surface (rejected appropriately in stateless mode).
-	router.Any(MCPPath, gin.WrapH(handler))
+	router.Any(MCPPath, resolveClientIP, gin.WrapH(handler))
 
-	return router
+	return router, nil
+}
+
+// resolveClientIP stores gin's trusted-proxy-aware client address on the
+// request context, where the audit and rate-limit code reads it.
+func resolveClientIP(c *gin.Context) {
+	c.Request = c.Request.WithContext(platform.WithClientIP(c.Request.Context(), c.ClientIP()))
+	c.Next()
 }

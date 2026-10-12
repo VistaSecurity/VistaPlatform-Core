@@ -126,17 +126,18 @@ type stubAuthServiceStore struct {
 	revokedJTIs []string
 
 	// Register / reset-password write surface.
-	registerResult   *models.User
-	registerErr      error
-	registerCalls    int
-	loginResult      *models.AuthResponse
-	loginErr         error
-	resetPasswordErr error
-	verifyEmailErr   error
-	emailUserResult  *models.User
-	emailUserErr     error
-	db               *sql.DB
-	bypassDB         *sql.DB
+	registerResult    *models.User
+	registerErr       error
+	registerCalls     int
+	loginResult       *models.AuthResponse
+	loginErr          error
+	resetPasswordErr  error
+	forgotPasswordErr error
+	verifyEmailErr    error
+	emailUserResult   *models.User
+	emailUserErr      error
+	db                *sql.DB
+	bypassDB          *sql.DB
 
 	bootstrappedTenantIDs []uuid.UUID
 }
@@ -183,12 +184,17 @@ func (s *stubAuthServiceStore) UpdateNotificationPreferences(_ uuid.UUID, _ map[
 func (s *stubAuthServiceStore) ChangePassword(_ uuid.UUID, _ *models.ChangePasswordRequest) error {
 	return nil
 }
-func (s *stubAuthServiceStore) ForgotPassword(_ *models.ForgotPasswordRequest) error { return nil }
+func (s *stubAuthServiceStore) ForgotPassword(_ *models.ForgotPasswordRequest) error {
+	return s.forgotPasswordErr
+}
 func (s *stubAuthServiceStore) ResetPassword(_ *models.ResetPasswordRequest) error {
 	return s.resetPasswordErr
 }
 func (s *stubAuthServiceStore) VerifyEmail(_ string) error              { return s.verifyEmailErr }
 func (s *stubAuthServiceStore) SendEmailVerification(_ uuid.UUID) error { return nil }
+func (s *stubAuthServiceStore) AllowResendVerification(_ context.Context, _ string) bool {
+	return true
+}
 func (s *stubAuthServiceStore) GetUserSessions(_ uuid.UUID) ([]models.Session, error) {
 	return s.sessions, s.sessionsErr
 }

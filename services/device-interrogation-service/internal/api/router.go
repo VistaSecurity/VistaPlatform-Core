@@ -148,13 +148,20 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 		// under agent mTLS it must still equal the certificate CN.
 		//
 		// Registered on the SAME group as the rest of the outbound surface, so
-		// it cannot be added ungated by mistake, and BEFORE the `/:id/...`
-		// routes so the static segment is matched as a static segment.
+		// it cannot be added ungated by mistake. Registration order relative to
+		// the `/:id/...` routes does not matter: gin prefers a static segment
+		// over a param at the same level (pinned by
+		// TestHostInventoryStaticRouteBeatsIDParamInEitherOrder).
 		agentRoutes.POST(agentOutbound, "/host-inventory", handlers.NewHostInventoryHandler(db, bypassDB, newAgentHostApprover(cfg)).Submit)
 
-		agentRoutes.GET(agentOutbound, "/:id/jobs", getAgentJobsHandler(db, bypassDB, redis))
+		// The job poll and the heartbeat are liveness traffic: every agent calls
+		// them every few seconds, and no person did. They are not recorded in
+		// the tenant activity log (audit.Skip). audit.Skip is for liveness and
+		// polling ONLY: results, host inventory and certificate rotation, where
+		// the agent submits data or changes its identity, stay audited.
+		agentRoutes.GET(agentOutbound, "/:id/jobs", auditmiddleware.Skip(), getAgentJobsHandler(db, bypassDB, redis))
 		agentRoutes.POST(agentOutbound, "/:id/results", submitAgentResultsHandler(db, bypassDB, redis))
-		agentRoutes.POST(agentOutbound, "/:id/heartbeat", agentHeartbeatHandler(db, bypassDB, redis))
+		agentRoutes.POST(agentOutbound, "/:id/heartbeat", auditmiddleware.Skip(), agentHeartbeatHandler(db, bypassDB, redis))
 		// Autonomous pre-expiry cert renewal. Under AgentAuth like the
 		// rest of the outbound surface — mirrors sensor-manager's rotate route.
 		agentRoutes.POST(agentOutbound, "/:id/certificates/rotate", rotateAgentCertificateHandler(db, bypassDB))
@@ -522,6 +529,9 @@ func registerAgentPublicHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.H
 
 		response := models.RegisterAgentResponse{
 			AgentID: agent.ID,
+			// Returned exactly once; only its wrapped form is stored.
+			AgentSecret:        agent.AgentSecret,
+			AgentSecretVersion: agent.AgentSecretVersion,
 		}
 
 		if req.CSR != "" {

@@ -5,6 +5,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import type { ConfigStatus, Setting, SettingValue, VersionInfo } from './agent-config';
+import { unwrap } from '../../lib/api-result';
 
 export interface AgentConfig {
   settings: Setting[];
@@ -157,10 +158,9 @@ export function useRequestAgentRestart(agentId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (): Promise<{ restart_requested_at: string; note: string }> => {
-      const { data, error } = await clients.devices.POST('/agents/{id}/restart', {
+      const data = unwrap(await clients.devices.POST('/agents/{id}/restart', {
         params: { path: { id: agentId } },
-      });
-      if (error || !data) throw new Error(problemText(error) ?? 'Could not request a restart');
+      }), 'Could not request a restart', { requireData: true });
       return data;
     },
     onSuccess: () => {

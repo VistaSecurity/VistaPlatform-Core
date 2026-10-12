@@ -52,7 +52,6 @@ var wantAgentRoutes = []string{
 	"POST /api/v1/sensor-manager/sensors/:sensor_id/discovery-jobs/:job_id/complete", // outbound_client.go CompleteDiscoveryJob
 	"POST /api/v1/sensor-manager/sensors/:sensor_id/discovery-jobs/:job_id/units",    // outbound_client.go ReportDiscoveryJobUnits
 	"POST /api/v1/sensor-manager/sensors/:sensor_id/certificates/rotate",             // sensor/internal/api/certificate_rotation.go RotateCertificate
-	"POST /api/v1/sensor-manager/sensors/:sensor_id/exports",                         // air-gapped export; no current caller
 	"POST /api/v1/sensor-manager/sensors/:sensor_id/health",                          // sensor_manager.go ReportHealth (legacy)
 	"GET /api/v1/sensor-manager/sensors/:sensor_id/config",                           // outbound_client.go / sensor_manager.go GetConfig (legacy)
 }

@@ -174,8 +174,6 @@ func (s *HealthService) checkServiceHealth(serviceName string, serviceConfig con
 		return s.checkRedisHealth(ctx, serviceName, serviceConfig, start)
 	case "nats":
 		return s.checkNatsHealth(ctx, serviceName, serviceConfig, start)
-	case "influxdb":
-		return s.checkInfluxDBHealth(ctx, serviceName, serviceConfig, start)
 	case "grafana":
 		return s.checkGrafanaHealth(ctx, serviceName, serviceConfig, start)
 	default:
@@ -394,56 +392,6 @@ func (s *HealthService) checkNatsHealth(ctx context.Context, serviceName string,
 	status := "healthy"
 	if resp.StatusCode != 200 {
 		status = "down"
-	} else if responseTime > 5000 {
-		status = "degraded"
-	}
-
-	return models.HealthCheckResult{
-		ServiceName:  serviceName,
-		Status:       status,
-		ResponseTime: responseTime,
-		Error:        nil,
-		Timestamp:    time.Now(),
-	}
-}
-
-// checkInfluxDBHealth checks InfluxDB health
-func (s *HealthService) checkInfluxDBHealth(ctx context.Context, serviceName string, serviceConfig config.ServiceConfig, start time.Time) models.HealthCheckResult {
-	// InfluxDB health endpoint
-	healthURL := serviceConfig.URL + "/health"
-
-	req, err := http.NewRequestWithContext(ctx, "GET", healthURL, nil)
-	if err != nil {
-		errStr := err.Error()
-		return models.HealthCheckResult{
-			ServiceName:  serviceName,
-			Status:       "unknown",
-			ResponseTime: 0,
-			Error:        &errStr,
-			Timestamp:    time.Now(),
-		}
-	}
-
-	resp, err := s.httpClient.Do(req)
-	responseTime := time.Since(start).Milliseconds()
-
-	if err != nil {
-		errStr := err.Error()
-		return models.HealthCheckResult{
-			ServiceName:  serviceName,
-			Status:       "down",
-			ResponseTime: responseTime,
-			Error:        &errStr,
-			Timestamp:    time.Now(),
-		}
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	status := "healthy"
-	if resp.StatusCode >= 500 {
-		status = "down"
-	} else if resp.StatusCode >= 400 {
-		status = "degraded"
 	} else if responseTime > 5000 {
 		status = "degraded"
 	}

@@ -20,6 +20,8 @@ package auditlog
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	sharedaudit "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
@@ -33,6 +35,9 @@ import (
 type Sink interface {
 	LogActivity(ctx context.Context, entry *sharedaudit.ActivityLogRequest) error
 }
+
+// ErrAuditUnavailable means an audit record could not be written.
+var ErrAuditUnavailable = errors.New("audit unavailable")
 
 // Identity is the resolved actor behind an API token, flattened out of
 // platform.Grant so this package stays free of mcp-service imports (platform
@@ -89,8 +94,11 @@ type ToolCall struct {
 	Err    error
 }
 
-// RecordToolCall writes the audit record for a tool invocation.
-func (r *Recorder) RecordToolCall(ctx context.Context, tc ToolCall) {
+// RecordToolCall writes the audit record for a tool invocation. The error is
+// non-nil when the record could not be handed to the audit path; a caller that
+// is about to release tenant data decides whether that stops it (tools.Deps.run
+// fails closed by default).
+func (r *Recorder) RecordToolCall(ctx context.Context, tc ToolCall) error {
 	metadata := map[string]any{
 		"transport":   "mcp",
 		"tool":        tc.Tool,
@@ -138,7 +146,7 @@ func (r *Recorder) RecordToolCall(ctx context.Context, tc ToolCall) {
 		}
 	}
 
-	r.write(ctx, entry, "tool call "+tc.Tool)
+	return r.write(ctx, entry, "tool call "+tc.Tool)
 }
 
 // Auth outcomes. These are the "on whose behalf" half of the record: a tool
@@ -213,20 +221,22 @@ func (r *Recorder) RecordAuth(ctx context.Context, ev AuthEvent) {
 		}
 	}
 
-	r.write(ctx, entry, "auth "+ev.Outcome)
+	_ = r.write(ctx, entry, "auth "+ev.Outcome)
 }
 
 // write hands the entry to the shared audit path. A missing sink or a rejected
 // write is reported loudly: an audit trail that quietly stops recording is
 // worse than none, because it still reads as evidence of absence.
-func (r *Recorder) write(ctx context.Context, entry *sharedaudit.ActivityLogRequest, what string) {
+func (r *Recorder) write(ctx context.Context, entry *sharedaudit.ActivityLogRequest, what string) error {
 	if r == nil || r.sink == nil {
 		logrus.WithField("event", what).Error("mcp audit sink not configured; MCP activity is NOT being recorded")
-		return
+		return ErrAuditUnavailable
 	}
 	if err := r.sink.LogActivity(ctx, entry); err != nil {
 		logrus.WithError(err).WithField("event", what).Error("failed to record MCP audit event")
+		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
 	}
+	return nil
 }
 
 // CategoryForPermission maps a tool's declared API-token permission to an

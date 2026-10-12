@@ -3,21 +3,22 @@
 // Cancel (pending|assigned|in_progress). Both go through a confirm Modal before
 // firing, then toast + invalidate the jobs query. A status filter (chips) defaults
 // to the problem states. All calls go through the typed clients.devices.
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import toast from 'react-hot-toast';
 import { Wrench, RotateCcw, Ban } from 'lucide-react';
 import { usePlatformPermissions, PLATFORM_PERMISSIONS } from '@vistasecurity/primitives/platform-auth';
 import { StatusTag, relTime } from '../../components/ui/primitives';
 import { Modal } from '../../components/ui/modal';
-import { useAdminJobs, useJobRepairMutations, errMsg, type AdminInterrogationJob } from './support-queries';
+import { useJobRepairMutations, errMsg, type AdminInterrogationJob } from './support-queries';
+import { useAdminJobs, JOB_STATUSES, PROBLEM_STATUSES, JOBS_PAGE_SIZE } from '../jobs/queries';
+import { JobsPager } from '../jobs/jobs-pager';
 
 // status → StatusTag key. 'cancelled' maps to the muted job-cancel signal; the
 // rest already exist in the design status table.
 const statusKey = (s: string): string => (s === 'cancelled' ? 'canceled_job' : s);
 
-const ALL_STATUSES = ['pending', 'assigned', 'in_progress', 'completed', 'failed', 'cancelled'] as const;
+const ALL_STATUSES = JOB_STATUSES;
 type StatusFilter = 'problems' | 'all' | (typeof ALL_STATUSES)[number];
-const PROBLEM_STATES = new Set(['failed', 'pending', 'assigned', 'in_progress']);
 
 const canRetry = (s: string) => s === 'failed' || s === 'cancelled';
 const canCancel = (s: string) => s === 'pending' || s === 'assigned' || s === 'in_progress';
@@ -25,7 +26,6 @@ const canCancel = (s: string) => s === 'pending' || s === 'assigned' || s === 'i
 type Confirm = { action: 'retry' | 'cancel'; job: AdminInterrogationJob } | null;
 
 export function JobRepairPage() {
-  const { data, isLoading, isError, refetch } = useAdminJobs();
   const mut = useJobRepairMutations();
   // Viewing the list needs platform.health (the section's gate); retrying or
   // cancelling a customer's job needs tenants.manage — the permission
@@ -36,12 +36,13 @@ export function JobRepairPage() {
   const [filter, setFilter] = useState<StatusFilter>('problems');
   const [confirm, setConfirm] = useState<Confirm>(null);
 
-  const jobs = useMemo(() => data ?? [], [data]);
-  const filtered = useMemo(() => {
-    if (filter === 'all') return jobs;
-    if (filter === 'problems') return jobs.filter((j) => PROBLEM_STATES.has(j.status));
-    return jobs.filter((j) => j.status === filter);
-  }, [jobs, filter]);
+  const [page, setPage] = useState(1);
+  // The status filter is applied by the server, so the problem rows are found
+  // however many healthy jobs are newer than them.
+  const statuses = filter === 'all' ? [] : filter === 'problems' ? PROBLEM_STATUSES : [filter];
+  const { data, isLoading, isError, refetch } = useAdminJobs({ statuses, page, pageSize: JOBS_PAGE_SIZE });
+  useEffect(() => { setPage(1); }, [filter]);
+  const filtered = data?.jobs ?? [];
 
   const runConfirm = () => {
     if (!confirm) return;
@@ -116,7 +117,7 @@ export function JobRepairPage() {
 
       <div style={{ flex: 'none', padding: '9px 24px', borderTop: '1px solid var(--op-border)', display: 'flex', alignItems: 'center', gap: 14, fontSize: 12, color: 'var(--op-t3)' }}>
         <Wrench size={13} />
-        <span>{filtered.length} jobs</span>
+        {data ? <JobsPager page={data.page} pageSize={data.pageSize} total={data.total} shown={filtered.length} onPage={setPage} /> : <span>0 jobs</span>}
         <span>·</span>
         <span>{canRepair
           ? 'Retry failed or cancelled jobs; cancel stuck pending/in-progress jobs.'

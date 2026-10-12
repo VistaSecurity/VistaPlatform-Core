@@ -3,6 +3,7 @@ package middleware
 import (
 	"database/sql"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -141,8 +142,11 @@ func RequireAuth(cfg *config.Config) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if userRevocation, ok := revocation.(sharedmw.UserRevocationChecker); ok &&
-			userRevocation.IsUserRevoked(c.Request.Context(), userID) {
+		var issuedAt time.Time
+		if iat, ok := claims["iat"].(float64); ok {
+			issuedAt = time.Unix(int64(iat), 0)
+		}
+		if sharedmw.IsUserTokenRevoked(c.Request.Context(), revocation, userID, issuedAt) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
 			c.Abort()
 			return

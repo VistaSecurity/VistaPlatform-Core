@@ -52,7 +52,11 @@ deployment template.
 */}}
 
 {{- define "vistaplatform.jwtSigningSecretName" -}}
+{{- if .Values.jwtSigning.existingSecretName -}}
+{{- .Values.jwtSigning.existingSecretName -}}
+{{- else -}}
 {{- printf "%s-jwt-signing" (include "vistaplatform.fullname" .) -}}
+{{- end -}}
 {{- end -}}
 
 {{/* Annotation stamped on the signing Secret when a live INSTALL creates it. */}}

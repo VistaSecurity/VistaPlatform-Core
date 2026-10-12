@@ -238,9 +238,34 @@ func (f *fakeRedis) apply(cmd redis.Cmder) {
 		}
 		cmd.(*redis.DurationCmd).SetVal(d)
 
+	case "eval": // only refundScript: DECR a live counter that is above zero
+		e := f.lookup(str(3))
+		var n int64
+		if e != nil && e.val > 0 {
+			e.val--
+			n = e.val
+		}
+		cmd.(*redis.Cmd).SetVal(n)
+
 	default:
 		cmd.SetErr(fmt.Errorf("fakeRedis: unsupported command %q", name))
 	}
+}
+
+// allowForgot runs one forgot-password attempt through AllowAction. That action
+// is neither per-IP nor refunded, so it behaves as a plain per-email counter —
+// the shape the fixed-window tests below pin.
+func allowForgot(l *RateLimiter, email string) (bool, time.Duration, error) {
+	return l.AllowAction(testGinContext("203.0.113.9:1234"), ActionForgotPassword, email)
+}
+
+func testGinContext(remoteAddr string) *gin.Context {
+	gin.SetMode(gin.TestMode)
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.RemoteAddr = remoteAddr
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = req
+	return c
 }
 
 func ceilSeconds(d time.Duration) time.Duration {
@@ -277,9 +302,9 @@ func TestRateLimiter_OverLimitRetriesDoNotExtendWindow(t *testing.T) {
 		},
 		{
 			name: "per-email (login handler)",
-			key:  "rate_limit:email:victim@example.com",
+			key:  "rate_limit:action:forgot-password:victim@example.com",
 			hit: func(l *RateLimiter) (bool, time.Duration, error) {
-				return l.AllowByEmail(ctx, "  Victim@Example.com ")
+				return allowForgot(l, "  Victim@Example.com ")
 			},
 		},
 	}
@@ -345,11 +370,10 @@ func TestRateLimiter_ConcurrentHitsShareOneFixedWindow(t *testing.T) {
 		loginLimit = 5
 		attempts   = 64
 	)
-	ctx := context.Background()
 	fake, client := newFakeRedis(t)
 	limiter := NewRateLimiter(client, 100, window, loginLimit)
 	const email = "concurrent@example.com"
-	const key = "rate_limit:email:" + email
+	const key = "rate_limit:action:forgot-password:" + email
 
 	start := make(chan struct{})
 	results := make(chan bool, attempts)
@@ -360,7 +384,7 @@ func TestRateLimiter_ConcurrentHitsShareOneFixedWindow(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			allowed, _, err := limiter.AllowByEmail(ctx, email)
+			allowed, _, err := allowForgot(limiter, email)
 			results <- allowed
 			errs <- err
 		}()
@@ -394,16 +418,15 @@ func TestRateLimiter_ConcurrentHitsShareOneFixedWindow(t *testing.T) {
 
 // TestRateLimiter_RedisErrorSemantics pins the failure modes the fixed-window
 // rewrite must keep: login endpoints fail CLOSED, other endpoints fail open,
-// and the per-email limiter always fails closed.
+// and the per-account limiter always fails closed.
 func TestRateLimiter_RedisErrorSemantics(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	ctx := context.Background()
 	fake, client := newFakeRedis(t)
 	fake.failWith = errors.New("connection refused")
 	limiter := NewRateLimiter(client, 100, time.Minute, 5)
 
-	if allowed, _, err := limiter.AllowByEmail(ctx, "victim@example.com"); err == nil || allowed {
-		t.Errorf("AllowByEmail on Redis error: allowed=%v err=%v, want allowed=false with an error", allowed, err)
+	if allowed, _, err := allowForgot(limiter, "victim@example.com"); err == nil || allowed {
+		t.Errorf("AllowAction on Redis error: allowed=%v err=%v, want allowed=false with an error", allowed, err)
 	}
 
 	router := gin.New()
@@ -431,36 +454,23 @@ func TestRateLimiter_RedisErrorSemantics(t *testing.T) {
 // assumptions (SET NX leaves an existing TTL alone, INCR preserves it)
 // against a real server. Skips when no Redis is reachable.
 func TestRateLimiter_FixedWindowAgainstRealRedis(t *testing.T) {
-	options := &redis.Options{Addr: "localhost:6379", DialTimeout: 500 * time.Millisecond}
-	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
-		parsed, err := redis.ParseURL(redisURL)
-		if err != nil {
-			t.Fatalf("parse REDIS_URL: %v", err)
-		}
-		options = parsed
-		options.DialTimeout = 500 * time.Millisecond
-	}
-	client := redis.NewClient(options)
-	t.Cleanup(func() { _ = client.Close() })
+	client := newRealRedis(t)
 	ctx := context.Background()
-	if err := client.Ping(ctx).Err(); err != nil {
-		t.Skip("Redis not available, skipping integration test")
-	}
 
 	const window = 3 * time.Second
 	email := fmt.Sprintf("fixed-window-%d@example.com", time.Now().UnixNano())
-	key := "rate_limit:email:" + email
+	key := "rate_limit:action:forgot-password:" + email
 	t.Cleanup(func() { client.Del(context.Background(), key) })
 
 	limiter := NewRateLimiter(client, 100, window, 1)
-	if allowed, _, err := limiter.AllowByEmail(ctx, email); err != nil || !allowed {
+	if allowed, _, err := allowForgot(limiter, email); err != nil || !allowed {
 		t.Fatalf("first attempt: allowed=%v err=%v", allowed, err)
 	}
 	opened := time.Now()
 
 	time.Sleep(1200 * time.Millisecond)
 	for i := 0; i < 10; i++ {
-		if allowed, _, err := limiter.AllowByEmail(ctx, email); err != nil || allowed {
+		if allowed, _, err := allowForgot(limiter, email); err != nil || allowed {
 			t.Fatalf("over-limit attempt %d: allowed=%v err=%v", i+1, allowed, err)
 		}
 	}
@@ -473,7 +483,28 @@ func TestRateLimiter_FixedWindowAgainstRealRedis(t *testing.T) {
 	}
 
 	time.Sleep(time.Until(opened.Add(window + 100*time.Millisecond)))
-	if allowed, _, err := limiter.AllowByEmail(ctx, email); err != nil || !allowed {
+	if allowed, _, err := allowForgot(limiter, email); err != nil || !allowed {
 		t.Fatalf("attempt after the original window: allowed=%v err=%v, want allowed", allowed, err)
 	}
+}
+
+// newRealRedis connects to REDIS_URL or localhost, skipping the test when no
+// server answers.
+func newRealRedis(t *testing.T) *redis.Client {
+	t.Helper()
+	options := &redis.Options{Addr: "localhost:6379", DialTimeout: 500 * time.Millisecond}
+	if redisURL := os.Getenv("REDIS_URL"); redisURL != "" {
+		parsed, err := redis.ParseURL(redisURL)
+		if err != nil {
+			t.Fatalf("parse REDIS_URL: %v", err)
+		}
+		options = parsed
+		options.DialTimeout = 500 * time.Millisecond
+	}
+	client := redis.NewClient(options)
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		t.Skip("Redis not available, skipping integration test")
+	}
+	return client
 }

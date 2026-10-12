@@ -43,6 +43,14 @@ function VerifyResult({ v }: { v: VerifyResponse }) {
           : 'Signature not asserted (unsigned or no verifier wired)'}
         {v.signature_kid && <span className="mono" style={{ color: 'var(--app-t3)' }}>· {v.signature_kid}</span>}
       </div>
+      {v.signature_checked && !v.signature_valid && (v.signature_reason || (v.envelope_mismatch?.length ?? 0) > 0) && (
+        <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 5, lineHeight: 1.5 }}>
+          {v.signature_reason}
+          {(v.envelope_mismatch?.length ?? 0) > 0 && (
+            <> — changed since signing: <span className="mono">{v.envelope_mismatch?.join(', ')}</span></>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -82,7 +90,7 @@ export function ArtifactDrawer({ seed, onClose, onDeleted }: {
 
   const a = detailQ.data ?? seed;
   const layers = a.layers ?? [];
-  const signed = !!a.signature_hmac;
+  const signed = !!(a.signature || a.signature_hmac);
 
   const onVerify = async () => {
     try { setVerifyRes(await verify.mutateAsync(a.id)); } catch { /* surfaced via verify.isError below */ }
@@ -149,7 +157,7 @@ export function ArtifactDrawer({ seed, onClose, onDeleted }: {
             <div className="eyebrow-app" style={{ marginBottom: 4 }}>Integrity</div>
             <Row label="Content hash" mono>{a.content_hash}</Row>
             <Row label="Spec" mono>CycloneDX {a.cyclonedx_spec_version}</Row>
-            {signed && <Row label="Signature" mono>{a.signature_hmac}</Row>}
+            {signed && <Row label="Signature" mono>{a.signature || a.signature_hmac}</Row>}
             {signed && a.signature_kid && <Row label="Key id" mono>{a.signature_kid}</Row>}
           </div>
 

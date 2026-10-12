@@ -102,6 +102,10 @@ type RegistrationRequest struct {
 	// Host is this sensor's own host identity, always sent at registration by
 	// a sensor build new enough to have one. nil on an older sensor.
 	Host *models.HostIdentity `json:"host,omitempty"`
+	// SupportsAgentSecret is sent by a sensor build that can store the
+	// per-sensor secret the platform issues at enrolment. An older build
+	// omits it and is issued nothing.
+	SupportsAgentSecret bool `json:"supports_agent_secret,omitempty"`
 }
 
 // RegistrationResponse represents the response to a registration request
@@ -116,6 +120,12 @@ type RegistrationResponse struct {
 	ReportingInterval    int             `json:"reporting_interval"`
 	Features             map[string]bool `json:"features"`
 	Message              string          `json:"message"`
+	// AgentSecret is the per-sensor secret issued at enrolment, returned
+	// exactly once and only to a sensor that sent supports_agent_secret. The
+	// platform keeps it wrapped under the master key and cannot show it again.
+	// The sensor stores it (0600) and no longer needs to keep the registration key.
+	AgentSecret        string `json:"agent_secret,omitempty"`
+	AgentSecretVersion int    `json:"agent_secret_version,omitempty"`
 }
 
 // registrationLimits are the registration-key limits every tenant's key
@@ -564,7 +574,24 @@ func (h *Handler) RegisterSensor(c *gin.Context) {
 	// verification succeeds; the sensor keeps presenting its per-tenant client
 	// cert. Falls back to the tenant CA when mTLS isn't enforced or the
 	// platform CA isn't mounted.
+	// The per-sensor secret. Issued after the sensor row exists. The
+	// registration key is already spent by now, so a failure here does not fail
+	// the enrolment: the sensor simply gets no secret, keeps working, and is
+	// issued one at its next certificate rotation.
+	var agentSecret string
+	var agentSecretVersion int
+	if req.SupportsAgentSecret {
+		var serr error
+		agentSecret, agentSecretVersion, serr = h.issueSensorSecret(c.Request.Context(), sensorID)
+		if serr != nil {
+			h.log.WithError(serr).WithField("sensor_id", sensorID.String()).Error("sensor enrolled but its agent secret could not be issued")
+			agentSecret, agentSecretVersion = "", 0
+		}
+	}
+
 	response := RegistrationResponse{
+		AgentSecret:          agentSecret,
+		AgentSecretVersion:   agentSecretVersion,
 		SensorID:             sensorID.String(),
 		RegistrationKey:      req.RegistrationKey,
 		ClientCert:           sensorCertPEM,

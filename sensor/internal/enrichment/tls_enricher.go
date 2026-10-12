@@ -276,11 +276,11 @@ func (e *TLSEnricher) probeAndEmit(req enrichRequest) {
 	e.probesAttempted++
 	e.mu.Unlock()
 
-	// Mark as probed (even before the probe, to prevent duplicate queuing)
-	e.markProbed(debounceKey)
-
 	finding, err := e.probeTLS(req.destIP, req.port, req.sniHost)
 	if err != nil {
+		// A failed probe is debounced so a dead endpoint is not re-dialled on
+		// every sighting; only a DROPPED result must stay re-probeable.
+		e.markProbed(debounceKey)
 		e.mu.Lock()
 		e.probesFailed++
 		e.mu.Unlock()
@@ -294,6 +294,9 @@ func (e *TLSEnricher) probeAndEmit(req enrichRequest) {
 	// Send to discoveries channel (non-blocking)
 	select {
 	case e.discoveries <- d:
+		// Marked only once the result is out: a result dropped on a full
+		// channel must not suppress the re-probe for the whole debounce TTL.
+		e.markProbed(debounceKey)
 		e.mu.Lock()
 		e.probesSucceeded++
 		e.mu.Unlock()

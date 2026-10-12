@@ -12,11 +12,13 @@
 // DELETE /{id} (204, no body).
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { invalidateAssetDetail } from './asset-queries';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
 import { Icon, Modal } from '../../components/ui';
 import { activeScanView, type ActiveScanView, type AssetActiveScan } from '../discovery/active-scan-row-state';
 import { ScanDialog } from './scan-dialog';
+import { unwrap } from '../../lib/api-result';
 
 // All inventory list/detail query keys are rooted at ['inventory'] (see
 // useAssets/useConfigs/useConnections); detail + child-config keys are by id.
@@ -24,7 +26,7 @@ import { ScanDialog } from './scan-dialog';
 function invalidateInventory(qc: ReturnType<typeof useQueryClient>, assetId?: string) {
   qc.invalidateQueries({ queryKey: ['inventory'] });
   if (assetId) {
-    qc.invalidateQueries({ queryKey: ['asset-detail', assetId] });
+    invalidateAssetDetail(qc, assetId);
     qc.invalidateQueries({ queryKey: ['asset-configs', assetId] });
   }
 }
@@ -37,9 +39,7 @@ export function DeleteAssetButton({ assetId, hostname, onDone }: { assetId: stri
   const [confirm, setConfirm] = useState(false);
   const del = useMutation({
     mutationFn: async () => {
-      const { error } = await clients.inventory.DELETE('/infrastructure-assets/{id}', { params: { path: { id: assetId } } });
-      // 204 No Content → openapi-fetch yields no `data`; only treat a real error as failure.
-      if (error) throw new Error('Failed to delete asset');
+      unwrap(await clients.inventory.DELETE('/infrastructure-assets/{id}', { params: { path: { id: assetId } } }), 'Failed to delete asset');
       return true;
     },
     onSuccess: () => {
@@ -120,8 +120,7 @@ export function RestoreAssetButton({ assetId, onDone }: { assetId: string; onDon
   const qc = useQueryClient();
   const restore = useMutation({
     mutationFn: async () => {
-      const { data, error } = await clients.inventory.POST('/infrastructure-assets/{id}/restore', { params: { path: { id: assetId } } });
-      if (error || !data) throw new Error('Failed to restore asset');
+      const data = unwrap(await clients.inventory.POST('/infrastructure-assets/{id}/restore', { params: { path: { id: assetId } } }), 'Failed to restore asset', { requireData: true });
       return data.asset;
     },
     onSuccess: () => {

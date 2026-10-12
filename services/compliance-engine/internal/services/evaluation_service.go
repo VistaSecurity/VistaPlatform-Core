@@ -26,6 +26,10 @@ import (
 // seed run), not a server fault.
 var ErrFrameworkNotFound = errors.New("framework not found")
 
+// ErrControlNotFound: no such control for this tenant. A control that exists
+// but belongs to another tenant is reported exactly the same way.
+var ErrControlNotFound = errors.New("control not found")
+
 // ErrFrameworkNotLicensed is returned by EvaluateFramework when the framework
 // exists but the tenant has no active subscription to it — a published
 // framework the tenant never activated (or whose activation lapsed). It is a
@@ -120,6 +124,10 @@ type ControlDetailsResponse struct {
 	EvidenceSummary EvidenceSummary       `json:"evidence_summary"`
 	Findings        []FindingSummary      `json:"findings"`
 	Overrides       OverrideSummary       `json:"overrides"`
+
+	// TotalFindings is every visible finding on the control, across pages. Not
+	// part of the body; the handler puts it in the pagination block.
+	TotalFindings int `json:"-"`
 }
 
 // ControlDetailsControl represents control details
@@ -227,10 +235,17 @@ func (s *EvaluationService) EvaluateFramework(tenantID, frameworkID uuid.UUID, v
 			}()
 		}
 		if licErr != nil {
-			log.Printf("WARN: License check failed for tenant %s framework %s: %v (allowing evaluation)", tenantID, frameworkID, licErr)
+			// Fail CLOSED: a database error says nothing about whether the tenant
+			// holds the licence, and "allowing evaluation" would let an outage
+			// hand out an unlicensed framework's results.
+			return nil, fmt.Errorf("license check failed: %w", licErr)
 		} else if !isLicensed {
 			return nil, ErrFrameworkNotLicensed
 		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		// A real database error is not "not a platform framework": falling through
+		// to the tenant lookup would report it as ErrFrameworkNotFound (404).
+		return nil, fmt.Errorf("failed to get framework: %w", err)
 	} else {
 		// Try tenant_frameworks (custom policies).
 		//
@@ -556,6 +571,10 @@ type MultiFrameworkEvaluationResult struct {
 		NotAssessed int `json:"not_assessed"`
 	} `json:"controls"`
 	LastEvaluated string `json:"last_evaluated"`
+	// Error is set (and Summary/Score are empty) when THIS framework could not be
+	// evaluated. The request still answers for the others: one failure must be
+	// visible per framework, never a silently shorter list.
+	Error string `json:"error,omitempty"`
 }
 
 // maxConcurrentFrameworkEvaluations bounds the fan-out of
@@ -572,8 +591,9 @@ func (s *EvaluationService) EvaluateMultipleFrameworks(
 ) ([]MultiFrameworkEvaluationResult, error) {
 	ctx := context.Background()
 	_ = ctx // Context for future cancellation support
-	results := make([]MultiFrameworkEvaluationResult, 0, len(frameworkIDs))
-	var mu sync.Mutex
+	// Indexed by input position so the response order is the request order, not
+	// goroutine-completion order, and a failed framework keeps its slot.
+	results := make([]MultiFrameworkEvaluationResult, len(frameworkIDs))
 	var wg sync.WaitGroup
 
 	// Evaluate the frameworks in parallel, but never more than
@@ -581,10 +601,10 @@ func (s *EvaluationService) EvaluateMultipleFrameworks(
 	// connections, so one goroutine per requested framework let a single
 	// request starve the pool every other request in the service draws on.
 	sem := make(chan struct{}, maxConcurrentFrameworkEvaluations)
-	for _, frameworkID := range frameworkIDs {
+	for idx, frameworkID := range frameworkIDs {
 		sem <- struct{}{}
 		wg.Add(1)
-		go func(fwID uuid.UUID) {
+		go func(idx int, fwID uuid.UUID) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
@@ -597,8 +617,19 @@ func (s *EvaluationService) EvaluateMultipleFrameworks(
 			// Evaluate framework
 			summary, err := s.EvaluateFramework(tenantID, fwID, version, filters, nil)
 			if err != nil {
-				// Log error but continue with other frameworks
-				fmt.Printf("ERROR: Failed to evaluate framework %s: %v\n", fwID, err)
+				// Report this framework as failed and continue with the others.
+				log.Printf("ERROR: Failed to evaluate framework %s: %v", fwID, err)
+				msg := "evaluation failed"
+				if errors.Is(err, ErrFrameworkNotLicensed) {
+					msg = "framework not licensed"
+				} else if errors.Is(err, ErrFrameworkNotFound) {
+					msg = "framework not found"
+				}
+				results[idx] = MultiFrameworkEvaluationResult{
+					FrameworkID:      fwID.String(),
+					FrameworkVersion: version,
+					Error:            msg,
+				}
 				return
 			}
 
@@ -731,10 +762,8 @@ func (s *EvaluationService) EvaluateMultipleFrameworks(
 				LastEvaluated: time.Now().Format(time.RFC3339),
 			}
 
-			mu.Lock()
-			results = append(results, result)
-			mu.Unlock()
-		}(frameworkID)
+			results[idx] = result
+		}(idx, frameworkID)
 	}
 
 	wg.Wait()
@@ -872,17 +901,22 @@ func (s *EvaluationService) GetComplianceScore(tenantID uuid.UUID, frameworkID *
 	}, nil
 }
 
-// calculatePlatformFrameworkScore calculates the severity-weighted compliance score for a platform framework
+// calculatePlatformFrameworkScore calculates the severity-weighted compliance score
+// for a platform framework.
+//
+// It is ONE grouped read (controls, then loadControlAssessments' fixed number of
+// queries for ALL of them) folded by scoreControls — the same fold the stored
+// rollup (recomputeFrameworkScore) uses, overrides included. It used to open a
+// tenant transaction per control and load every ACTIVE finding row, and a
+// per-control error was `continue`d past, which dropped the control from the
+// score and so INFLATED it. Any error now surfaces to the caller.
 func (s *EvaluationService) calculatePlatformFrameworkScore(tenantID, frameworkID uuid.UUID) (*int, error) {
-	type controlRow struct {
-		ID               uuid.UUID `db:"id"`
-		BaselineSeverity string    `db:"baseline_severity"`
-	}
-	var controls []controlRow
+	var controls []scoredControl
 	err := s.db.Select(&controls, `
 		SELECT id, baseline_severity
 		FROM platform_framework_controls
 		WHERE framework_id = $1
+		ORDER BY id
 	`, frameworkID)
 	if err != nil {
 		return nil, err
@@ -894,27 +928,11 @@ func (s *EvaluationService) calculatePlatformFrameworkScore(tenantID, frameworkI
 		return nil, nil
 	}
 
-	controlIDs := make([]uuid.UUID, 0, len(controls))
-	for _, ctrl := range controls {
-		controlIDs = append(controlIDs, ctrl.ID)
-	}
-	assessments, err := loadControlAssessments(context.Background(), s.db.DB, tenantID, controlIDs, "platform")
+	breakdown, err := scoreControls(context.Background(), s.db, tenantID, controls, "platform", time.Time{})
 	if err != nil {
 		return nil, err
 	}
-
-	outcomes := make([]controlOutcome, 0, len(controls))
-	for _, ctrl := range controls {
-		findings, ferr := s.getFindingsForControl(tenantID, ctrl.ID, models.ScenarioFilters{})
-		if ferr != nil {
-			continue
-		}
-		status, _, _ := s.controlStatusFromAssessment(findings, assessments[ctrl.ID])
-		outcomes = append(outcomes, controlOutcome{BaselineSeverity: ctrl.BaselineSeverity, Status: status})
-	}
-
-	breakdown, err := frameworkScore(outcomes)
-	return breakdown.Score, err
+	return breakdown.Score, nil
 }
 
 // FrameworkStatusResponse represents framework status information
@@ -986,82 +1004,19 @@ func (s *EvaluationService) GetFrameworkStatus(tenantID uuid.UUID) (*FrameworkSt
 	if defaultFrameworkID != nil {
 		activeFrameworkID = *defaultFrameworkID
 	} else {
-		// Auto-create Best Practices license if missing (defensive programming)
-		log.Printf("⚠️ No default framework found for tenant %s, auto-creating Best Practices license", tenantID)
-		var bestPracticesID uuid.UUID
-		err = s.db.Get(&bestPracticesID, `
+		// No active default licence. This is a GET: it does NOT repair the
+		// missing row (it used to INSERT one, and with a cancelled Best
+		// Practices row present ON CONFLICT DO NOTHING left the tenant with no
+		// active default anyway). Repair belongs to the subscription/provisioning
+		// path. Select Best Practices if the tenant has it active; otherwise the
+		// first licensed framework is marked selected after the list is built.
+		err = s.db.Get(&activeFrameworkID, `
 			SELECT id FROM platform_frameworks
 			WHERE is_platform_default = true AND status = 'published'
 			LIMIT 1
 		`)
-		if err != nil {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("failed to find Best Practices framework: %w", err)
-		}
-
-		// Check if tenant exists
-		var tenantExists bool
-		err = s.db.Get(&tenantExists, `SELECT EXISTS(SELECT 1 FROM tenants WHERE id = $1)`, tenantID)
-		if err != nil || !tenantExists {
-			return nil, fmt.Errorf("tenant not found: %s", tenantID)
-		}
-
-		// Create Best Practices license as default (RLS-policied write).
-		err = func() error {
-			tx, txErr := s.db.BeginTxx(ctx, nil)
-			if txErr != nil {
-				return fmt.Errorf("begin tx: %w", txErr)
-			}
-			defer func() { _ = tx.Rollback() }()
-			if scErr := shareddatabase.SetTenantContext(ctx, tx.Tx, tenantID); scErr != nil {
-				return scErr
-			}
-			if _, eErr := tx.Exec(`
-				INSERT INTO tenant_framework_licenses (
-					id, tenant_id, platform_framework_id, is_locked, locked_at, locked_by,
-					is_default, purchased_at, created_at, updated_at
-				) VALUES (
-					gen_random_uuid(), $1, $2, false, NULL, NULL, true, NOW(), NOW(), NOW()
-				)
-				ON CONFLICT (tenant_id, platform_framework_id) DO NOTHING
-			`, tenantID, bestPracticesID); eErr != nil {
-				return eErr
-			}
-			return tx.Commit()
-		}()
-		if err != nil {
-			return nil, fmt.Errorf("failed to auto-create Best Practices license: %w", err)
-		}
-
-		activeFrameworkID = bestPracticesID
-		log.Printf("✅ Auto-created Best Practices license for tenant %s", tenantID)
-
-		// Re-fetch licensed frameworks after auto-creation (RLS-policied read).
-		err = func() error {
-			tx, txErr := s.db.BeginTxx(ctx, nil)
-			if txErr != nil {
-				return fmt.Errorf("begin tx: %w", txErr)
-			}
-			defer func() { _ = tx.Rollback() }()
-			if scErr := shareddatabase.SetTenantContext(ctx, tx.Tx, tenantID); scErr != nil {
-				return scErr
-			}
-			if sErr := tx.Select(&licensedFrameworks, `
-				SELECT platform_framework_id, is_default
-				FROM tenant_framework_licenses
-				WHERE tenant_id = $1 AND `+sqlActiveSubscription+`
-			`, tenantID); sErr != nil {
-				return sErr
-			}
-			return tx.Commit()
-		}()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get licensed frameworks after auto-creation: %w", err)
-		}
-
-		// Rebuild licensed map
-		licensedMap = make(map[uuid.UUID]bool)
-		for _, lf := range licensedFrameworks {
-			licensedMap[lf.PlatformFrameworkID] = true
 		}
 	}
 
@@ -1144,8 +1099,9 @@ func (s *EvaluationService) GetFrameworkStatus(tenantID uuid.UUID) (*FrameworkSt
 		// Calculate score directly for the platform framework using its controls and findings
 		score, err := s.calculatePlatformFrameworkScore(tenantID, detail.PlatformFramework.ID)
 		if err != nil {
-			log.Printf("⚠️ Failed to calculate score for framework %s: %v", detail.PlatformFramework.ID, err)
-			score = nil
+			// Surface it. Reporting this framework as "no score" would hide a
+			// failure behind the honest-looking "—".
+			return nil, fmt.Errorf("failed to calculate score for framework %s: %w", detail.PlatformFramework.ID, err)
 		}
 
 		isSelected := activeFrameworkID == detail.PlatformFramework.ID
@@ -1177,13 +1133,22 @@ func (s *EvaluationService) GetFrameworkStatus(tenantID uuid.UUID) (*FrameworkSt
 		overallScore = &avg
 	}
 
-	// Find selected framework detail
-	var selectedFramework *FrameworkStatusDetail
+	// Find selected framework detail. With no active default licence and no
+	// active Best Practices, fall back to the first (is_default DESC, name) row.
+	selectedIdx := -1
 	for i := range frameworkStatuses {
 		if frameworkStatuses[i].IsSelected {
-			selectedFramework = &frameworkStatuses[i]
+			selectedIdx = i
 			break
 		}
+	}
+	if selectedIdx < 0 && len(frameworkStatuses) > 0 {
+		selectedIdx = 0
+		frameworkStatuses[0].IsSelected = true
+	}
+	var selectedFramework *FrameworkStatusDetail
+	if selectedIdx >= 0 {
+		selectedFramework = &frameworkStatuses[selectedIdx]
 	}
 
 	// If no frameworks exist at all, return empty response (not an error)
@@ -1207,22 +1172,11 @@ func (s *EvaluationService) getFindingsForControl(tenantID, controlID uuid.UUID,
 	return s.getFindingsForControlScoped(tenantID, controlID, filters, false)
 }
 
-func (s *EvaluationService) getVisibleFindingsForControl(tenantID, controlID uuid.UUID, filters models.ScenarioFilters) ([]models.ComplianceFinding, error) {
-	return s.getFindingsForControlScoped(tenantID, controlID, filters, true)
-}
-
-func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid.UUID, filters models.ScenarioFilters, licensedOnly bool) ([]models.ComplianceFinding, error) {
-	// Note: We join assets only for filtering, not for selecting fields
-	// Asset fields are in the joined Asset struct with db:"-" tag, so sqlx can't scan them
+// controlFindingsFrom builds the FROM/WHERE shared by every read of a control's
+// open findings, so the row page and the aggregates cannot disagree on what
+// "the control's findings" are.
+func controlFindingsFrom(tenantID, controlID uuid.UUID, filters models.ScenarioFilters, licensedOnly bool) (string, []interface{}) {
 	query := `
-		SELECT cf.id, cf.tenant_id, cf.producer, cf.kind, cf.control_id,
-		       cf.subject_id, cf.subject_type, cf.subject_label,
-		       cf.severity, cf.score, cf.summary,
-		       cf.evidence, cf.first_seen, cf.last_seen, cf.assigned_to, cf.assigned_at,
-		       cf.assigned_by, cf.remediation_notes, cf.detection_state, cf.workflow_status,
-		       cf.occurrence_count, cf.resurfaced_at, cf.suppressed_until, cf.suppression_reason,
-		       cf.is_stale, cf.last_evaluated_at, cf.evaluation_version,
-		       cf.created_at, cf.updated_at
 		FROM findings cf
 		-- Both key columns: assets is hash-partitioned by tenant_id and keyed on
 		-- (tenant_id, id), with no index on id alone, so a join that names only
@@ -1233,7 +1187,7 @@ func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid
 		WHERE cf.tenant_id = $1 AND cf.control_id = $2
 		  AND cf.detection_state = 'ACTIVE'
 		  AND ` + complianceProducerScope("cf") + `
-		  AND (cf.workflow_status != 'SUPPRESSED' OR cf.workflow_status IS NULL)
+		  AND ` + notSuppressedPredicate("cf") + `
 	`
 	args := []interface{}{tenantID, controlID}
 	argIndex := 3
@@ -1255,9 +1209,84 @@ func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid
 		query += fmt.Sprintf(" AND cf.severity = $%d", argIndex)
 		args = append(args, legacySeverityFilter(filters.Severity))
 	}
+	return query, args
+}
 
-	query += " ORDER BY cf.last_seen DESC"
+const controlFindingColumns = `
+		SELECT cf.id, cf.tenant_id, cf.producer, cf.kind, cf.control_id,
+		       cf.subject_id, cf.subject_type, cf.subject_label,
+		       cf.severity, cf.score, cf.summary,
+		       cf.evidence, cf.first_seen, cf.last_seen, cf.assigned_to, cf.assigned_at,
+		       cf.assigned_by, cf.remediation_notes, cf.detection_state, cf.workflow_status,
+		       cf.occurrence_count, cf.resurfaced_at, cf.suppressed_until, cf.suppression_reason,
+		       cf.is_stale, cf.last_evaluated_at, cf.evaluation_version,
+		       cf.created_at, cf.updated_at`
 
+// controlFindingsAgg is what GetControlDetails needs to know about ALL of a
+// control's findings without loading them.
+type controlFindingsAgg struct {
+	Total          int
+	AffectedAssets int
+	LastSeen       time.Time
+	Severities     []string
+}
+
+// standIns returns one placeholder finding per distinct severity (carrying the
+// latest last_seen on the first), enough for the status/severity/last-seen folds.
+func (a controlFindingsAgg) standIns() []models.ComplianceFinding {
+	out := make([]models.ComplianceFinding, 0, len(a.Severities))
+	for i, sev := range a.Severities {
+		f := models.ComplianceFinding{Severity: sev}
+		if i == 0 {
+			f.LastSeen = a.LastSeen
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+func (s *EvaluationService) controlFindingsAggregate(tenantID, controlID uuid.UUID, filters models.ScenarioFilters, licensedOnly bool) (controlFindingsAgg, error) {
+	from, args := controlFindingsFrom(tenantID, controlID, filters, licensedOnly)
+	var agg controlFindingsAgg
+	ctx := context.Background()
+	err := shareddatabase.WithTenantTx(ctx, s.db.DB, tenantID, func(tx *sql.Tx) error {
+		var last sql.NullTime
+		var sevs sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT cf.subject_id), MAX(cf.last_seen),
+			string_agg(DISTINCT cf.severity, ',') `+from, args...).Scan(&agg.Total, &agg.AffectedAssets, &last, &sevs); err != nil {
+			return fmt.Errorf("failed to aggregate findings: %w", err)
+		}
+		if last.Valid {
+			agg.LastSeen = last.Time
+		}
+		if sevs.Valid && sevs.String != "" {
+			agg.Severities = strings.Split(sevs.String, ",")
+		}
+		return nil
+	})
+	return agg, err
+}
+
+// controlFindingsPageSQL is the page query's text, split out so a test can pin
+// that the page is cut in SQL.
+func controlFindingsPageSQL(from string, argCount int) string {
+	return controlFindingColumns + from + fmt.Sprintf(" ORDER BY cf.last_seen DESC, cf.id LIMIT $%d OFFSET $%d", argCount+1, argCount+2)
+}
+
+// getFindingsPageForControl reads one page, LIMIT/OFFSET in SQL.
+func (s *EvaluationService) getFindingsPageForControl(tenantID, controlID uuid.UUID, filters models.ScenarioFilters, licensedOnly bool, limit, offset int) ([]models.ComplianceFinding, error) {
+	from, args := controlFindingsFrom(tenantID, controlID, filters, licensedOnly)
+	pageSQL := controlFindingsPageSQL(from, len(args))
+	args = append(args, limit, offset)
+	return s.scanControlFindings(tenantID, pageSQL, args)
+}
+
+func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid.UUID, filters models.ScenarioFilters, licensedOnly bool) ([]models.ComplianceFinding, error) {
+	from, args := controlFindingsFrom(tenantID, controlID, filters, licensedOnly)
+	return s.scanControlFindings(tenantID, controlFindingColumns+from+" ORDER BY cf.last_seen DESC", args)
+}
+
+func (s *EvaluationService) scanControlFindings(tenantID uuid.UUID, query string, args []interface{}) ([]models.ComplianceFinding, error) {
 	// findings and assets are RLS-policied: run the read inside
 	// a tenant-scoped transaction so app.tenant_id is set on the query connection.
 	ctx := context.Background()
@@ -1316,49 +1345,10 @@ func (s *EvaluationService) getFindingsForControlScoped(tenantID, controlID uuid
 	return findings, nil
 }
 
-// getOverrides gets overrides for a tenant (global + scenario-specific)
-// Works with platform, tenant, and legacy framework controls via the framework_type column.
+// getOverrides gets overrides for a tenant (global + scenario-specific).
+// See loadOverrides for the precedence.
 func (s *EvaluationService) getOverrides(tenantID uuid.UUID, scenarioID *uuid.UUID) (map[uuid.UUID]models.Override, error) {
-	query := `
-		SELECT id, tenant_id, scenario_id, control_id, override_type, severity_from,
-		       severity_to, rationale, framework_type, created_by, created_at, updated_at
-		FROM compliance_overrides
-		WHERE tenant_id = $1
-	`
-	args := []interface{}{tenantID}
-
-	if scenarioID != nil {
-		query += " AND (scenario_id = $2 OR scenario_id IS NULL)"
-		args = append(args, *scenarioID)
-	} else {
-		query += " AND scenario_id IS NULL"
-	}
-
-	// compliance_overrides is RLS-policied: scope the read with app.tenant_id.
-	ctx := context.Background()
-	var overrides []models.Override
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := shareddatabase.SetTenantContext(ctx, tx.Tx, tenantID); err != nil {
-		return nil, err
-	}
-	if err := tx.Select(&overrides, query, args...); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	// Convert to map for easy lookup
-	overrideMap := make(map[uuid.UUID]models.Override)
-	for _, override := range overrides {
-		overrideMap[override.ControlID] = override
-	}
-
-	return overrideMap, nil
+	return loadOverrides(context.Background(), s.db, tenantID, scenarioID)
 }
 
 // severityToWeight converts a baseline severity to a numeric weight for scoring.
@@ -1410,30 +1400,8 @@ func (s *EvaluationService) applyOverrides(controlID uuid.UUID, baselineStatus, 
 	if !exists {
 		return baselineStatus, baselineSeverity, false
 	}
-
-	hasOverride = true
-	effectiveSeverity = baselineSeverity
-
-	switch override.OverrideType {
-	case models.OverrideTypeDisregard:
-		if baselineStatus == statusNotAssessed {
-			// "Accept this risk" cannot manufacture evidence of a check that was
-			// never run. A disregard on a not-assessed control leaves it not
-			// assessed rather than laundering it into a pass.
-			return baselineStatus, baselineSeverity, hasOverride
-		}
-		return statusPass, baselineSeverity, hasOverride
-	case models.OverrideTypeSeverity:
-		if override.SeverityTo != nil {
-			effectiveSeverity = *override.SeverityTo
-		}
-		// A re-rating changes the control's WEIGHT, not whether it was violated
-		//. It used to also flip the status, so re-rating a failing
-		// control to Low made it report PASS.
-		return baselineStatus, effectiveSeverity, hasOverride
-	}
-
-	return baselineStatus, baselineSeverity, hasOverride
+	effectiveStatus, effectiveSeverity = overrideEffect(override, baselineStatus, baselineSeverity)
+	return effectiveStatus, effectiveSeverity, true
 }
 
 // getLastSeen gets the most recent last_seen time from findings
@@ -1482,27 +1450,37 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 
 	frameworkType := "platform"
 
-	// If not found in platform_framework_controls, try tenant_framework_controls
-	if err != nil {
+	// If not a platform control, try tenant_framework_controls.
+	//
+	// tenant_framework_controls carries no tenant_id and no RLS policy of its own:
+	// ownership lives on the parent tenant_frameworks row. So the lookup joins
+	// through it, inside the tenant transaction. Without the join a caller who
+	// knew another tenant's control UUID read its title, description and severity.
+	if errors.Is(err, sql.ErrNoRows) {
 		frameworkType = "tenant"
-		err = s.db.Get(&control, `
-			SELECT c.id, c.framework_id, COALESCE(c.family_id, '00000000-0000-0000-0000-000000000000'::uuid) as family_id,
-			       c.control_id, c.title, c.description,
-			       c.baseline_severity, c.crypto_relevant, c.created_at, c.updated_at
-			FROM tenant_framework_controls c
-			WHERE c.id = $1
-		`, controlID)
+		err = shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
+			txx := sqlx.Tx{Tx: tx, Mapper: s.db.Mapper}
+			return txx.Get(&control, tenantControlLookupSQL, controlID, tenantID)
+		})
 	}
-
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrControlNotFound
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get control: %w", err)
 	}
 
-	// Get findings for this control
-	allFindings, err := s.getVisibleFindingsForControl(tenantID, controlID, filters)
+	// Findings summary for this control, as aggregates: the page of rows is read
+	// separately below with LIMIT/OFFSET, so a control with thousands of findings
+	// no longer loads them all to show twenty-five.
+	agg, err := s.controlFindingsAggregate(tenantID, controlID, filters, true)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get findings: %w", err)
 	}
+	// controlStatusFromAssessment and getLastSeen only need to know whether there
+	// are findings, the worst severity and the latest last_seen, so hand them one
+	// stand-in per distinct severity rather than the rows.
+	allFindings := agg.standIns()
 
 	// Calculate baseline status.
 	//
@@ -1544,21 +1522,12 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 	// (framework_score.go: severity is the WEIGHT, never the pass/fail input). It
 	// produced the flat contradiction of `failing_findings_count: 0, score: 100`
 	// sitting next to `status: FAIL` and a full array of findings.
-	failingFindingsCount := len(allFindings)
-	affectedAssetSet := make(map[uuid.UUID]bool)
-	for _, finding := range allFindings {
-		affectedAssetSet[finding.SubjectID] = true
-	}
+	failingFindingsCount := agg.Total
 
-	// Paginate findings
-	offset := (page - 1) * pageSize
-	var paginatedFindings []models.ComplianceFinding
-	if offset < len(allFindings) {
-		end := offset + pageSize
-		if end > len(allFindings) {
-			end = len(allFindings)
-		}
-		paginatedFindings = allFindings[offset:end]
+	// Page of findings, paginated in SQL.
+	paginatedFindings, err := s.getFindingsPageForControl(tenantID, controlID, filters, true, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get findings: %w", err)
 	}
 
 	// Convert findings to summaries
@@ -1716,27 +1685,19 @@ func (s *EvaluationService) GetControlDetails(tenantID, controlID uuid.UUID, sce
 		Rationale: rationale,
 		EvidenceSummary: EvidenceSummary{
 			FailingFindingsCount: failingFindingsCount,
-			AffectedAssetsCount:  len(affectedAssetSet),
+			AffectedAssetsCount:  agg.AffectedAssets,
 			LastSeen:             s.getLastSeen(allFindings),
 		},
-		Findings:  findingSummaries,
-		Overrides: overrideSummary,
+		Findings:      findingSummaries,
+		Overrides:     overrideSummary,
+		TotalFindings: agg.Total,
 	}, nil
-}
-
-// GetControlDetailsTotalCount returns the total count of findings for a control (for pagination)
-func (s *EvaluationService) GetControlDetailsTotalCount(tenantID, controlID uuid.UUID, filters models.ScenarioFilters) (int, error) {
-	allFindings, err := s.getVisibleFindingsForControl(tenantID, controlID, filters)
-	if err != nil {
-		return 0, err
-	}
-	return len(allFindings), nil
 }
 
 // ResolveControlID resolves a string control_id (e.g., "BP-002") to its UUID primary key.
 // It searches platform_framework_controls and tenant_framework_controls. If
 // frameworkIDStr is provided, it narrows the search to that framework first.
-func (s *EvaluationService) ResolveControlID(controlIDStr, frameworkIDStr string) (uuid.UUID, error) {
+func (s *EvaluationService) ResolveControlID(tenantID uuid.UUID, controlIDStr, frameworkIDStr string) (uuid.UUID, error) {
 	var id uuid.UUID
 	var frameworkID *uuid.UUID
 	if frameworkIDStr != "" {
@@ -1752,7 +1713,7 @@ func (s *EvaluationService) ResolveControlID(controlIDStr, frameworkIDStr string
 			return id, nil
 		}
 		// Try tenant_framework_controls
-		err = s.db.Get(&id, `SELECT id FROM tenant_framework_controls WHERE control_id = $1 AND framework_id = $2 LIMIT 1`, controlIDStr, *frameworkID)
+		err = s.resolveTenantControl(&id, tenantID, controlIDStr, frameworkID)
 		if err == nil {
 			return id, nil
 		}
@@ -1763,10 +1724,34 @@ func (s *EvaluationService) ResolveControlID(controlIDStr, frameworkIDStr string
 	if err == nil {
 		return id, nil
 	}
-	err = s.db.Get(&id, `SELECT id FROM tenant_framework_controls WHERE control_id = $1 LIMIT 1`, controlIDStr)
+	err = s.resolveTenantControl(&id, tenantID, controlIDStr, nil)
 	if err == nil {
 		return id, nil
 	}
 
 	return uuid.Nil, fmt.Errorf("control not found: %s", controlIDStr)
 }
+
+// resolveTenantControl finds a custom-policy control by its string code, among
+// this tenant's frameworks only (tenant_framework_controls has no tenant_id of
+// its own; ownership is on tenant_frameworks).
+func (s *EvaluationService) resolveTenantControl(dest *uuid.UUID, tenantID uuid.UUID, code string, frameworkID *uuid.UUID) error {
+	return shareddatabase.WithTenantTx(context.Background(), s.db.DB, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRow(`
+			SELECT c.id FROM tenant_framework_controls c
+			JOIN tenant_frameworks tf ON tf.id = c.framework_id AND tf.tenant_id = $2
+			WHERE c.control_id = $1 AND ($3::uuid IS NULL OR c.framework_id = $3::uuid)
+			LIMIT 1`, code, tenantID, frameworkID).Scan(dest)
+	})
+}
+
+// tenantControlLookupSQL reads one custom-policy control, only if its framework
+// belongs to the tenant ($2).
+const tenantControlLookupSQL = `
+	SELECT c.id, c.framework_id, COALESCE(c.family_id, '00000000-0000-0000-0000-000000000000'::uuid) as family_id,
+	       c.control_id, c.title, c.description,
+	       c.baseline_severity, c.crypto_relevant, c.created_at, c.updated_at
+	FROM tenant_framework_controls c
+	JOIN tenant_frameworks tf ON tf.id = c.framework_id AND tf.tenant_id = $2
+	WHERE c.id = $1
+`

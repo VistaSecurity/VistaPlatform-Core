@@ -6,6 +6,7 @@
 // params. On success the account exists but no session is established
 // (RegisterResponse carries no tokens), so we route to /login with a success
 // state. Public route — mounted outside RequireAuth.
+import { orgNameValid } from './org-name';
 import { useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useMutation, useQuery } from '@tanstack/react-query';
@@ -13,6 +14,7 @@ import { clients } from '../lib/clients';
 import { Icon } from '../components/ui';
 import { AuthShell, AuthLabel, AuthSubmit, AuthError, authInputStyle } from './auth-shell';
 import { LegalLinks } from '../components/legal-links';
+import { unwrap } from '../lib/api-result';
 
 export function CompleteProfilePage() {
   const navigate = useNavigate();
@@ -38,20 +40,27 @@ export function CompleteProfilePage() {
   const legalQ = useQuery({
     queryKey: ['complete-profile', 'legal'],
     queryFn: async () => {
-      const { data } = await clients.auth.GET('/auth/legal/current', {});
+      const { data, response } = await clients.auth.GET('/auth/legal/current', {});
+      // A failed load must not read as "no documents published" — that would
+      // hide the terms checkbox and let the form look submittable.
+      if (!response.ok) throw new Error('Failed to load the terms of service');
       return data?.documents ?? [];
     },
   });
   const legalDocs = legalQ.data ?? [];
   const legalRequired = legalDocs.length > 0;
+  // Fail closed: until the terms have loaded (or if they failed to), submission is
+  // blocked — a failed load must not look like "no terms published".
+  const legalLoadFailed = legalQ.isError;
+  const legalBlocked = legalQ.isPending || legalLoadFailed;
 
   const pwTooShort = password.length > 0 && password.length < 8;
   const mismatch = confirm.length > 0 && confirm !== password;
-  const valid = !!email.trim() && !!firstName.trim() && !!lastName.trim() && password.length >= 8 && confirm === password && (!legalRequired || acceptedLegal);
+  const valid = !!email.trim() && !!firstName.trim() && !!lastName.trim() && password.length >= 8 && confirm === password && !legalBlocked && (!legalRequired || acceptedLegal);
 
   const submit = useMutation({
     mutationFn: async () => {
-      const { data, error } = await clients.auth.POST('/auth/register/complete', {
+      const data = unwrap(await clients.auth.POST('/auth/register/complete', {
         body: {
           email: email.trim(),
           password,
@@ -61,8 +70,7 @@ export function CompleteProfilePage() {
           subscription_tier_id: tierId,
           accepted_legal: acceptedLegal,
         },
-      });
-      if (error || !data) throw new Error((error as { error?: string } | undefined)?.error || 'Could not complete registration. The link may have expired.');
+      }), 'Could not complete registration. The link may have expired.', { requireData: true });
       return data;
     },
     onSuccess: () => setDone(true),
@@ -74,10 +82,9 @@ export function CompleteProfilePage() {
   const [ssoNeedsVerify, setSsoNeedsVerify] = useState(false);
   const ssoSubmit = useMutation({
     mutationFn: async () => {
-      const { data, error, response } = await clients.auth.POST('/auth/sso/platform/register/complete', {
+      const data = unwrap(await clients.auth.POST('/auth/sso/platform/register/complete', {
         body: { sso_token: ssoToken, tenant_name: orgName.trim(), accepted_legal: acceptedLegal },
-      });
-      if (error || !response.ok || !data) throw new Error((error as { error?: string } | undefined)?.error || 'Could not finish setup. Please try signing up again.');
+      }), 'Could not finish setup. Please try signing up again.', { requireData: true });
       return data;
     },
     // Microsoft (unverified email): show a check-your-email state instead of
@@ -101,14 +108,15 @@ export function CompleteProfilePage() {
       <AuthShell icon="user-plus" eyebrow="One last step" title="Name your organization"
         subtitle="You're verified. Tell us your organization name and we'll set up your console."
         footer={<>Wrong account? <a href="/login" style={{ color: 'var(--accent-light)', textDecoration: 'none' }}>Sign in</a></>}>
-        <form onSubmit={(e) => { e.preventDefault(); if (orgName.trim().length >= 2 && (!legalRequired || acceptedLegal)) ssoSubmit.mutate(); }} style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
+        <form onSubmit={(e) => { e.preventDefault(); if (orgNameValid(orgName) && !legalBlocked && (!legalRequired || acceptedLegal)) ssoSubmit.mutate(); }} style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
+          {legalLoadFailed && <AuthError>Could not load the terms of service, so sign-up is paused. Reload the page to try again.</AuthError>}
           {ssoSubmit.isError && <AuthError>{(ssoSubmit.error as Error).message}</AuthError>}
           <div>
             <AuthLabel>Organization</AuthLabel>
             <input value={orgName} onChange={(e) => setOrgName(e.target.value)} required autoFocus placeholder="Acme Corp" style={authInputStyle} />
           </div>
           {legalRequired && <LegalConsent docs={legalDocs} checked={acceptedLegal} onChange={setAcceptedLegal} />}
-          <AuthSubmit disabled={orgName.trim().length < 2 || (legalRequired && !acceptedLegal) || ssoSubmit.isPending}>
+          <AuthSubmit disabled={!orgNameValid(orgName) || legalBlocked || (legalRequired && !acceptedLegal) || ssoSubmit.isPending}>
             <Icon name="arrow-right" size={17} />{ssoSubmit.isPending ? 'Setting up…' : 'Finish setup'}
           </AuthSubmit>
         </form>
@@ -130,6 +138,7 @@ export function CompleteProfilePage() {
     <AuthShell icon="user-plus" eyebrow="Complete your registration" title="Set up your account" subtitle="A few details and a password, and your console is ready."
       footer={<>Already have an account? <a href="/login" style={{ color: 'var(--accent-light)', textDecoration: 'none' }}>Sign in</a></>}>
       <form onSubmit={onSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 13 }}>
+        {legalLoadFailed && <AuthError>Could not load the terms of service, so sign-up is paused. Reload the page to try again.</AuthError>}
         {submit.isError && <AuthError>{(submit.error as Error).message}</AuthError>}
 
         <div>

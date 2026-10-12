@@ -40,7 +40,7 @@ const hostInventoryTimeout = 10 * time.Minute
 // endpoint, so honouring a local-mode job would produce a result the platform
 // has no row to attach it to, and a job that appears to succeed while landing
 // nowhere is worse than one that fails.
-func (e *JobExecutor) executeHostInventory(job *models.Job) error {
+func (e *JobExecutor) executeHostInventory(parent context.Context, job *models.Job) error {
 	mode := hostinventory.Mode(strings.ToLower(paramString(job.Parameters, "mode")))
 	switch mode {
 	case hostinventory.ModeRemote:
@@ -56,7 +56,7 @@ func (e *JobExecutor) executeHostInventory(job *models.Job) error {
 		return e.submitFailure(job, err.Error())
 	}
 
-	decrypted, err := security.DecryptCredentials(job.Credentials, job.ID.String(), e.config.RegistrationKey)
+	decrypted, err := security.DecryptCredentials(job.Credentials, job.ID.String(), e.config.CredentialSecrets()...)
 	if err != nil {
 		return e.submitFailure(job, fmt.Sprintf("Failed to decrypt credentials: %v", err))
 	}
@@ -72,7 +72,7 @@ func (e *JobExecutor) executeHostInventory(job *models.Job) error {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), hostInventoryTimeout)
+	ctx, cancel := context.WithTimeout(parent, hostInventoryTimeout)
 	defer cancel()
 
 	// Remote-peer collection is privacy-sensitive and therefore requires an

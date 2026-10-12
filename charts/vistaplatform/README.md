@@ -36,7 +36,7 @@ helm install ... -f values-ha.yaml -f values-customer.yaml
 All required fields are validated by `values.schema.json` at parse time. Minimum:
 
 - `tls.dnsName` — external hostname for the install
-- `tls.issuerRef.name` — cert-manager Issuer / ClusterIssuer (when `tls.mode: certManager`, the default)
+- `tls.issuerRef.name` — cert-manager Issuer / ClusterIssuer (when `tls.mode: certManager`; the default mode is `selfSigned`)
 - `license.existingSecretName` — Secret holding the JWT (default `vistaplatform-license`). Optional: without it the install runs as Core.
 
 The chart also creates `<fullname>-install` (for release `vista`,
@@ -100,23 +100,39 @@ to get past a pooler, also set `jit = off` on the PostgreSQL side
 is tuned for. Behaviour behind PgBouncer or a managed database proxy is
 documented here but is not tested by the project.
 
+## Private registries and mirrors
+
+- `image.pullSecrets` (a list of Secret names in the release namespace) is applied to **every** pod the
+  chart renders: backends, web-ui, admin-ui, the four datastores, the schema-migration / rls-roles /
+  seed-data Jobs and the `helm test` pod.
+- Every product image, frontends included, is pinned by `image.digest` when one is set and rendered
+  by tag otherwise. Set a digest to `""` (for example `--set frontend.webUi.image.digest=`) to force
+  the tag form.
+- The `helm test` pod image is `smokeTest.image.{registry,repository,tag,digest}`; an empty
+  `registry` follows `image.registry`, so a mirror or an air-gapped registry can host it.
+- With `replicas > 1` (for example `values-ha.yaml`) every backend and both frontends get a
+  PodDisruptionBudget.
+
 ## What the chart deploys
 
-- 16 Go backend services (auth, inventory, compliance, etc.)
+- 17 Go backend services (auth, inventory, compliance, etc.)
 - 2 React frontends (web-ui for tenants, admin-ui for platform admins)
 - Traefik `IngressRoute` + `Middleware` CRDs consumed by the cluster's own
   Traefik (kube-system on RKE2, ALB+Traefik on EKS). No in-cluster gateway pod.
-- 4 datastores (Postgres, Redis, InfluxDB, NATS JetStream)
+- 3 datastores (Postgres, Redis, NATS JetStream)
 - NetworkPolicies, schema-migration Job, helm-test smoke check
 - Hardened pod security defaults (non-root, read-only FS, dropped caps, RuntimeDefault seccomp, no SA token mount)
 
 Resource counts by HA / minimal profile — see `values-ha.yaml` / `values-minimal.yaml` in this directory.
 
+`values-minimal.yaml` is for a single node: it sets every backend to `strategy: Recreate` so a `helm upgrade` never surges pod CPU requests past the node (about 2.55 vCPU steady state against a 4 vCPU node; a rolling surge would reach 4.4). Expect a brief outage per backend during upgrades.
+
 ## v1 limitations to flag with customers
 
 - **Datastores are single-replica** even in HA mode. True datastore HA needs operators (CloudNativePG, NATS clustering) or external managed services. v1.x roadmap.
+- **`admin-service` is pinned to `replicas: 1` in `values-ha.yaml`** so the MSP licence-reports volume (`licensing.reports.persistence.enabled=true`, ReadWriteOnce) renders. To run two, use a ReadWriteMany class (`licensing.reports.persistence.accessMode=ReadWriteMany`, `storageClassName=...`) and set `backends.admin-service.replicas=2`.
 - **`pcap-processor` and `sensor-manager` are pinned to `replicas: 1`** even in HA mode. They share a `ReadWriteOnce` PVC for PCAP file handoff between sensor-manager (writer) and pcap-processor (reader). Scaling either to 2 results in a `MultiAttach` error and the new pod stays Pending. Roadmap: object-storage-backed handoff (S3 or in-cluster MinIO) so both services can scale independently.
-- **No air-gap support in v1.** All image pulls go through AWS ECR. If a customer needs offline install, that's a separate engagement.
+- **No turnkey air-gap support in v1.** Images pull from the registry in `image.registry` (GHCR for Core, Docker Hub for commercial). A mirror works (`image.registry`, `image.repoPrefix`, `image.pullSecrets`), but there is no offline bundle; if a customer needs one, that's a separate engagement.
 
 ## Verifying chart authenticity (customer instructions)
 

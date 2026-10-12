@@ -42,7 +42,7 @@ func flattenSensorDiscoveryEnvelope(raw map[string]interface{}) map[string]inter
 	if !ok || len(nested) == 0 {
 		return raw
 	}
-	out := make(map[string]interface{}, len(nested)+len(raw))
+	out := make(map[string]interface{}, len(raw))
 	for k, v := range nested {
 		out[k] = v
 	}

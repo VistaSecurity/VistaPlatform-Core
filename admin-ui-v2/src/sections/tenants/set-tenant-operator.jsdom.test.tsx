@@ -73,6 +73,9 @@ async function runMutation(isOperator: boolean, seed?: (qc: QueryClient) => void
   return { qc, error };
 }
 
+// The directory caches the paged-walk result, not a bare array.
+const paged = (items: unknown[]) => ({ items, total: items.length, truncated: false });
+
 describe('useSetTenantOperator', () => {
   it('PUTs the flag and seeds the banner query with the returned cap', async () => {
     const cap = { edition: 'msp', licensed: 5, current: 3, operator: 1, grace_started_at: null, grace_days: 30, grace_ends_at: null, state: 'under' };
@@ -90,12 +93,12 @@ describe('useSetTenantOperator', () => {
     const other = '55555555-5555-4555-8555-555555555555';
     const rows = [{ id: ID, is_operator: false }, { id: other, is_operator: false }];
     const { qc, error } = await runMutation(true, (c) => {
-      c.setQueryData(['platform', 'tenants', null], rows);
-      c.setQueryData(['platform', 'tenants', ID], [rows[0]]);
+      c.setQueryData(['platform', 'tenants', null], paged(rows));
+      c.setQueryData(['platform', 'tenants', ID], paged([rows[0]]));
     });
     expect(error).toBeUndefined();
-    expect(qc.getQueryData(['platform', 'tenants', null])).toEqual([{ id: ID, is_operator: true }, { id: other, is_operator: false }]);
-    expect(qc.getQueryData(['platform', 'tenants', ID])).toEqual([{ id: ID, is_operator: true }]);
+    expect(qc.getQueryData(['platform', 'tenants', null])).toEqual(paged([{ id: ID, is_operator: true }, { id: other, is_operator: false }]));
+    expect(qc.getQueryData(['platform', 'tenants', ID])).toEqual(paged([{ id: ID, is_operator: true }]));
   });
 
   it("passes the server's refusal text through unchanged", async () => {

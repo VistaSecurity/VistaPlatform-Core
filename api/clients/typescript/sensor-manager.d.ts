@@ -13,9 +13,9 @@ export interface paths {
         };
         /**
          * List sensors for the current tenant
-         * @description Returns the tenant's sensors. On any service error the handler logs and
-         *     returns 200 with an empty list rather than 500, so the Operations page
-         *     always renders.
+         * @description Returns the tenant's sensors. When the sensor store cannot be read the
+         *     handler answers 503 rather than an empty list, so a database blip is not
+         *     mistaken for "this tenant has no sensors".
          */
         get: operations["listSensors"];
         put?: never;
@@ -303,7 +303,11 @@ export interface paths {
         /**
          * Queue a command for a sensor
          * @description Creates a pending command for the sensor to pick up on its next poll.
-         *     `command_type` is required in the body. Gated by the `sensors.update`
+         *     `command_type` is required and must be one of the operator verbs the
+         *     sensor handles (restart, update_config, clear_cache, trigger_scan,
+         *     update_interfaces, list_interfaces, set_log_level, export_logs); the
+         *     encoded payload is capped at 64 KB, and a sensor holds at most 50
+         *     pending commands (429 beyond that). Gated by the `sensors.update`
          *     permission. Returns 201 with the created command.
          */
         post: operations["createSensorCommand"];
@@ -528,7 +532,8 @@ export interface paths {
         };
         /**
          * Recent discoveries for a sensor
-         * @description Returns the sensor's most recent discoveries (default 50), newest first.
+         * @description Returns the sensor's most recent discoveries (default 50, at most 500;
+         *     a non-positive or non-numeric `limit` is a 400), newest first.
          *     Each item carries the base discovery fields plus selected metadata
          *     (source_ip / version / cipher_suite / key_size) promoted to the top level
          *     when present — so a discovery item is an open object.
@@ -647,6 +652,33 @@ export interface paths {
         get: operations["getSensorCertificate"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/sensors/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enrol a sensor with a single-use registration key
+         * @description Public bootstrap route (no auth middleware): the registration key names
+         *     the tenant. Registers the sensor and, when a CSR is supplied, issues its
+         *     mTLS client certificate from the tenant CA.
+         *
+         *     When the sensor sends `supports_agent_secret` the response also carries
+         *     a per-sensor `agent_secret`, once. The sensor persists it and drops the
+         *     registration key from its config; an older sensor that does not send the
+         *     flag is issued nothing and keeps its key.
+         */
+        post: operations["registerSensor"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1319,9 +1351,52 @@ export interface components {
             /** @description compromised / expired / rotated / manual. */
             reason: string;
         };
+        /**
+         * @description POST /sensors/register body. Only the fields that matter to the contract
+         *     of the agent secret are listed; the rest of the enrolment payload (name,
+         *     platform, version, profile, network_interfaces, ip_address, host, ...) is
+         *     unchanged.
+         */
+        RegisterSensorRequest: {
+            registration_key: string;
+            /** @description PEM certificate signing request; its CN is the proposed sensor id. */
+            csr?: string;
+            /** Format: uuid */
+            sensor_id?: string;
+            /** @description Sent by a sensor build that stores the per-sensor secret; without it none is issued. */
+            supports_agent_secret?: boolean;
+        } & {
+            [key: string]: unknown;
+        };
+        /** @description POST /sensors/register result (the fields relevant to the agent-secret contract; see the handler for the rest). */
+        RegisterSensorResponse: {
+            sensor_id: string;
+            client_cert: string;
+            server_ca_cert: string;
+            control_plane_url?: string;
+            certificate_expires_at?: string;
+            /**
+             * @description The per-sensor secret (32 random bytes, standard base64), issued
+             *     ONCE — only to a sensor that sent `supports_agent_secret`. The
+             *     platform keeps it wrapped under the master key and cannot show it
+             *     again. The sensor stores it (0600, atomically with its certificate)
+             *     and no longer needs to keep the single-use registration key.
+             */
+            agent_secret?: string;
+            /** @description The platform's counter for `agent_secret`; it only increases. */
+            agent_secret_version?: number;
+        } & {
+            [key: string]: unknown;
+        };
         /** @description Request body for the rotate endpoint (PEM CSR). */
         RotateCertificateRequest: {
             csr: string;
+            /**
+             * @description Sent by a sensor build that stores the per-sensor secret. Without it
+             *     rotation changes nothing about the sensor's secret, so an older build
+             *     is never switched to a secret it would ignore.
+             */
+            supports_agent_secret?: boolean;
         };
         /** @description POST /sensors/{sensor_id}/regenerate-certificates — fresh CA + client cert PEM bundle. */
         RegenerateCertificatesResponse: {
@@ -1431,6 +1506,16 @@ export interface components {
             /** Format: date-time */
             certificate_expires_at: string;
             message: string;
+            /**
+             * @description The per-sensor secret (32 random bytes, standard base64), issued
+             *     ONCE, only when the request sent `supports_agent_secret`: it REPLACES the secret the sensor holds. The sensor keeps the replaced secret for 24 hours so anything sealed just before the rotation still opens; the platform uses this one from now on. The
+             *     platform keeps it wrapped under the master key and cannot show it
+             *     again. The sensor stores it (0600, atomically with its certificate)
+             *     and no longer needs to keep the single-use registration key.
+             */
+            agent_secret?: string;
+            /** @description The platform's counter for `agent_secret`; it only increases. */
+            agent_secret_version?: number;
         };
         /**
          * @description GET /sensors/{sensor_id}/certificate — certificate metadata. Open object;
@@ -1768,6 +1853,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            503: components["responses"]["LegacyServiceUnavailable"];
         };
     };
     getSensorStats: {
@@ -1790,6 +1876,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            503: components["responses"]["LegacyServiceUnavailable"];
         };
     };
     getSensorDiscoveryCounts: {
@@ -2159,6 +2246,15 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            /** @description The sensor already has the maximum number of pending commands. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LegacyError"];
+                };
+            };
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -2569,6 +2665,32 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             404: components["responses"]["LegacyNotFound"];
+        };
+    };
+    registerSensor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegisterSensorRequest"];
+            };
+        };
+        responses: {
+            /** @description Sensor registered. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegisterSensorResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            500: components["responses"]["LegacyServerError"];
         };
     };
     revokeSensorCertificate: {

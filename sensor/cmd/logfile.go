@@ -128,6 +128,31 @@ func teeLogToFile(dataPath string, alsoStderr bool) (string, error) {
 	if alsoStderr {
 		writers = append(writers, os.Stderr)
 	}
-	log.SetOutput(io.MultiWriter(writers...))
+	log.SetOutput(&tolerantMultiWriter{writers: writers})
 	return path, nil
+}
+
+// tolerantMultiWriter writes to every sink even when an earlier one fails, and
+// reports the first error. io.MultiWriter stops at the first failing writer, so
+// a full disk (file write fails) used to leave stderr, and so journald or the
+// service log, with nothing at exactly the moment an operator needs it.
+type tolerantMultiWriter struct {
+	writers []io.Writer
+}
+
+func (m *tolerantMultiWriter) Write(p []byte) (int, error) {
+	var firstErr error
+	for _, w := range m.writers {
+		if n, err := w.Write(p); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else if n != len(p) && firstErr == nil {
+			firstErr = io.ErrShortWrite
+		}
+	}
+	if firstErr != nil {
+		return 0, firstErr
+	}
+	return len(p), nil
 }

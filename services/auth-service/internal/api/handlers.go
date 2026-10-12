@@ -305,9 +305,10 @@ func (h *AuthHandlers) Register(c *gin.Context) {
 		}
 		switch {
 		case errors.Is(err, auth.ErrEmailExists):
-			c.JSON(http.StatusConflict, gin.H{
-				"error": "Email already exists",
-			})
+			// Not a 409: that made public signup an account-existence
+			// oracle (and let an unverified signup probe for a claimed
+			// address). Answer exactly as for a new address.
+			respondSignupAccepted(c, decoySignupUser(req.RegisterRequest))
 		case errors.Is(err, auth.ErrPersonalEmail):
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "Personal email addresses are not allowed. Please use your work email address",
@@ -336,13 +337,7 @@ func (h *AuthHandlers) Register(c *gin.Context) {
 		}
 	}
 
-	// Remove password hash from response
-	user.PasswordHash = ""
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "User registered successfully",
-		"user":    user,
-	})
+	respondSignupAccepted(c, signupResponseUser(user))
 }
 
 // Login handles user authentication
@@ -358,7 +353,7 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 	// Per-email rate limit (defense against IP-rotation brute-force).
 	// Middleware IP-keyed limiter still runs as a secondary defense.
 	if h.rateLimiter != nil {
-		allowed, retryAfter, err := h.rateLimiter.AllowByEmail(c.Request.Context(), req.Email)
+		allowed, retryAfter, err := h.rateLimiter.AllowAction(c, middleware.ActionLogin, req.Email)
 		if err != nil {
 			logrus.WithError(err).Warn("Per-email rate limiter unavailable on /auth/login — failing closed")
 			c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -435,7 +430,7 @@ func (h *AuthHandlers) Login(c *gin.Context) {
 			}
 		}
 
-		if respondTenantBlocked(c, err) {
+		if respondTenantBlocked(c, err) || respondPlatformAccount(c, err) {
 			return
 		}
 		switch err {
@@ -596,7 +591,7 @@ func (h *AuthHandlers) RefreshToken(c *gin.Context) {
 
 	authResponse, err := h.authService.RefreshToken(req.RefreshToken, clientIP, userAgent)
 	if err != nil {
-		if respondTenantBlocked(c, err) {
+		if respondTenantBlocked(c, err) || respondPlatformAccount(c, err) {
 			return
 		}
 		switch err {
@@ -809,6 +804,10 @@ func (h *AuthHandlers) UpdateMe(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": "User not found",
 			})
+		case auth.ErrInvalidAvatarURL:
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": auth.ErrInvalidAvatarURL.Error(),
+			})
 		default:
 			logrus.WithError(err).WithField("user_id", userID).Error("Failed to update user")
 			c.JSON(http.StatusInternalServerError, gin.H{
@@ -888,7 +887,7 @@ func (h *AuthHandlers) RevokeSession(c *gin.Context) {
 
 	err = h.authService.RevokeRefreshToken(userID, sessionID)
 	if err != nil {
-		if err == auth.ErrUserNotFound {
+		if errors.Is(err, auth.ErrSessionNotFound) || errors.Is(err, auth.ErrUserNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": "Session not found",
 			})
@@ -967,7 +966,7 @@ func (h *AuthHandlers) SetPrimaryAuth(c *gin.Context) {
 
 	err = h.authService.SetPrimaryAuthMethod(userID, connectionID)
 	if err != nil {
-		if err == auth.ErrUserNotFound {
+		if errors.Is(err, auth.ErrConnectionNotFound) || errors.Is(err, auth.ErrUserNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": "Connection not found",
 			})
@@ -1181,7 +1180,7 @@ func (h *AuthHandlers) ForgotPassword(c *gin.Context) {
 	// Constant-time response either way so a denial here doesn't leak the
 	// email's existence.
 	if h.rateLimiter != nil {
-		allowed, _, err := h.rateLimiter.AllowByEmail(c.Request.Context(), req.Email)
+		allowed, _, err := h.rateLimiter.AllowAction(c, middleware.ActionForgotPassword, req.Email)
 		if err != nil {
 			logrus.WithError(err).Warn("Per-email rate limiter unavailable on /auth/forgot-password — failing closed")
 			c.JSON(http.StatusServiceUnavailable, gin.H{
@@ -1292,8 +1291,17 @@ func (h *AuthHandlers) ResendEmailVerification(c *gin.Context) {
 	}
 
 	// Get user by email — return same response regardless of whether user exists
-	// to prevent user enumeration attacks
+	// to prevent user enumeration attacks. The response also takes the same
+	// minimum time either way, and a per-address cap stops the endpoint being
+	// used to mail-bomb one mailbox; going over the cap answers identically
+	// and simply sends nothing.
 	successResponse := gin.H{"message": "If the email exists and is unverified, a verification email has been sent"}
+	defer holdResponseFloor(time.Now(), resendVerificationMinDuration)
+
+	if !h.authService.AllowResendVerification(c.Request.Context(), req.Email) {
+		c.JSON(http.StatusOK, successResponse)
+		return
+	}
 
 	user, err := h.authService.GetUserByEmail(req.Email)
 	if err != nil {
@@ -1449,9 +1457,10 @@ func (h *AuthHandlers) CompleteRegistration(c *gin.Context) {
 		}
 		switch {
 		case errors.Is(err, auth.ErrEmailExists):
-			c.JSON(http.StatusConflict, gin.H{
-				"error": "Email already exists",
-			})
+			// Not a 409: that made public signup an account-existence
+			// oracle (and let an unverified signup probe for a claimed
+			// address). Answer exactly as for a new address.
+			respondSignupAccepted(c, decoySignupUser(req.RegisterRequest))
 		case errors.Is(err, auth.ErrPersonalEmail):
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "Personal email addresses are not allowed. Please use your work email address",
@@ -1520,13 +1529,7 @@ func (h *AuthHandlers) CompleteRegistration(c *gin.Context) {
 		}
 	}
 
-	// Remove password hash from response
-	user.PasswordHash = ""
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "User registered successfully",
-		"user":    user,
-	})
+	respondSignupAccepted(c, signupResponseUser(user))
 }
 
 // GetOnboardingStatus returns the current onboarding status for the authenticated user
@@ -1908,5 +1911,50 @@ func (h *AuthHandlers) UpdateNotificationPreferences(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Notification preferences updated successfully",
+	})
+}
+
+// signupAcceptedMessage is the one body message public signup answers with,
+// whether the address was new or already registered.
+const signupAcceptedMessage = "User registered successfully"
+
+// signupResponseUser projects the created user onto the fields the signup
+// response carries. The same projection is applied to the decoy returned for
+// an already-registered address, so the two responses cannot differ in shape
+// or in any field an attacker could compare.
+func signupResponseUser(u *models.User) gin.H {
+	return gin.H{
+		"id":             u.ID,
+		"tenant_id":      u.TenantID,
+		"email":          strings.ToLower(u.Email),
+		"first_name":     u.FirstName,
+		"last_name":      u.LastName,
+		"role":           "tenant_admin",
+		"is_active":      true,
+		"email_verified": false,
+		"created_at":     u.CreatedAt,
+		"updated_at":     u.UpdatedAt,
+	}
+}
+
+// decoySignupUser is what signup returns for an address that already has an
+// account: random identifiers, the caller's own submitted fields. Nothing about
+// the existing account is read or revealed.
+func decoySignupUser(r models.RegisterRequest) gin.H {
+	return signupResponseUser(&models.User{
+		ID:        uuid.New(),
+		TenantID:  uuid.New(),
+		Email:     r.Email,
+		FirstName: r.FirstName,
+		LastName:  r.LastName,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	})
+}
+
+func respondSignupAccepted(c *gin.Context, user gin.H) {
+	c.JSON(http.StatusCreated, gin.H{
+		"message": signupAcceptedMessage,
+		"user":    user,
 	})
 }

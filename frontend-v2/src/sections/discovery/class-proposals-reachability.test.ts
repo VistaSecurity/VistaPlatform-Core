@@ -84,8 +84,8 @@ describe('class proposals are reachable in Approvals', () => {
 
 describe('the pending banner counts class proposals', () => {
   it('reads the fourth total', () => {
-    expect(inventoryPage).toContain('useClassProposals');
-    expect(inventoryPage).toMatch(/classProposalsQ\.data\?\.total/);
+    expect(inventoryPage).toContain('useClassProposalCount');
+    expect(inventoryPage).toMatch(/\(classProposalsQ\.data \?\? 0\)/);
   });
 });
 

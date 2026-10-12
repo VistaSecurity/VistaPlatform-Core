@@ -113,6 +113,7 @@ func TestRegister_RejectedKeySurvivesTheWrap(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.Config{ControlPlaneURL: server.URL, RegistrationKey: "REG-spent"}
+	cfg.Storage.DataPath = t.TempDir()
 	s := &Sensor{config: cfg, sensorManager: api.NewSensorManagerClient(cfg)}
 
 	err := s.register()
@@ -135,6 +136,7 @@ func TestRegister_ServerErrorStaysRetryable(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.Config{ControlPlaneURL: server.URL, RegistrationKey: "REG-fresh"}
+	cfg.Storage.DataPath = t.TempDir()
 	s := &Sensor{config: cfg, sensorManager: api.NewSensorManagerClient(cfg)}
 
 	err := s.register()
@@ -144,5 +146,55 @@ func TestRegister_ServerErrorStaysRetryable(t *testing.T) {
 	var rejected *api.RegistrationRejectedError
 	if errors.As(err, &rejected) {
 		t.Fatalf("a 503 was classified as a permanent rejection: %v", err)
+	}
+}
+
+// TestRegistrationRejectedExitsNeedsOperator drives the real startup decision
+// against a control plane that has redeemed the key. The sensor must exit with
+// exitNeedsOperator, which the installer's systemd unit lists in
+// RestartPreventExitStatus; any other status makes systemd re-hit the
+// registration endpoint every RestartSec forever.
+func TestRegistrationRejectedExitsNeedsOperator(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"Registration key has already been used"}`))
+	}))
+	defer server.Close()
+
+	var exited []int
+	orig := exitProcess
+	exitProcess = func(code int) { exited = append(exited, code) }
+	defer func() { exitProcess = orig }()
+
+	cfg := &config.Config{ControlPlaneURL: server.URL, RegistrationKey: "REG-spent"}
+	s := &Sensor{config: cfg, sensorManager: api.NewSensorManagerClient(cfg)}
+	s.resolveRegistrationAtStartup(false, make(chan struct{}))
+
+	if len(exited) != 1 || exited[0] != exitNeedsOperator {
+		t.Fatalf("exit calls = %v, want exactly [%d]", exited, exitNeedsOperator)
+	}
+}
+
+// The other polarity: a control plane that is down is retried in the
+// background, never an exit.
+func TestRegistrationOutageDoesNotExit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	var exited []int
+	orig := exitProcess
+	exitProcess = func(code int) { exited = append(exited, code) }
+	defer func() { exitProcess = orig }()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	cfg := &config.Config{ControlPlaneURL: server.URL, RegistrationKey: "REG-fresh"}
+	s := &Sensor{config: cfg, sensorManager: api.NewSensorManagerClient(cfg)}
+	s.resolveRegistrationAtStartup(false, stop)
+
+	if len(exited) != 0 {
+		t.Fatalf("a 503 exited the sensor with %v; it must retry", exited)
 	}
 }

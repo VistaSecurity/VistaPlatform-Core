@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/autoscan"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
@@ -228,9 +229,10 @@ func authorize(tx Queryer, payload sensordispatch.Payload, sensor uuid.UUID, dns
 		}
 		// Neither collector's own interface is ever a target. They were one
 		// collector when this check was written; now that they can differ,
-		// both are excluded, as the planner excludes both.
+		// both are excluded. The rule is collectorAddressesSQL, shared with the
+		// planner (identityenrichment.Store.Scope) so the two cannot drift again.
 		var collectorAddress bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM agent_addresses WHERE (sensor_id=$1 OR sensor_id=$2) AND address=$3::inet)`, sensor, observer, target).Scan(&collectorAddress); err != nil {
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM (`+collectorAddressesSQL+`) c WHERE c.address=$2::inet)`, pq.StringArray{sensor.String(), observer.String()}, target).Scan(&collectorAddress); err != nil {
 			return err
 		}
 		if collectorAddress {

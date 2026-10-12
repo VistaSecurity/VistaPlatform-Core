@@ -1,6 +1,22 @@
 Vista Platform {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
 {{- $publicHost := include "vistaplatform.publicHost" . }}
 
+STORAGE CLASS
+  datastores.storageClassName defaults to "" (the cluster's default StorageClass).
+  UPGRADING an existing release? StatefulSet volume claim templates are
+  immutable: pin the class it already uses BEFORE `helm upgrade`, or the upgrade
+  fails with Forbidden:
+    --set datastores.storageClassName=<class>
+  Find it with: kubectl -n {{ .Release.Namespace }} get pvc
+{{- if not .Values.datastores.storageClassName }}
+  This release is using the cluster default class (storageClassName omitted).
+{{- end }}
+{{- if not (include "vistaplatform.generateSecrets" .) }}
+
+platform.generateSecrets=false: this chart generated NO Secrets. It is using
+the ones you pre-created ({{ include "vistaplatform.platformSecretName" . }}, {{ include "vistaplatform.generatedSecretName" . }}, {{ include "vistaplatform.installSecretName" . }}{{ if .Values.jwtSigning.enabled }}, {{ include "vistaplatform.jwtSigningSecretName" . }}{{ end }}); rotating them is your job, not `helm upgrade`'s.
+{{- end }}
+
 Verify the install:
 
   1. Wait for the schema migration job to complete:
@@ -95,10 +111,33 @@ ENCRYPTED INTERNAL TRANSPORT IS ON (serviceMtls.enabled=true — default since #
         kubectl get deploy -A -l app.kubernetes.io/name=reloader
 
   To turn encrypted internal transport OFF (only for a cluster that cannot
-  provide the prerequisites), set all three to false:
+  provide the prerequisites), set all four to false (agentMtls.enabled defaults
+  to true and itself requires serviceMtls):
     serviceMtls.enabled=false
     datastores.postgres.tls.enabled=false
     datastores.nats.tls.enabled=false
+    agentMtls.enabled=false
+{{- end }}
+
+{{- if .Values.createNamespace }}
+
+NAMESPACE IS KEPT ON UNINSTALL
+
+  The Namespace "{{ .Release.Namespace }}" carries helm.sh/resource-policy: keep, so
+  `helm uninstall` leaves it (and the PVCs and Secrets in it, which hold the
+  datastores and encryption-master-key) in place. Delete it yourself with
+  `kubectl delete namespace {{ .Release.Namespace }}` only when you mean to destroy that data.
+{{- end }}
+
+{{- if and .Values.serviceRls.enabled .Values.datastores.postgres.enabled (not .Values.schemaMigration.enabled) }}
+
+SCHEMA MIGRATION IS OFF, SERVICE RLS IS ON
+
+  The rls-roles Job still runs: it waits for the roles {{ .Values.serviceRls.roleApp }} and
+  {{ .Values.serviceRls.roleBypass }} to exist, then grants them LOGIN. Your own schema must
+  create them as NOLOGIN placeholders ({{ .Values.serviceRls.roleApp }} NOBYPASSRLS, {{ .Values.serviceRls.roleBypass }}
+  BYPASSRLS) with the grants from scripts/database/schema.sql ("RLS ROLE SPLIT"
+  and the trailing GRANT statements). Until they exist, backends stay in Init.
 {{- end }}
 
 {{/*
@@ -194,8 +233,8 @@ Verify chart authenticity (run on a machine with cosign installed):
   Signing is keyless, so there is no key to trust: the signing identity IS
   the release workflow named in the regexp above.
 
-For day-2 operations (upgrade, backup, support bundle), see the customer
-deployment guide at docsv4/core/operate/security/service-mesh-mtls.md.
+For day-2 operations (upgrade, backup, rollback), see
+docsv4/core/operate/deployment/production-checklist.md.
 
 {{- if .Release.IsUpgrade }}
 
@@ -236,11 +275,11 @@ UPGRADE NOTES
     the rendered ConfigMap (checksum/config), because env vars are injected at
     pod start only and running pods would otherwise silently keep the old
     config. On a single-node cluster, mind the rolling-upgrade CPU-surge
-    caveat in the deployment guide before making config-only upgrades.
+    caveat in docsv4/core/operate/deployment/production-checklist.md (Single-node clusters) before making config-only upgrades.
 
   - For other edge-case upgrade scenarios (env-shape migrations, RWO PVC
-    deadlocks), see "Upgrade" in the deployment guide:
-    docsv4/core/operate/security/service-mesh-mtls.md
+    deadlocks), see "Upgrading" in
+    docsv4/core/operate/deployment/production-checklist.md
 {{- if .Values.serviceMtls.enabled }}
 
   - ENCRYPTED INTERNAL TRANSPORT is now ON by default (#965). If you are
@@ -252,7 +291,8 @@ UPGRADE NOTES
          datastores.nats.tls.enabled.
     Toggling postgres.tls on a live release recreates the schema-migration
     Job (the former #421 immutability bug is fixed by #983). See
-    deployment-guide §5E. To keep the prior all-off posture on this release,
-    set all three toggles to false in your values.
+    docsv4/core/operate/security/service-mesh-mtls.md. To keep the prior all-off posture on this release,
+    set serviceMtls.enabled, datastores.postgres.tls.enabled,
+    datastores.nats.tls.enabled and agentMtls.enabled to false in your values.
 {{- end }}
 {{- end }}

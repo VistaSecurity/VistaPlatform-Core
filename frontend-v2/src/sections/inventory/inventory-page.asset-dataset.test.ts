@@ -74,6 +74,6 @@ describe('the shared asset dataset', () => {
   });
 
   it('passes the flag to useAssets rather than computing a second opinion', () => {
-    expect(src).toMatch(/useAssets\(page, search, usesAssetDataset,/);
+    expect(src).toMatch(/useAssets\(page, serverSearch, usesAssetDataset,/);
   });
 });

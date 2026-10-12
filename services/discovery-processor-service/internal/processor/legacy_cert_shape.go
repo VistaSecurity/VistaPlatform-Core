@@ -60,7 +60,7 @@ func upgradeLegacyFlatCertificate(raw map[string]interface{}) map[string]interfa
 		return raw
 	}
 
-	entry := make(map[string]interface{}, len(legacyFlatCertFields)+2)
+	entry := make(map[string]interface{}, len(legacyFlatCertFields))
 	for suffix, canonical := range legacyFlatCertFields {
 		v, ok := raw[legacyCertKeyPrefix+suffix]
 		if !ok || isEmptyMetadataValue(v) {
@@ -85,7 +85,7 @@ func upgradeLegacyFlatCertificate(raw map[string]interface{}) map[string]interfa
 	// The flat form could only ever carry the leaf.
 	entry["chain_order"] = 0
 
-	out := make(map[string]interface{}, len(raw)+1)
+	out := make(map[string]interface{}, len(raw))
 	for k, v := range raw {
 		out[k] = v
 	}

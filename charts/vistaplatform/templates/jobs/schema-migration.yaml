@@ -38,6 +38,9 @@ external-database branches below, which previously carried it verbatim twice.
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
+      {{- with include "vistaplatform.pullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
         {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
       containers:
@@ -170,8 +173,16 @@ name, so Helm creates a fresh Job instead of attempting an in-place patch of
 the old one (which Kubernetes rejects). Previously the name was keyed only on
 the schema-content hash, so enabling postgres.tls on an existing release
 failed with "spec.template: field is immutable". Superseded Jobs are removed
-by Helm on upgrade (name no longer in the release manifest) and completed
-ones also age out via ttlSecondsAfterFinished.
+by Helm on upgrade (name no longer in the release manifest).
+
+No ttlSecondsAfterFinished (#2443): a TTL deletes the finished Job ten minutes
+after it completes, so a GitOps controller (Argo CD, Flux) sees its desired
+object vanish and re-creates it, re-running the migration on every sync. The
+name is already a pure function of the rendered pod template, so the same tree
+renders the same Job and a controller sees nothing to do. Cleanup needs no
+CronJob: each release keeps at most one finished Job of this kind, and the next
+upgrade that changes the pod template renames it, so Helm (or Argo/Flux with
+prune on) deletes the superseded one.
 */}}
 apiVersion: v1
 kind: ConfigMap
@@ -197,7 +208,6 @@ metadata:
     vistasecurity.io/schema-hash: "{{ $schemaHash }}"
 spec:
   backoffLimit: 5
-  ttlSecondsAfterFinished: 600
   template:
     {{- $podTemplate }}
 {{- end }}

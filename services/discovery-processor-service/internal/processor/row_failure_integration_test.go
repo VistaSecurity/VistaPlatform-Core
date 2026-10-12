@@ -128,7 +128,7 @@ func TestIntegration_ProcessBatch_FailedChunkCostsOnlyItsRows(t *testing.T) {
 	// lands. The failing chunk comes first on purpose: the old code abandoned
 	// every chunk after a failure, so the 10 would never have been sent.
 	p, inv, db, tenant := newFlakyBatchProcessor(t, importChunkSize)
-	p.SetRetryPolicy(RetryPolicy{MaxAttempts: 3}) // the default budget is longer; this test walks a short one to its end
+	p.SetRetryPolicy(RetryPolicy{MaxAttempts: 3, MaxTransientAttempts: 3}) // the default budgets are longer; this test walks a short one to its end
 	batchID, sensorID := uuid.New().String(), uuid.New()
 	for i := 0; i < 60; i++ {
 		host := fmt.Sprintf("host-%02d.corp.example", i)

@@ -17,7 +17,9 @@ metadata:
 spec:
   accessModes:
     - {{ .Values.pcapUploads.accessMode }}
-  storageClassName: {{ .Values.datastores.storageClassName }}
+  {{- with .Values.datastores.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
   resources:
     requests:
       storage: {{ .Values.pcapUploads.size }}

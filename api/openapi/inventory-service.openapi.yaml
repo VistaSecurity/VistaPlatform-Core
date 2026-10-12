@@ -9469,21 +9469,37 @@ components:
           type: array
           items:
             type: string
-          description: Asset UUIDs as strings. Unparseable entries are silently dropped.
+          description: Asset UUIDs as strings, at most 200 per request. Unparseable entries are reported back in `invalid_ids`.
     ApprovalResult:
       type: object
       additionalProperties: false
-      description: 'CURRENT response for POST /infrastructure-assets/approve and /deny: a human-readable message plus the count of assets acted on.
+      description: 'CURRENT response for POST /infrastructure-assets/approve and /deny. `count` is the number of assets whose status actually moved (never the number requested); `changed` lists them, `skipped` lists valid ids that did not move (unknown, already in the target state, or not in a state the decision applies to), and `invalid_ids` echoes request entries that were not UUIDs.
 
         '
       required:
       - message
       - count
+      - changed
+      - skipped
       properties:
         message:
           type: string
         count:
           type: integer
+        changed:
+          type: array
+          items:
+            type: string
+            format: uuid
+        skipped:
+          type: array
+          items:
+            type: string
+            format: uuid
+        invalid_ids:
+          type: array
+          items:
+            type: string
     Certificate:
       type: object
       additionalProperties: false
@@ -12322,7 +12338,7 @@ components:
           type: array
           items:
             type: string
-          description: Asset UUIDs as strings. Unparseable entries are silently dropped.
+          description: Asset UUIDs as strings, at most 200 per request. Unparseable entries are reported back in `invalid_ids`.
         query:
           type: string
           description: >-
@@ -12364,7 +12380,7 @@ components:
           type: array
           items:
             type: string
-          description: Asset UUIDs as strings. Unparseable entries are silently dropped.
+          description: Asset UUIDs as strings, at most 200 per request. Unparseable entries are reported back in `invalid_ids`.
         query:
           type: string
           description: >-
@@ -14623,6 +14639,13 @@ components:
           type:
           - string
           - 'null'
+        note:
+          type: string
+          description: >-
+            A sentence about how the job ended or what it did not do, when that
+            is not an error: "no active scanning requested; nothing probed", or
+            the targets dropped because they were no longer authorized. Absent
+            when there is nothing to say.
         progress:
           type: integer
           minimum: 0

@@ -76,6 +76,7 @@ describe('tenant console route table (react-router v8)', () => {
     ['/login', '/login'],
     ['/signup', '/signup'],
     ['/verify-email', '/verify-email'],
+    ['/forgot-password', '/forgot-password'],
     ['/reset-password', '/reset-password'],
     ['/accept-invite', '/accept-invite'],
     ['/auth/sso/callback', '/auth/sso/callback'],

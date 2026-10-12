@@ -16,6 +16,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/certificates"
 	// Aliased: the device-agent has its own `certificates` package, above.
 	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/httpclient"
 )
 
 // RotateCertificate rotates the agent's certificate by generating a new CSR and requesting a new certificate
@@ -71,6 +72,9 @@ func (c *OutboundClient) RotateCertificate() error {
 	// Request certificate rotation
 	rotationReq := map[string]interface{}{
 		"csr": csrPEM,
+		// This build stores the per-agent secret; the platform issues a
+		// replacement only to a build that says so.
+		"supports_agent_secret": true,
 	}
 
 	jsonData, err := json.Marshal(rotationReq)
@@ -104,6 +108,8 @@ func (c *OutboundClient) RotateCertificate() error {
 		ServerCACert         string    `json:"server_ca_cert"`
 		CertificateExpiresAt time.Time `json:"certificate_expires_at"`
 		Message              string    `json:"message"`
+		AgentSecret          string    `json:"agent_secret"`
+		AgentSecretVersion   int       `json:"agent_secret_version"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&rotationResp); err != nil {
@@ -118,6 +124,15 @@ func (c *OutboundClient) RotateCertificate() error {
 	if rotationResp.ServerCACert != "" {
 		c.config.Security.ServerCACert = sharedcerts.MergeCAPEMs(
 			c.config.Security.ServerCACert, rotationResp.ServerCACert)
+	}
+
+	// The replacement per-agent secret. The one it replaces stays
+	// valid for agentcreds.PreviousSecretWindow so a job the platform sealed
+	// just before this rotation still opens; for an agent that held none (it
+	// enrolled before agent secrets existed) the replaced root is its
+	// registration key. The caller persists it with the certificate.
+	if rotationResp.AgentSecret != "" {
+		c.config.RotateAgentSecret(rotationResp.AgentSecret, rotationResp.AgentSecretVersion, time.Now())
 	}
 
 	// Save certificates to disk files
@@ -180,9 +195,7 @@ func (c *OutboundClient) reconfigureTLS() error {
 		tlsConfig.RootCAs = caPool
 	}
 
-	c.httpClient.Transport = &http.Transport{
-		TLSClientConfig: tlsConfig,
-	}
+	httpclient.Swap(c.httpClient, httpclient.NewTransport(tlsConfig))
 
 	return nil
 }

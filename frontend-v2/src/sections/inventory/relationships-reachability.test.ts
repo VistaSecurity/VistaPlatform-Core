@@ -101,7 +101,7 @@ describe('the pending banner counts relationship proposals', () => {
     // links to the queue. Leaving a kind out makes the number smaller than the
     // page it points at — the same defect the merge total had before it was
     // read off `total`.
-    expect(inventoryPage).toContain('useRelationshipProposals');
-    expect(inventoryPage).toMatch(/relProposalsQ\.data\?\.total/);
+    expect(inventoryPage).toContain('useRelationshipProposalCount');
+    expect(inventoryPage).toMatch(/\(relProposalsQ\.data \?\? 0\)/);
   });
 });

@@ -16,7 +16,7 @@
 // not something an end-of-life finding has.
 // One remaining adaptation from the mock: "By Network Zone" is "By Category"
 // (the crypto-risk stream carries no segment field).
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -40,6 +40,7 @@ import { CryptoAssessment } from './crypto-assessment';
 import type { FindingSubjectFilter } from './queries';
 import { coverageLine, formatScore, normalizeControlStatus, notAssessedReasonText, CONTROL_STATUS_LABEL, NOT_ASSESSED_LABEL } from './control-status';
 import { downloadCsv, buildCryptoRiskCsvRows, buildComplianceFindingCsvRows, CRYPTO_RISK_CSV_HEADER, COMPLIANCE_FINDING_CSV_HEADER, type ControlMeta } from './export-csv';
+import { unwrap } from '../../lib/api-result';
 
 const GRID = '12px minmax(0,1.7fr) 118px minmax(0,1.5fr) minmax(0,1.25fr) 122px';
 const SEVS: (RiskLevel | 'Unknown')[] = [...LEVELS, 'Unknown'];
@@ -164,9 +165,11 @@ export function FindingsPage() {
   const [openCtrl, setOpenCtrl] = useState<string | null>(initialControl);
 
   const { user } = useAuth();
-  const risksQ = useCryptoRisks();
-  const ctxQ = useFrameworkContext();
   const findingsLens = isFindingsLens(lens);
+  // Only the crypto lenses render this stream; the findings-scoped lenses read
+  // the findings table and must not pay for up to five requests they ignore.
+  const risksQ = useCryptoRisks(!findingsLens);
+  const ctxQ = useFrameworkContext();
   // The framework/control lenses are compliance-shaped: they GROUP by control,
   // and only the compliance producer has one. The producer lens groups by
   // producer and shows every row.
@@ -351,15 +354,35 @@ export function FindingsPage() {
       .sort((a, b) => sevRank(a.worst) - sevRank(b.worst) || b.count - a.count);
   }, [complianceFiltered]);
 
+  // Which group bands start open. A band the user has not met yet opens by
+  // default, and "not met yet" is keyed on the GROUP KEYS rather than on the
+  // fetches' success flags: narrowing the search or the severity filter forms
+  // groups that did not exist a moment ago, and an effect that only re-ran when
+  // a request first succeeded left them collapsed under a list that looked
+  // empty. Bands the user already saw keep whatever they did with them.
+  const groupKeys = useMemo(() => {
+    switch (lens) {
+      case 'asset': return assetGroups.slice(0, 5).map((g) => g.key);
+      case 'category': return categoryGroups.map((g) => g.key);
+      case 'severity': return severityGroups.map((g) => g.key);
+      case 'framework': return fwGroups.map((g) => g.fwId);
+      case 'producer': return producerGroups.map((g) => g.key);
+      default: return [];
+    }
+  }, [lens, assetGroups, categoryGroups, severityGroups, fwGroups, producerGroups]);
+  const seenGroups = useRef<{ lens: string; keys: Set<string> }>({ lens: '', keys: new Set() });
   useEffect(() => {
-    if (lens === 'asset') setOpen(new Set(assetGroups.slice(0, 5).map((g) => g.key)));
-    else if (lens === 'category') setOpen(new Set(categoryGroups.map((g) => g.key)));
-    else if (lens === 'severity') setOpen(new Set(severityGroups.map((g) => g.key)));
-    else if (lens === 'framework') setOpen(new Set(fwGroups.map((g) => g.fwId)));
-    else if (lens === 'producer') setOpen(new Set(producerGroups.map((g) => g.key)));
-    else setOpen(new Set());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lens, risksQ.isSuccess, batchQ.isSuccess, listQ.isSuccess, producerF]);
+    const prev = seenGroups.current;
+    if (prev.lens !== lens) {
+      seenGroups.current = { lens, keys: new Set(groupKeys) };
+      setOpen(new Set(groupKeys));
+      return;
+    }
+    const fresh = groupKeys.filter((k) => !prev.keys.has(k));
+    if (!fresh.length) return;
+    fresh.forEach((k) => prev.keys.add(k));
+    setOpen((o) => new Set([...o, ...fresh]));
+  }, [lens, groupKeys]);
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === 'Escape' && !assetOpen) setSel(null); };
     window.addEventListener('keydown', h);
@@ -815,10 +838,9 @@ function Inspector({ sel, allRisks, onClose, onSelect, onOpenAsset, go }: {
   const qc = useQueryClient();
   const bulkTicket = useMutation({
     mutationFn: async () => {
-      const { data, error } = await clients.compliance.POST('/tickets', {
+      const data = unwrap(await clients.compliance.POST('/tickets', {
         body: bulkCryptoTicketBody(risk!, sameIssue),
-      });
-      if (error || !data) throw new Error('Failed to create remediation ticket');
+      }), 'Failed to create remediation ticket', { requireData: true });
       return data.ticket;
     },
     onSuccess: () => {

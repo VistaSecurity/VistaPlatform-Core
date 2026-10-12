@@ -217,9 +217,19 @@ export const PROFILE_NAV: SettingsNavItem[] = [
  * SpecPendingPage), so a deep link to an unbuilt page never 404s or crashes —
  * it's just not advertised in the nav.
  */
-export function visibleSettingsNav(features: FeaturesMap): SettingsNavSection[] {
+export function visibleSettingsNav(
+  features: FeaturesMap,
+  /** Omit to skip permission filtering (callers with no RBAC context). */
+  hasPermission?: (p: string) => boolean,
+): SettingsNavSection[] {
   return SETTINGS_NAV
-    .map((sec) => ({ ...sec, items: sec.items.filter((it) => it.built && (!it.feature || features[it.feature])) }))
+    .map((sec) => ({
+      ...sec,
+      items: sec.items.filter((it) =>
+        it.built
+        && (!it.feature || features[it.feature])
+        && (!it.permission || !hasPermission || hasPermission(it.permission))),
+    }))
     .filter((sec) => sec.items.length > 0);
 }
 

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import { clients } from '../../lib/clients';
 import { useAssetsQuery } from '../inventory/asset-queries';
 import { assetIdentity, primaryAddressPort } from '../inventory/asset-shape';
@@ -76,7 +77,8 @@ function ChooseDecisionForm({ id, observation, initialAction = null }: DecisionP
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const cache = useQueryClient();
-  const candidates = useAssetsQuery(`(status:monitoring OR status:pending_approval)${search.trim() ? ` AND ${JSON.stringify(search.trim())}` : ''}`, page, action === 'link');
+  const debouncedSearch = useDebouncedValue(search).trim();
+  const candidates = useAssetsQuery(`(status:monitoring OR status:pending_approval)${debouncedSearch ? ` AND ${JSON.stringify(debouncedSearch)}` : ''}`, page, action === 'link');
   const mutation = useMutation({ mutationFn: async () => {
     const body = { reason: reason.trim(), ...(name.trim() ? { name: name.trim() } : {}), ...(assetID ? { asset_id: assetID } : {}) };
     const params = { path: { id } };

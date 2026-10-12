@@ -53,31 +53,6 @@ services:
       - crypto-network
     restart: "no"
 
-  influxdb:
-    image: influxdb:2.8-alpine
-    container_name: crypto-influxdb
-    environment:
-      DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_USERNAME:-admin}
-      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:?Set INFLUXDB_PASSWORD in .env}
-      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-crypto-inventory}
-      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-metrics}
-      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:?Set INFLUXDB_TOKEN in .env}
-    volumes:
-      - influx_data:/var/lib/influxdb2
-      - influx_config:/etc/influxdb2
-    ports:
-      - "${INFLUXDB_HOST_PORT:-8086}:8086"
-    healthcheck:
-      test: [ "CMD", "influx", "ping" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    networks:
-      - crypto-network
-    restart: unless-stopped
-
   redis:
     image: redis:8-alpine
     container_name: crypto-redis
@@ -215,8 +190,6 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      influxdb:
-        condition: service_healthy
       nats:
         condition: service_healthy
     volumes:
@@ -293,10 +266,6 @@ services:
       - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - INFLUXDB_URL=http://influxdb:8086
-      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
-      - INFLUXDB_ORG=crypto-inventory
-      - INFLUXDB_BUCKET=metrics
       - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
@@ -327,8 +296,6 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      influxdb:
-        condition: service_healthy
       nats:
         condition: service_healthy
     volumes:
@@ -357,10 +324,6 @@ services:
       - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - INFLUXDB_URL=http://influxdb:8086
-      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN}
-      - INFLUXDB_ORG=crypto-inventory
-      - INFLUXDB_BUCKET=metrics
       - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
@@ -385,8 +348,6 @@ services:
       db-roles:
         condition: service_completed_successfully
       redis:
-        condition: service_healthy
-      influxdb:
         condition: service_healthy
       nats:
         condition: service_healthy
@@ -461,6 +422,7 @@ services:
       - PORT=8080
       - ENV=development
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
       - LICENSE_TOKEN=${LICENSE_TOKEN:-}
       - LOG_LEVEL=debug
       # mTLS Configuration
@@ -475,6 +437,8 @@ services:
       - "${MCP_SERVICE_HOST_PORT:-8100}:8080"
     depends_on:
       auth-service:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - ./service-certs/mcp-service:/app/certs:ro
@@ -822,7 +786,6 @@ services:
       - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - INFLUXDB_URL=http://influxdb:8086
       - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
       - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
       - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
@@ -851,8 +814,6 @@ services:
       db-roles:
         condition: service_completed_successfully
       redis:
-        condition: service_healthy
-      influxdb:
         condition: service_healthy
       nats:
         condition: service_healthy
@@ -1128,7 +1089,6 @@ services:
     depends_on:
       - prometheus
       - otel-collector
-      - influxdb
     networks:
       - crypto-network
     restart: unless-stopped
@@ -1138,10 +1098,6 @@ services:
 # =================================================================
 volumes:
   postgres_data:
-    driver: local
-  influx_data:
-    driver: local
-  influx_config:
     driver: local
   redis_data:
     driver: local

@@ -21,6 +21,7 @@ import {
 } from './auto-scan-form';
 import { describeNotScanned, notScannedHeadline } from './auto-scan-not-scanned';
 import { IdentityDiscoverySettings } from './identity-discovery-settings';
+import { unwrap } from '../../lib/api-result';
 
 interface AutoScanData {
   policy: AutoScanPolicy;
@@ -153,10 +154,9 @@ function AutoScanForm({ policy, limits, summary }: { policy: AutoScanPolicy; lim
 
   const save = useMutation({
     mutationFn: async () => {
-      const { data, error, response } = await clients.inventory.PUT('/discovery/auto-scan', {
+      const data = unwrap(await clients.inventory.PUT('/discovery/auto-scan', {
         body: draftToPayload(draft),
-      });
-      if (!response.ok || error || !data) throw new Error('Failed to save the policy');
+      }), 'Failed to save the policy', { requireData: true });
       return data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: QUERY_KEY }),

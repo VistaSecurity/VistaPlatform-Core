@@ -76,20 +76,29 @@ type Artifact struct {
 	StorageKey   string       `json:"storage_key,omitempty" db:"storage_key"`
 	// InlineContent is only populated when shared/storage is not configured
 	// (typical dev). Production / customer installs use storage_key.
-	HasInlineContent     bool       `json:"has_inline_content" db:"-"`
-	ContentHash          string     `json:"content_hash" db:"content_hash"`
-	SizeBytes            int64      `json:"size_bytes" db:"size_bytes"`
-	ComponentCount       int        `json:"component_count" db:"component_count"`
-	CycloneDXSpecVersion string     `json:"cyclonedx_spec_version" db:"cyclonedx_spec_version"`
-	InputDataFreshnessAt time.Time  `json:"input_data_freshness_at" db:"input_data_freshness_at"`
-	GeneratedAt          time.Time  `json:"generated_at" db:"generated_at"`
-	GeneratedBy          uuid.UUID  `json:"generated_by" db:"generated_by"`
-	SignatureHMAC        string     `json:"signature_hmac,omitempty" db:"signature_hmac"`
-	SignatureKID         string     `json:"signature_kid,omitempty" db:"signature_kid"`
-	Provenance           Provenance `json:"provenance" db:"provenance"`
-	Layers               []Layer    `json:"layers" db:"layers"`
-	DeletedAt            *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
-	CreatedAt            time.Time  `json:"created_at" db:"created_at"`
+	HasInlineContent     bool      `json:"has_inline_content" db:"-"`
+	ContentHash          string    `json:"content_hash" db:"content_hash"`
+	SizeBytes            int64     `json:"size_bytes" db:"size_bytes"`
+	ComponentCount       int       `json:"component_count" db:"component_count"`
+	CycloneDXSpecVersion string    `json:"cyclonedx_spec_version" db:"cyclonedx_spec_version"`
+	InputDataFreshnessAt time.Time `json:"input_data_freshness_at" db:"input_data_freshness_at"`
+	GeneratedAt          time.Time `json:"generated_at" db:"generated_at"`
+	GeneratedBy          uuid.UUID `json:"generated_by" db:"generated_by"`
+	// SignatureHMAC is the LEGACY shared-secret signature. No new artifact
+	// carries one; a row that still does is reported by /verify as
+	// legacy-hmac and must be regenerated.
+	SignatureHMAC string `json:"signature_hmac,omitempty" db:"signature_hmac"`
+	SignatureKID  string `json:"signature_kid,omitempty" db:"signature_kid"`
+	// Signature is the hex Ed25519 signature over SignedEnvelope.
+	Signature          string `json:"signature,omitempty" db:"signature"`
+	SignatureAlgorithm string `json:"signature_algorithm,omitempty" db:"signature_algorithm"`
+	// SignedEnvelope is the canonical envelope exactly as it was signed
+	// (envelope.go). /verify recomputes each field from the row and compares.
+	SignedEnvelope string     `json:"signed_envelope,omitempty" db:"signed_envelope"`
+	Provenance     Provenance `json:"provenance" db:"provenance"`
+	Layers         []Layer    `json:"layers" db:"layers"`
+	DeletedAt      *time.Time `json:"deleted_at,omitempty" db:"deleted_at"`
+	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
 
 	// StorageDegraded and AttestationError describe what went wrong while this
 	// artifact was being written, for the caller that asked for it. Both are
@@ -163,14 +172,25 @@ type VerifyResponse struct {
 	HashRecomputed string `json:"hash_recomputed,omitempty"`
 	// HashStored is what cbom_artifacts.content_hash records.
 	HashStored string `json:"hash_stored"`
-	// SignatureValid is true when the stored HMAC matches one we recompute
-	// against the platform's current signing key. False+SignatureChecked=true
-	// means tamper. SignatureChecked=false means the artifact was unsigned
-	// (signature_hmac empty) or the verifier wasn't configured.
+	// SignatureValid is true when the Ed25519 signature verifies over the
+	// stored envelope AND every envelope field still matches the row.
+	// False+SignatureChecked=true means tamper, a legacy signature, or an
+	// unknown key (see SignatureReason). SignatureChecked=false means the
+	// artifact was unsigned or no verifier is configured.
 	SignatureValid   bool `json:"signature_valid"`
 	SignatureChecked bool `json:"signature_checked"`
 	// SignatureKID is the kid stored on the artifact (empty for unsigned).
 	SignatureKID string `json:"signature_kid,omitempty"`
+	// SignatureAlgorithm is "ed25519", or "hmac-sha256" for a legacy row.
+	SignatureAlgorithm string `json:"signature_algorithm,omitempty"`
+	// SignatureReason says why a checked signature is not valid:
+	// "legacy-hmac; regenerate", "envelope-mismatch", "signature-invalid",
+	// "unknown-kid". Empty when valid.
+	SignatureReason string `json:"signature_reason,omitempty"`
+	// EnvelopeMismatch names the signed-envelope fields (hash, scope_id,
+	// scope_version, layers_hash, kind, generated_by) whose recorded value no
+	// longer matches the row.
+	EnvelopeMismatch []string `json:"envelope_mismatch,omitempty"`
 }
 
 // GenerateResponse is the JSON body returned from POST /cbom/generate.
@@ -188,6 +208,10 @@ type GenerateResponse struct {
 	// and could not be built. Empty means either "not requested" or "built" —
 	// the artifact's `layers` says which.
 	AttestationError string `json:"attestation_error,omitempty"`
+	// SigningError is set when signing was on by default for this tenant but
+	// the deployment has no signer, so the artifact is unsigned. An explicit
+	// `sign: true` in that state is refused with 503 instead.
+	SigningError string `json:"signing_error,omitempty"`
 }
 
 // DownloadFormat is the wire format requested via ?format= on download.

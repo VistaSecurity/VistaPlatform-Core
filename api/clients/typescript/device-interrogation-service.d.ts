@@ -222,6 +222,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enrol a device agent with a single-use registration key
+         * @description Public bootstrap route (no auth middleware): the registration key names
+         *     the tenant and must belong to a device-interrogation registration. When a
+         *     CSR is supplied the response carries the agent's mTLS client certificate.
+         *
+         *     When the agent sends `supports_agent_secret` the response also carries a
+         *     per-agent `agent_secret`, ONCE. It replaces the registration key as the
+         *     root of the key that seals the credentials of every job the platform
+         *     hands this agent: the agent stores it (0600, atomically with its
+         *     certificate) and no longer keeps the registration key. An older agent that
+         *     does not send the flag is issued nothing and its credential key stays
+         *     rooted in its registration key.
+         */
+        post: operations["registerAgent"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{id}/certificates/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate a device agent's certificate (and agent secret) from a CSR
+         * @description The agent's own pre-expiry renewal, authenticated by its CURRENT client
+         *     certificate. Issues a replacement certificate and supersedes the old one.
+         *
+         *     When the agent sends `supports_agent_secret` the response also carries a
+         *     NEW `agent_secret` that replaces the one the agent holds (an agent that
+         *     enrolled before agent secrets existed receives its first here and
+         *     switches from its registration key — no re-enrolment). The platform seals
+         *     every job from then on under the new secret. The agent keeps the replaced
+         *     secret for 24 hours so a job sealed just before the rotation still opens.
+         *     A failure to issue the secret never withholds the certificate; the agent
+         *     keeps the secret it has and the next rotation retries.
+         */
+        post: operations["rotateAgentCertificate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents/{id}": {
         parameters: {
             query?: never;
@@ -1928,6 +1988,66 @@ export interface components {
             /** @description True for the address the agent reaches the platform from. At most one per agent. */
             is_primary: boolean;
         };
+        /** @description POST /agents/register body. */
+        RegisterAgentRequest: {
+            registration_key: string;
+            platform: string;
+            version: string;
+            /** @description PEM certificate signing request; its CN is the proposed agent id. */
+            csr?: string;
+            /** Format: uuid */
+            agent_id?: string;
+            /** @description Sent by an agent build that stores the per-agent secret; without it none is issued. */
+            supports_agent_secret?: boolean;
+        };
+        /** @description POST /agents/register result. */
+        RegisterAgentResponse: {
+            /** Format: uuid */
+            agent_id: string;
+            client_cert?: string;
+            /** @description Legacy (no-CSR) flow only. */
+            client_key?: string;
+            server_ca_cert?: string;
+            certificate_expires_at?: string;
+            /** @description The mTLS passthrough URL to switch to; only set when fail-closed agent mTLS is enforced. */
+            control_plane_url?: string;
+            /**
+             * @description The per-agent secret (32 random bytes, standard base64), returned
+             *     ONCE and only to an agent that sent `supports_agent_secret`. The
+             *     platform keeps it wrapped under the master key and cannot show it
+             *     again.
+             */
+            agent_secret?: string;
+            /** @description The platform's counter for `agent_secret`; it only increases. */
+            agent_secret_version?: number;
+        };
+        /** @description POST /agents/{id}/certificates/rotate body. */
+        RotateAgentCertificateRequest: {
+            csr: string;
+            /**
+             * @description Sent by an agent build that stores the per-agent secret. Without it
+             *     rotation changes nothing about the agent's secret, so an older build
+             *     is never switched to a secret it would ignore.
+             */
+            supports_agent_secret?: boolean;
+        };
+        /** @description POST /agents/{id}/certificates/rotate result. */
+        RotateAgentCertificateResponse: {
+            /** Format: uuid */
+            agent_id: string;
+            client_cert: string;
+            server_ca_cert: string;
+            /** Format: date-time */
+            certificate_expires_at: string;
+            message: string;
+            /**
+             * @description A NEW per-agent secret, present only when the request sent
+             *     `supports_agent_secret` and the platform issued it. It REPLACES the
+             *     secret the agent holds; the agent keeps the replaced one for 24 hours.
+             */
+            agent_secret?: string;
+            agent_secret_version?: number;
+        };
         /** @description Envelope for GET /agents — `{ "agents": [...], "count": N }`. On an empty/nil result `agents` can serialize as JSON null, so it is typed as a nullable array. */
         AgentListResponse: {
             agents: components["schemas"]["Agent"][] | null;
@@ -2995,6 +3115,62 @@ export interface operations {
                 };
             };
             400: components["responses"]["LegacyBadRequest"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    registerAgent: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RegisterAgentRequest"];
+            };
+        };
+        responses: {
+            /** @description Agent enrolled. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RegisterAgentResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    rotateAgentCertificate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The agent's UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RotateAgentCertificateRequest"];
+            };
+        };
+        responses: {
+            /** @description Certificate rotated. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RotateAgentCertificateResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };

@@ -25,15 +25,29 @@ in `INSTALL.md`.
 - **cert-manager** — required by default. It issues the per-service certificates
   for encrypted internal transport (`serviceMtls`, on by default) and, with
   `tls.mode: certManager`, the browser-facing certificate too. The install stops
-  with a clear error if its CRDs are absent. Only optional if you turn all three
-  of `serviceMtls.enabled`, `datastores.postgres.tls.enabled` and
-  `datastores.nats.tls.enabled` off — not recommended for a real deployment.
+  with a clear error if its CRDs are absent. Only optional if you turn all four
+  of `serviceMtls.enabled`, `datastores.postgres.tls.enabled`,
+  `datastores.nats.tls.enabled` and `agentMtls.enabled` off (`agentMtls` is on by
+  default and requires `serviceMtls`) — not recommended for a real deployment.
 - **Stakater Reloader** — required whenever `serviceMtls` is on (the default). It
   restarts pods when a certificate rotates. Nothing fails at install time
   without it; internal mTLS quietly breaks at the first renewal, ~60 days in.
 - **Traefik**, with its CRDs. The chart creates `IngressRoute` and `Middleware`
   *resources*; it does not install the controller or the CRDs that define them.
-- **A StorageClass** for the PostgreSQL, InfluxDB, and upload volumes.
+- **A StorageClass** for the PostgreSQL, Redis, NATS and upload volumes. The
+  chart defaults to `datastores.storageClassName: ""`, which omits
+  `storageClassName` so your cluster's **default** StorageClass is used; check
+  that `kubectl get storageclass` shows one marked `(default)`. If there is no
+  default (or you want a specific class), set `datastores.storageClassName`
+  (or a per-datastore `datastores.<store>.storageClassName`, which wins) to a
+  class that exists; otherwise the PersistentVolumeClaims stay `Pending`.
+
+  **Upgrading an existing release: pin its class first.** Earlier chart
+  versions defaulted this value to `longhorn`, and StatefulSet
+  `volumeClaimTemplates` are immutable, so `helm upgrade` with the new empty
+  default fails with a `Forbidden` error. Before upgrading, read the class off
+  your existing volumes (`kubectl -n <ns> get pvc`) and pass
+  `--set datastores.storageClassName=<class>` (or put it in your values file).
 
 Full detail on the internal-mTLS options — what each toggle covers, how to stage
 them across upgrades, and how to run against a managed PostgreSQL — is in
@@ -48,6 +62,22 @@ to make in-cluster callers trust it.
       and the admin console.
 - [ ] Set `tls.issuerRef` to a cert-manager `ClusterIssuer` you already have (for
       `tls.mode: certManager`), or configure your own certificate path.
+- [ ] If you use `tls.mode: certManager` with an **HTTP-01** issuer, the chart
+      already allows the cert-manager solver pod (label
+      `acme.cert-manager.io/http01-solver`, port 8089) through its default-deny
+      ingress NetworkPolicy, from `networkPolicy.ingressControllerNamespace`
+      (default `kube-system`; set it to the namespace your ingress controller
+      runs in). Your issuer must still be able to reach your ingress from the
+      Internet on port 80. A **DNS-01** issuer creates no solver pod and needs
+      nothing extra from the NetworkPolicy.
+- [ ] If you turn on `networkPolicy.egressEnabled` **and** use an external
+      PostgreSQL or Redis (`datastores.postgres.enabled: false` /
+      `datastores.redis.enabled: false`), list the database's address range in
+      `networkPolicy.externalDatastoreCIDRs` (for example `["10.20.30.0/24"]`).
+      The chart then allows egress to those CIDRs on TCP 5432 (PostgreSQL) and
+      6379 (Redis); without it the default egress deny blocks every backend and
+      Job from reaching the database, so the chart refuses to render with an
+      empty list.
 - [ ] Create `platform.existingSecretName` yourself, out of band, and name it in
       values — otherwise the chart generates platform secrets on first install
       and keeps them. Either way, treat `ENCRYPTION_MASTER_KEY` the way you'd
@@ -55,6 +85,22 @@ to make in-cluster callers trust it.
       credential encrypted under the old key becomes permanently undecryptable.
       The chart reads the existing Secret back on upgrade rather than
       regenerating it, but only if you haven't overridden that behavior.
+- [ ] **External PostgreSQL or Redis** (`datastores.postgres.enabled=false` /
+      `datastores.redis.enabled=false`) **requires** `platform.existingSecretName`.
+      The chart-generated Secret cannot carry your connection strings, so the
+      render stops with an error unless you supply a Secret that also holds
+      `database-url` (external Postgres) and/or `redis-url` (external Redis),
+      alongside `jwt-secret`, `internal-auth-secret` and `encryption-master-key`.
+- [ ] **External NATS is not supported.** `datastores.nats.enabled=false` is
+      refused at render time; keep the bundled NATS.
+- [ ] If you apply the schema yourself (`schemaMigration.enabled=false`) and keep
+      `serviceRls.enabled` on (the default), your schema must create the
+      `crypto_app` (NOLOGIN NOBYPASSRLS) and `crypto_bypass` (NOLOGIN BYPASSRLS)
+      roles with the grants from `schema.sql`. The `rls-roles` Job still runs and
+      waits for them, then grants LOGIN; backends stay in `Init` until it does.
+- [ ] The chart creates the namespace only with `createNamespace=true`; that
+      namespace is kept on `helm uninstall` (with its PVCs and Secrets). Delete
+      it yourself when you mean to destroy the data.
 - [ ] Size the node(s) for roughly double your steady-state CPU **request**
       during upgrades if you're running a single-node cluster — see
       "Single-node clusters" below.
@@ -120,7 +166,7 @@ The install **fails** without the two `agentMtls` hostnames (or an explicit
 
 There is no separate "start infrastructure, then services, then gateway"
 sequence to run by hand — `helm install` reconciles everything (Postgres,
-Redis, NATS, InfluxDB, every backend, both frontends, and the schema-migration
+Redis, NATS, every backend, both frontends, and the schema-migration
 and seed-data Jobs) in dependency order, and `--wait` returns once every pod is
 ready. Give the first install a few minutes: it's applying the schema, seeding
 reference data, and pulling ~18 images.
@@ -167,6 +213,60 @@ verify command for the chart version you installed at the end of its run.
 - [ ] Verify HTTPS is enforced end to end (browser → ingress)
 - [ ] Test authentication and authorization
 - [ ] Review the [Security & Trust → Dashboard](../platform-admin-guide.md#security--trust) posture view
+
+## GitOps (Argo CD / Flux)
+
+By default the chart generates its passwords and keys with `lookup`, which
+reads the Secret back on `helm install` / `helm upgrade`. A template-only render
+(Argo CD, Flux's dry runs, `helm template | kubectl apply`) cannot `lookup`, so
+every sync would write **new** random values: a new database password against the
+old volume, and a new `encryption-master-key` that makes every stored
+integration credential undecryptable. For these tools, set
+`platform.generateSecrets: false` and create the Secrets yourself (Sealed
+Secrets, SOPS, External Secrets, or `kubectl create secret`). The render then
+contains no generated Secret at all, and fails, listing the keys, if you have not
+named them.
+
+```yaml
+platform:
+  generateSecrets: false
+  existingSecretName: vista-platform          # jwt-secret, internal-auth-secret, encryption-master-key
+  existingDatastoreSecretName: vista-datastores   # postgres-password, redis-password, nats-token
+install:
+  existingSecretName: vista-install           # install-id, signing-key.pem
+  # ...or pin BOTH install.id and install.signingKeyPEM instead (from an encrypted values file)
+jwtSigning:
+  existingSecretName: vista-jwt-signing       # signing-key.pem (skip if jwtSigning.enabled: false)
+cbomSigning:
+  existingSecretName: vista-cbom-signing      # signing-key.pem (or pin cbomSigning.keyPEM)
+tls:
+  mode: certManager                           # or existingSecret; selfSigned is refused (it generates a cert)
+```
+
+| Secret | Keys | Value |
+|---|---|---|
+| `platform.existingSecretName` | `jwt-secret`, `internal-auth-secret`, `encryption-master-key` | 64 random alphanumeric characters each. Add `database-url` / `redis-url` only for an external database or Redis. |
+| `platform.existingDatastoreSecretName` | `postgres-password`, `redis-password`, `nats-token` | 32 random alphanumeric characters each. |
+| `install.existingSecretName` | `install-id`, `signing-key.pem` | A UUID, and an ECDSA P-256 private key in PEM. On an existing install copy both from the current `<release>-install` Secret. |
+| `jwtSigning.existingSecretName` | `signing-key.pem` | An ECDSA P-256 private key in PEM. On an existing install copy it from `<release>-jwt-signing` so live sessions survive. |
+| `cbomSigning.existingSecretName` | `signing-key.pem` | An Ed25519 private key as a PKCS#8 PEM. On an existing install copy it from `<release>-cbom-signing` so artifact signatures keep their key id. |
+
+To adopt an existing release, copy the values out of the Secrets the chart
+created (`kubectl get secret <release>-generated -o yaml`, and the `-platform`,
+`-install`, `-jwt-signing` siblings) into your own Secrets **before** switching
+the flag; the chart-created Secrets carry `helm.sh/resource-policy: keep`, so
+they are not deleted when they leave the render.
+
+Keep `generateSecrets: true` for plain `helm install` / `helm upgrade`.
+
+**Migration Jobs.** The `schema-migration` and `rls-roles` Jobs have no
+`ttlSecondsAfterFinished`, so a controller never sees them disappear and
+re-apply them. Their names embed a hash of the rendered pod template: the same
+chart and values render the same Job, and a schema or chart change renders a new
+one. At most one finished Job of each kind is kept; the next change renames it
+and Helm (or Argo CD / Flux with pruning enabled) deletes the superseded one.
+The `seed-data` Job is a Helm hook (post-install/post-upgrade) and is cleaned up
+as one.
 
 ## Upgrading
 

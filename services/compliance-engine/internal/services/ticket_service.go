@@ -95,47 +95,34 @@ func (s *TicketService) Create(tenantID, createdBy uuid.UUID, input models.Creat
 	if input.DueDate != nil && *input.DueDate != "" {
 		parsed, err := time.Parse(time.RFC3339, *input.DueDate)
 		if err != nil {
-			return nil, fmt.Errorf("invalid due_date format: %w", err)
+			return nil, invalidInput("due_date", "must be an RFC 3339 timestamp")
 		}
 		t.DueDate = &parsed
 	}
 
-	// Parse UUID references
-	if input.FindingID != nil && *input.FindingID != "" {
-		id, err := uuid.Parse(*input.FindingID)
-		if err == nil {
-			t.FindingID = &id
+	// Parse UUID references. An id that does not parse is refused: it used to be
+	// dropped, and the ticket was created without the link the caller asked for
+	// and reported as a success.
+	var refErr error
+	parseRef := func(field string, in *string, out **uuid.UUID) {
+		if refErr != nil || in == nil || *in == "" {
+			return
 		}
+		id, err := uuid.Parse(*in)
+		if err != nil {
+			refErr = invalidInput(field, "must be a UUID")
+			return
+		}
+		*out = &id
 	}
-	if input.ControlID != nil && *input.ControlID != "" {
-		id, err := uuid.Parse(*input.ControlID)
-		if err == nil {
-			t.ControlID = &id
-		}
-	}
-	if input.AssetID != nil && *input.AssetID != "" {
-		id, err := uuid.Parse(*input.AssetID)
-		if err == nil {
-			t.AssetID = &id
-		}
-	}
-	if input.CertificateID != nil && *input.CertificateID != "" {
-		id, err := uuid.Parse(*input.CertificateID)
-		if err == nil {
-			t.CertificateID = &id
-		}
-	}
-	if input.CryptoImplementationID != nil && *input.CryptoImplementationID != "" {
-		id, err := uuid.Parse(*input.CryptoImplementationID)
-		if err == nil {
-			t.CryptoImplementationID = &id
-		}
-	}
-	if input.AssignedTo != nil && *input.AssignedTo != "" {
-		id, err := uuid.Parse(*input.AssignedTo)
-		if err == nil {
-			t.AssignedTo = &id
-		}
+	parseRef("finding_id", input.FindingID, &t.FindingID)
+	parseRef("control_id", input.ControlID, &t.ControlID)
+	parseRef("asset_id", input.AssetID, &t.AssetID)
+	parseRef("certificate_id", input.CertificateID, &t.CertificateID)
+	parseRef("crypto_implementation_id", input.CryptoImplementationID, &t.CryptoImplementationID)
+	parseRef("assigned_to", input.AssignedTo, &t.AssignedTo)
+	if refErr != nil {
+		return nil, refErr
 	}
 
 	// External ticket system
@@ -157,6 +144,10 @@ func (s *TicketService) Create(tenantID, createdBy uuid.UUID, input models.Creat
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := shareddatabase.SetTenantContext(context.Background(), tx.Tx, tenantID); err != nil {
+		return nil, err
+	}
+
+	if err := checkTicketRefs(tx, tenantID, t.FindingID, t.AssetID, t.CertificateID, t.AssignedTo); err != nil {
 		return nil, err
 	}
 
@@ -184,6 +175,41 @@ func (s *TicketService) Create(tenantID, createdBy uuid.UUID, input models.Creat
 	}
 
 	return result, nil
+}
+
+// checkTicketRefs verifies that every reference a ticket carries names a row of
+// THIS tenant: the assignee is one of the tenant's users, and the finding, asset
+// and certificate are the tenant's own. A reference that fails is a
+// services.InputError with Missing set, which the handler answers 422. Another
+// tenant's id fails exactly like one that never existed.
+//
+// control_id and crypto_implementation_id are not checked: a control lives in
+// either of two catalogue tables depending on the framework, and the crypto
+// implementation table is the legacy one that has no tenant key to check
+// against (see the tickets_asset_id_fkey note in schema.sql).
+func checkTicketRefs(tx *sqlx.Tx, tenantID uuid.UUID, findingID, assetID, certificateID, assignedTo *uuid.UUID) error {
+	for _, r := range []struct {
+		field string
+		id    *uuid.UUID
+		query string
+	}{
+		{"assigned_to", assignedTo, `SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND tenant_id = $2)`},
+		{"finding_id", findingID, `SELECT EXISTS(SELECT 1 FROM findings WHERE id = $1 AND tenant_id = $2)`},
+		{"asset_id", assetID, `SELECT EXISTS(SELECT 1 FROM assets WHERE tenant_id = $2 AND id = $1)`},
+		{"certificate_id", certificateID, `SELECT EXISTS(SELECT 1 FROM certificates WHERE id = $1 AND tenant_id = $2)`},
+	} {
+		if r.id == nil {
+			continue
+		}
+		var ok bool
+		if err := tx.QueryRow(r.query, *r.id, tenantID).Scan(&ok); err != nil {
+			return fmt.Errorf("failed to check %s: %w", r.field, err)
+		}
+		if !ok {
+			return missingReference(r.field)
+		}
+	}
+	return nil
 }
 
 // GetByID retrieves a ticket by ID, scoped to tenant
@@ -277,19 +303,21 @@ func (s *TicketService) Update(tenantID, ticketID uuid.UUID, input models.Update
 		} else {
 			parsed, parseErr := time.Parse(time.RFC3339, *input.DueDate)
 			if parseErr != nil {
-				return nil, fmt.Errorf("invalid due_date format: %w", parseErr)
+				return nil, invalidInput("due_date", "must be an RFC 3339 timestamp")
 			}
 			addClause("due_date", parsed)
 		}
 	}
+	var assignee *uuid.UUID
 	if input.AssignedTo != nil {
 		if *input.AssignedTo == "" {
 			addClause("assigned_to", nil)
 		} else {
 			id, parseErr := uuid.Parse(*input.AssignedTo)
 			if parseErr != nil {
-				return nil, fmt.Errorf("invalid assigned_to UUID: %w", parseErr)
+				return nil, invalidInput("assigned_to", "must be a UUID")
 			}
+			assignee = &id
 			addClause("assigned_to", id)
 		}
 	}
@@ -324,6 +352,9 @@ func (s *TicketService) Update(tenantID, ticketID uuid.UUID, input models.Update
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := shareddatabase.SetTenantContext(context.Background(), tx.Tx, tenantID); err != nil {
+		return nil, err
+	}
+	if err := checkTicketRefs(tx, tenantID, nil, nil, nil, assignee); err != nil {
 		return nil, err
 	}
 
@@ -909,31 +940,31 @@ func (s *TicketService) AddComment(tenantID, ticketID, authorID uuid.UUID, conte
 }
 
 // ListComments retrieves all comments for a ticket
-func (s *TicketService) ListComments(tenantID, ticketID uuid.UUID) ([]models.TicketComment, error) {
+func (s *TicketService) ListComments(tenantID, ticketID uuid.UUID, limit, offset int) ([]models.TicketComment, bool, error) {
 	tx, err := s.db.BeginTxx(context.Background(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, false, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := shareddatabase.SetTenantContext(context.Background(), tx.Tx, tenantID); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// Verify ticket belongs to tenant
 	var exists bool
 	if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM tickets WHERE id = $1 AND tenant_id = $2)", ticketID, tenantID).Scan(&exists); err != nil {
-		return nil, fmt.Errorf("failed to verify ticket: %w", err)
+		return nil, false, fmt.Errorf("failed to verify ticket: %w", err)
 	}
 	if !exists {
-		return nil, fmt.Errorf("ticket not found")
+		return nil, false, fmt.Errorf("ticket not found")
 	}
 
 	rows, err := tx.Query(
-		"SELECT id, ticket_id, author_id, content, created_at FROM ticket_comments WHERE ticket_id = $1 ORDER BY created_at ASC",
-		ticketID,
+		"SELECT id, ticket_id, author_id, content, created_at FROM ticket_comments WHERE ticket_id = $1 ORDER BY created_at ASC, id LIMIT $2 OFFSET $3",
+		ticketID, limit+1, offset,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list comments: %w", err)
+		return nil, false, fmt.Errorf("failed to list comments: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -942,7 +973,7 @@ func (s *TicketService) ListComments(tenantID, ticketID uuid.UUID) ([]models.Tic
 		var c models.TicketComment
 		var author uuid.NullUUID
 		if err := rows.Scan(&c.ID, &c.TicketID, &author, &c.Content, &c.CreatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan comment: %w", err)
+			return nil, false, fmt.Errorf("failed to scan comment: %w", err)
 		}
 		if author.Valid {
 			c.AuthorID = &author.UUID
@@ -950,9 +981,13 @@ func (s *TicketService) ListComments(tenantID, ticketID uuid.UUID) ([]models.Tic
 		comments = append(comments, c)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit tx: %w", err)
+		return nil, false, fmt.Errorf("commit tx: %w", err)
 	}
-	return comments, nil
+	hasMore := len(comments) > limit
+	if hasMore {
+		comments = comments[:limit]
+	}
+	return comments, hasMore, nil
 }
 
 // StartDueDateChecker runs a periodic check for tickets approaching or past their due date

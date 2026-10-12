@@ -7,19 +7,13 @@ import { useAuth } from '@vistasecurity/primitives/auth';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import type { authServiceComponents as AuthC } from '@vistasecurity/api-contract';
+import { unwrap } from '../../lib/api-result';
+import { rolesQuery } from './roles-query';
 
 type TenantUser = AuthC['schemas']['TenantUser'];
 
 function useTenantRoles(tenantId: string | undefined, enabled: boolean) {
-  return useQuery({
-    queryKey: ['settings', 'roles', tenantId],
-    enabled: !!tenantId && enabled,
-    queryFn: async () => {
-      const { data, error } = await clients.auth.GET('/tenant/{tenantId}/roles', { params: { path: { tenantId: tenantId! } } });
-      if (error || !data) throw new Error('Failed to load roles');
-      return data;
-    },
-  });
+  return useQuery({ ...rolesQuery(tenantId), enabled: !!tenantId && enabled });
 }
 
 /**
@@ -139,13 +133,10 @@ export function ChangeRoleModal({ member, open, onClose }: { member: TenantUser;
       // Assign the new role first so the member is never role-less; then
       // remove the previous assignment. A failed removal leaves both roles,
       // which is recoverable from this same modal.
-      const assign = await clients.auth.POST('/tenant/{tenantId}/users/{userId}/roles', {
+      unwrap(await clients.auth.POST('/tenant/{tenantId}/users/{userId}/roles', {
         params: { path: { tenantId: tenantId!, userId: member.id } },
         body: { role_id: selected },
-      });
-      if (assign.error || !assign.response.ok) {
-        throw new Error(assign.error && typeof assign.error === 'object' && 'error' in assign.error ? String((assign.error as { error: unknown }).error) : 'Failed to assign the role');
-      }
+      }), 'Failed to assign the role');
       if (currentRole && currentRole.id !== selected) {
         const remove = await clients.auth.DELETE('/tenant/{tenantId}/users/{userId}/roles/{roleId}', {
           params: { path: { tenantId: tenantId!, userId: member.id, roleId: currentRole.id } },

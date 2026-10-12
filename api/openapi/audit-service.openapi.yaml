@@ -94,7 +94,8 @@ paths:
         returns `{ "logs": [...] }` with no pagination metadata (export uses a
         large page size); `format=csv` returns a `text/csv` file download
         (Content-Disposition: attachment). Accepts the same filter query params
-        as `GET /activity-logs`. Tenant users are auto-scoped to their own tenant.
+        as `GET /activity-logs` (paging params are ignored), so the file holds
+        exactly the rows the filtered list shows. Tenant users are auto-scoped to their own tenant.
       parameters:
       - name: format
         in: query
@@ -106,6 +107,117 @@ paths:
           - json
           - csv
           default: json
+      - name: tenant_id
+        in: query
+        required: false
+        description: Scope the export to one tenant. Ignored for tenant users, who are always pinned to their own tenant.
+        schema:
+          type: string
+          format: uuid
+      - name: user_id
+        in: query
+        required: false
+        description: Only entries by this user.
+        schema:
+          type: string
+          format: uuid
+      - name: user_type
+        in: query
+        required: false
+        description: Only entries by this actor type (e.g. platform, tenant, system).
+        schema:
+          type: string
+      - name: event_type
+        in: query
+        required: false
+        description: Only these event types (repeatable).
+        schema:
+          type: array
+          items:
+            type: string
+      - name: event_category
+        in: query
+        required: false
+        description: Only these event categories (repeatable).
+        schema:
+          type: array
+          items:
+            type: string
+      - name: action
+        in: query
+        required: false
+        description: Only these actions (repeatable).
+        schema:
+          type: array
+          items:
+            type: string
+      - name: resource_type
+        in: query
+        required: false
+        description: Only entries for this resource type.
+        schema:
+          type: string
+      - name: resource_id
+        in: query
+        required: false
+        description: Only entries for this resource.
+        schema:
+          type: string
+          format: uuid
+      - name: compliance_tag
+        in: query
+        required: false
+        description: Only entries carrying these compliance tags (repeatable).
+        schema:
+          type: array
+          items:
+            type: string
+      - name: tag
+        in: query
+        required: false
+        description: Only entries carrying these tags (repeatable).
+        schema:
+          type: array
+          items:
+            type: string
+      - name: success
+        in: query
+        required: false
+        description: Only successful (true) or failed (false) entries.
+        schema:
+          type: boolean
+      - name: requires_attention
+        in: query
+        required: false
+        description: Only entries flagged (true) or not flagged (false) for attention.
+        schema:
+          type: boolean
+      - name: impersonation
+        in: query
+        required: false
+        description: Only impersonated (true) or non-impersonated (false) actions.
+        schema:
+          type: boolean
+      - name: search
+        in: query
+        required: false
+        description: Free-text search, as in the list endpoint.
+        schema:
+          type: string
+      - name: start_date
+        in: query
+        required: false
+        description: Inclusive lower bound on occurred_at (RFC3339).
+        schema:
+          type: string
+          format: date-time
+      - name: end_date
+        in: query
+        required: false
+        description: Inclusive upper bound on occurred_at (RFC3339).
+        schema:
+          type: string
+          format: date-time
       responses:
         '200':
           description: The exported logs as a JSON envelope, or a CSV file download.

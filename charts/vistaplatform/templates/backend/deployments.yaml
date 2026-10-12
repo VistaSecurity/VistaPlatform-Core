@@ -1,6 +1,8 @@
 {{- /* Decided once per render: it costs two API lookups (_jwt-signing.tpl). */}}
 {{- $legacyHmac := fromJson (include "vistaplatform.jwtLegacyHmac" .) }}
 {{- range $name, $svc := .Values.backends }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" $name) }}
 ---
 {{ include "vistaplatform.backend" (dict "ctx" $ "name" $name "svc" $svc "legacyHmac" $legacyHmac.accept) }}
+{{- end }}
 {{- end }}

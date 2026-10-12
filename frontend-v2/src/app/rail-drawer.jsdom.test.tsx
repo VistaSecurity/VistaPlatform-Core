@@ -35,9 +35,11 @@ vi.mock('@vistasecurity/primitives/auth', () => ({
     logout: vi.fn(async () => undefined),
   }),
 }));
+// Permissions the viewer LACKS; the default viewer holds everything the rail lists.
+const denied = vi.hoisted(() => new Set<string>());
 vi.mock('@vistasecurity/primitives/rbac', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@vistasecurity/primitives/rbac')>()),
-  usePermissions: () => ({ hasAnyPermission: () => false }),
+  usePermissions: () => ({ hasAnyPermission: () => false, hasPermission: (p: string) => !denied.has(p) }),
 }));
 vi.mock('@vistasecurity/primitives/features', () => ({ useFeatures: () => ({ features: {} }) }));
 vi.mock('../sections/onboarding/queries', () => ({ useOnboardingStatus: () => ({ data: undefined }) }));
@@ -50,6 +52,7 @@ vi.mock('./platform-branding', () => ({
 }));
 
 import { AppShell } from './app-shell';
+import { settingsPageMeta } from '../sections/settings/nav';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -92,7 +95,7 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
 });
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => { vi.clearAllMocks(); denied.clear(); });
 
 const at = (): string => container.querySelector('#loc')?.textContent ?? '';
 const drawer = (): HTMLElement => {
@@ -350,5 +353,25 @@ describe('rail drawer — My Profile shares the mechanism', () => {
     // the nav and the content disagreeing.
     expect(at()).toBe('/profile');
     expect(isOpen()).toBe(true);
+  });
+});
+
+describe('rail drawer - pages the viewer cannot open', () => {
+  // MUTATION (recorded in the PR): drop the `hasPermission` argument from
+  // visibleSettingsNav in settings-drawer.tsx -> the second test fails.
+  it('lists a permission-gated page for a viewer who holds the permission', async () => {
+    await mount('/dashboard');
+    await click(settingsToggle());
+    expect(container.querySelector('a[href="/settings/members"]')).toBeTruthy();
+  });
+
+  it('hides a page whose permission the viewer lacks, but keeps the others', async () => {
+    const members = settingsPageMeta('members');
+    expect(members.permission).toBeTruthy();
+    denied.add(members.permission!);
+    await mount('/dashboard');
+    await click(settingsToggle());
+    expect(container.querySelector('a[href="/settings/members"]')).toBeNull();
+    expect(container.querySelector('a[href="/settings/org-overview"]')).toBeTruthy();
   });
 });

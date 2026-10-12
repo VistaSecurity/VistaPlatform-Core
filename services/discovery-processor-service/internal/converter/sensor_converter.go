@@ -28,10 +28,17 @@ func (c *SensorDiscoveryConverter) ToIngestFinding(discovery interface{}) (*Inge
 	var metadata map[string]interface{}
 	if len(sd.Metadata) > 0 {
 		if err := json.Unmarshal(sd.Metadata, &metadata); err != nil {
-			// If metadata is invalid JSON, create empty map
-			metadata = make(map[string]interface{})
+			// Metadata that is not a JSON object (an array, a string, a number,
+			// or broken JSON) used to fall back to an empty map, and the row was
+			// then imported as a bare ip/port finding with nothing measured. A
+			// property of the row's stored content cannot be fixed by a retry,
+			// so say so: the caller settles the row as a permanent failure with
+			// this reason instead of fabricating a finding from nothing.
+			return nil, fmt.Errorf("discovery %s: metadata is not a JSON object: %w", sd.ID, err)
 		}
-	} else {
+	}
+	if metadata == nil {
+		// Absent, empty, or the JSON literal null.
 		metadata = make(map[string]interface{})
 	}
 

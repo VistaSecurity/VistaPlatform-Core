@@ -2,7 +2,9 @@ package cbom
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -15,7 +17,7 @@ import (
 //	Core       — scopes, artifact generation, content hashing, CycloneDX
 //	             export. Everything needed to produce and read a CBOM.
 //	             Artifacts are unsigned.
-//	Enterprise — the audit-grade layer on top: HMAC signing, compliance
+//	Enterprise — the audit-grade layer on top: Ed25519 signing, compliance
 //	             attestation, artifact comparison/drift, and the alternate
 //	             export formats (SPDX, PDF).
 //
@@ -40,20 +42,43 @@ import (
 // Signer produces and verifies the detached signature stamped on a CBOM
 // artifact. Implemented by the Enterprise build; nil in Core.
 //
-// Note that Core keeps the `signature_hmac`/`signature_kid` columns and will
-// happily serve artifacts carrying them — it simply cannot mint or check one.
+// The signature is Ed25519 over a canonical Envelope (envelope.go), not over
+// the content bytes alone. Core keeps the signature columns and will happily
+// serve artifacts carrying them — it simply cannot mint or check one.
 type Signer interface {
-	// KID returns the key id to store alongside the signature so a future
-	// key rotation can still verify old artifacts.
+	// KID returns the id of the key that signs new artifacts. It is stored
+	// beside every signature so verification can pick the right key after a
+	// rotation.
 	KID() string
 
-	// Sign computes the signature over the canonical CBOM bytes.
-	Sign(canonicalBytes []byte) string
+	// Algorithm names the signature scheme ("ed25519").
+	Algorithm() string
 
-	// Verify constant-time compares a candidate signature for the given
-	// content hash and key id. A mismatched kid must return false rather
-	// than verifying against the current key.
-	Verify(contentHashHex, candidateSignatureHex, kid string) (bool, error)
+	// Sign signs the canonical envelope bytes and returns the hex signature.
+	Sign(envelope []byte) (string, error)
+
+	// Verify checks a hex signature over the envelope bytes under the key
+	// named by kid — the current key or a retired one from the key history.
+	// A kid with no known key returns an error wrapping ErrUnknownKey.
+	Verify(ctx context.Context, kid string, envelope []byte, signatureHex string) (bool, error)
+
+	// PublicKeys lists every verification key, current and retired, so a third
+	// party can verify an artifact offline.
+	PublicKeys(ctx context.Context) ([]SigningKey, error)
+}
+
+// ErrUnknownKey means no verification key is recorded for a key id.
+var ErrUnknownKey = errors.New("cbom: unknown signing key id")
+
+// SigningKey is the public half of an artifact signing key.
+type SigningKey struct {
+	KID       string `json:"kid"`
+	Algorithm string `json:"algorithm"`
+	// PublicKeyPEM is the SubjectPublicKeyInfo ("PUBLIC KEY") PEM.
+	PublicKeyPEM string `json:"public_key_pem"`
+	// Active marks the key that signs new artifacts.
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // AttestationBuilder assembles the compliance-attestation Layer recorded on
@@ -69,8 +94,9 @@ type AttestationBuilder interface {
 	Build(ctx context.Context, tenantID uuid.UUID, assetIDs []uuid.UUID) (*Layer, error)
 }
 
-// ArtifactFormatter re-renders an artifact's canonical CycloneDX bytes into an
-// alternate download format. Implemented by the Enterprise build; nil in Core.
+// ArtifactFormatter re-renders an artifact into an alternate download format,
+// from its INTERNAL view (the models.CBOMData document stored beside the
+// canonical bytes), never from the canonical CycloneDX bytes themselves. Implemented by the Enterprise build; nil in Core.
 //
 // Unlike Signer/AttestationBuilder, a nil ArtifactFormatter is *not* silently
 // tolerated: the download handler answers 402 Payment Required for the formats
@@ -84,9 +110,11 @@ type AttestationBuilder interface {
 // distinguish 402 (valid format, wrong edition) from 400 (nonsense format).
 type ArtifactFormatter interface {
 	// Render returns the rendered body and the MIME type to serve it as.
+	// internalBytes is the artifact's internal view; an implementation handed
+	// canonical CycloneDX returns an error wrapping ErrNoInternalView.
 	// format is a DownloadFormat value other than cyclonedx (Core serves the
 	// canonical bytes verbatim and never calls this for them).
-	Render(canonicalBytes []byte, format string) (body []byte, contentType string, err error)
+	Render(internalBytes []byte, format string) (body []byte, contentType string, err error)
 }
 
 // RegisterUnavailableComparisonRoutes mounts the Core-side 402 for artifact

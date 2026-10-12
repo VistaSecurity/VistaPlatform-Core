@@ -56,6 +56,7 @@ func newPlanFixtureAsIs(t *testing.T) *planFixture {
 	}
 	h := handlers.NewDiscoveryHandler(services.NewDiscoveryService(db, db), services.NewRateLimiter(db), nil, nil)
 	r := gin.New()
+	r.Use(auditWired(t))
 	as := func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
 			c.Set(sharedmw.CtxKeyTenantID, tenant)

@@ -12,6 +12,7 @@ import { clients } from '../../lib/clients';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { Tag } from '../../components/ui/primitives';
 import { AcceptUpdateButton, SeededContentBadges } from './seeded-content';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type MeasurementType = complianceEngineComponents['schemas']['MeasurementType'];
 type ControlMeasurement = complianceEngineComponents['schemas']['ControlMeasurement'];
@@ -139,22 +140,19 @@ export function MeasurementRulesModal({ control, onClose }: { control: { id: str
   };
   const addMut = useMutation({
     mutationFn: async (body: MeasurementInput) => {
-      const { error } = await clients.compliance.POST('/admin/controls/{id}/measurements', { params: { path: { id: control.id } }, body });
-      if (error) throw new Error('Add rule failed (check the predicate is valid for the measurement type)');
+      unwrap(await clients.compliance.POST('/admin/controls/{id}/measurements', { params: { path: { id: control.id } }, body }), 'Add rule failed (check the predicate is valid for the measurement type)');
     },
     onSuccess: invalidate,
   });
   const updateMut = useMutation({
     mutationFn: async ({ measurementId, body }: { measurementId: string; body: MeasurementInput }) => {
-      const { error } = await clients.compliance.PUT('/admin/controls/{id}/measurements/{measurementId}', { params: { path: { id: control.id, measurementId } }, body });
-      if (error) throw new Error('Update rule failed');
+      unwrap(await clients.compliance.PUT('/admin/controls/{id}/measurements/{measurementId}', { params: { path: { id: control.id, measurementId } }, body }), 'Update rule failed');
     },
     onSuccess: invalidate,
   });
   const deleteMut = useMutation({
     mutationFn: async (measurementId: string) => {
-      const { error } = await clients.compliance.DELETE('/admin/controls/{id}/measurements/{measurementId}', { params: { path: { id: control.id, measurementId } } });
-      if (error) throw new Error('Delete rule failed');
+      unwrap(await clients.compliance.DELETE('/admin/controls/{id}/measurements/{measurementId}', { params: { path: { id: control.id, measurementId } } }), 'Delete rule failed');
     },
     onSuccess: invalidate,
   });
@@ -163,7 +161,7 @@ export function MeasurementRulesModal({ control, onClose }: { control: { id: str
   const acceptMut = useMutation({
     mutationFn: async (measurementId: string) => {
       const { error, response } = await clients.compliance.POST('/admin/controls/{id}/measurements/{measurementId}/accept-update', { params: { path: { id: control.id, measurementId } } });
-      if (error) throw new Error(response?.status === 409 ? 'No update available any more' : 'Accepting the update failed');
+      if (!response.ok || error) throw new Error(response.status === 409 ? 'No update available any more' : 'Accepting the update failed');
     },
     onSuccess: invalidate,
   });
@@ -262,8 +260,8 @@ export function MeasurementRulesModal({ control, onClose }: { control: { id: str
                     <AcceptUpdateButton row={m} label="this rule" pending={acceptMut.isPending} onAccept={() => acceptMut.mutate(m.id, { onSuccess: () => toast.success('Update accepted'), onError: (e) => toast.error(errMsg(e)) })} />
                     {m.severity_override && <span style={{ fontSize: 10.5, color: 'var(--op-t3)' }}>sev {m.severity_override}</span>}
                     <span className="mono" style={{ fontSize: 10.5, color: 'var(--op-t3)' }}>w{m.weight}</span>
-                    <button className="op-btn icon sm" title="Edit rule" onClick={() => setForm(formFromMeasurement(m))}><Pencil size={12} /></button>
-                    <button className="op-btn icon sm" title="Delete rule" disabled={deleteMut.isPending} onClick={() => { if (window.confirm('Delete this rule?')) deleteMut.mutate(m.id, { onSuccess: () => toast.success('Rule deleted'), onError: (e) => toast.error(errMsg(e)) }); }}><Trash2 size={12} /></button>
+                    <button className="op-btn icon sm" title="Edit rule" aria-label="Edit rule" onClick={() => setForm(formFromMeasurement(m))}><Pencil size={12} /></button>
+                    <button className="op-btn icon sm" title="Delete rule" aria-label="Delete rule" disabled={deleteMut.isPending} onClick={() => { if (window.confirm('Delete this rule?')) deleteMut.mutate(m.id, { onSuccess: () => toast.success('Rule deleted'), onError: (e) => toast.error(errMsg(e)) }); }}><Trash2 size={12} /></button>
                   </div>
                 );
               })}

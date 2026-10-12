@@ -70,10 +70,11 @@ func TestInstallerConfig_AgentEnrollsItselfAndInstallerSeesIt(t *testing.T) {
 	script := string(raw)
 	heredoc := installerSection(t, script, `cat > "\$CONFIG_FILE" << EOF`, `^EOF$`)
 	readConfigValue := installerSection(t, script, `^read_config_value\(\) \{`, `^\}`)
+	yamlQuote := installerSection(t, script, `^yaml_quote\(\) \{`, `^\}`)
 
 	installDir := t.TempDir()
 	cfgPath := filepath.Join(installDir, "device-agent.yaml")
-	runInstallerBash(t, "CONFIG_FILE="+cfgPath+"\n"+heredoc,
+	runInstallerBash(t, "CONFIG_FILE="+cfgPath+"\n"+yamlQuote+"\n"+heredoc,
 		"CONTROL_PLANE_URL=https://control.example.test",
 		"REGISTRATION_KEY=REG-0123456789abcdef",
 		"INSTALL_DIR="+installDir,
@@ -111,5 +112,34 @@ func TestInstallerConfig_AgentEnrollsItselfAndInstallerSeesIt(t *testing.T) {
 	}
 	if got := read("registration_key"); got != "REG-0123456789abcdef" {
 		t.Fatalf("installer read registration_key %q — a re-run would discard a working enrollment", got)
+	}
+}
+
+// A "#" or ": " in the URL or key used to end or break the unquoted YAML value
+// the installer wrote, so the agent started with the wrong URL or no key.
+func TestInstallerConfig_AwkwardValuesSurviveYAML(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	raw, err := os.ReadFile(deviceAgentInstaller)
+	if err != nil {
+		t.Fatalf("read installer: %v", err)
+	}
+	script := string(raw)
+	heredoc := installerSection(t, script, `cat > "\$CONFIG_FILE" << EOF`, `^EOF$`)
+	yamlQuote := installerSection(t, script, `^yaml_quote\(\) \{`, `^\}`)
+
+	installDir := t.TempDir()
+	cfgPath := filepath.Join(installDir, "device-agent.yaml")
+	const url = `https://control.example.test/p#frag: x`
+	const key = `REG-a#b: "c"\d`
+	runInstallerBash(t, "CONFIG_FILE="+cfgPath+"\n"+yamlQuote+"\n"+heredoc,
+		"CONTROL_PLANE_URL="+url, "REGISTRATION_KEY="+key, "INSTALL_DIR="+installDir)
+	cfg, err := config.LoadFromFile(cfgPath)
+	if err != nil {
+		t.Fatalf("agent cannot load the installer's config: %v", err)
+	}
+	if cfg.PlatformURL != url || cfg.RegistrationKey != key {
+		t.Fatalf("url/key = %q/%q, want %q/%q", cfg.PlatformURL, cfg.RegistrationKey, url, key)
 	}
 }

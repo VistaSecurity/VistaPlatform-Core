@@ -1115,6 +1115,15 @@ async function writeIngressRoutes(services, adminPlane, outPath) {
         .replaceAll(ADMIN_ONLY_TOKEN, 'Host(`{{ $adminDnsName }}`)')
         .replaceAll(HOST_TOKEN, '{{ $dnsName }}')
         .replaceAll(ADMIN_HOST_TOKEN, '{{ $adminDnsName }}');
+      // A route to a backend Go service (port 8080) is skipped when the
+      // operator set backends.<svc>.enabled=false — its Service is not rendered.
+      // Frontends (port 80) are not in .Values.backends and are never gated.
+      const gatedBackend = route.services.length === 1 && route.services[0].port === 8080
+        ? route.services[0].name
+        : null;
+      if (gatedBackend) {
+        lines.push(`    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "${gatedBackend}") }}`);
+      }
       lines.push(`    - match: ${matchExpr}`);
       lines.push(`      kind: ${route.kind}`);
       if (route.priority) {
@@ -1152,6 +1161,9 @@ async function writeIngressRoutes(services, adminPlane, outPath) {
       }
       for (const m of route.middlewares) {
         lines.push(`        - name: ${m.name}`);
+      }
+      if (gatedBackend) {
+        lines.push('    {{- end }}');
       }
     }
 

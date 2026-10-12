@@ -161,7 +161,7 @@ func LookupInvitation(db *sql.DB, bypassDB *sql.DB) gin.HandlerFunc {
 		// each enabled SSO provider. tenants is not RLS-scoped — read plain.
 		var authPolicy string
 		_ = db.QueryRow(`SELECT COALESCE(authentication_policy, 'password_only') FROM tenants WHERE id = $1`, tenantID).Scan(&authPolicy)
-		allowPassword := authPolicy != "sso_only"
+		allowPassword := !auth.PolicyForbidsLocalPassword(authPolicy)
 
 		type ssoMethod struct {
 			Provider     string `json:"provider"`
@@ -245,7 +245,7 @@ func AcceptInvitation(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, jwtServi
 			return
 		}
 
-		userID, role, err := materializeInvitedUser(c.Request.Context(), db, inv, func(tx *sql.Tx, uid uuid.UUID) error {
+		userID, role, err := materializeInvitedUser(c.Request.Context(), db, bypassDB, inv, func(tx *sql.Tx, uid uuid.UUID) error {
 			hashed, hErr := passwordService.HashPassword(req.Password)
 			if hErr != nil {
 				return hErr
@@ -462,7 +462,7 @@ func lockPendingInvitation(bypassDB *sql.DB, rawToken string) (*pendingInvitatio
 // an optional extra step (e.g. set a password) inside the same flow. Returns the
 // user id and the assigned role name. Rejects if the email is already an active
 // user in the tenant (the invite should be revoked/used instead).
-func materializeInvitedUser(ctx context.Context, db *sql.DB, inv *pendingInvitation, extra func(*sql.Tx, uuid.UUID) error) (uuid.UUID, string, error) {
+func materializeInvitedUser(ctx context.Context, db, bypassDB *sql.DB, inv *pendingInvitation, extra func(*sql.Tx, uuid.UUID) error) (uuid.UUID, string, error) {
 	// inv.role is already an internal role name (mapped at invite-create time).
 	roleName := inv.role
 	userID := uuid.New()
@@ -475,11 +475,28 @@ func materializeInvitedUser(ctx context.Context, db *sql.DB, inv *pendingInvitat
 	// share ONE tenant-scoped tx: the INSERT's WITH CHECK on tenant_id is
 	// satisfied, and the existence check fails closed unless the tenant is set.
 	emailTaken := false
-	localPart := strings.ToLower(inv.email)
+	inv.email = auth.NormalizeEmail(inv.email)
+	localPart := inv.email
 	if i := strings.IndexByte(localPart, '@'); i > 0 {
 		localPart = localPart[:i]
 	}
 	err := shareddatabase.WithTenantTx(ctx, db, inv.tenantID, func(tx *sql.Tx) error {
+		// Global uniqueness at ACCEPT time, not only at invite time: the address
+		// may have been registered elsewhere since the invitation was issued,
+		// and the invite-time check is the only thing a malicious inviter has to
+		// get past. The advisory lock makes two simultaneous accepts of the same
+		// address queue so the second one's check sees the first one's commit.
+		if err := lockEmailForCreate(ctx, tx, inv.email); err != nil {
+			return err
+		}
+		taken, takenErr := auth.EmailInUseGlobally(ctx, bypassDB, inv.email)
+		if takenErr != nil {
+			return takenErr
+		}
+		if taken {
+			emailTaken = true
+			return nil
+		}
 		var existing uuid.UUID
 		emailErr := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2) AND deleted_at IS NULL`, inv.tenantID, inv.email).Scan(&existing)
 		if emailErr == nil {
@@ -492,7 +509,7 @@ func materializeInvitedUser(ctx context.Context, db *sql.DB, inv *pendingInvitat
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO users (id, tenant_id, email, first_name, last_name, is_active, email_verified, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, true, NOW(), NOW())
-		`, userID, inv.tenantID, strings.ToLower(inv.email), localPart, ""); err != nil {
+		`, userID, inv.tenantID, inv.email, localPart, ""); err != nil {
 			return err
 		}
 		if extra != nil {
@@ -543,7 +560,7 @@ func consumeInvitationForSSO(db *sql.DB, bypassDB *sql.DB, rawToken, idpEmail st
 	if inv.tenantID != tenantID || !strings.EqualFold(inv.email, idpEmail) {
 		return uuid.Nil, "", false
 	}
-	userID, role, mErr := materializeInvitedUser(context.Background(), db, inv, nil)
+	userID, role, mErr := materializeInvitedUser(context.Background(), db, bypassDB, inv, nil)
 	if mErr != nil {
 		logrus.WithError(mErr).WithField("invitation_id", inv.id).Warn("SSO invite acceptance failed to materialize user")
 		return uuid.Nil, "", false
@@ -556,7 +573,7 @@ func consumeInvitationForSSO(db *sql.DB, bypassDB *sql.DB, rawToken, idpEmail st
 func policyForbidsPassword(db *sql.DB, tenantID uuid.UUID) bool {
 	var policy string
 	_ = db.QueryRow(`SELECT COALESCE(authentication_policy, 'password_only') FROM tenants WHERE id = $1`, tenantID).Scan(&policy)
-	return policy == "sso_only"
+	return auth.PolicyForbidsLocalPassword(policy)
 }
 
 // requireCallerTenant resolves and validates the caller's tenant from the path +

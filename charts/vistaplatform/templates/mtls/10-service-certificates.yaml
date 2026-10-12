@@ -17,7 +17,7 @@ for outbound mTLS to backends.
 {{- if .Values.serviceMtls.enabled }}
 {{- $cert := .Values.serviceMtls.certificate }}
 {{- range $name, $svc := .Values.backends }}
-{{- if $svc.enabled | default true }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" $name) }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate

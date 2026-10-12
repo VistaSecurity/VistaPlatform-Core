@@ -33,11 +33,13 @@ import (
 	"github.com/vistasecurity/vistaplatform/sensor/internal/models"
 	"github.com/vistasecurity/vistaplatform/sensor/internal/testmode"
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig/desiredstate"
+	"github.com/vistasecurity/vistaplatform/shared/atomicfile"
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
 	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
+	"gopkg.in/yaml.v3"
 )
 
 // Version is stamped at build time via -ldflags "-X main.Version=<tag>"
@@ -66,14 +68,18 @@ type Sensor struct {
 	// failures, and registration failures/rejections. See recordError.
 	errorsCount int64
 
-	config        *config.Config
-	configPath    string // Path to the config file for saving updates
-	packetCapture *capture.PacketCapture
-	apiClient     *api.OutboundClient
-	sensorManager *api.SensorManagerClient
-	tlsEnricher   *enrichment.TLSEnricher
-	testLogger    *testmode.TestLogger
-	discoveries   []*models.CryptoDiscovery
+	config     *config.Config
+	configPath string // Path to the config file for saving updates
+
+	// unpersistedCredentials is set when a rotated certificate could not be
+	// written to disk; see rotateCertificateIfNeeded.
+	unpersistedCredentials atomicfile.Pending
+	packetCapture          *capture.PacketCapture
+	apiClient              *api.OutboundClient
+	sensorManager          *api.SensorManagerClient
+	tlsEnricher            *enrichment.TLSEnricher
+	testLogger             *testmode.TestLogger
+	discoveries            []*models.CryptoDiscovery
 	// pendingRetry holds batches that failed to submit on the previous tick.
 	// Retried before new discoveries on the next tick.  Capped to prevent
 	// unbounded memory growth during extended outages.
@@ -81,9 +87,12 @@ type Sensor struct {
 	retryCount   int
 	// applier holds the control-plane-managed settings. Nil leaves the
 	// heartbeat exactly as it was, which is what makes the exchange additive.
-	applier   *desiredstate.Applier
-	mu        sync.RWMutex
-	startTime time.Time // Track when sensor started for uptime calculation
+	applier *desiredstate.Applier
+	mu      sync.RWMutex
+	// captureFactory builds and starts the replacement capture on an interface
+	// change. Nil means the real packet capture; tests substitute one.
+	captureFactory func(*config.Config) (*capture.PacketCapture, error)
+	startTime      time.Time // Track when sensor started for uptime calculation
 	// discoveryTicker is the live data-send ticker, published by the run loop so
 	// an operator's reporting-interval change can Reset() it without a restart.
 	discoveryTicker *time.Ticker
@@ -286,7 +295,9 @@ func (s *Sensor) resolveRegistrationAtStartup(alreadyRequested bool, stop <-chan
 			log.Printf("⛔ Registration was REJECTED by the control plane (HTTP %d): %s", rejected.StatusCode, rejected.Body)
 			log.Printf("⛔ The registration key is invalid, expired, or has already been used.")
 			log.Printf("⛔ Generate a new key in the web UI (Discovery → Sensors & Agents → Register) and put it in the sensor's config.")
-			log.Fatalf("❌ Refusing to start: a sensor that cannot register can capture but can never submit anything.")
+			log.Printf("❌ Refusing to start: a sensor that cannot register can capture but can never submit anything.")
+			exitProcess(exitNeedsOperator)
+			return
 		}
 		log.Printf("⚠️  Registration FAILED: %v", err)
 		s.recordError()
@@ -505,24 +516,22 @@ func runSensor(flags sensorFlags, host sensorHost) sensorOutcome {
 	log.Printf("Platform: %s/%s", runtime.GOOS, runtime.GOARCH)
 	log.Printf("Command line flags: verbose=%v, register=%v, interactive=%v, test=%v, config=%s", *verbose, *register, *interactive, *testMode, *configFile)
 
-	// Load configuration
-	var cfg *config.Config
-	var err error
-
-	// Try to load from config file if specified
+	// Load configuration. A config file that exists but cannot be parsed is
+	// fatal: falling back to defaults would start the sensor against no control
+	// plane with no identity while reporting success.
 	if *configFile != "" {
 		log.Printf("📁 Loading configuration from file: %s", *configFile)
-		cfg, err = config.LoadFromFile(*configFile)
-		if err != nil {
-			log.Printf("⚠️  Failed to load config file (%v), falling back to environment variables", err)
-			cfg = config.Load()
-		} else {
-			log.Printf("✅ Configuration loaded from file")
-		}
 	} else {
 		log.Printf("⚠️  No valid config file found, falling back to environment variables and defaults")
-		// Fall back to environment variables
-		cfg = config.Load()
+	}
+	cfg, err := loadConfig(*configFile)
+	if err != nil {
+		log.Printf("❌ %v", err)
+		exitProcess(exitNeedsOperator)
+		return sensorStopped
+	}
+	if *configFile != "" {
+		log.Printf("✅ Configuration loaded from file")
 	}
 
 	// The build-stamped binary version is the truth about what code is running;
@@ -722,16 +731,16 @@ func runSensor(flags sensorFlags, host sensorHost) sensorOutcome {
 		case <-heartbeatTicker.C:
 			log.Println("💓 Sending heartbeat...")
 			sensor.sendHeartbeat()
-		case discovery := <-sensor.packetCapture.GetDiscoveries():
-			log.Printf("🔍 New discovery received: %s on %s:%d", discovery.Protocol, discovery.DestIP, discovery.Port)
-			sensor.handleDiscovery(discovery)
-			// Check if this passive discovery needs TLS certificate enrichment
-			if sensor.tlsEnricher != nil {
-				sensor.tlsEnricher.MaybeEnrich(discovery)
+		case discovery, ok := <-sensor.packetCapture.GetDiscoveries():
+			if sensor.onCaptureDiscovery(discovery, ok) {
+				sensor.shutdownForRestart()
+				return sensorRestartRequested
 			}
-		case err := <-sensor.packetCapture.GetErrors():
-			log.Printf("❌ Capture error: %v", err)
-			sensor.recordError()
+		case err, ok := <-sensor.packetCapture.GetErrors():
+			if sensor.onCaptureError(err, ok) {
+				sensor.shutdownForRestart()
+				return sensorRestartRequested
+			}
 		case sig := <-signalChan:
 			log.Printf("🛑 Received signal %v, shutting down gracefully...", sig)
 			sensor.cleanup()
@@ -823,6 +832,12 @@ func (s *Sensor) register() error {
 		return fmt.Errorf("sensor manager client not initialized")
 	}
 
+	// Before anything is sent: the registration key is single use, so a sensor
+	// that cannot keep the certificate it is about to be issued must not spend it.
+	if err := checkEnrollmentWritable(s.config.Storage.DataPath, s.configPath); err != nil {
+		return errors.New(enrollmentUnwritableMessage(err, s.config.Storage.DataPath))
+	}
+
 	config, err := s.sensorManager.Register()
 	if err != nil {
 		// %w, not %v: both callers errors.As this for *api.RegistrationRejectedError
@@ -850,20 +865,12 @@ func (s *Sensor) register() error {
 	// Update sensor configuration with received config
 	s.updateConfig(config)
 
-	// Save certificates to disk
-	if err := saveCertificates(s.config); err != nil {
-		log.Printf("⚠️  Failed to save certificates to disk: %v", err)
-		// Continue anyway - certificates are in memory
-	} else {
-		log.Printf("✅ Certificates saved to: %s", filepath.Join(s.config.Storage.DataPath, "certs"))
-	}
-
-	// Save updated sensor ID and certificate paths to config file for persistence
-	if err := s.saveConfigFile(); err != nil {
-		log.Printf("⚠️  Failed to save config file with new sensor ID and certificates: %v", err)
-		// Continue anyway - sensor ID is in memory and will work for this session
-	} else {
-		log.Printf("💾 Configuration saved to file with sensor ID")
+	// The platform has already issued the identity and spent the single-use
+	// registration key, so a failure to keep it is fatal: continuing would run
+	// on in-memory credentials that vanish at the next restart, which then
+	// tries the spent key and is REJECTED forever.
+	if err := s.persistEnrollment(); err != nil {
+		log.Fatalf("❌ %s", err)
 	}
 
 	log.Printf("✅ Sensor registered successfully with ID: %s", s.config.SensorID)
@@ -886,8 +893,28 @@ func (s *Sensor) saveConfigFile() error {
 	lines := strings.Split(string(existingData), "\n")
 	sensorIDUpdated := false
 
+	// Once the platform has issued a per-sensor secret and it is safely on disk
+	// the single-use registration key is no longer kept: its line is
+	// replaced by a fingerprint, which is all the installer needs to recognise
+	// "this host already enrolled with this key".
+	dropRegistrationKey := !s.config.RegistrationKeyRetained()
+	fingerprint := s.config.RegistrationKeyFingerprint()
+	fingerprintWritten := false
+
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if dropRegistrationKey && fingerprint != "" {
+			switch {
+			case strings.HasPrefix(trimmed, "registrationKey:"):
+				lines[i] = fmt.Sprintf("registrationKeySha256: %q", fingerprint)
+				fingerprintWritten = true
+				continue
+			case strings.HasPrefix(trimmed, "registrationKeySha256:"):
+				lines[i] = fmt.Sprintf("registrationKeySha256: %q", fingerprint)
+				fingerprintWritten = true
+				continue
+			}
+		}
 		if strings.HasPrefix(trimmed, "sensorId:") {
 			lines[i] = fmt.Sprintf("sensorId: \"%s\"", s.config.SensorID)
 			sensorIDUpdated = true
@@ -919,10 +946,16 @@ func (s *Sensor) saveConfigFile() error {
 		lines = newLines
 	}
 
+	// A key that came from the environment was never in the file; the fingerprint
+	// is still recorded so a re-run of the installer recognises the host.
+	if dropRegistrationKey && fingerprint != "" && !fingerprintWritten {
+		lines = append(lines[:len(lines):len(lines)], fmt.Sprintf("registrationKeySha256: %q", fingerprint))
+	}
+
 	// Add or update certificate paths when registration/rotation has provided
 	// mTLS material. Rotation calls this repeatedly, so keep the block idempotent.
 	if s.config.Security.ClientCertPath != "" {
-		lines = upsertSecurityConfigBlock(lines, s.config.Security.ClientCertPath, s.config.Security.ClientKeyPath, s.config.Security.ServerCACertPath)
+		lines = upsertSecurityConfigBlock(lines, s.config.Security.ClientCertPath, s.config.Security.ClientKeyPath, s.config.Security.ServerCACertPath, s.config.Security.AgentSecretPath)
 	}
 
 	// Write the updated content back
@@ -939,7 +972,7 @@ func (s *Sensor) saveConfigFile() error {
 	return nil
 }
 
-func upsertSecurityConfigBlock(lines []string, clientCertPath, clientKeyPath, serverCACertPath string) []string {
+func upsertSecurityConfigBlock(lines []string, clientCertPath, clientKeyPath, serverCACertPath, agentSecretPath string) []string {
 	securityStart := -1
 	securityEnd := len(lines)
 	for i, line := range lines {
@@ -960,9 +993,14 @@ func upsertSecurityConfigBlock(lines []string, clientCertPath, clientKeyPath, se
 		"clientCertPath":   fmt.Sprintf("%q", clientCertPath),
 		"clientKeyPath":    fmt.Sprintf("%q", clientKeyPath),
 		"serverCACertPath": fmt.Sprintf("%q", serverCACertPath),
+		"agentSecretPath":  fmt.Sprintf("%q", agentSecretPath),
 		"useTLS":           "true",
 	}
 	keys := []string{"clientCertPath", "clientKeyPath", "serverCACertPath", "useTLS"}
+	if agentSecretPath != "" {
+		// The per-sensor secret file, kept beside the certificate.
+		keys = []string{"clientCertPath", "clientKeyPath", "serverCACertPath", "agentSecretPath", "useTLS"}
+	}
 
 	if securityStart == -1 {
 		securitySection := []string{
@@ -1009,48 +1047,110 @@ func isTopLevelConfigLine(line string) bool {
 	return line == strings.TrimLeft(line, " \t")
 }
 
+// Persisting a rotated certificate is retried a few times before the sensor
+// gives up and holds it in memory only. Variables so tests do not sleep.
+var (
+	rotationPersistAttempts = 3
+	rotationPersistDelay    = time.Second
+)
+
+// certificateRotator is the slice of the sensor-manager client rotation needs.
+type certificateRotator interface {
+	CheckCertificateExpiration() (time.Time, bool, error)
+	RotateCertificate() error
+}
+
+// persistCredentials writes the certificate files and then the config file.
+func (s *Sensor) persistCredentials() error {
+	if err := saveCertificates(s.config); err != nil {
+		return fmt.Errorf("certificates: %w", err)
+	}
+	if err := s.saveConfigFile(); err != nil {
+		return fmt.Errorf("config file: %w", err)
+	}
+	return nil
+}
+
 // checkAndRotateCertificate checks certificate expiration and rotates if needed
 func (s *Sensor) checkAndRotateCertificate() {
 	if s.sensorManager == nil {
 		return
 	}
+	s.rotateCertificateIfNeeded(s.sensorManager)
+	s.pruneAgentSecrets()
+}
 
-	expiresAt, expiringSoon, err := s.sensorManager.CheckCertificateExpiration()
+// pruneAgentSecrets stops keeping the previous agent secret once its window has
+// passed (agentcreds.PreviousSecretWindow): in memory it is already ignored, and
+// this rewrites the secret file so a replaced secret does not outlive its use on
+// disk. Best effort; the next check tries again.
+func (s *Sensor) pruneAgentSecrets() {
+	if !s.config.PruneAgentSecrets(time.Now()) {
+		return
+	}
+	if err := s.persistCredentials(); err != nil {
+		log.Printf("⚠️  Could not drop the expired previous agent secret from disk: %v", err)
+	}
+}
+
+func (s *Sensor) rotateCertificateIfNeeded(rotator certificateRotator) {
+	expiresAt, expiringSoon, err := rotator.CheckCertificateExpiration()
 	if err != nil {
 		log.Printf("⚠️  Failed to check certificate expiration: %v", err)
 		return
 	}
 
-	if expiringSoon {
-		log.Printf("🔄 Certificate expires on %s, rotating...", expiresAt.Format(time.RFC3339))
-		if err := s.sensorManager.RotateCertificate(); err != nil {
-			log.Printf("❌ Failed to rotate certificate: %v", err)
-			s.recordError()
-			return
-		}
-
-		// RotateCertificate updated the shared config with the new cert/key and
-		// hot-swapped the sensorManager transport, but two things still need doing
-		// or the rotation is lost/half-applied:
-		//  1. Persist the new cert to disk + config file — otherwise a restart
-		//     reloads the OLD cert, which the platform has just REVOKED as part of
-		//     rotation, and the sensor can no longer authenticate.
-		//  2. Refresh the OutboundClient (heartbeat/discovery) transport — it is a
-		//     separate client still holding the old (now-revoked) cert; under
-		//     enforced mTLS its next call would be rejected.
-		if err := saveCertificates(s.config); err != nil {
-			log.Printf("⚠️  Failed to persist rotated certificate to disk: %v", err)
-		}
-		if err := s.saveConfigFile(); err != nil {
-			log.Printf("⚠️  Failed to persist rotated certificate to config file: %v", err)
-		}
-		if s.apiClient != nil {
-			s.apiClient.ActivateMTLS()
-		}
-		log.Println("✅ Certificate rotated successfully")
-	} else {
+	if !expiringSoon {
 		log.Printf("✅ Certificate valid until %s", expiresAt.Format(time.RFC3339))
+		return
 	}
+
+	log.Printf("🔄 Certificate expires on %s, rotating...", expiresAt.Format(time.RFC3339))
+	if err := rotator.RotateCertificate(); err != nil {
+		log.Printf("❌ Failed to rotate certificate: %v", err)
+		s.recordError()
+		return
+	}
+
+	// RotateCertificate updated the shared config with the new cert/key and
+	// hot-swapped the sensorManager transport, but two things still need doing
+	// or the rotation is lost/half-applied:
+	//  1. Refresh the OutboundClient (heartbeat/discovery) transport — it is a
+	//     separate client still holding the old (now-revoked) cert; under
+	//     enforced mTLS its next call would be rejected.
+	//  2. Persist the new cert to disk + config file — otherwise a restart
+	//     reloads the OLD cert, which the platform has just REVOKED as part of
+	//     rotation, and the sensor can no longer authenticate.
+	if s.apiClient != nil {
+		s.apiClient.ActivateMTLS()
+	}
+	if err := atomicfile.Retry(rotationPersistAttempts, rotationPersistDelay, s.persistCredentials); err != nil {
+		// Never claim success: the old certificate is already revoked, so the
+		// new one exists only in this process until it is saved.
+		s.unpersistedCredentials.Set(err)
+		s.recordError()
+		log.Printf("❌ Certificate rotated on the platform but the new certificate could NOT be saved: %v", err)
+		log.Printf("❌ The previous certificate is revoked. The sensor keeps working on the new one in memory, but a restart before it is saved will lock this sensor out. Retrying on every heartbeat; fix the permissions or free space on %s.", s.config.Storage.DataPath)
+		return
+	}
+	s.unpersistedCredentials.Clear()
+	log.Println("✅ Certificate rotated successfully")
+}
+
+// retryUnpersistedCredentials is called from every heartbeat. While a rotated
+// certificate has not reached disk it says so at error level and tries again.
+func (s *Sensor) retryUnpersistedCredentials() {
+	pending := s.unpersistedCredentials.Err()
+	if pending == nil {
+		return
+	}
+	if err := s.persistCredentials(); err != nil {
+		s.unpersistedCredentials.Set(err)
+		log.Printf("❌ Rotated certificate is still NOT saved to disk (%v) — a restart now would lock this sensor out", err)
+		return
+	}
+	s.unpersistedCredentials.Clear()
+	log.Printf("✅ Rotated certificate is now saved to disk (earlier failure: %v)", pending)
 }
 
 // start starts the sensor
@@ -1187,6 +1287,7 @@ func (s *Sensor) drainStoppedCaptureDiscoveries() []*models.CryptoDiscovery {
 // It runs independently of discovery submission so the control plane always receives
 // regular health signals even when there are no new discoveries.
 func (s *Sensor) sendHeartbeat() {
+	s.retryUnpersistedCredentials()
 	// Cumulative, process-lifetime counters — see the field comments on
 	// Sensor.discoveriesMade / Sensor.errorsCount. Deliberately NOT
 	// len(s.discoveries): that buffer drains every report interval, so a sensor
@@ -1570,7 +1671,9 @@ func (s *Sensor) handleRestart(command models.Command) *models.CommandResponse {
 // TLS enricher debounce without requiring a restart.
 func (s *Sensor) applyDedupTTL(minutes int) {
 	ttl := time.Duration(minutes) * time.Minute
+	s.mu.Lock()
 	s.config.Capture.DedupTTLMinutes = minutes
+	s.mu.Unlock()
 	if s.packetCapture != nil && s.packetCapture.GetCache() != nil {
 		s.packetCapture.GetCache().SetTTL(ttl)
 	}
@@ -1585,84 +1688,23 @@ func (s *Sensor) applyDedupTTL(minutes int) {
 // and persists the value to the config file so it survives a restart. The next
 // heartbeat reports the new interval back to the control plane.
 func (s *Sensor) applyReportingInterval(seconds int) {
-	s.config.ReportingInterval = time.Duration(seconds) * time.Second
+	if err := s.applyReportingIntervalPersisted(seconds); err != nil {
+		log.Printf("⚠️  Reporting interval applied but not persisted: %v", err)
+	}
+}
+
+// applyReportingIntervalPersisted is applyReportingInterval for callers that
+// must tell the operator whether the change will survive a restart.
+func (s *Sensor) applyReportingIntervalPersisted(seconds int) error {
 	s.mu.Lock()
+	s.config.ReportingInterval = time.Duration(seconds) * time.Second
 	if s.discoveryTicker != nil {
 		s.discoveryTicker.Reset(s.config.ReportingInterval)
 	}
 	s.mu.Unlock()
-	if err := s.saveConfigFile(); err != nil {
-		log.Printf("⚠️  Reporting interval applied but not persisted: %v", err)
-	}
-	log.Printf("📝 Reporting interval updated to %v", s.config.ReportingInterval)
-}
-
-// handleUpdateConfig handles configuration update command
-func (s *Sensor) handleUpdateConfig(command models.Command) *models.CommandResponse {
-	log.Printf("📝 Configuration update command received")
-
-	configData, ok := command.Payload["config"].(map[string]interface{})
-	if !ok {
-		return &models.CommandResponse{
-			ID:           uuid.New(),
-			CommandID:    command.ID,
-			SensorID:     s.config.SensorID,
-			Status:       "error",
-			Message:      "Invalid config payload",
-			ResponseData: make(map[string]interface{}),
-			Timestamp:    time.Now(),
-		}
-	}
-
-	// Apply configuration updates
-	updatesApplied := 0
-
-	if reportingInterval, ok := configData["reporting_interval"].(float64); ok && reportingInterval > 0 {
-		s.applyReportingInterval(int(reportingInterval))
-		updatesApplied++
-	}
-
-	if captureRaw, ok := configData["capture_config"].(map[string]interface{}); ok {
-		if ap, ok := captureRaw["active_probing"].(bool); ok {
-			s.config.SetActiveProbing(ap)
-			updatesApplied++
-			log.Printf("📝 Active probing set to: %v", ap)
-		}
-		if nd, ok := captureRaw["network_discovery"].(bool); ok {
-			s.config.Capture.NetworkDiscovery = nd
-			updatesApplied++
-		}
-		if ho, ok := captureRaw["host_observation"].(bool); ok {
-			// Recorded so the value is reported back and survives a config
-			// save. It does NOT take effect on the running capture: the BPF
-			// filter is set when the interface handle is opened, so a sensor
-			// told to start observing hosts would have the decoders running
-			// and no frames reaching them — a pipeline that reports success
-			// while seeing nothing. The change lands on the next restart, and
-			// the log says so rather than leaving the operator to wonder.
-			if ho != s.config.Capture.HostObservation {
-				log.Printf("📝 Host observation set to: %v (applies on next sensor restart — the capture filter is fixed at interface open)", ho)
-			}
-			s.config.Capture.HostObservation = ho
-			updatesApplied++
-		}
-		if dedupTTLRaw, ok := captureRaw["dedup_ttl_minutes"].(float64); ok && dedupTTLRaw > 0 {
-			s.applyDedupTTL(int(dedupTTLRaw))
-			updatesApplied++
-		}
-	}
-
-	return &models.CommandResponse{
-		ID:        uuid.New(),
-		CommandID: command.ID,
-		SensorID:  s.config.SensorID,
-		Status:    "success",
-		Message:   fmt.Sprintf("Configuration updated (%d settings changed)", updatesApplied),
-		ResponseData: map[string]interface{}{
-			"updates_applied": updatesApplied,
-		},
-		Timestamp: time.Now(),
-	}
+	err := s.saveConfigFile()
+	log.Printf("📝 Reporting interval updated to %v", time.Duration(seconds)*time.Second)
+	return err
 }
 
 // handleClearCache handles cache clear command
@@ -1706,13 +1748,15 @@ func (s *Sensor) handleTriggerScan(command models.Command) *models.CommandRespon
 
 	s.mu.RLock()
 	pending := len(s.discoveries)
+	networkDiscovery := s.config.Capture.NetworkDiscovery
+	hostObservation := s.config.Capture.HostObservation
 	s.mu.RUnlock()
 
 	data := map[string]interface{}{
 		"interfaces":           s.config.Capture.Interfaces,
-		"active_probing":       s.config.Capture.ActiveProbing,
-		"network_discovery":    s.config.Capture.NetworkDiscovery,
-		"host_observation":     s.config.Capture.HostObservation,
+		"active_probing":       s.config.ActiveProbingEnabled(),
+		"network_discovery":    networkDiscovery,
+		"host_observation":     hostObservation,
 		"host_observation_dns": s.config.Capture.HostObservationDNS,
 		"pending_discoveries":  pending,
 		"uptime_seconds":       int64(time.Since(s.startTime).Seconds()),
@@ -1828,6 +1872,15 @@ func (s *Sensor) handleUpdateInterfaces(command models.Command) *models.CommandR
 // PacketCapture.Stop() closes it. Capture sends are non-blocking, so Stop()'s
 // wg.Wait() can't deadlock while the consumer loop is parked here.
 func (s *Sensor) reinitCapture() error {
+	// Bring the replacement up FIRST. If it cannot start, the running capture
+	// and enricher are untouched, so the main loop never reads channels of a
+	// capture that was stopped and never replaced (a nil discovery, an error
+	// channel that yields forever, a send on a closed channel).
+	pc, err := s.startReplacementCapture()
+	if err != nil {
+		return err
+	}
+
 	if s.tlsEnricher != nil {
 		s.tlsEnricher.Stop()
 	}
@@ -1841,11 +1894,6 @@ func (s *Sensor) reinitCapture() error {
 			s.recordDiscoveriesAccepted(len(flushedDiscoveries))
 		}
 	}
-
-	pc := capture.NewPacketCapture(s.config)
-	if err := pc.Start(); err != nil {
-		return err
-	}
 	s.packetCapture = pc
 
 	enr := s.newTLSEnricher(pc.GetDiscoveriesWritable())
@@ -1857,6 +1905,77 @@ func (s *Sensor) reinitCapture() error {
 	return nil
 }
 
+// startReplacementCapture builds and starts a capture on the current config
+// without touching the running one. A start that fails leaves nothing behind.
+func (s *Sensor) startReplacementCapture() (*capture.PacketCapture, error) {
+	if s.captureFactory != nil {
+		return s.captureFactory(s.config)
+	}
+	pc := capture.NewPacketCapture(s.config)
+	if err := pc.Start(); err != nil {
+		return nil, err
+	}
+	return pc, nil
+}
+
+// onCaptureDiscovery handles one receive from the capture's discovery channel.
+// It reports stop=true when the channel is closed: a closed channel yields nil
+// forever, so carrying on would dereference nil and then spin. The caller
+// treats it as a restart condition.
+func (s *Sensor) onCaptureDiscovery(discovery *models.CryptoDiscovery, ok bool) (stop bool) {
+	if !ok || discovery == nil {
+		log.Printf("❌ Packet capture discovery channel closed unexpectedly; restarting sensor")
+		s.recordError()
+		return true
+	}
+	log.Printf("🔍 New discovery received: %s on %s:%d", discovery.Protocol, discovery.DestIP, discovery.Port)
+	s.handleDiscovery(discovery)
+	// Check if this passive discovery needs TLS certificate enrichment
+	if s.tlsEnricher != nil {
+		s.tlsEnricher.MaybeEnrich(discovery)
+	}
+	return false
+}
+
+// onCaptureError is onCaptureDiscovery for the error channel.
+func (s *Sensor) onCaptureError(err error, ok bool) (stop bool) {
+	if !ok {
+		log.Printf("❌ Packet capture error channel closed unexpectedly; restarting sensor")
+		s.recordError()
+		return true
+	}
+	log.Printf("❌ Capture error: %v", err)
+	s.recordError()
+	return false
+}
+
+// validateInterfaceName rejects interface names that cannot be written into
+// the config file safely. Names arrive in a platform-controlled command
+// payload; a newline or other control character would let a payload add keys
+// to the YAML.
+func validateInterfaceName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("interface name is empty")
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f || r == 0x85 || r == 0x2028 || r == 0x2029 {
+			return fmt.Errorf("interface name %q contains a control character", name)
+		}
+	}
+	return nil
+}
+
+// yamlQuote renders s as a YAML scalar via the yaml library, double-quoted so
+// no character in it can be read as YAML syntax.
+func yamlQuote(s string) (string, error) {
+	n := yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: s, Style: yaml.DoubleQuotedStyle}
+	out, err := yaml.Marshal(&n)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // persistMonitoredInterfaces rewrites the capture.interfaces list in the sensor
 // config file so a restart comes back monitoring the new set. It returns an
 // error WITHOUT modifying the file if the interfaces block can't be located, so
@@ -1864,6 +1983,17 @@ func (s *Sensor) reinitCapture() error {
 func (s *Sensor) persistMonitoredInterfaces(interfaces []string) error {
 	if s.configPath == "" {
 		return fmt.Errorf("no config file path set")
+	}
+	quoted := make([]string, 0, len(interfaces))
+	for _, iface := range interfaces {
+		if err := validateInterfaceName(iface); err != nil {
+			return err
+		}
+		q, err := yamlQuote(iface)
+		if err != nil {
+			return fmt.Errorf("quote interface %q: %w", iface, err)
+		}
+		quoted = append(quoted, q)
 	}
 	data, err := os.ReadFile(s.configPath)
 	if err != nil {
@@ -1904,8 +2034,8 @@ func (s *Sensor) persistMonitoredInterfaces(interfaces []string) error {
 	}
 
 	block := []string{indent + "interfaces:"}
-	for _, iface := range interfaces {
-		block = append(block, fmt.Sprintf("%s- %s", itemIndent, iface))
+	for _, q := range quoted {
+		block = append(block, fmt.Sprintf("%s- %s", itemIndent, q))
 	}
 
 	out := make([]string, 0, len(lines))
@@ -1971,36 +2101,6 @@ func (s *Sensor) handleListInterfaces(command models.Command) *models.CommandRes
 		ResponseData: map[string]interface{}{
 			"interfaces":           list,
 			"monitored_interfaces": s.config.Capture.Interfaces,
-		},
-		Timestamp: time.Now(),
-	}
-}
-
-// handleSetLogLevel handles log level change command
-func (s *Sensor) handleSetLogLevel(command models.Command) *models.CommandResponse {
-	log.Printf("📊 Set log level command received")
-
-	level, ok := command.Payload["level"].(string)
-	if !ok {
-		return &models.CommandResponse{
-			ID:           uuid.New(),
-			CommandID:    command.ID,
-			SensorID:     s.config.SensorID,
-			Status:       "error",
-			Message:      "Invalid log level payload",
-			ResponseData: make(map[string]interface{}),
-			Timestamp:    time.Now(),
-		}
-	}
-
-	return &models.CommandResponse{
-		ID:        uuid.New(),
-		CommandID: command.ID,
-		SensorID:  s.config.SensorID,
-		Status:    "success",
-		Message:   fmt.Sprintf("Log level set to: %s", level),
-		ResponseData: map[string]interface{}{
-			"log_level": level,
 		},
 		Timestamp: time.Now(),
 	}
@@ -2082,16 +2182,40 @@ func isFlagSet(name string) bool {
 
 // findDefaultConfigFile returns the first readable config file in the standard
 // locations, or "" when the host has never been configured.
+//
+// The data-directory file comes first: it is the one registration rewrites
+// with the sensor ID and certificate paths. A stray config.yaml in whatever
+// directory the sensor happened to be started from must not shadow the
+// enrolled config, so it is only a last resort.
 func findDefaultConfigFile() string {
-	for _, path := range []string{
+	return pickDefaultConfigFile(defaultConfigCandidates(getDefaultDataPath())...)
+}
+
+// defaultConfigCandidates lists the default config locations in precedence
+// order: the data-directory file, then ./config.yaml as a last resort.
+func defaultConfigCandidates(dataPath string) []string {
+	return []string{
+		filepath.Join(dataPath, "sensor-config.yaml"),
 		"config.yaml",
-		filepath.Join(getDefaultDataPath(), "sensor-config.yaml"),
-	} {
-		if _, err := os.Stat(path); err == nil {
-			return path
-		}
 	}
-	return ""
+}
+
+// pickDefaultConfigFile returns the first existing candidate and logs which
+// one was chosen (and which were ignored), or "" when none exists.
+func pickDefaultConfigFile(candidates ...string) string {
+	chosen := ""
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		if chosen == "" {
+			chosen = path
+			log.Printf("Using config file %s", path)
+			continue
+		}
+		log.Printf("Ignoring config file %s: %s takes precedence", path, chosen)
+	}
+	return chosen
 }
 
 // shouldRunInteractive decides whether to open the configuration dialogue.
@@ -2763,6 +2887,12 @@ func startSensorWithConfig(verbose bool) {
 
 	// Load configuration
 	cfg, err := config.LoadFromFile(configPath)
+	var certErr *config.CertificateReadError
+	if errors.As(err, &certErr) {
+		// The config names certificate files this process cannot read. Running
+		// on without them would drop mTLS and then re-register with a spent key.
+		log.Fatalf("❌ %v", err)
+	}
 	if err != nil {
 		// Fall back to environment variables if config file can't be loaded
 		fmt.Printf("⚠️  Warning: Failed to load config file (%v), using environment variables\n", err)
@@ -2930,16 +3060,16 @@ func startSensorWithConfig(verbose bool) {
 		case <-heartbeatTicker.C:
 			log.Println("💓 Sending heartbeat...")
 			sensor.sendHeartbeat()
-		case discovery := <-sensor.packetCapture.GetDiscoveries():
-			log.Printf("🔍 New discovery received: %s on %s:%d", discovery.Protocol, discovery.DestIP, discovery.Port)
-			sensor.handleDiscovery(discovery)
-			// Check if this passive discovery needs TLS certificate enrichment
-			if sensor.tlsEnricher != nil {
-				sensor.tlsEnricher.MaybeEnrich(discovery)
+		case discovery, ok := <-sensor.packetCapture.GetDiscoveries():
+			if sensor.onCaptureDiscovery(discovery, ok) {
+				sensor.shutdownForRestart()
+				return
 			}
-		case err := <-sensor.packetCapture.GetErrors():
-			log.Printf("❌ Capture error: %v", err)
-			sensor.recordError()
+		case err, ok := <-sensor.packetCapture.GetErrors():
+			if sensor.onCaptureError(err, ok) {
+				sensor.shutdownForRestart()
+				return
+			}
 		case sig := <-signalChan:
 			log.Printf("🛑 Received signal %v, shutting down gracefully...", sig)
 			sensor.cleanup()
@@ -3098,12 +3228,13 @@ func createConfigFile(configPath, controlPlaneURL, registrationKey string, inter
 // device administrator passwords. The adjacent client private key has always
 // been written 0600; this matches it.
 //
-// os.WriteFile applies the mode only when it CREATES the file, so an upgrade
-// over a config an older build left world-readable would keep 0644. The
-// explicit Chmod is what actually tightens those.
+// Until the platform has issued a per-sensor secret the file carries the
+// registration key; afterwards the key is no longer written, only a fingerprint.
+//
+// The write is atomic (temp file in the same directory, then rename) so a crash
+// never leaves a truncated config, and the mode is set explicitly on every
+// write so an upgrade over a config an older build left world-readable is
+// tightened.
 func writeSecretConfigFile(path string, data []byte) error {
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0600)
+	return atomicfile.Write(path, data, 0o600)
 }

@@ -106,23 +106,26 @@ var testTenantID = uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 // slice exercises carry behavior; the rest are no-ops present to satisfy the
 // interface.
 type stubSensorRepo struct {
-	sensors        []*models.Sensor
-	getSensor      *models.Sensor
-	getSensorErr   error
-	forTenantErr   error
-	updateStErr    error
-	deleteErr      error
-	pendings       []*models.PendingSensorRegistration
-	getPendingKey  *models.PendingSensorRegistration
-	getPendingErr  error
-	commands       []*models.SensorCommand
-	createCmdErr   error
-	health         *models.SensorHealthMetrics
-	healthErr      error
-	healthHistory  []*models.SensorHealthMetrics
-	historyErr     error
-	discoveries    []*models.SensorDiscovery
-	discoveriesErr error
+	sensors              []*models.Sensor
+	getSensor            *models.Sensor
+	getSensorErr         error
+	forTenantErr         error
+	updateStErr          error
+	deleteErr            error
+	pendings             []*models.PendingSensorRegistration
+	getPendingKey        *models.PendingSensorRegistration
+	getPendingErr        error
+	commands             []*models.SensorCommand
+	createCmdErr         error
+	commandCapReached    bool
+	listErr              error
+	lastDiscoveriesLimit int
+	health               *models.SensorHealthMetrics
+	healthErr            error
+	healthHistory        []*models.SensorHealthMetrics
+	historyErr           error
+	discoveries          []*models.SensorDiscovery
+	discoveriesErr       error
 }
 
 // Sensors
@@ -141,6 +144,9 @@ func (s *stubSensorRepo) GetSensorByIDForTenant(_ context.Context, _, _ uuid.UUI
 	return s.getSensor, s.getSensorErr
 }
 func (s *stubSensorRepo) ListSensorsByTenant(_ context.Context, _ uuid.UUID) ([]*models.Sensor, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
 	return s.sensors, nil
 }
 func (s *stubSensorRepo) UpdateSensor(context.Context, *models.Sensor) error { return nil }
@@ -170,6 +176,12 @@ func (s *stubSensorRepo) ExpirePendingSensors(context.Context) error            
 func (s *stubSensorRepo) CreateCommand(_ context.Context, _ *models.SensorCommand) error {
 	return s.createCmdErr
 }
+func (s *stubSensorRepo) CreateCommandIfUnderLimit(_ context.Context, _ *models.SensorCommand, _ int) (bool, error) {
+	if s.createCmdErr != nil {
+		return false, s.createCmdErr
+	}
+	return !s.commandCapReached, nil
+}
 func (s *stubSensorRepo) GetPendingCommands(_ context.Context, _ uuid.UUID) ([]*models.SensorCommand, error) {
 	return s.commands, nil
 }
@@ -188,7 +200,8 @@ func (s *stubSensorRepo) GetLatestHealthMetrics(_ context.Context, _ uuid.UUID) 
 func (s *stubSensorRepo) GetHealthMetricsHistory(context.Context, uuid.UUID, time.Time, int) ([]*models.SensorHealthMetrics, error) {
 	return s.healthHistory, s.historyErr
 }
-func (s *stubSensorRepo) ListSensorDiscoveries(context.Context, uuid.UUID, int) ([]*models.SensorDiscovery, error) {
+func (s *stubSensorRepo) ListSensorDiscoveries(_ context.Context, _ uuid.UUID, limit int) ([]*models.SensorDiscovery, error) {
+	s.lastDiscoveriesLimit = limit
 	return s.discoveries, s.discoveriesErr
 }
 
@@ -437,7 +450,7 @@ func TestContract_DeleteSensor_200(t *testing.T) {
 func TestContract_CreateSensorCommand_201(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newEngine(&stubSensorRepo{getSensor: sampleSensor()})
-	body := strings.NewReader(`{"command_type":"rescan","payload":{"depth":"full"}}`)
+	body := strings.NewReader(`{"command_type":"clear_cache","payload":{"depth":"full"}}`)
 	w := do(eng, http.MethodPost, base+"/sensors/"+aUUID+"/commands", body)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", w.Code, w.Body.String())

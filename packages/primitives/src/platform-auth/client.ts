@@ -9,6 +9,7 @@
 // when absent). openapi-fetch runs onRequest middlewares in registration order,
 // so this one — added last — wins.
 import { createAdminServiceClient, type adminServiceComponents } from '@vistasecurity/api-contract';
+import { unwrap } from '../shared/api-result';
 import { PLATFORM_CSRF_COOKIE, platformTokenManager } from './token';
 
 export type PlatformLoginResponse = adminServiceComponents['schemas']['PlatformLoginResponse'];
@@ -66,10 +67,12 @@ export function createPlatformAuthClient(baseUrl?: string): PlatformAuthClient {
       return data.user;
     },
     async changePassword(currentPassword, newPassword, confirmPassword) {
-      const { error } = await c.POST('/admin/auth/change-password', {
+      const result = await c.POST('/admin/auth/change-password', {
         body: { current_password: currentPassword, new_password: newPassword, confirm_password: confirmPassword },
       });
-      if (error) throw new Error(messageFromError(error, 'Could not change password'));
+      // `response.ok` is the authority: a bodiless 4xx/5xx leaves `error` falsy
+      // and must not read as "password changed" (it would clear force_password_change).
+      unwrap(result, messageFromError(result.error, 'Could not change password'));
     },
   };
 }

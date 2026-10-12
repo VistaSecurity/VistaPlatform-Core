@@ -18,6 +18,7 @@ package handlers
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -210,11 +211,11 @@ type stubApprovalStore struct {
 	denyErr    error
 }
 
-func (s *stubApprovalStore) ApproveAssets(_ uuid.UUID, _ []uuid.UUID, _ uuid.UUID) error {
-	return s.approveErr
+func (s *stubApprovalStore) ApproveAssetsReport(_ uuid.UUID, ids []uuid.UUID, _ uuid.UUID) (services.LifecycleChangeResult, error) {
+	return services.LifecycleChangeResult{Changed: ids, Skipped: []uuid.UUID{}}, s.approveErr
 }
-func (s *stubApprovalStore) DenyAssets(_ uuid.UUID, _ []uuid.UUID, _ uuid.UUID) error {
-	return s.denyErr
+func (s *stubApprovalStore) DenyAssetsReport(_ uuid.UUID, ids []uuid.UUID, _ uuid.UUID) (services.LifecycleChangeResult, error) {
+	return services.LifecycleChangeResult{Changed: ids, Skipped: []uuid.UUID{}}, s.denyErr
 }
 func (s *stubApprovalStore) AutoApproveAgentHost(_, _, _ uuid.UUID) (bool, error) {
 	return false, nil
@@ -452,11 +453,10 @@ func TestContract_GetAsset_400_badID(t *testing.T) {
 	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
 }
 
-// GetAssetByID maps ANY service error (including no-rows) to 404 — a documented
-// quirk captured by x-quirks in the spec.
+// GetAssetByID answers 404 only for a missing row; any other failure is a 500.
 func TestContract_GetAsset_404(t *testing.T) {
 	sv := loadSpec(t)
-	eng := newEngine(&stubAssetStore{getErr: io.EOF}, &stubApprovalStore{})
+	eng := newEngine(&stubAssetStore{getErr: fmt.Errorf("failed to get asset: %w", sql.ErrNoRows)}, &stubApprovalStore{})
 	w := do(eng, http.MethodGet, "/api/v2/inventory-service/infrastructure-assets/"+aUUID, nil)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())

@@ -30,6 +30,10 @@ var ErrRoleNotInTenant = errors.New("role does not belong to tenant")
 // (services/admin-service/internal/handlers/roles.go).
 var ErrSystemRoleImmutable = errors.New("system roles are read-only")
 
+// ErrLastTenantAdmin is returned when removing a role assignment would leave
+// the tenant with no active tenant_admin.
+var ErrLastTenantAdmin = errors.New("cannot remove the last tenant_admin role of a tenant")
+
 // ErrRoleNameConflict is returned when a custom role name collides with an
 // existing role in the same tenant (unique constraint tenant_roles_tenant_id_name_key).
 var ErrRoleNameConflict = errors.New("a role with that name already exists")
@@ -235,7 +239,7 @@ func (s *RBACService) callerPermissionIDs(ctx context.Context, tx *sql.Tx, tenan
 		JOIN tenant_role_permissions rp ON p.id = rp.permission_id
 		JOIN tenant_roles r ON rp.role_id = r.id
 		JOIN user_tenant_roles ur ON r.id = ur.role_id
-		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND ur.is_active = true
+		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND ur.is_active = true AND (ur.expires_at IS NULL OR ur.expires_at > now())
 	`, actorID, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve caller permissions: %w", err)
@@ -703,7 +707,7 @@ func (s *RBACService) GetUserRoles(tenantID, userID uuid.UUID) ([]Role, error) {
 		SELECT r.id, r.name, r.description, r.created_at, r.updated_at
 		FROM tenant_roles r
 		JOIN user_tenant_roles ur ON r.id = ur.role_id
-		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND ur.is_active = true
+		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND ur.is_active = true AND (ur.expires_at IS NULL OR ur.expires_at > now())
 		ORDER BY r.name`
 
 	// RLS-scoped read over tenant_roles + user_tenant_roles; tenant is known.
@@ -804,6 +808,44 @@ func (s *RBACService) RemoveUserRole(tenantID, userID, roleID uuid.UUID) error {
 	// RLS-scoped write over user_tenant_roles (tenant_isolation policy); tenant
 	// is known. The "not found" sentinel is surfaced via a typed error from fn.
 	return shareddatabase.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sql.Tx) error {
+		// Last-admin guard. Lock every live tenant_admin assignment of the
+		// tenant (FOR UPDATE serialises two concurrent removals of the last
+		// two admins) and refuse when the assignment being removed is the
+		// only one held by an active user.
+		rows, err := tx.QueryContext(context.Background(), `
+			SELECT ur.user_id, ur.role_id
+			FROM user_tenant_roles ur
+			JOIN tenant_roles r ON r.id = ur.role_id AND r.tenant_id = ur.tenant_id
+			JOIN users u ON u.id = ur.user_id AND u.tenant_id = ur.tenant_id
+			WHERE ur.tenant_id = $1 AND r.name = 'tenant_admin'
+			  AND ur.is_active = true AND (ur.expires_at IS NULL OR ur.expires_at > now())
+			  AND u.deleted_at IS NULL
+			FOR UPDATE OF ur`, tenantID)
+		if err != nil {
+			return fmt.Errorf("failed to check tenant admins: %w", err)
+		}
+		removingAdmin, otherAdmins := false, 0
+		for rows.Next() {
+			var uid, rid uuid.UUID
+			if scanErr := rows.Scan(&uid, &rid); scanErr != nil {
+				_ = rows.Close()
+				return fmt.Errorf("failed to scan tenant admin: %w", scanErr)
+			}
+			if uid == userID && rid == roleID {
+				removingAdmin = true
+			} else {
+				otherAdmins++
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		_ = rows.Close()
+		if removingAdmin && otherAdmins == 0 {
+			return ErrLastTenantAdmin
+		}
+
 		res, err := tx.ExecContext(context.Background(), `
 			UPDATE user_tenant_roles
 			SET is_active = false
@@ -831,7 +873,7 @@ func (s *RBACService) GetUserPermissions(tenantID, userID uuid.UUID) ([]Permissi
 		JOIN tenant_role_permissions rp ON p.id = rp.permission_id
 		JOIN tenant_roles r ON rp.role_id = r.id
 		JOIN user_tenant_roles ur ON r.id = ur.role_id
-		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND ur.is_active = true
+		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND ur.is_active = true AND (ur.expires_at IS NULL OR ur.expires_at > now())
 		ORDER BY p.resource, p.action`
 
 	// RLS-scoped: joins tenant_roles + user_tenant_roles (tenant_isolation
@@ -872,7 +914,7 @@ func (s *RBACService) CheckPermission(tenantID, userID uuid.UUID, permission str
 		JOIN tenant_role_permissions rp ON p.id = rp.permission_id
 		JOIN tenant_roles r ON rp.role_id = r.id
 		JOIN user_tenant_roles ur ON r.id = ur.role_id
-		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND p.name = $3 AND ur.is_active = true`
+		WHERE ur.user_id = $1 AND r.tenant_id = $2 AND p.name = $3 AND ur.is_active = true AND (ur.expires_at IS NULL OR ur.expires_at > now())`
 
 	// RLS-scoped: joins tenant_roles + user_tenant_roles (tenant_isolation
 	// policies); tenant is known.

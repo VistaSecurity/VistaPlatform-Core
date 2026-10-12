@@ -10,6 +10,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	sharedapi "github.com/vistasecurity/vistaplatform/shared/api"
 	"github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
@@ -113,7 +114,7 @@ func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID
 		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id` + primaryEndpointJoin + `
 		WHERE a.tenant_id = $1 AND a.location_id = $2 AND a.deleted_at IS NULL
 		  AND (a.environment::text = $3 OR ($3 = 'unknown' AND a.environment IS NULL))
-		ORDER BY a.risk_score DESC NULLS LAST, a.last_seen_at DESC
+		ORDER BY a.risk_score DESC NULLS LAST, a.last_seen_at DESC, a.id
 		LIMIT $4 OFFSET $5
 	`
 
@@ -184,8 +185,14 @@ func (s *OperationalService) GetRemediationQueue(tenantID uuid.UUID, filters mod
 	if filters.PageSize <= 0 {
 		filters.PageSize = 50
 	}
+	if filters.PageSize > sharedapi.MaxPageSize {
+		filters.PageSize = sharedapi.MaxPageSize
+	}
 	if filters.Page <= 0 {
 		filters.Page = 1
+	}
+	if filters.Page > sharedapi.MaxPage {
+		filters.Page = sharedapi.MaxPage
 	}
 	offset := (filters.Page - 1) * filters.PageSize
 

@@ -72,20 +72,45 @@ func TestIntegration_PermanentFailureIsTerminalOnTheFirstAttempt(t *testing.T) {
 	}
 }
 
-// With the default policy a row survives well past the old three attempts.
-func TestIntegration_DefaultPolicySurvivesSixTransientFailures(t *testing.T) {
+// With the default policy a row failing with a transient class (a 503 here)
+// survives well past the ordinary seven-attempt budget: an inventory outage
+// longer than that ladder (about 25 minutes) must not reject rows.
+func TestIntegration_DefaultPolicySurvivesTenTransientFailures(t *testing.T) {
 	p, _, db, tenant := newFlakyBatchProcessor(t, 1)
 	batchID := uuid.New().String()
 	id := seedOneManaged(t, p, tenant, batchID, "10.78.2.1")
-	for i := 1; i <= 6; i++ {
+	for i := 1; i <= 10; i++ {
 		_ = p.ProcessBatch(batchID, tenant)
-		if s := readRows(t, db, tenant, batchID)[id]; s.processed || s.attempts != i {
+		if s := readRows(t, db, tenant, batchID)[id]; s.processed || s.status == "rejected" || s.attempts != i {
 			t.Fatalf("after failure %d: %+v, want still retryable", i, s)
 		}
 	}
-	_ = p.ProcessBatch(batchID, tenant)
-	if s := readRows(t, db, tenant, batchID)[id]; !s.processed || s.status != "rejected" || s.attempts != 7 {
-		t.Fatalf("after the 7th failure: %+v, want terminal rejected", s)
+}
+
+// The transient budget is a budget: MaxTransientAttempts transient failures
+// settle the row, and not before. MaxAttempts (2 here) governs only failures
+// that are not of a transient class.
+//
+// Mutation: charge a transient failure against MaxAttempts instead (drop the
+// `CASE WHEN v.transient` in failureTerminal) and the row goes terminal at the
+// 2nd failure.
+func TestIntegration_TransientBudgetEndsAtMaxTransientAttempts(t *testing.T) {
+	p, _, db, tenant := newFlakyBatchProcessor(t, 1)
+	p.SetRetryPolicy(RetryPolicy{MaxAttempts: 2, MaxTransientAttempts: 5, BackoffBase: time.Second, BackoffCap: 2 * time.Second})
+	batchID := uuid.New().String()
+	id := seedOneManaged(t, p, tenant, batchID, "10.78.2.2")
+	for i := 1; i <= 4; i++ {
+		_ = p.ProcessBatch(batchID, tenant)
+		if s := readRows(t, db, tenant, batchID)[id]; s.processed || s.attempts != i {
+			t.Fatalf("after transient failure %d: %+v, want still retryable (budget 5)", i, s)
+		}
+	}
+	var rf *RowFailuresError
+	if err := p.ProcessBatch(batchID, tenant); !errors.As(err, &rf) || rf.Terminal != 1 {
+		t.Fatalf("5th transient failure = %v, want the row terminal", err)
+	}
+	if s := readRows(t, db, tenant, batchID)[id]; !s.processed || s.status != "rejected" || s.attempts != 5 {
+		t.Fatalf("after the 5th failure: %+v, want terminal rejected", s)
 	}
 }
 

@@ -6,6 +6,7 @@ import { clients } from '../../lib/clients';
 import { Icon } from '../../components/ui';
 import { PageWrap, jobMeta, relTime } from './kit';
 import { usePcapJobs } from './queries';
+import { unwrap } from '../../lib/api-result';
 
 // Discovery → PCAP Upload — the mock's `discovery-pcap` dropzone, wired to the
 // live sensor-manager upload endpoint, plus the processing-job history below
@@ -48,15 +49,14 @@ export function PcapPage() {
       // Typed multipart: the contract types the part ({ file: binary }); the
       // serializer supplies the real FormData. Content-Type is left to the
       // browser so the boundary is set.
-      const { data, error } = await clients.sensors.POST('/pcap/upload', {
+      const data = unwrap(await clients.sensors.POST('/pcap/upload', {
         body: { file: '' },
         bodySerializer: () => {
           const fd = new FormData();
           fd.append('file', file);
           return fd;
         },
-      });
-      if (error || !data) throw new Error('Upload failed');
+      }), 'Upload failed', { requireData: true });
       return data;
     },
     onSuccess: () => toast.success('Capture uploaded — processing started'),

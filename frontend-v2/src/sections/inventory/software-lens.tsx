@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import { Icon } from '../../components/ui';
 import {
   SOFTWARE_PAGE_SIZE, productDrillThroughQuery, productIdentifier, useSoftwareProducts,
@@ -73,7 +74,7 @@ export function SoftwareLens() {
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SoftwareProductSort>('name');
   const [page, setPage] = useState(0);
-  const q = useSoftwareProducts({ q: search, sort, page });
+  const q = useSoftwareProducts({ q: useDebouncedValue(search), sort, page });
 
   const rows = q.data?.rows ?? [];
   const total = q.data?.total ?? 0;

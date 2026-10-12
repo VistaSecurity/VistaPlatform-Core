@@ -75,7 +75,6 @@ func main() {
 	ruleEvaluator := services.NewRuleEvaluator(db, measurementExtractor)
 	evaluationService := services.NewEvaluationService(db, ruleEvaluator)
 	templateService := services.NewTemplateService(db)
-	mappingsService := services.NewMappingsService(db)
 
 	// Initialize metrics service
 	metricsService := services.NewMetricsService()
@@ -85,7 +84,7 @@ func main() {
 	ruleEvaluator.SetMetrics(metricsService)
 
 	// Initialize handlers
-	complianceHandlers := handlers.NewComplianceHandlers(mappingsService)
+	complianceHandlers := handlers.NewComplianceHandlers()
 	findingsService := services.NewFindingsService(db, bypassDB, ruleEvaluator, frameworkLicenseService, evaluationService, metricsService)
 	workspaceHandlers := handlers.NewWorkspaceHandlers(evaluationService, scenarioService, overrideService, findingsService)
 	metricsHandlers := handlers.NewMetricsHandlers(metricsService)
@@ -124,6 +123,7 @@ func main() {
 		reconcileEnqueuer = services.NewReconcileEnqueuer(natsClient, bypassDB)
 		frameworkLicenseService.SetReconcileEnqueuer(reconcileEnqueuer)
 		platformFrameworkService.SetReconcileEnqueuer(reconcileEnqueuer)
+		overrideService.SetReconcileEnqueuer(reconcileEnqueuer)
 	}
 
 	// Tenant-triggered re-evaluation: same reconcile path as the admin route, but
@@ -166,6 +166,10 @@ func main() {
 
 	// Initialize router
 	router := gin.Default()
+	// Bound every request body before anything reads it (audit and
+	// resource-tracking below can). TestMainMountsTheRequestBodyLimitFirst pins
+	// the order.
+	router.Use(requestBodyLimit())
 
 	// Resource tracking middleware
 	trackerConfig := resourcetracking.DefaultConfig()
@@ -452,12 +456,6 @@ func main() {
 			sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate),
 			remediationDraftHandlers.Accept)
 
-		// Mappings (admin-only in future)
-		compliance.GET("/mappings", complianceHandlers.ListMappings)
-		compliance.GET("/mappings/:id", complianceHandlers.GetMapping)
-		compliance.POST("/mappings", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), complianceHandlers.CreateMapping)
-		compliance.PUT("/mappings/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), complianceHandlers.UpdateMapping)
-		compliance.DELETE("/mappings/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionComplianceUpdate), complianceHandlers.DeleteMapping)
 	}
 
 	// Admin routes (platform operators). Each route is gated on a named
@@ -691,6 +689,17 @@ func main() {
 	staleCleanupJob := jobs.NewStaleFindingCleanupJob(bypassDB, findingsService, 90, 7, 1000)
 	go staleCleanupJob.StartPeriodic(jobCtx, 24*time.Hour)
 	log.Printf("🧹 Stale finding cleanup job started (runs every 24 hours)")
+
+	// Time-boxed suppressions: reopen findings whose suppressed_until has passed
+	// and ask each affected tenant to reconcile. Without this sweep the stored
+	// deadline was read by nothing and every suppression was permanent.
+	var enqueueExpired func(uuid.UUID, string)
+	if reconcileEnqueuer != nil {
+		enqueueExpired = reconcileEnqueuer.EnqueueTenant
+	}
+	suppressionExpiryJob := jobs.NewSuppressionExpiryJob(findingsService, enqueueExpired)
+	go suppressionExpiryJob.StartPeriodic(jobCtx, 10*time.Minute)
+	log.Printf("⏳ Suppression expiry sweep started (runs every 10 minutes)")
 
 	// ADR-0015: the periodic + on-boot full-tenant ReevaluationJob is REMOVED. A
 	// finding only changes when its inputs change (asset state or control definition),

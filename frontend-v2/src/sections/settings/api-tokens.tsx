@@ -11,6 +11,7 @@ import { copyToClipboard } from '../../lib/clipboard';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import { SPage, SCard, STable, STableRow, STag, SDot, StateNote, relTime, GREEN, AMBER, RED } from './kit';
 import type { SettingsNavItem } from './nav';
+import { unwrap } from '../../lib/api-result';
 
 type APIToken = authServiceComponents['schemas']['APIToken'];
 type Perm = NonNullable<authServiceComponents['schemas']['APITokenCreateRequest']['permissions']>[number];
@@ -51,8 +52,7 @@ export function ApiTokensPage({ meta }: { meta: SettingsNavItem }) {
 
   const revoke = useMutation({
     mutationFn: async (id: string) => {
-      const { error, response } = await clients.auth.DELETE('/api-tokens/{id}', { params: { path: { id } } });
-      if (!response.ok || error) throw new Error('Failed to revoke token');
+      unwrap(await clients.auth.DELETE('/api-tokens/{id}', { params: { path: { id } } }), 'Failed to revoke token');
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settings', 'api-tokens'] }),
     onSettled: () => setConfirmRevoke(null),
@@ -171,16 +171,20 @@ function CreateTokenModal({ open, onClose }: { open: boolean; onClose: () => voi
   const [plaintext, setPlaintext] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // The plaintext token is shown once and must not linger. It goes to local
+  // component state from inside the mutationFn and is NOT returned, so the
+  // mutation's `data` (kept in the MutationCache) never holds it; gcTime 0 drops
+  // the settled mutation as soon as nothing observes it.
   const create = useMutation({
-    mutationFn: async () => {
-      const { data, error } = await clients.auth.POST('/api-tokens', {
+    gcTime: 0,
+    mutationFn: async (): Promise<null> => {
+      const data = unwrap(await clients.auth.POST('/api-tokens', {
         body: { name: name.trim(), permissions: perms, expires_in_days: expiry },
-      });
-      if (error || !data) throw new Error((error as { error?: string })?.error ?? 'Failed to create token');
-      return data;
-    },
-    onSuccess: (data) => {
+      }), 'Failed to create token', { requireData: true });
       setPlaintext(data.plaintext_token);
+      return null;
+    },
+    onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['settings', 'api-tokens'] });
     },
   });

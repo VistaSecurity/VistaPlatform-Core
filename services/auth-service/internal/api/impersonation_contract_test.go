@@ -27,13 +27,20 @@ const impBase = "/api/v1/auth-service"
 
 // --- stub -------------------------------------------------------------------
 
+// impActor is the admin every harness request is authenticated as.
+const impActor = "7b1d3f0e-5c1a-4b52-9d6e-0a2f4c8e1b33"
+
 type stubImpersonation struct {
-	user      *models.User
-	userErr   error
-	token     string
-	tokenErr  error
-	events    []auth.ImpersonationEvent
-	eventsErr error
+	// startedBy is the admin recorded on the start audit entry for any jti;
+	// noStartRecord simulates a jti with no start entry at all.
+	startedBy     string
+	noStartRecord bool
+	user          *models.User
+	userErr       error
+	token         string
+	tokenErr      error
+	events        []auth.ImpersonationEvent
+	eventsErr     error
 }
 
 func (s *stubImpersonation) GetUserByID(uuid.UUID) (*models.User, error) {
@@ -48,6 +55,15 @@ func (s *stubImpersonation) RecordImpersonationStart(context.Context, auth.Imper
 func (s *stubImpersonation) RevokeJTI(context.Context, string, time.Duration) error { return nil }
 func (s *stubImpersonation) RemainingImpersonationTTL(context.Context, string) (time.Duration, bool, error) {
 	return 0, false, nil
+}
+func (s *stubImpersonation) ImpersonationActor(context.Context, string) (string, bool, error) {
+	if s.noStartRecord {
+		return "", false, nil
+	}
+	if s.startedBy != "" {
+		return s.startedBy, true, nil
+	}
+	return impActor, true, nil
 }
 func (s *stubImpersonation) RecordImpersonationStop(context.Context, string, string, string, string) error {
 	return nil
@@ -65,7 +81,7 @@ func newImpersonationEngine(svc impersonationService) *gin.Engine {
 	r := gin.New()
 	g := r.Group(impBase)
 	g.Use(func(c *gin.Context) {
-		c.Set("userID", uuid.NewString())
+		c.Set("userID", impActor)
 		c.Set("email", "admin@example.com")
 		if svc != nil {
 			c.Set("authService", svc)
@@ -188,6 +204,47 @@ func TestContract_StopImpersonation_204(t *testing.T) {
 	if w.Body.Len() != 0 {
 		t.Fatalf("expected empty body for 204, got %s", w.Body.String())
 	}
+}
+
+// Only the admin who started an impersonation may stop it: naming someone
+// else's jti (or one that was never an impersonation) must not reach the
+// global denylist.
+func TestContract_StopImpersonation_refusesAnotherAdminsSession(t *testing.T) {
+	sv := loadSpec(t)
+	revoked := &revokeRecorder{stubImpersonation: stubImpersonation{startedBy: uuid.NewString()}}
+	eng := newImpersonationEngine(revoked)
+	w := do(eng, http.MethodPost, impBase+"/admin/impersonations/stop", strings.NewReader(`{"jti":"someone-elses"}`))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if revoked.revoked {
+		t.Fatal("another admin's session was denylisted")
+	}
+}
+
+func TestContract_StopImpersonation_404_unknownJTI(t *testing.T) {
+	sv := loadSpec(t)
+	revoked := &revokeRecorder{stubImpersonation: stubImpersonation{noStartRecord: true}}
+	eng := newImpersonationEngine(revoked)
+	w := do(eng, http.MethodPost, impBase+"/admin/impersonations/stop", strings.NewReader(`{"jti":"an-ordinary-session"}`))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "LegacyError", w.Body.Bytes())
+	if revoked.revoked {
+		t.Fatal("a jti with no impersonation start record was denylisted")
+	}
+}
+
+type revokeRecorder struct {
+	stubImpersonation
+	revoked bool
+}
+
+func (r *revokeRecorder) RevokeJTI(context.Context, string, time.Duration) error {
+	r.revoked = true
+	return nil
 }
 
 // Missing jti → 400.

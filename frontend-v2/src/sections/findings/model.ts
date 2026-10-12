@@ -104,7 +104,10 @@ export function subjectContext(f: ComplianceFinding): string | null {
 
 // Finding workflow vocabulary (backend: findings_service.go) with the mock's
 // status colors (Findings.jsx FSTATUS).
-export const WF_STATUSES = ['NEW', 'NOTIFIED', 'RESOLVED', 'SUPPRESSED'] as const;
+/** The server's workflow vocabulary, typed from the generated contract. */
+export type WorkflowStatus = complianceEngineComponents['schemas']['UpdateWorkflowStatusRequest']['workflow_status'];
+export const WF_STATUSES: readonly WorkflowStatus[] = ['NEW', 'NOTIFIED', 'RESOLVED', 'SUPPRESSED'];
+export const isWorkflowStatus = (v: string): v is WorkflowStatus => (WF_STATUSES as readonly string[]).includes(v);
 export const WF_LABEL: Record<string, string> = { NEW: 'New', NOTIFIED: 'Notified', RESOLVED: 'Resolved', SUPPRESSED: 'Suppressed' };
 export const WF_COLOR: Record<string, string> = { NEW: 'var(--info)', NOTIFIED: 'var(--warn)', RESOLVED: 'var(--ok)', SUPPRESSED: 'var(--neutral)' };
 export const wfOf = (f: ComplianceFinding) => (f.workflow_status || 'NEW').toUpperCase();

@@ -11,6 +11,7 @@ import { useDevices, useDeviceAgents } from './queries';
 import { classLabel } from '../inventory/asset-shape';
 import { DeviceFormModal, DeviceDeleteModal, TestConnectionModal } from './device-modals';
 import { DiscoveryStatusPill, pendingDiscoveryRows, useDeviceDiscoveries, useDiscoveryActions, type DeviceDiscovery } from './device-discoveries';
+import { unwrap } from '../../lib/api-result';
 
 // Discovery → Devices — now "assets with management configured".
 //
@@ -96,8 +97,7 @@ export function DevicesPage() {
   const interrogate = useMutation({
     mutationFn: async (id: string) => {
       setInterrogatingId(id);
-      const { data, error } = await clients.devices.POST('/devices/{id}/interrogate', { params: { path: { id } } });
-      if (error || !data) throw new Error('Failed to start interrogation');
+      const data = unwrap(await clients.devices.POST('/devices/{id}/interrogate', { params: { path: { id } } }), 'Failed to start interrogation', { requireData: true });
       return data;
     },
     onSuccess: (result) => {
@@ -123,8 +123,7 @@ export function DevicesPage() {
   const resetHostKey = useMutation({
     mutationFn: async (id: string) => {
       setRepinningId(id);
-      const { data, error } = await clients.devices.DELETE('/devices/{id}/ssh-host-key', { params: { path: { id } } });
-      if (error || !data) throw new Error('Failed to clear the pinned SSH host key');
+      const data = unwrap(await clients.devices.DELETE('/devices/{id}/ssh-host-key', { params: { path: { id } } }), 'Failed to clear the pinned SSH host key', { requireData: true });
       return data;
     },
     onSuccess: () => {

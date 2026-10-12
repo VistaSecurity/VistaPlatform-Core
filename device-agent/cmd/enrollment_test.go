@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/vistasecurity/vistaplatform/device-agent/internal/api"
 )
 
 // The real main(), re-executed in a child process: enrollment ends in
@@ -40,6 +44,15 @@ func runAgentMain(t *testing.T, args ...string) (string, error) {
 		t.Fatalf("the agent was still running after 20s — it did not stop on a failed enrollment:\n%s", out)
 	}
 	return string(out), err
+}
+
+// exitStatus is the child's exit status, or -1 if it did not exit on its own.
+func exitStatus(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 // registrationServer counts registration attempts and answers them the way the
@@ -107,6 +120,9 @@ func TestRegister_UnwritableDataPathSendsNothing(t *testing.T) {
 			if !strings.Contains(out, "registration key is still unused") {
 				t.Fatalf("operator not told the key is still good:\n%s", out)
 			}
+			if got := exitStatus(err); got != exitNeedsOperator {
+				t.Fatalf("exit status %d, want %d (a person has to fix this; the systemd unit must not restart it)", got, exitNeedsOperator)
+			}
 		})
 	}
 }
@@ -139,6 +155,11 @@ func TestRegister_RejectedKeyIsReportedAsRejected(t *testing.T) {
 			if strings.Contains(out, "Device agent started") {
 				t.Fatalf("agent started polling with no enrollment:\n%s", out)
 			}
+			// The installer's unit lists this status in RestartPreventExitStatus;
+			// any other status restarts the agent against the endpoint every 10s.
+			if got := exitStatus(err); got != exitNeedsOperator {
+				t.Fatalf("exit status %d after a rejected key, want %d", got, exitNeedsOperator)
+			}
 		})
 	}
 }
@@ -163,5 +184,32 @@ func TestCheckEnrollmentWritable(t *testing.T) {
 	}
 	if err := checkEnrollmentWritable(filepath.Join(dir, "data"), readOnlyConfig); err == nil {
 		t.Fatal("a config file the agent cannot rewrite was accepted")
+	}
+}
+
+// A config file that cannot be parsed is fixed by a person, not by a restart.
+func TestMalformedConfigExitsNeedsOperator(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "device-agent.yaml")
+	if err := os.WriteFile(cfg, []byte("platform_url: [unterminated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runAgentMain(t, "-config", cfg, "-interactive=false")
+	if got := exitStatus(err); got != exitNeedsOperator {
+		t.Fatalf("exit status %d for a malformed config, want %d:\n%s", got, exitNeedsOperator, out)
+	}
+}
+
+// Only a REJECTION is permanent: an unreachable platform keeps exit 1 so the
+// service manager's restart is the retry.
+func TestRegistrationFailureExitCode(t *testing.T) {
+	if got := registrationFailureExitCode(&api.RegistrationRejectedError{StatusCode: 400}); got != exitNeedsOperator {
+		t.Errorf("rejected key: %d, want %d", got, exitNeedsOperator)
+	}
+	wrapped := fmt.Errorf("register: %w", &api.RegistrationRejectedError{StatusCode: 403})
+	if got := registrationFailureExitCode(wrapped); got != exitNeedsOperator {
+		t.Errorf("wrapped rejection: %d, want %d", got, exitNeedsOperator)
+	}
+	if got := registrationFailureExitCode(errors.New("connection refused")); got != 1 {
+		t.Errorf("transient failure: %d, want 1", got)
 	}
 }

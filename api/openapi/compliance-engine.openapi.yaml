@@ -585,8 +585,16 @@ paths:
                 $ref: "#/components/schemas/OverrideMutationResponse"
         "400":
           $ref: "#/components/responses/LegacyBadRequest"
+        "409":
+          description: The tenant already has an override for this control and scenario.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LegacyError"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
+        "413":
+          $ref: "#/components/responses/LegacyPayloadTooLarge"
         "500":
           $ref: "#/components/responses/LegacyServerError"
   /overrides/{id}:
@@ -834,6 +842,10 @@ paths:
           $ref: "#/components/responses/LegacyBadRequest"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
+        "413":
+          $ref: "#/components/responses/LegacyPayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/LegacyUnprocessable"
         "500":
           $ref: "#/components/responses/LegacyServerError"
     delete:
@@ -907,6 +919,8 @@ paths:
           $ref: "#/components/responses/LegacyBadRequest"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
+        "413":
+          $ref: "#/components/responses/LegacyPayloadTooLarge"
         "500":
           $ref: "#/components/responses/LegacyServerError"
   /findings/{id}/remediation/draft:
@@ -1075,6 +1089,13 @@ paths:
         tell them apart. Compliance rows are additionally gated on the tenant
         having activated the framework their control belongs to; a producer with
         no control has no such gate.
+
+
+        Paginated: `page_size` defaults to 100 (the maximum) and a malformed
+        `page` or `page_size` is a 400.
+      parameters:
+        - $ref: "#/components/parameters/TicketPageParam"
+        - $ref: "#/components/parameters/TicketPageSizeParam"
       responses:
         "200":
           description: The asset's open findings, worst severity first.
@@ -2526,8 +2547,9 @@ paths:
       summary: List the tenant's tickets
       description: >
         Returns a page of tickets for the tenant, filtered by any combination
-        of the query parameters. Page defaults to 1 and page_size to 20 (capped
-        at 100 in the service layer; values outside 1..100 collapse to 20).
+        of the query parameters. Page defaults to 1 and page_size to 20;
+        page_size above 100 is clamped to 100, and a non-numeric or non-positive
+        page or page_size is a 400.
       parameters:
         - $ref: "#/components/parameters/TicketCategoryFilter"
         - $ref: "#/components/parameters/TicketStatusFilter"
@@ -2551,11 +2573,12 @@ paths:
                 $ref: "#/components/schemas/TicketListResponse"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
         "500":
           $ref: "#/components/responses/LegacyServerError"
       x-quirks:
         - "UUID-shaped filters (assigned_to, asset_id, certificate_id, finding_id) are silently dropped when the value fails uuid.Parse — the request still returns 200 with the filter ignored, not 400."
-        - "page_size outside the 1..100 range silently collapses to the default 20 — no warning, no error."
         - "overdue is a boolean toggle: the service treats only the exact string `true` as on; any other value (including `1`, `True`, `yes`) is off."
         - "The response carries `total` and echoes the requested `page` + `page_size` at the top level, not under a `pagination` envelope — this is a pre-ADR-0002 shape."
     post:
@@ -2566,8 +2589,12 @@ paths:
         Creates a new ticket in the unified `tickets` table. `category` defaults
         to `general`, `priority` to `medium`, `source` to `manual`, `status` to
         `open`, `external_sync_status` to `none`. Inventory-link UUID fields
-        (finding_id, asset_id, etc.) are silently dropped when malformed, same
-        as the list filters.
+        (finding_id, asset_id, control_id, certificate_id,
+        crypto_implementation_id, assigned_to) must parse as UUIDs (400
+        otherwise); `assigned_to`, `finding_id`, `asset_id` and
+        `certificate_id` must also exist in the caller's tenant (422
+        otherwise). `title` is at most 200 characters and `description` at most
+        20000.
       requestBody:
         required: true
         content:
@@ -2585,6 +2612,10 @@ paths:
           $ref: "#/components/responses/LegacyBadRequest"
         "401":
           $ref: "#/components/responses/LegacyUnauthorized"
+        "413":
+          $ref: "#/components/responses/LegacyPayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/LegacyUnprocessable"
         "500":
           $ref: "#/components/responses/LegacyServerError"
       x-quirks:
@@ -2703,11 +2734,15 @@ paths:
           $ref: "#/components/responses/LegacyUnauthorized"
         "404":
           $ref: "#/components/responses/LegacyNotFound"
+        "413":
+          $ref: "#/components/responses/LegacyPayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/LegacyUnprocessable"
         "500":
           $ref: "#/components/responses/LegacyServerError"
       x-quirks:
         - "Not-found is detected by `err.Error() == \"ticket not found\"` string matching — any service-layer rewording would silently degrade the 404 to a 500."
-        - "Invalid `due_date` (non-RFC3339, non-empty) returns 500 — the parse error is wrapped and bubbles up as a generic update failure. Same handling asymmetry as create."
+        - "Invalid `due_date` (non-RFC3339, non-empty) and a malformed `assigned_to` return 400; an `assigned_to` that is not a user of the tenant returns 422."
     delete:
       operationId: deleteTicket
       tags: [tickets]
@@ -2757,6 +2792,12 @@ paths:
       operationId: listTicketComments
       tags: [tickets]
       summary: List comments on a ticket
+      description: >
+        Oldest first. `page_size` defaults to 100 (the maximum); a malformed
+        `page` or `page_size` is a 400.
+      parameters:
+        - $ref: "#/components/parameters/TicketPageParam"
+        - $ref: "#/components/parameters/TicketPageSizeParam"
       responses:
         "200":
           description: The ticket's comments, oldest first.
@@ -2795,6 +2836,8 @@ paths:
           $ref: "#/components/responses/LegacyUnauthorized"
         "404":
           $ref: "#/components/responses/LegacyNotFound"
+        "413":
+          $ref: "#/components/responses/LegacyPayloadTooLarge"
         "500":
           $ref: "#/components/responses/LegacyServerError"
       x-quirks:
@@ -3348,7 +3391,7 @@ components:
       name: page_size
       in: query
       required: false
-      description: 1..100; values outside this range silently fall back to the default 20.
+      description: Positive integer, default 20; values above 100 are clamped to 100; a malformed value is a 400.
       schema:
         type: integer
         minimum: 1
@@ -3358,6 +3401,23 @@ components:
     # --- Current ("legacy") error envelope: { "error": "string" } ---
     LegacyBadRequest:
       description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyPayloadTooLarge:
+      description: >
+        The request body exceeds the 1 MiB limit. Answered before the body is
+        read when Content-Length declares it, and when the stream passes the cap.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LegacyError"
+    LegacyUnprocessable:
+      description: >
+        The request parsed, but names a row that does not exist in this tenant
+        (an assignee that is not one of the tenant's users, a finding, asset or
+        certificate that is not the tenant's). The message names the field.
       content:
         application/json:
           schema:
@@ -4476,6 +4536,12 @@ components:
           type: [array, "null"]
           items:
             $ref: "#/components/schemas/ComplianceFinding"
+        page:
+          type: integer
+        page_size:
+          type: integer
+        has_next:
+          type: boolean
     FindingHistoryResponse:
       type: object
       additionalProperties: false
@@ -6213,13 +6279,20 @@ components:
     UpdateWorkflowStatusRequest:
       type: object
       additionalProperties: true
-      description: Body for PUT /findings/{id}/workflow-status.
+      description: >
+        Body for PUT /findings/{id}/workflow-status. `workflow_status` must be
+        one of NEW, NOTIFIED, RESOLVED, SUPPRESSED (400 otherwise). SUPPRESSED
+        requires a non-empty `suppression_reason` (at most 2000 characters);
+        when `suppressed_until` is given it must be in the future, and the
+        finding returns to the status it held before once that time passes.
       required: [workflow_status]
       properties:
         workflow_status:
           type: string
+          enum: [NEW, NOTIFIED, RESOLVED, SUPPRESSED]
         suppression_reason:
           type: string
+          maxLength: 2000
         suppressed_until:
           type: string
           format: date-time
@@ -6997,6 +7070,12 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TicketComment"
+        page:
+          type: integer
+        page_size:
+          type: integer
+        has_next:
+          type: boolean
 
     TicketCommentCreatedResponse:
       type: object

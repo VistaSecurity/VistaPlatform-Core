@@ -20,6 +20,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { Link, useNavigate } from 'react-router';
 import { clients } from '../../lib/clients';
+import { useRiskSummary, usePostureTrend, usePqcProgress } from '../../lib/shared-queries';
 import { Icon, LEVEL_MIN, MiniBar, Sparkline, heatColor, proportionPercent } from '../../components/ui';
 import type { AssetFacetBucket } from '../inventory/asset-queries';
 import {
@@ -48,14 +49,7 @@ const TONE: Record<'critical' | 'high' | 'caution', string> = {
 };
 
 function useOverviewNext() {
-  const risk = useQuery({
-    queryKey: ['dashboard', 'risk-summary'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/risk/summary', {});
-      if (error || !data) throw new Error('Failed to load risk summary');
-      return data.risk_summary;
-    },
-  });
+  const risk = useRiskSummary();
   // Same cache key as the original Overview — the two pages must never be able
   // to report a different critical count for the same tenant.
   const findingsSeverity = useQuery({
@@ -66,14 +60,7 @@ function useOverviewNext() {
       return data.all_producer_severity_counts;
     },
   });
-  const pqc = useQuery({
-    queryKey: ['dashboard', 'pqc-progress'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/pqc/progress', {});
-      if (error || !data) throw new Error('Failed to load PQC progress');
-      return data.progress;
-    },
-  });
+  const pqc = usePqcProgress();
   // Its OWN cache key, not the original's: a different `limit` is a different
   // response, and sharing the key would serve whichever page loaded first.
   const expiring = useQuery({
@@ -86,14 +73,7 @@ function useOverviewNext() {
       return data.certificates ?? [];
     },
   });
-  const trend = useQuery({
-    queryKey: ['dashboard', 'posture-trend'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/risk/posture/trend', { params: { query: { days: 30 } } });
-      if (error || !data) throw new Error('Failed to load posture trend');
-      return data.trend ?? [];
-    },
-  });
+  const trend = usePostureTrend(30);
   const tickets = useQuery({ queryKey: ['dashboard', 'ticket-stats'], queryFn: fetchDashboardTicketStats });
 
   // The grid: one `class` facet per risk band, six calls in parallel.

@@ -23,6 +23,7 @@ import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, modalInputStyle } from '../../components/ui/modal';
 import { serverError, useTenants } from '../tenants/queries';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 type TrialListing = adminServiceComponents['schemas']['TrialListing'];
 type TrialEndLanding = adminServiceComponents['schemas']['TrialEndLanding'];
@@ -74,16 +75,13 @@ export function TrialRowActions({ trial }: { trial: Pick<TrialListing, 'tenant_i
   const path = { params: { path: { tenant_id: trial.tenant_id } } };
 
   const extend = useTrialMutation(async (additional_days: number) => {
-    const { error } = await clients.admin.POST('/admin/billing/trials/tenants/{tenant_id}/extend', { ...path, body: { additional_days } });
-    if (error) throw new Error(serverError(error, 'Failed to extend the trial'));
+    unwrap(await clients.admin.POST('/admin/billing/trials/tenants/{tenant_id}/extend', { ...path, body: { additional_days } }), 'Failed to extend the trial');
   }, `Extended ${trial.tenant_name}'s trial`);
   const convert = useTrialMutation(async () => {
-    const { error } = await clients.admin.POST('/admin/billing/trials/tenants/{tenant_id}/convert', path);
-    if (error) throw new Error(serverError(error, 'Failed to convert the trial'));
+    unwrap(await clients.admin.POST('/admin/billing/trials/tenants/{tenant_id}/convert', path), 'Failed to convert the trial');
   }, `${trial.tenant_name} converted to paid`);
   const end = useTrialMutation(async () => {
-    const { data, error } = await clients.admin.DELETE('/admin/billing/trials/tenants/{tenant_id}', path);
-    if (error) throw new Error(serverError(error, 'Failed to end the trial'));
+    const data = unwrap(await clients.admin.DELETE('/admin/billing/trials/tenants/{tenant_id}', path), 'Failed to end the trial');
     return data?.landing;
   }, (l) => !l
     ? `Ended ${trial.tenant_name}'s trial`
@@ -173,10 +171,9 @@ export function StartTrialModal({ onClose }: { onClose: () => void }) {
   const error = !selected ? 'Pick a tenant' : days.trim() && !positiveDays(days) ? 'Days must be a positive number' : null;
 
   const start = useTrialMutation(async () => {
-    const { error: apiError } = await clients.admin.POST('/admin/billing/trials', {
+    unwrap(await clients.admin.POST('/admin/billing/trials', {
       body: { tenant_id: tenantId, ...(days.trim() ? { duration: Number(days) } : {}) },
-    });
-    if (apiError) throw new Error(serverError(apiError, 'Failed to start the trial'));
+    }), 'Failed to start the trial');
   }, `Started a trial for ${selected?.name ?? 'the tenant'}`);
 
   return (

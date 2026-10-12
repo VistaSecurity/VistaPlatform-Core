@@ -90,9 +90,9 @@ paths:
       - sensors
       summary: List sensors for the current tenant
       description: |
-        Returns the tenant's sensors. On any service error the handler logs and
-        returns 200 with an empty list rather than 500, so the Operations page
-        always renders.
+        Returns the tenant's sensors. When the sensor store cannot be read the
+        handler answers 503 rather than an empty list, so a database blip is not
+        mistaken for "this tenant has no sensors".
       responses:
         '200':
           description: The tenant's sensors.
@@ -104,8 +104,9 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
       x-quirks:
-      - 'Service errors return 200 with `{"sensors": []}`, not 500.'
       - On an empty/nil result the `sensors` field can serialize as JSON null;
         the web-ui coalesces with `?? []`.
   /sensors/stats:
@@ -130,9 +131,11 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
       x-quirks:
       - total_discoveries / total_packets / total_errors are always 0 today.
-      - Service errors return 200 with the default (all-zero) stats, not 500.
+      - A store error answers 503, not zeroed stats.
   /sensors/discovery-counts:
     get:
       operationId: getSensorDiscoveryCounts
@@ -521,7 +524,11 @@ paths:
       summary: Queue a command for a sensor
       description: |
         Creates a pending command for the sensor to pick up on its next poll.
-        `command_type` is required in the body. Gated by the `sensors.update`
+        `command_type` is required and must be one of the operator verbs the
+        sensor handles (restart, update_config, clear_cache, trigger_scan,
+        update_interfaces, list_interfaces, set_log_level, export_logs); the
+        encoded payload is capped at 64 KB, and a sensor holds at most 50
+        pending commands (429 beyond that). Gated by the `sensors.update`
         permission. Returns 201 with the created command.
       requestBody:
         required: true
@@ -540,6 +547,12 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '401':
           $ref: '#/components/responses/LegacyUnauthorized'
+        '429':
+          description: The sensor already has the maximum number of pending commands.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LegacyError'
         '500':
           $ref: '#/components/responses/LegacyServerError'
   /sensors/{sensor_id}/health:
@@ -815,7 +828,8 @@ paths:
       - sensors
       summary: Recent discoveries for a sensor
       description: |
-        Returns the sensor's most recent discoveries (default 50), newest first.
+        Returns the sensor's most recent discoveries (default 50, at most 500;
+        a non-positive or non-numeric `limit` is a 400), newest first.
         Each item carries the base discovery fields plus selected metadata
         (source_ip / version / cipher_suite / key_size) promoted to the top level
         when present — so a discovery item is an open object.
@@ -1020,6 +1034,39 @@ paths:
           $ref: '#/components/responses/LegacyBadRequest'
         '404':
           $ref: '#/components/responses/LegacyNotFound'
+  /sensors/register:
+    post:
+      operationId: registerSensor
+      tags:
+      - certificates
+      summary: Enrol a sensor with a single-use registration key
+      description: |
+        Public bootstrap route (no auth middleware): the registration key names
+        the tenant. Registers the sensor and, when a CSR is supplied, issues its
+        mTLS client certificate from the tenant CA.
+
+        When the sensor sends `supports_agent_secret` the response also carries
+        a per-sensor `agent_secret`, once. The sensor persists it and drops the
+        registration key from its config; an older sensor that does not send the
+        flag is issued nothing and keeps its key.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterSensorRequest'
+      responses:
+        '200':
+          description: Sensor registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterSensorResponse'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
   /sensors/{sensor_id}/certificates/revoke:
     parameters:
     - $ref: '#/components/parameters/SensorId'
@@ -2217,6 +2264,58 @@ components:
         reason:
           type: string
           description: compromised / expired / rotated / manual.
+    RegisterSensorRequest:
+      type: object
+      additionalProperties: true
+      description: |
+        POST /sensors/register body. Only the fields that matter to the contract
+        of the agent secret are listed; the rest of the enrolment payload (name,
+        platform, version, profile, network_interfaces, ip_address, host, ...) is
+        unchanged.
+      required:
+      - registration_key
+      properties:
+        registration_key:
+          type: string
+        csr:
+          type: string
+          description: PEM certificate signing request; its CN is the proposed sensor id.
+        sensor_id:
+          type: string
+          format: uuid
+        supports_agent_secret:
+          type: boolean
+          description: Sent by a sensor build that stores the per-sensor secret; without it none is issued.
+    RegisterSensorResponse:
+      type: object
+      additionalProperties: true
+      description: POST /sensors/register result (the fields relevant to the agent-secret contract; see the handler for the rest).
+      required:
+      - sensor_id
+      - client_cert
+      - server_ca_cert
+      properties:
+        sensor_id:
+          type: string
+        client_cert:
+          type: string
+        server_ca_cert:
+          type: string
+        control_plane_url:
+          type: string
+        certificate_expires_at:
+          type: string
+        agent_secret:
+          type: string
+          description: |
+            The per-sensor secret (32 random bytes, standard base64), issued
+            ONCE — only to a sensor that sent `supports_agent_secret`. The
+            platform keeps it wrapped under the master key and cannot show it
+            again. The sensor stores it (0600, atomically with its certificate)
+            and no longer needs to keep the single-use registration key.
+        agent_secret_version:
+          type: integer
+          description: The platform's counter for `agent_secret`; it only increases.
     RotateCertificateRequest:
       type: object
       additionalProperties: false
@@ -2226,6 +2325,12 @@ components:
       properties:
         csr:
           type: string
+        supports_agent_secret:
+          type: boolean
+          description: |
+            Sent by a sensor build that stores the per-sensor secret. Without it
+            rotation changes nothing about the sensor's secret, so an older build
+            is never switched to a secret it would ignore.
     RegenerateCertificatesResponse:
       type: object
       additionalProperties: false
@@ -2462,6 +2567,17 @@ components:
           format: date-time
         message:
           type: string
+        agent_secret:
+          type: string
+          description: |
+            The per-sensor secret (32 random bytes, standard base64), issued
+            ONCE, only when the request sent `supports_agent_secret`: it REPLACES the secret the sensor holds. The sensor keeps the replaced secret for 24 hours so anything sealed just before the rotation still opens; the platform uses this one from now on. The
+            platform keeps it wrapped under the master key and cannot show it
+            again. The sensor stores it (0600, atomically with its certificate)
+            and no longer needs to keep the single-use registration key.
+        agent_secret_version:
+          type: integer
+          description: The platform's counter for `agent_secret`; it only increases.
     SensorCertificateResponse:
       type: object
       additionalProperties: true

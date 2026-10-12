@@ -2,11 +2,11 @@ package middleware
 
 import (
 	"context"
-	"net/http"
-	"strings"
+	"strconv"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -33,48 +33,47 @@ func NewRedisRevocationWriter(rdb *redis.Client) RevocationWriter {
 	return redisRevocationWriter{rdb: rdb}
 }
 
-// RevokeRequestAccessToken puts the access token presented on r (Authorization:
-// Bearer, else the named cookies in order) on the denylist for the rest of its
-// life, so a sign-out ends the live access token on every service, not only the
-// refresh token.
+// RevokeRequestAccessToken puts the access token that RequireJWTAuth verified
+// for this request on the denylist for the rest of its life, so a sign-out ends
+// the live access token on every service, not only the refresh token.
 //
-// The token must already have been validated by the auth middleware: only its
-// registered jti and exp claims are read here, without verifying the signature.
+// The jti and exp come from the gin context (CtxKeyTokenID /
+// CtxKeyTokenExpiresAt), set by the middleware only after the signature and
+// claims were verified. Nothing is read from the request's headers or cookies,
+// so a request cannot steer the write to a jti it did not authenticate with.
 // It returns revoked=false with a nil error when there is nothing to deny (no
-// writer, no token, no jti/exp, or already expired) and a non-nil error only when
-// the denylist write itself fails.
-func RevokeRequestAccessToken(ctx context.Context, w RevocationWriter, r *http.Request, cookieNames ...string) (revoked bool, err error) {
-	if w == nil {
+// writer, no verified jti/exp, or already expired) and a non-nil error only
+// when the denylist write itself fails.
+func RevokeRequestAccessToken(ctx context.Context, w RevocationWriter, c *gin.Context) (revoked bool, err error) {
+	if w == nil || c == nil {
 		return false, nil
 	}
-	raw := ""
-	if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
-		raw = strings.TrimSpace(h[7:])
-	}
-	if raw == "" {
-		for _, name := range cookieNames {
-			if ck, cerr := r.Cookie(name); cerr == nil && ck.Value != "" {
-				raw = ck.Value
-				break
-			}
-		}
-	}
-	if raw == "" {
+	jti, ok := GetTokenIDFromContext(c)
+	if !ok {
 		return false, nil
 	}
-	var claims jwt.RegisteredClaims
-	if _, _, perr := jwt.NewParser().ParseUnverified(raw, &claims); perr != nil {
+	exp, ok := GetTokenExpiresAtFromContext(c)
+	if !ok {
 		return false, nil
 	}
-	if claims.ID == "" || claims.ExpiresAt == nil {
-		return false, nil
-	}
-	ttl := time.Until(claims.ExpiresAt.Time)
+	ttl := time.Until(exp)
 	if ttl <= 0 {
 		return false, nil
 	}
-	if err := w.RevokeJTI(ctx, claims.ID, ttl); err != nil {
+	if err := w.RevokeJTI(ctx, jti, ttl); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// RevokeUserTokensIssuedBefore makes every access token for userID minted before
+// cutoff invalid on every service (read side: UserCutoffChecker). ttl must
+// outlast the longest-lived access token, after which the entry is moot. Tokens
+// minted at or after cutoff's whole second keep working, so a reactivated user
+// signing in afterwards is unaffected and nothing needs clearing.
+func RevokeUserTokensIssuedBefore(ctx context.Context, rdb *redis.Client, userID uuid.UUID, cutoff time.Time, ttl time.Duration) error {
+	if rdb == nil {
+		return nil
+	}
+	return rdb.Set(ctx, RevokedUserCutoffKey(userID), strconv.FormatInt(cutoff.Unix(), 10), ttl).Err()
 }

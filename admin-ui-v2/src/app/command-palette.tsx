@@ -5,7 +5,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Search, CornerDownLeft } from 'lucide-react';
-import { SECTIONS, editionAllows, licenseAllows } from './nav';
+import { SECTIONS, visibleSections } from './nav';
+import { usePlatformPermissions } from '@vistasecurity/primitives/platform-auth';
 import { Avatar, initialsFromName } from '../components/ui/primitives';
 import { useTenants, planLabel } from '../sections/tenants/queries';
 import { usePlatformEdition } from '../lib/edition';
@@ -18,6 +19,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const navigate = useNavigate();
   const { data: tenants } = useTenants();
   const { capabilities, license } = usePlatformEdition();
+  const { hasPermission } = usePlatformPermissions();
   const [q, setQ] = useState('');
   const [idx, setIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -28,11 +30,10 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
 
   const results = useMemo<Result[]>(() => {
     const ql = q.trim().toLowerCase();
-    // Edition filter mirrors the sidebar: the palette is a second door into the
-    // same sections, so leaving it unfiltered would hand a Core operator the
-    // 404-ing Tenants page the rail no longer offers.
-    const navHits: Result[] = SECTIONS
-      .filter((s) => editionAllows(s, capabilities) && licenseAllows(s, license))
+    // Same gates as the sidebar (permission, edition, licence): the palette is
+    // a second door into the same sections, so leaving any gate out would offer
+    // an operator sections the rail hides and the route guards refuse.
+    const navHits: Result[] = visibleSections(hasPermission, capabilities, SECTIONS, license)
       .filter((s) => !ql || s.label.toLowerCase().includes(ql) || s.title.toLowerCase().includes(ql))
       .map((s) => ({ kind: 'nav', id: s.id, label: s.label, sub: s.subtitle }));
     const tenantHits: Result[] = (tenants ?? [])
@@ -40,7 +41,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       .slice(0, 6)
       .map((t) => ({ kind: 'tenant', id: t.id, label: t.name, sub: `${t.slug} · ${planLabel(t)}`, brand: planLabel(t) === 'Sovereign' }));
     return [...navHits, ...tenantHits];
-  }, [q, tenants, capabilities, license]);
+  }, [q, tenants, capabilities, license, hasPermission]);
 
   useEffect(() => { setIdx(0); }, [q]);
 
@@ -48,7 +49,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
 
   const run = (r: Result) => {
     onClose();
-    navigate(r.kind === 'nav' ? `/${r.id}` : '/tenants');
+    navigate(r.kind === 'nav' ? `/${r.id}` : `/tenants?open=${encodeURIComponent(r.id)}`);
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {

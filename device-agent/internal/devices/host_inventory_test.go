@@ -1,6 +1,7 @@
 package devices
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestExecute_HostInventoryRefusesLocalMode(t *testing.T) {
 		exec, rec := newTestExecutor()
 		job := hostInventoryJob(map[string]interface{}{"mode": mode})
 
-		if err := exec.Execute(job); err != nil {
+		if err := exec.Execute(context.Background(), job); err != nil {
 			t.Fatalf("mode %q: execute: %v", mode, err)
 		}
 		res := rec.last()
@@ -81,7 +82,7 @@ func TestExecute_HostInventoryRefusesWinRMWithAnExplanation(t *testing.T) {
 		"mode": "remote", "transport": "winrm", "ip_address": "198.51.100.30",
 	})
 
-	if err := exec.Execute(job); err != nil {
+	if err := exec.Execute(context.Background(), job); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	res := rec.last()
@@ -102,7 +103,7 @@ func TestExecute_HostInventoryRejectsAnUnknownTransport(t *testing.T) {
 	job := hostInventoryJob(map[string]interface{}{
 		"mode": "remote", "transport": "telnet", "ip_address": "198.51.100.30",
 	})
-	if err := exec.Execute(job); err != nil {
+	if err := exec.Execute(context.Background(), job); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if res := rec.last(); res == nil || res.Success || !strings.Contains(res.Error, "telnet") {
@@ -117,7 +118,7 @@ func TestExecute_HostInventoryRefusesAJobWithNoTarget(t *testing.T) {
 	exec, rec := newTestExecutor()
 	job := hostInventoryJob(map[string]interface{}{"mode": "remote", "transport": "ssh"})
 
-	if err := exec.Execute(job); err != nil {
+	if err := exec.Execute(context.Background(), job); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	res := rec.last()
@@ -133,7 +134,7 @@ func TestExecute_HostInventoryRefusesAJobWithNoTarget(t *testing.T) {
 // turned the default branch into a catch-all.
 func TestExecute_UnknownJobTypeIsStillAnError(t *testing.T) {
 	exec, _ := newTestExecutor()
-	if err := exec.Execute(&models.Job{ID: uuid.New(), Type: "not_a_thing"}); err == nil {
+	if err := exec.Execute(context.Background(), &models.Job{ID: uuid.New(), Type: "not_a_thing"}); err == nil {
 		t.Fatal("an unknown job type was accepted")
 	}
 }

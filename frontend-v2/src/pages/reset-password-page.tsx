@@ -2,17 +2,25 @@
 // dead-ended at /login). Reads the reset token from the URL and posts a new
 // password to the contracted POST /auth/reset-password. On success the
 // user signs in with the new password. Public route — mounted outside RequireAuth.
-import { useState, type FormEvent } from 'react';
-import { useNavigate, useSearchParams } from 'react-router';
+import { useEffect, useState, type FormEvent } from 'react';
+import { useLocation, useNavigate, useSearchParams } from 'react-router';
 import { useMutation } from '@tanstack/react-query';
 import { clients } from '../lib/clients';
 import { Icon } from '../components/ui';
 import { AuthShell, AuthLabel, AuthSubmit, AuthError, authInputStyle } from './auth-shell';
+import { unwrap } from '../lib/api-result';
 
 export function ResetPasswordPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const token = params.get('token') || '';
+  const { pathname } = useLocation();
+  // Read the token once, then take it out of the address bar so it doesn't sit
+  // in history, a screenshot or a Referer (the SSO callback strips its query the
+  // same way). Held in state so the form survives the URL change.
+  const [token] = useState(() => params.get('token') || '');
+  useEffect(() => {
+    if (params.has('token')) void navigate(pathname, { replace: true });
+  }, [navigate, params, pathname]);
 
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -27,10 +35,9 @@ export function ResetPasswordPage() {
     mutationFn: async () => {
       // The contract carries both `password` and `new_password` (min 8); send the
       // chosen new password as both.
-      const { data, error, response } = await clients.auth.POST('/auth/reset-password', {
+      const data = unwrap(await clients.auth.POST('/auth/reset-password', {
         body: { token, password, new_password: password },
-      });
-      if (!response.ok || error || !data) throw new Error((error as { error?: string } | undefined)?.error || 'Could not reset your password. The link may have expired.');
+      }), 'Could not reset your password. The link may have expired.', { requireData: true });
       return data;
     },
     onSuccess: () => setDone(true),

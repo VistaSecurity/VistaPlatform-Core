@@ -221,6 +221,11 @@ mail delivery is still being set up. Full flow, including what the invitee sees:
 invited but has not joined. Each can be **resent** (which issues a fresh link and
 invalidates the old one) or **revoked**.
 
+Deactivating or deleting a member signs them out everywhere at once: the pages
+and API calls they already have open stop working on the next request, in every
+service, not when their sign-in would have expired. Reactivating a member does not
+bring those old sessions back; they sign in again.
+
 Three per-member actions sit at the end of each row, all needing the manage-users
 permission:
 
@@ -652,7 +657,8 @@ fourteen-column table. The
 filters.
 
 Event coverage spans authentication, asset changes, discovery jobs, compliance
-evaluations, and more. Retention follows the schedule your platform operator
+evaluations, and more. Sensor and discovery-agent heartbeats and job polls are
+not recorded, so the trail shows what people did rather than machine liveness. Retention follows the schedule your platform operator
 sets — see [Retention Policies](#retention-policies). For the full event
 taxonomy and the investigation workflows, see the
 [Audit Logging guide](./audit-logging.md).

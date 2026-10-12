@@ -11,6 +11,7 @@
 // `software_end_of_life` findings — is part 2 and depends on the phase-1 asset
 // rewrite. Nothing on this page claims otherwise.
 import { useState } from 'react';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import { CalendarClock, Search } from 'lucide-react';
 import { Tag, num } from '../../components/ui/primitives';
 import {
@@ -93,8 +94,10 @@ function CatalogueView() {
   const [search, setSearch] = useState('');
   const [kind, setKind] = useState<ProductKind | ''>('');
   const [page, setPage] = useState(1);
+  // The input is controlled by `search`; the query is keyed on the debounced value.
+  const debouncedSearch = useDebouncedValue(search);
 
-  const { data, isLoading, isError, refetch } = useEolCatalogue({ search, kind, page });
+  const { data, isLoading, isError, refetch } = useEolCatalogue({ search: debouncedSearch, kind, page });
   const rows = data?.rows ?? [];
   const total = data?.total ?? 0;
   const lastPage = Math.max(1, Math.ceil(total / (data?.pageSize ?? PAGE_SIZE)));

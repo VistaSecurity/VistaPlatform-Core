@@ -58,6 +58,24 @@ type Discovery struct {
 	// request", which keeps the chain working on an install that has neither
 	// set rather than emitting a blank URL.
 	PublicBaseURL string
+
+	// Production marks a production deployment. There the Host header is never
+	// believed on its own: with no usable PublicBaseURL the discovery document
+	// is refused (503) and the 401 challenge carries no resource_metadata,
+	// because a request-derived origin lets any client that can reach the pod
+	// choose the authorization server a caching intermediary then serves to
+	// everyone.
+	Production bool
+	// AllowHostFallback (MCP_ALLOW_HOST_FALLBACK=true) restores the
+	// request-derived origin in production. For a deployment that is
+	// reachable ONLY through a gateway that rewrites Host; off by default.
+	AllowHostFallback bool
+}
+
+// hostFallbackAllowed reports whether the origin may be derived from the
+// request when PublicBaseURL is unusable. Development always may.
+func (d Discovery) hostFallbackAllowed() bool {
+	return !d.Production || d.AllowHostFallback
 }
 
 // baseURL resolves the external origin for this request.
@@ -70,12 +88,21 @@ func (d Discovery) baseURL(r *http.Request) string {
 	if b := normalizeOrigin(d.PublicBaseURL); b != "" {
 		return b
 	}
+	if !d.hostFallbackAllowed() {
+		return ""
+	}
 	return requestOrigin(r)
 }
 
 // ResourceMetadataURL is the absolute URL the 401 challenge points at.
+// Empty when no trustworthy origin exists (see Discovery.Production); the
+// challenge then omits the parameter rather than point at a request-chosen host.
 func (d Discovery) ResourceMetadataURL(r *http.Request) string {
-	return d.baseURL(r) + ProtectedResourceMetadataPath
+	base := d.baseURL(r)
+	if base == "" {
+		return ""
+	}
+	return base + ProtectedResourceMetadataPath
 }
 
 // Metadata builds the document served at both well-known paths.
@@ -94,6 +121,13 @@ func (d Discovery) Metadata(r *http.Request) ProtectedResourceMetadata {
 
 // ServeProtectedResourceMetadata answers the RFC 9728 well-known endpoints.
 func (d Discovery) ServeProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	if d.baseURL(r) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"oauth discovery is not configured: set OAUTH_CALLBACK_BASE_URL to this deployment's public origin (or MCP_ALLOW_HOST_FALLBACK=true behind a gateway that rewrites Host)"}`))
+		return
+	}
 	body, err := json.Marshal(d.Metadata(r))
 	if err != nil {
 		http.Error(w, `{"error":"failed to render resource metadata"}`, http.StatusInternalServerError)

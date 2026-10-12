@@ -13,10 +13,12 @@ import (
 	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/agentsecret"
 	"github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	sharednetwork "github.com/vistasecurity/vistaplatform/shared/network"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/tenantstate"
 )
 
@@ -134,16 +136,35 @@ func (s *AgentService) RegisterDeviceAgentBootstrap(ctx context.Context, req mod
 		agentID = uuid.New()
 	}
 
+	// The per-agent secret, generated BEFORE the key is spent so a
+	// platform that cannot store one (no master key) refuses the enrolment
+	// instead of handing out a secret it could not use. An agent build that did
+	// not ask for one keeps the registration key as its root (version 0).
+	var secret string
+	var wrappedSecret sql.NullString
+	secretVersion := 0
+	if req.SupportsAgentSecret {
+		var wrapped string
+		secret, wrapped, err = s.issueAgentSecret()
+		if err != nil {
+			return nil, fmt.Errorf("failed to issue agent secret: %w", err)
+		}
+		wrappedSecret = sql.NullString{String: wrapped, Valid: true}
+		secretVersion = 1
+	}
+
 	now := time.Now()
 	insertQuery := `
 		INSERT INTO device_agents (
-			id, tenant_id, registration_key, name, description, platform, profile, version, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			id, tenant_id, registration_key, name, description, platform, profile, version, status, created_at, updated_at,
+			agent_secret_enc, agent_secret_version
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING id, tenant_id, name, platform, profile, version, status, last_heartbeat, created_at, updated_at
 	`
 	agent := &models.Agent{}
 	err = tx.QueryRowContext(ctx, insertQuery,
 		agentID, tenantID, req.RegistrationKey, pendingName, pendingDescription, req.Platform, profile, req.Version, "active", now, now,
+		wrappedSecret, secretVersion,
 	).Scan(
 		&agent.ID, &agent.TenantID, &agent.Name, &agent.Platform, &agent.Profile, &agent.Version,
 		&agent.Status, &agent.LastHeartbeat, &agent.CreatedAt, &agent.UpdatedAt,
@@ -166,7 +187,56 @@ func (s *AgentService) RegisterDeviceAgentBootstrap(ctx context.Context, req mod
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit registration: %w", err)
 	}
+	agent.AgentSecret = secret
+	agent.AgentSecretVersion = secretVersion
 	return agent, nil
+}
+
+// agentSecretCipher is the house credential cipher, keyed by the master key, that
+// wraps an agent secret at rest.
+func (s *AgentService) agentSecretCipher() (*credentials.Cipher, error) {
+	return credentials.NewCipher("device agent secret", s.encryptionKey, credentials.Policy{})
+}
+
+// issueAgentSecret generates a new secret and its wrapped, storable form.
+func (s *AgentService) issueAgentSecret() (secret, wrapped string, err error) {
+	cipher, err := s.agentSecretCipher()
+	if err != nil {
+		return "", "", err
+	}
+	return agentsecret.Issue(cipher)
+}
+
+// RotateAgentSecret issues the agent a NEW secret, replacing the stored one, and
+// returns the plaintext and the new version for the rotation response.
+//
+// Called after the replacement certificate was issued, so a failure here leaves
+// everything coherent: the agent gets its new certificate, is told nothing about
+// a secret, and keeps sealing/opening under the one it has.
+//
+// There is no previous-secret column. The platform seals a job with the current
+// secret at the moment it hands the job over; the grace for an envelope already
+// in the agent's hands when it rotated is the agent's (agentcreds.PreviousSecretWindow).
+//
+// RLS: agent-outbound — keyed by agent id, so the bypass role, like every other
+// read and write on this path.
+func (s *AgentService) RotateAgentSecret(ctx context.Context, agentID uuid.UUID) (secret string, version int, err error) {
+	secret, wrapped, err := s.issueAgentSecret()
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to issue agent secret: %w", err)
+	}
+	err = s.bypassDB.QueryRowContext(ctx, `
+		UPDATE device_agents
+		   SET agent_secret_enc = $2, agent_secret_version = agent_secret_version + 1, updated_at = NOW()
+		 WHERE id = $1 AND deleted_at IS NULL
+		RETURNING agent_secret_version`, agentID, wrapped).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, ErrAgentNotFound
+	}
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to store agent secret: %w", err)
+	}
+	return secret, version, nil
 }
 
 // RegisterAgent registers a new device agent. tenantID is an INPUT, so the
@@ -723,25 +793,45 @@ func hasAnyTarget(params map[string]interface{}) bool {
 	return false
 }
 
-// sealJobCredentials resolves the claiming agent's registration key and seals
-// the job's credentials with it.
+// sealJobCredentials resolves the secret the claiming agent opens envelopes
+// with and seals the job's credentials under it.
+//
+// That is the agent's per-agent secret once one has been issued, and the
+// registration key for an agent that has not rotated its certificate since
+// before secrets existed (agent_secret_version 0). An agent holding a secret
+// whose stored form cannot be unwrapped fails the job loudly; falling back to
+// the registration key there would seal under a key the agent has already
+// discarded.
 //
 // RLS: agent-outbound — keyed by agent id, tenant is the OUTPUT → bypass role,
 // same as every other read on this path.
 func (s *AgentService) sealJobCredentials(ctx context.Context, agentID uuid.UUID, job *models.Job) (map[string]interface{}, error) {
-	var registrationKey sql.NullString
+	var registrationKey, wrappedSecret sql.NullString
+	var secretVersion int
 	err := s.bypassDB.QueryRowContext(ctx,
-		`SELECT registration_key FROM device_agents WHERE id = $1 AND deleted_at IS NULL`,
+		`SELECT registration_key, agent_secret_enc, agent_secret_version FROM device_agents WHERE id = $1 AND deleted_at IS NULL`,
 		agentID,
-	).Scan(&registrationKey)
+	).Scan(&registrationKey, &wrappedSecret, &secretVersion)
 	if err == sql.ErrNoRows {
 		return nil, ErrAgentNotFound
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve agent registration key: %w", err)
+		return nil, fmt.Errorf("failed to resolve agent credential secret: %w", err)
 	}
 
-	return SealCredentialsForAgent(job.Credentials, job.ID.String(), registrationKey.String, s.encryptionKey)
+	root := registrationKey.String
+	if secretVersion > 0 {
+		var cipher *credentials.Cipher
+		cipher, err = s.agentSecretCipher()
+		if err == nil {
+			root, err = agentsecret.Unwrap(cipher, wrappedSecret.String)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("agent secret v%d unusable: %w", secretVersion, err)
+		}
+	}
+
+	return SealCredentialsForAgent(job.Credentials, job.ID.String(), root, s.encryptionKey)
 }
 
 // SubmitJobResult submits job execution results.

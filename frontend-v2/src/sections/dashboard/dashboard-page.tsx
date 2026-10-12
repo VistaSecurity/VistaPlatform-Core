@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router';
 import { clients } from '../../lib/clients';
+import { useRiskSummary, usePostureTrend, usePqcProgress } from '../../lib/shared-queries';
 import { Icon, LevelBar, LevelDot, MiniBar, PercentageGauge, RiskDonut, proportionPercent, LEVEL_MIN, type DonutSegment } from '../../components/ui';
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import {
@@ -24,14 +25,7 @@ import { InventoryHealthHero } from './inventory-health-hero';
 const BLUE = 'var(--info)', GREEN = 'var(--ok)', RED = 'var(--danger)', ORANGE = 'var(--warn-strong)';
 
 function useRollups() {
-  const risk = useQuery({
-    queryKey: ['dashboard', 'risk-summary'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/risk/summary', {});
-      if (error || !data) throw new Error('Failed to load risk summary');
-      return data.risk_summary;
-    },
-  });
+  const risk = useRiskSummary();
   const sensors = useQuery({ queryKey: ['dashboard', 'sensors'], queryFn: fetchDashboardSensors });
   // Discovery agents are a SECOND fleet, in device-interrogation-service's own
   // table — the Discovery card counted only /sensors and so under-reported the
@@ -41,14 +35,7 @@ function useRollups() {
   // classifier's full partition (pqc_ready, symmetric_safe, non_pqc,
   // unclassified) so "not yet assessed" configs can be shown separately
   // instead of being folded into "on classical crypto".
-  const pqc = useQuery({
-    queryKey: ['dashboard', 'pqc-progress'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/pqc/progress', {});
-      if (error || !data) throw new Error('Failed to load PQC progress');
-      return data.progress;
-    },
-  });
+  const pqc = usePqcProgress();
   // H-2: critical-findings counts sourced from compliance-engine's own
   // materialized findings (the same table the Findings page reads), not from
   // inventory-service's crypto-implementation-risk-score-derived
@@ -79,14 +66,7 @@ function useRollups() {
   const untrustedCerts = useQuery({ queryKey: ['dashboard', 'untrusted-certs'], queryFn: fetchUntrustedCertificateCount });
   // 30-day posture trend (ADR-0007). New tenants get a flat seeded baseline at
   // their current posture rather than a blank chart.
-  const trend = useQuery({
-    queryKey: ['dashboard', 'posture-trend'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/risk/posture/trend', { params: { query: { days: 30 } } });
-      if (error || !data) throw new Error('Failed to load posture trend');
-      return data.trend ?? [];
-    },
-  });
+  const trend = usePostureTrend(30);
   // Observed 3rd-party (external) connections — the /inventory?lens=connections rollup.
   const connections = useQuery({
     queryKey: ['dashboard', 'external-connections-summary'],

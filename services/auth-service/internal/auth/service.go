@@ -13,11 +13,14 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -462,12 +465,8 @@ func (a *AuthService) Register(req *models.RegisterRequest) (*models.User, error
 	}
 
 	// Check if email already exists across all tenants (global uniqueness)
-	existingUser, err := a.GetUserByEmail(req.Email)
-	if err != nil && err != ErrUserNotFound {
+	if err := a.ensureEmailAvailable(req.Email); err != nil {
 		return nil, err
-	}
-	if existingUser != nil {
-		return nil, ErrEmailExists
 	}
 
 	// Hash password
@@ -652,102 +651,47 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 	// Get user by email with tenant information for multi-tenant isolation
 	user, err := a.GetUserByEmail(req.Email)
 	if err != nil {
+		if errors.Is(err, ErrAmbiguousEmail) {
+			// Fail closed and indistinguishably: a shared address cannot be
+			// resolved to one account, so nobody signs in with it. The
+			// duplicate was logged loudly by GetUserByEmail.
+			a.burnPasswordHash(req.Password)
+			return nil, ErrInvalidCredentials
+		}
 		if err == ErrUserNotFound {
-			// Check if this is a platform user
-			platformUser, passwordHash, platformRoleName, forcePasswordChange, platformErr := a.getPlatformUserByEmail(req.Email)
+			// Not a tenant user. If the address is a platform account, this
+			// service does NOT sign it in: refresh_tokens.user_id has a
+			// foreign key to users, so a platform session could never be
+			// persisted, and platform staff authenticate through admin-service.
+			// A caller who proves the password is told where to go; everyone
+			// else gets exactly what a wrong password gets, with the same
+			// Argon2id cost, so neither the answer nor its timing says whether
+			// the address is a platform account.
+			platformID, passwordHash, platformErr := a.lookupPlatformAccountByEmail(req.Email)
 			if platformErr != nil {
-				// An unknown address must cost what a known one costs: without
-				// this, "no such user" answers in a millisecond while a real
-				// account spends an Argon2id verification, so response time
-				// alone enumerates accounts.
 				a.burnPasswordHash(req.Password)
 				return nil, ErrInvalidCredentials
 			}
 
-			// Check if platform user is active
-			if !platformUser.IsActive {
-				return nil, ErrUserInactive
-			}
-
-			// Check if the account is locked due to too many failed attempts
-			//. Platform admins are the highest-privilege accounts and now
-			// get the same lockout the tenant path has always had.
-			platformLocked, lockErr := a.checkPlatformAccountLocked(platformUser.ID)
+			// Same lockout the tenant path has: this endpoint must not
+			// be a password-guessing oracle for platform staff.
+			platformLocked, lockErr := a.checkPlatformAccountLocked(platformID)
 			if lockErr != nil {
-				logrus.WithError(lockErr).WithField("platform_user_id", platformUser.ID).Warn("Failed to check platform account lockout status")
+				logrus.WithError(lockErr).WithField("platform_user_id", platformID).Warn("Failed to check platform account lockout status")
 			} else if platformLocked {
 				return nil, ErrAccountLocked
 			}
 
-			// Verify password for platform user. A platform account with no
-			// password (SSO-only) is an invalid-credentials answer like any
-			// other wrong password — not an internal error, which would tell the
-			// caller the account exists.
 			valid, err := a.verifyLoginPassword(req.Password, passwordHash)
 			if err != nil {
 				return nil, err
 			}
 			if !valid {
-				a.recordPlatformFailedLogin(platformUser.ID)
+				a.recordPlatformFailedLogin(platformID)
 				return nil, ErrInvalidCredentials
 			}
-
-			// Reset the failed-login counter on a successful authentication.
-			a.resetPlatformFailedLoginAttempts(platformUser.ID)
-
-			sessionTTL := authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry())
-
-			// Generate tokens for platform user (no tenant_id for platform users).
-			//
-			// When the account carries force_password_change this must be a
-			// LIMITED session: the holder proved knowledge of a password
-			// that has to be rotated — on a fresh install that is the PUBLISHED
-			// seeded super-admin password — so the token carries
-			// pwd_change_required and reaches nothing but the change-password
-			// flow. admin-service has always done this; auth-service did not,
-			// which meant the mitigation was bypassable simply by logging in at
-			// the tenant host instead.
-			accessToken, refreshToken, err := a.jwt.GenerateTokensWithPasswordChange(
-				platformUser.ID, uuid.Nil, platformUser.Email, platformRoleName, sessionTTL, forcePasswordChange)
-			if err != nil {
-				return nil, fmt.Errorf("failed to generate tokens: %w", err)
-			}
-
-			// Update last login time for platform user.
-			// Best-effort: a failure here must not fail the login.
-			now := time.Now()
-			_, _ = a.db.Exec(
-				"UPDATE platform_users SET last_login_at = $1 WHERE id = $2",
-				now, platformUser.ID,
-			)
-
-			// Store refresh token
-			expiresAt := time.Now().Add(sessionTTL)
-			_, err = a.refreshTokenService.StoreRefreshToken(
-				platformUser.ID,
-				refreshToken,
-				nil,
-				expiresAt,
-				clientIP,
-				userAgent,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("failed to store refresh token: %w", err)
-			}
-
-			return &models.AuthResponse{
-				AccessToken:      accessToken,
-				RefreshToken:     refreshToken,
-				RefreshExpiresIn: int64(sessionTTL.Seconds()),
-				User: &models.User{
-					ID:        platformUser.ID,
-					Email:     platformUser.Email,
-					FirstName: platformUser.FirstName,
-					LastName:  platformUser.LastName,
-					Role:      platformRoleName,
-					IsActive:  platformUser.IsActive,
-				},
-			}, nil
+			a.resetPlatformFailedLoginAttempts(platformID)
+			return nil, &PlatformAccountError{AdminURL: a.adminUIBaseURL()}
 		}
 		return nil, err
 	}
@@ -776,6 +720,20 @@ func (a *AuthService) Login(req *models.LoginRequest, clientIP, userAgent string
 	// address a deactivated account?" with no credential at all.
 	if !user.IsActive {
 		return nil, ErrUserInactive
+	}
+
+	// An sso_only tenant has no local passwords (and enforce_sso has none for
+	// non-admins): a password that happens to be correct (an old one, one set by a reset, one for a user since removed from
+	// the IdP) must not open a session. Checked only AFTER the password proved
+	// out, so the refusal tells an unauthenticated caller nothing about the
+	// tenant, and a failed lookup refuses rather than waves through. Both /auth/login and
+	// /auth/authenticate land here, so one check covers both.
+	forbidden, policyErr := a.localPasswordRefused(user.ID, user.TenantID)
+	if policyErr != nil {
+		return nil, policyErr
+	}
+	if forbidden {
+		return nil, ErrSSORequired
 	}
 
 	// Reset failed login attempts on successful authentication
@@ -882,57 +840,23 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 		return nil, ErrInvalidToken
 	}
 
-	// Get user — for platform users, TenantID is uuid.Nil; fall back to platform_users if needed
+	// Platform tokens carry TenantID uuid.Nil and have no users row.
 	user, err := a.GetUserByID(claims.UserID)
 	if err != nil {
 		if err != ErrUserNotFound || claims.TenantID != uuid.Nil {
 			return nil, err
 		}
-		// Platform user token on tenant endpoint: look up in platform_users
-		platformUser, roleName, forcePasswordChange, platformErr := a.getPlatformUserByID(claims.UserID)
-		if platformErr != nil {
-			return nil, ErrUserNotFound
+		// A platform session cannot be refreshed here: its refresh
+		// token was never persistable against the users foreign key.
+		if a.platformAccountExists(claims.UserID) {
+			return nil, &PlatformAccountError{AdminURL: a.adminUIBaseURL()}
 		}
-		if !platformUser.IsActive {
-			return nil, ErrUserInactive
-		}
-		sessionTTL := authpolicy.SessionLifetime(a.db, a.jwt.GetRefreshExpiry())
-		accessToken, newRefreshToken, err := a.jwt.GenerateTokensWithPasswordChange(
-			platformUser.ID, uuid.Nil, platformUser.Email, roleName, sessionTTL, forcePasswordChange)
-		if err != nil {
-			return nil, fmt.Errorf("failed to generate tokens: %w", err)
-		}
-		expiresAt := time.Now().Add(sessionTTL)
-		_, err = a.refreshTokenService.ValidateAndRotateToken(
-			refreshToken,
-			platformUser.ID,
-			newRefreshToken,
-			expiresAt,
-			clientIP,
-			userAgent,
-		)
-		if err != nil {
-			if err == ErrTokenReuseDetected {
-				// ValidateAndRotateToken already revoked the entire token family.
-				// Do NOT call RevokeAllUserTokens — that would kill every session for this
-				// user across all devices/browsers, which is disproportionate. Family
-				// revocation is the right blast radius for a detected replay.
-				return nil, ErrTokenReuseDetected
-			}
-			return nil, err
-		}
-		return &models.AuthResponse{
-			AccessToken:      accessToken,
-			RefreshToken:     newRefreshToken,
-			ExpiresIn:        int64(a.jwt.GetAccessExpiry().Seconds()),
-			RefreshExpiresIn: int64(sessionTTL.Seconds()),
-		}, nil
+		return nil, ErrUserNotFound
 	}
 
 	// Reject refresh for a deactivated user. Login enforces this on the front
 	// door, but without re-checking here a user deactivated mid-session keeps
-	// minting fresh 7-day tokens on every refresh and never loses access. Mirrors
-	// the platform-user branch above.
+	// minting fresh 7-day tokens on every refresh and never loses access.
 	if !user.IsActive {
 		return nil, ErrUserInactive
 	}
@@ -978,91 +902,68 @@ func (a *AuthService) RefreshToken(refreshToken string, clientIP, userAgent stri
 
 // Logout invalidates all refresh tokens for the user
 func (a *AuthService) Logout(userID uuid.UUID) error {
-	return a.refreshTokenService.RevokeAllUserTokens(userID)
+	if err := a.refreshTokenService.RevokeAllUserTokens(userID); err != nil {
+		return err
+	}
+	// Every session is gone, so the other sessions' access tokens go too.
+	a.revokeLiveAccessTokens(userID, "logout")
+	return nil
 }
 
-// getPlatformUserByID retrieves a platform user by UUID.
-//
-// Same two rules as getPlatformUserByEmail, for the same reason: this is the
-// refresh path, which re-mints tokens. Refusing a soft-deleted operator at login
-// but re-issuing their session on refresh would leave the front door locked and
-// a window open, and dropping force_password_change here would let one
-// /auth/refresh call upgrade a limited session into an unrestricted one.
-func (a *AuthService) getPlatformUserByID(userID uuid.UUID) (*models.PlatformUser, string, bool, error) {
-	query := `
-		SELECT pu.id, pu.email, pu.first_name, pu.last_name,
-		       pu.is_active, pu.email_verified, pu.force_password_change,
-		       pu.last_login_at, pu.created_at,
-		       pr.name as role_name
+// lookupPlatformAccountByEmail returns the id and password hash ("" for an
+// SSO-only account) of a live platform account. The filters mirror
+// admin-service's own platform login: a soft-deleted or deactivated operator is
+// not a platform account for this purpose, so it answers as an unknown address.
+func (a *AuthService) lookupPlatformAccountByEmail(email string) (uuid.UUID, string, error) {
+	var id uuid.UUID
+	var passwordHash sql.NullString
+	err := a.db.QueryRow(`
+		SELECT pu.id, pu.password_hash
 		FROM platform_users pu
-		JOIN platform_roles pr ON pu.role_id = pr.id
-		WHERE pu.id = $1 AND pu.deleted_at IS NULL`
-
-	user := &models.PlatformUser{}
-	var roleName string
-	var forcePasswordChange bool
-	err := a.db.QueryRow(query, userID).Scan(
-		&user.ID, &user.Email,
-		&user.FirstName, &user.LastName, &user.IsActive,
-		&user.EmailVerified, &forcePasswordChange,
-		&user.LastLoginAt, &user.CreatedAt,
-		&roleName,
-	)
+		WHERE lower(pu.email) = $1 AND pu.deleted_at IS NULL AND pu.is_active = true`,
+		NormalizeEmail(email)).Scan(&id, &passwordHash)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, "", false, ErrUserNotFound
+			return uuid.Nil, "", ErrUserNotFound
 		}
-		return nil, "", false, err
+		return uuid.Nil, "", err
 	}
-	return user, roleName, forcePasswordChange, nil
+	return id, passwordHash.String, nil
 }
 
-// getPlatformUserByEmail retrieves a platform user by email with password hash,
-// role name and the force_password_change flag.
-//
-// The WHERE clause mirrors admin-service's own platform login
-// (services/admin-service/internal/handlers/auth.go): soft-deleted and
-// deactivated operators must not authenticate here either. Without the
-// deleted_at filter a platform administrator removed in admin-ui kept a working
-// login on the tenant host, because DeletePlatformUser only stamps deleted_at —
-// it does not clear is_active.
-//
-// force_password_change is selected because this is a token-issuing path: the
-// seeded super-admin rows ship with the flag set and the caller must mint
-// a LIMITED session for them rather than an unrestricted one.
-func (a *AuthService) getPlatformUserByEmail(email string) (*models.PlatformUser, string, string, bool, error) {
-	query := `
-		SELECT pu.id, pu.email, pu.password_hash, pu.first_name, pu.last_name,
-		       pu.is_active, pu.email_verified, pu.force_password_change,
-		       pu.last_login_at, pu.created_at,
-		       pr.name as role_name
-		FROM platform_users pu
-		JOIN platform_roles pr ON pu.role_id = pr.id
-		WHERE pu.email = $1 AND pu.deleted_at IS NULL AND pu.is_active = true`
-
-	user := &models.PlatformUser{}
-	var passwordHash sql.NullString // NULL for SSO-only platform users (#891)
-	var roleName string
-	var forcePasswordChange bool
-	err := a.db.QueryRow(query, strings.ToLower(email)).Scan(
-		&user.ID, &user.Email, &passwordHash,
-		&user.FirstName, &user.LastName, &user.IsActive,
-		&user.EmailVerified, &forcePasswordChange,
-		&user.LastLoginAt, &user.CreatedAt,
-		&roleName,
-	)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, "", "", false, ErrUserNotFound
-		}
-		return nil, "", "", false, err
-	}
-
-	return user, passwordHash.String, roleName, forcePasswordChange, nil
+// platformAccountExists reports whether id is a live platform account.
+func (a *AuthService) platformAccountExists(id uuid.UUID) bool {
+	var found uuid.UUID
+	err := a.db.QueryRow(
+		`SELECT id FROM platform_users WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&found)
+	return err == nil
 }
 
-// GetUserByEmail retrieves a user by email
+// adminUIBaseURL returns the admin console base URL: platform_settings
+// admin_ui_base_url (set in admin-ui), then ADMIN_UI_BASE_URL (the chart injects
+// it from tls.adminDnsName), else "" -- callers then omit the link rather than
+// point a user at a guessed host. Same resolution order as admin-service.
+func (a *AuthService) adminUIBaseURL() string {
+	var raw []byte
+	if err := a.db.QueryRow(`SELECT setting_value FROM platform_settings WHERE setting_key = 'admin_ui_base_url'`).Scan(&raw); err == nil {
+		var u string
+		if json.Unmarshal(raw, &u) == nil && u != "" {
+			return u
+		}
+	}
+	return os.Getenv("ADMIN_UI_BASE_URL")
+}
+
+// GetUserByEmail retrieves a user by email.
+//
+// The match is case-insensitive and DETERMINISTIC about uniqueness: the schema
+// only makes (tenant_id, email) unique, so the same address can exist in two
+// tenants (or in two cases within one). Login, reset and lockout all resolve an
+// account from the address alone, so with two matches "the" user is whichever
+// row Postgres returned first — a tenant admin who registered a victim's address
+// in their own tenant would then capture the victim's login, resets and
+// lockouts. More than one live match therefore returns ErrAmbiguousEmail and
+// logs loudly; callers fail closed.
 func (a *AuthService) GetUserByEmail(email string) (*models.User, error) {
 	// RLS: cross-tenant — runs on the bypass role (Phase 4). Login/registration
 	// resolve the tenant FROM the email here; we cannot set app.tenant_id to a
@@ -1072,7 +973,9 @@ func (a *AuthService) GetUserByEmail(email string) (*models.User, error) {
 		       is_active, email_verified, last_login_at, avatar_url, timezone, preferences,
 		       created_at, updated_at, deleted_at
 		FROM users
-		WHERE email = $1 AND deleted_at IS NULL`
+		WHERE lower(email) = $1 AND deleted_at IS NULL
+		ORDER BY created_at, id
+		LIMIT 2`
 
 	user := &models.User{}
 	var preferencesJSON []byte
@@ -1080,17 +983,36 @@ func (a *AuthService) GetUserByEmail(email string) (*models.User, error) {
 	// NullString so loading them doesn't fail. Login/registration resolve
 	// the tenant FROM the email, so this lookup runs on the bypass role (Phase 4).
 	var passwordHash sql.NullString
-	err := a.bypassDB.QueryRow(query, strings.ToLower(email)).Scan(
-		&user.ID, &user.TenantID, &user.Email, &passwordHash,
-		&user.FirstName, &user.LastName, &user.IsActive,
-		&user.EmailVerified, &user.LastLoginAt, &user.AvatarURL, &user.Timezone,
-		&preferencesJSON, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt,
-	)
-
+	normalized := NormalizeEmail(email)
+	rows, err := a.bypassDB.Query(query, normalized)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrUserNotFound
 		}
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, ErrUserNotFound
+	}
+	if err := rows.Scan(
+		&user.ID, &user.TenantID, &user.Email, &passwordHash,
+		&user.FirstName, &user.LastName, &user.IsActive,
+		&user.EmailVerified, &user.LastLoginAt, &user.AvatarURL, &user.Timezone,
+		&preferencesJSON, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt,
+	); err != nil {
+		return nil, err
+	}
+	if rows.Next() {
+		logrus.WithField("email_hash", emailLogToken(normalized)).Error(
+			"SECURITY: more than one live account shares this email address; refusing to resolve it. " +
+				"Resolve the duplicate (the schema only enforces uniqueness per tenant) before this user can sign in.")
+		return nil, ErrAmbiguousEmail
+	}
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	user.PasswordHash = passwordHash.String
@@ -1108,6 +1030,27 @@ func (a *AuthService) GetUserByEmail(email string) (*models.User, error) {
 	user.Role = a.getUserPrimaryRole(user.ID, user.TenantID)
 
 	return user, nil
+}
+
+// emailLogToken is a short, non-reversible tag for an address, so a duplicate
+// can be correlated across log lines without writing the address itself.
+func emailLogToken(normalized string) string {
+	sum := sha256.Sum256([]byte(normalized))
+	return hex.EncodeToString(sum[:6])
+}
+
+// ensureEmailAvailable returns ErrEmailExists when the address is already held by
+// a live tenant user in ANY tenant or by a platform user (global uniqueness — see
+// EmailInUseGlobally), and nil when it is free.
+func (a *AuthService) ensureEmailAvailable(email string) error {
+	inUse, err := EmailInUseGlobally(context.Background(), a.bypassDB, email)
+	if err != nil {
+		return err
+	}
+	if inUse {
+		return ErrEmailExists
+	}
+	return nil
 }
 
 // GetUserByID retrieves a user by ID
@@ -1689,6 +1632,18 @@ func (a *AuthService) checkAccountLocked(userID uuid.UUID) (bool, error) {
 	if lockedUntil.Valid && lockedUntil.Time.After(time.Now()) {
 		return true, nil
 	}
+	if lockedUntil.Valid {
+		// The lockout has run its course. Start the next window from zero:
+		// failed_login_attempts is cumulative, so leaving it at the threshold
+		// would re-lock the account on the very next typo.
+		if _, err := a.bypassDB.Exec(
+			`UPDATE users SET failed_login_attempts = 0, locked_until = NULL, updated_at = $1
+			 WHERE id = $2 AND locked_until IS NOT NULL AND locked_until <= $1`,
+			time.Now(), userID,
+		); err != nil {
+			logrus.WithError(err).WithField("user_id", userID).Warn("Failed to clear expired lockout")
+		}
+	}
 	return false, nil
 }
 
@@ -1753,6 +1708,16 @@ func (a *AuthService) checkPlatformAccountLocked(userID uuid.UUID) (bool, error)
 	if lockedUntil.Valid && lockedUntil.Time.After(time.Now()) {
 		return true, nil
 	}
+	if lockedUntil.Valid {
+		// Expired lockout: restart the counter (see checkAccountLocked).
+		if _, err := a.db.Exec(
+			`UPDATE platform_users SET failed_login_attempts = 0, locked_until = NULL, updated_at = $1
+			 WHERE id = $2 AND locked_until IS NOT NULL AND locked_until <= $1`,
+			time.Now(), userID,
+		); err != nil {
+			logrus.WithError(err).WithField("platform_user_id", userID).Warn("Failed to clear expired platform lockout")
+		}
+	}
 	return false, nil
 }
 
@@ -1816,20 +1781,23 @@ func (a *AuthService) UpdateUser(userID uuid.UUID, req *models.UpdateUserRequest
 	if req.LastName != nil && *req.LastName != "" {
 		user.LastName = *req.LastName
 	}
-	if req.Email != nil && *req.Email != "" && *req.Email != user.Email {
-		// Check if new email is already taken
-		existingUser, err := a.GetUserByEmail(*req.Email)
-		if err != nil && err != ErrUserNotFound {
+	if req.Email != nil && NormalizeEmail(*req.Email) != "" && NormalizeEmail(*req.Email) != NormalizeEmail(user.Email) {
+		// The new address must be free platform-wide (any tenant, and platform
+		// users), not merely absent from the first row GetUserByEmail returns.
+		if err := a.ensureEmailAvailable(*req.Email); err != nil {
 			return nil, err
 		}
-		if existingUser != nil {
-			return nil, ErrEmailExists
-		}
-		user.Email = strings.ToLower(*req.Email)
+		user.Email = NormalizeEmail(*req.Email)
 		user.EmailVerified = false // Require re-verification for email changes
 	}
 	if req.AvatarURL != nil {
-		user.AvatarURL = req.AvatarURL
+		if *req.AvatarURL == "" {
+			user.AvatarURL = nil
+		} else if !ValidAvatarURL(*req.AvatarURL) {
+			return nil, ErrInvalidAvatarURL
+		} else {
+			user.AvatarURL = req.AvatarURL
+		}
 	}
 	if req.Timezone != nil && *req.Timezone != "" {
 		user.Timezone = req.Timezone
@@ -1951,6 +1919,13 @@ func (a *AuthService) ChangePassword(userID uuid.UUID, req *models.ChangePasswor
 	// Get current user
 	user, err := a.GetUserByID(userID)
 	if err != nil {
+		if err == ErrUserNotFound {
+			// A platform user (no tenant, no users row). admin-service mints
+			// them a LIMITED pwd_change_required session whose only way forward is
+			// this endpoint, so it has to work for them — it used to 404,
+			// stranding the seeded super-admin on the forced-change screen.
+			return a.changePlatformPassword(userID, req)
+		}
 		return err
 	}
 
@@ -1989,20 +1964,109 @@ func (a *AuthService) ChangePassword(userID uuid.UUID, req *models.ChangePasswor
 		// Log error but don't fail password change
 		logrus.WithError(err).WithField("user_id", userID).Warn("Failed to revoke refresh tokens after password change")
 	}
+	// ...and the user's other live access tokens, on every service.
+	a.revokeLiveAccessTokens(userID, "password change")
 
 	return nil
 }
 
-// ForgotPassword initiates password reset process
+// forgotPasswordMinDuration is the floor on how long ForgotPassword takes. An
+// unknown address returns almost instantly while a known one writes a token and
+// prepares an email, so without a floor the response time alone tells a caller
+// which addresses have accounts. Tests set it to zero.
+var forgotPasswordMinDuration = 250 * time.Millisecond
+
+// runAsync runs the outbound-mail work off the request path. SMTP is the slow,
+// variable part of both ForgotPassword and SendEmailVerification and used to run
+// inline only for real addresses — a timing oracle for account existence. Tests
+// swap it for a synchronous runner.
+var runAsync = func(f func()) { go f() }
+
+// consumeTokenHash atomically reads AND deletes a Redis hash (one Lua script, so
+// two concurrent presenters of the same token cannot both read it before either
+// deletes it — the HGETALL-then-DEL it replaces let a reset or verification link
+// be redeemed twice in a race). Returns an empty map when the key is absent.
+var consumeTokenHashScript = redis.NewScript(`
+local v = redis.call('HGETALL', KEYS[1])
+if #v > 0 then redis.call('DEL', KEYS[1]) end
+return v
+`)
+
+func (a *AuthService) consumeTokenHash(ctx context.Context, key string) (map[string]string, error) {
+	res, err := consumeTokenHashScript.Run(ctx, a.redis, []string{key}).Slice()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(res)/2)
+	for i := 0; i+1 < len(res); i += 2 {
+		k, _ := res[i].(string)
+		v, _ := res[i+1].(string)
+		out[k] = v
+	}
+	return out, nil
+}
+
+// resendVerificationLimit and resendVerificationWindow cap how many verification
+// mails one address can be sent through the public resend endpoint.
+const (
+	resendVerificationLimit  = 3
+	resendVerificationWindow = 15 * time.Minute
+)
+
+// AllowResendVerification counts one resend request against the address and
+// reports whether it is still within the cap. The count is per normalised
+// address, never per account, so it ticks identically for unknown and known
+// addresses. A Redis failure allows the request (the handler's answer is the
+// same either way; only the mail volume is at stake).
+func (a *AuthService) AllowResendVerification(ctx context.Context, email string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	if normalized == "" || a.redis == nil {
+		return true
+	}
+	sum := sha256.Sum256([]byte(normalized))
+	key := "resend_verification:" + hex.EncodeToString(sum[:])
+	// SET NX with the TTL then INCR keeps the window fixed (an EXPIRE on every
+	// hit would let retries extend it forever).
+	pipe := a.redis.TxPipeline()
+	pipe.SetNX(ctx, key, 0, resendVerificationWindow)
+	incr := pipe.Incr(ctx, key)
+	if _, err := pipe.Exec(ctx); err != nil {
+		logrus.WithError(err).Warn("resend-verification limiter unavailable")
+		return true
+	}
+	return incr.Val() <= resendVerificationLimit
+}
+
+// ForgotPassword initiates password reset process.
+//
+// It is deliberately uniform: an unknown address, an ambiguous one, a user whose
+// tenant is sso_only and a real account all return nil after the same minimum
+// time, and the email (the slow part) is sent asynchronously.
 func (a *AuthService) ForgotPassword(req *models.ForgotPasswordRequest) error {
+	started := time.Now()
+	defer func() {
+		if remaining := forgotPasswordMinDuration - time.Since(started); remaining > 0 {
+			time.Sleep(remaining)
+		}
+	}()
+
 	// Get user by email
 	user, err := a.GetUserByEmail(req.Email)
 	if err != nil {
-		if err == ErrUserNotFound {
+		if err == ErrUserNotFound || errors.Is(err, ErrAmbiguousEmail) {
 			// Don't reveal if email exists or not for security
 			return nil
 		}
 		return err
+	}
+
+	// An sso_only tenant has no local passwords to reset; mailing a reset link
+	// would invite exactly the credential the policy removed. Say nothing.
+	if forbidden, polErr := a.localPasswordRefused(user.ID, user.TenantID); polErr != nil {
+		logrus.WithError(polErr).WithField("user_id", user.ID).Warn("Could not read tenant authentication policy for password reset; not sending")
+		return nil
+	} else if forbidden {
+		return nil
 	}
 
 	// Generate reset token
@@ -2028,31 +2092,56 @@ func (a *AuthService) ForgotPassword(req *models.ForgotPasswordRequest) error {
 		return fmt.Errorf("failed to set reset token expiry: %w", err)
 	}
 
-	// Send email with reset link
-	svc, err := a.emailServiceFromDB()
-	if err != nil {
-		logrus.WithError(err).WithField("email", user.Email).Warn("Email not configured — skipping password reset email")
-		return nil
-	}
-	resetLink := fmt.Sprintf("%s/reset-password?token=%s", a.webUIBaseURL(), resetToken)
-	err = svc.SendPasswordResetEmail(user.Email, resetLink)
-	if err != nil {
-		logrus.WithError(err).WithField("email", user.Email).Warn("Failed to send password reset email")
-	}
+	// Send email with reset link, off the request path.
+	toEmail := user.Email
+	runAsync(func() {
+		svc, err := a.emailServiceFromDB()
+		if err != nil {
+			logrus.WithError(err).WithField("email", toEmail).Warn("Email not configured — skipping password reset email")
+			return
+		}
+		resetLink := fmt.Sprintf("%s/reset-password?token=%s", a.webUIBaseURL(), resetToken)
+		if err := svc.SendPasswordResetEmail(toEmail, resetLink); err != nil {
+			logrus.WithError(err).WithField("email", toEmail).Warn("Failed to send password reset email")
+		}
+	})
 
 	return nil
 }
 
-// ResetPassword resets password using reset token
+// ResetPassword resets password using reset token.
+//
+// The token is single-use and consumed ATOMICALLY (consumeTokenHash): of two
+// concurrent redemptions exactly one wins. A cheap existence peek runs first so
+// garbage tokens never reach the Argon2 hash, but the authoritative values come
+// from the atomic consume. A successful reset also clears the lockout — the
+// usual reason to reset is that the account was locked by failed attempts.
 func (a *AuthService) ResetPassword(req *models.ResetPasswordRequest) error {
-	// Get reset token data from Redis
 	key := fmt.Sprintf("password_reset:%s", req.Token)
-	resetData, err := a.redis.HGetAll(context.Background(), key).Result()
+	exists, err := a.redis.Exists(context.Background(), key).Result()
 	if err != nil {
 		return fmt.Errorf("failed to get reset token: %w", err)
 	}
+	if exists == 0 {
+		return ErrInvalidToken
+	}
 
+	// Validate new password strength and hash it BEFORE consuming the token, so
+	// a too-weak password does not burn the link.
+	if err := passwordsvc.ValidatePasswordStrengthWithPolicy(a.db, req.NewPassword); err != nil {
+		return err
+	}
+	newPasswordHash, err := a.password.HashPassword(req.NewPassword)
+	if err != nil {
+		return fmt.Errorf("failed to hash new password: %w", err)
+	}
+
+	resetData, err := a.consumeTokenHash(context.Background(), key)
+	if err != nil {
+		return fmt.Errorf("failed to get reset token: %w", err)
+	}
 	if len(resetData) == 0 {
+		// Lost a race with another redemption of the same token.
 		return ErrInvalidToken
 	}
 
@@ -2061,10 +2150,7 @@ func (a *AuthService) ResetPassword(req *models.ResetPasswordRequest) error {
 	if err != nil {
 		return fmt.Errorf("invalid reset token format: %w", err)
 	}
-
 	if time.Now().Unix() > expiryUnix {
-		// Clean up expired token
-		a.redis.Del(context.Background(), key)
 		return ErrExpiredToken
 	}
 
@@ -2074,49 +2160,60 @@ func (a *AuthService) ResetPassword(req *models.ResetPasswordRequest) error {
 		return fmt.Errorf("invalid user ID in reset token: %w", err)
 	}
 
-	// Validate new password strength
-	if err := passwordsvc.ValidatePasswordStrengthWithPolicy(a.db, req.NewPassword); err != nil {
+	// A link mailed before the tenant went sso_only must not set a local
+	// password afterwards. Answered as an invalid token (the generic 400 the
+	// reset handler already maps) — and it was just consumed.
+	var tenantID uuid.UUID
+	// RLS: cross-tenant — runs on the bypass role (Phase 4). The tenant is
+	// resolved FROM the user id carried in the token. Wrapping would fail closed.
+	if err := a.bypassDB.QueryRow(`SELECT tenant_id FROM users WHERE id = $1 AND deleted_at IS NULL`, userID).Scan(&tenantID); err != nil {
+		if err == sql.ErrNoRows {
+			return ErrInvalidToken
+		}
+		return fmt.Errorf("failed to resolve reset token user: %w", err)
+	}
+	forbidden, err := a.localPasswordRefused(userID, tenantID)
+	if err != nil {
 		return err
 	}
-
-	// Hash new password
-	newPasswordHash, err := a.password.HashPassword(req.NewPassword)
-	if err != nil {
-		return fmt.Errorf("failed to hash new password: %w", err)
+	if forbidden {
+		return ErrInvalidToken
 	}
 
-	// Update password in database.
+	// Update password in database and clear the lockout.
 	// RLS: cross-tenant — runs on the bypass role (Phase 4). Password reset keyed
 	// only by the user id carried in the Redis reset token; tenant is not known
 	// here. Wrapping would fail closed.
-	query := `UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3`
+	query := `UPDATE users SET password_hash = $1, failed_login_attempts = 0, locked_until = NULL, updated_at = $2
+	          WHERE id = $3 AND deleted_at IS NULL`
 	_, err = a.bypassDB.Exec(query, newPasswordHash, time.Now(), userID)
 	if err != nil {
 		return fmt.Errorf("failed to update password: %w", err)
 	}
 
-	// Clean up reset token
-	a.redis.Del(context.Background(), key)
-
 	// Invalidate all refresh tokens for security
 	if err := a.refreshTokenService.RevokeAllUserTokens(userID); err != nil {
 		logrus.WithError(err).WithField("user_id", userID).Warn("Failed to revoke refresh tokens after password reset")
 	}
+	a.revokeLiveAccessTokens(userID, "password reset")
 
 	return nil
 }
 
-// VerifyEmail verifies user email address
+// VerifyEmail verifies user email address. Single-use: the Redis token is
+// consumed atomically. A token that is not in Redis is then tried against the
+// users.email_verification_token column, which is where tenant admins' "create
+// user" flow has always stored its token (see CreateUser) — that link used to be
+// dead because only Redis was read.
 func (a *AuthService) VerifyEmail(token string) error {
-	// Get verification token data from Redis
 	key := fmt.Sprintf("email_verification:%s", token)
-	verificationData, err := a.redis.HGetAll(context.Background(), key).Result()
+	verificationData, err := a.consumeTokenHash(context.Background(), key)
 	if err != nil {
 		return fmt.Errorf("failed to get verification token: %w", err)
 	}
 
 	if len(verificationData) == 0 {
-		return ErrInvalidToken
+		return a.verifyEmailByColumnToken(token)
 	}
 
 	// Check if token is expired
@@ -2126,8 +2223,6 @@ func (a *AuthService) VerifyEmail(token string) error {
 	}
 
 	if time.Now().Unix() > expiryUnix {
-		// Clean up expired token
-		a.redis.Del(context.Background(), key)
 		return ErrExpiredToken
 	}
 
@@ -2147,13 +2242,36 @@ func (a *AuthService) VerifyEmail(token string) error {
 		return fmt.Errorf("failed to verify email: %w", err)
 	}
 
-	// Clean up verification token
-	a.redis.Del(context.Background(), key)
-
 	return nil
 }
 
-// SendEmailVerification sends email verification token
+// verifyEmailByColumnToken redeems a token stored in users.email_verification_token
+// in one statement (single-use: the token is cleared by the same UPDATE that
+// checks it).
+func (a *AuthService) verifyEmailByColumnToken(token string) error {
+	if strings.TrimSpace(token) == "" {
+		return ErrInvalidToken
+	}
+	// RLS: cross-tenant — runs on the bypass role (Phase 4). The tenant is the
+	// OUTPUT of the token lookup. Wrapping would fail closed.
+	res, err := a.bypassDB.Exec(`
+		UPDATE users
+		SET email_verified = true, email_verification_token = NULL,
+		    email_verification_expires = NULL, updated_at = NOW()
+		WHERE email_verification_token = $1 AND deleted_at IS NULL
+		  AND (email_verification_expires IS NULL OR email_verification_expires > NOW())`, token)
+	if err != nil {
+		return fmt.Errorf("failed to verify email: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrInvalidToken
+	}
+	return nil
+}
+
+// SendEmailVerification sends email verification token. The token is stored
+// synchronously; the SMTP send runs off the request path so a real address and
+// an unknown one cost the caller the same.
 func (a *AuthService) SendEmailVerification(userID uuid.UUID) error {
 	// Get user
 	user, err := a.GetUserByID(userID)
@@ -2188,18 +2306,77 @@ func (a *AuthService) SendEmailVerification(userID uuid.UUID) error {
 		return fmt.Errorf("failed to set verification token expiry: %w", err)
 	}
 
-	// Send email with verification link
-	svc, err := a.emailServiceFromDB()
-	if err != nil {
-		logrus.WithError(err).WithField("email", user.Email).Warn("Email not configured — skipping verification email")
-		return nil
-	}
-	verificationLink := fmt.Sprintf("%s/verify-email?token=%s", a.webUIBaseURL(), verificationToken)
-	err = svc.SendEmailVerificationEmail(user.Email, verificationLink)
-	if err != nil {
-		logrus.WithError(err).WithField("email", user.Email).Warn("Failed to send email verification")
-	}
+	// Send email with verification link, off the request path.
+	toEmail := user.Email
+	runAsync(func() {
+		svc, err := a.emailServiceFromDB()
+		if err != nil {
+			logrus.WithError(err).WithField("email", toEmail).Warn("Email not configured — skipping verification email")
+			return
+		}
+		verificationLink := fmt.Sprintf("%s/verify-email?token=%s", a.webUIBaseURL(), verificationToken)
+		if err := svc.SendEmailVerificationEmail(toEmail, verificationLink); err != nil {
+			logrus.WithError(err).WithField("email", toEmail).Warn("Failed to send email verification")
+		}
+	})
 
+	return nil
+}
+
+// ErrInvalidAvatarURL is returned when a profile update carries an avatar_url
+// that is not one this service issued.
+var ErrInvalidAvatarURL = errors.New("avatar_url must be an uploaded avatar path")
+
+var avatarURLPattern = regexp.MustCompile(`^/uploads/avatars/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|gif|webp)$`)
+
+// ValidAvatarURL reports whether s has the exact shape the upload endpoint
+// issues: /uploads/avatars/<uuid>.<ext>. avatar_url is rendered into <img src>
+// and exported in data-subject responses, so an arbitrary string (an external
+// tracking URL, a javascript: or data: URI) must not be storable via the
+// profile update.
+func ValidAvatarURL(s string) bool { return avatarURLPattern.MatchString(s) }
+
+// changePlatformPassword is ChangePassword for a platform_users account. It
+// verifies the current password, applies the same strength policy, stores the
+// new hash, clears force_password_change (this is the endpoint the limited
+// pwd_change_required session exists to reach) and revokes the account's
+// refresh tokens.
+func (a *AuthService) changePlatformPassword(userID uuid.UUID, req *models.ChangePasswordRequest) error {
+	var currentHash sql.NullString
+	err := a.db.QueryRow(`
+		SELECT password_hash FROM platform_users
+		WHERE id = $1 AND deleted_at IS NULL AND is_active = true`, userID).Scan(&currentHash)
+	if err == sql.ErrNoRows {
+		return ErrUserNotFound
+	}
+	if err != nil {
+		return err
+	}
+	valid, err := a.verifyLoginPassword(req.CurrentPassword, currentHash.String)
+	if err != nil {
+		return err
+	}
+	if !valid {
+		return ErrInvalidCredentials
+	}
+	if err := passwordsvc.ValidatePasswordStrengthWithPolicy(a.db, req.NewPassword); err != nil {
+		return err
+	}
+	newHash, err := a.password.HashPassword(req.NewPassword)
+	if err != nil {
+		return fmt.Errorf("failed to hash new password: %w", err)
+	}
+	if _, err := a.db.Exec(`
+		UPDATE platform_users
+		SET password_hash = $1, force_password_change = false,
+		    password_changed_at = NOW(), updated_at = NOW()
+		WHERE id = $2`, newHash, userID); err != nil {
+		return fmt.Errorf("failed to update password: %w", err)
+	}
+	if err := a.refreshTokenService.RevokeAllUserTokens(userID); err != nil {
+		logrus.WithError(err).WithField("platform_user_id", userID).Warn("Failed to revoke refresh tokens after platform password change")
+	}
+	a.revokeLiveAccessTokens(userID, "platform password change")
 	return nil
 }
 
@@ -2237,8 +2414,18 @@ func (a *AuthService) GetUserSessions(userID uuid.UUID) ([]models.Session, error
 }
 
 // RevokeRefreshToken revokes a specific refresh token
+//
+// An access token does not name the session it came from, so the session's live
+// access token cannot be singled out: the user's access tokens minted before now
+// are invalidated, and their other devices transparently refresh (their refresh
+// tokens are untouched). Without this the revoked session stayed usable until
+// its access token expired.
 func (a *AuthService) RevokeRefreshToken(userID, sessionID uuid.UUID) error {
-	return a.refreshTokenService.RevokeToken(userID, sessionID)
+	if err := a.refreshTokenService.RevokeToken(userID, sessionID); err != nil {
+		return err
+	}
+	a.revokeLiveAccessTokens(userID, "session revoked")
+	return nil
 }
 
 // GetUserAuthMethods returns authentication methods for a user.
@@ -2469,4 +2656,25 @@ func (a *AuthService) GetTenantSecuritySummary(tenantID uuid.UUID) (*TenantSecur
 	}
 
 	return summary, nil
+}
+
+// PlatformAccountCode is the stable machine-readable code the tenant login paths
+// answer (HTTP 403) when the credentials belong to a platform account.
+const PlatformAccountCode = "platform_account_use_admin_console"
+
+// PlatformAccountError means: these are valid platform credentials, which this
+// service does not sign in. AdminURL is the admin console, "" when not known.
+type PlatformAccountError struct{ AdminURL string }
+
+func (e *PlatformAccountError) Error() string {
+	return "platform account: sign in through the admin console"
+}
+
+// AsPlatformAccount unwraps a *PlatformAccountError from err.
+func AsPlatformAccount(err error) (*PlatformAccountError, bool) {
+	var pe *PlatformAccountError
+	if errors.As(err, &pe) {
+		return pe, true
+	}
+	return nil, false
 }

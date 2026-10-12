@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { Modal, ModalField, ModalSelect } from '../../components/ui';
 import { clients } from '../../lib/clients';
-import { errorMessage, useAssetsQuery, type MergeCandidate, type MergeProposal } from '../inventory/asset-queries';
+import { errorMessage, invalidateAfterMerge, useAssetsQuery, type MergeCandidate, type MergeProposal } from '../inventory/asset-queries';
 import { candidateName, defaultSurvivor } from './merge-proposal-row';
 
 type Preview = inventoryComponents['schemas']['AssetMergePreview'];
@@ -84,7 +85,8 @@ export function AssetMergeModal({ proposal, initialAssets = [], note, onClose }:
   const [search, setSearch] = useState('');
   const [searchPage, setSearchPage] = useState(1);
   const [addID, setAddID] = useState('');
-  const matches = useAssetsQuery(`(status:monitoring OR status:pending_approval)${search.trim() ? ` AND ${JSON.stringify(search.trim())}` : ''}`, searchPage, !proposal);
+  const debouncedSearch = useDebouncedValue(search).trim();
+  const matches = useAssetsQuery(`(status:monitoring OR status:pending_approval)${debouncedSearch ? ` AND ${JSON.stringify(debouncedSearch)}` : ''}`, searchPage, !proposal);
   const choices = proposal ? mergeChoices(proposal) : added;
   const [survivor, setSurvivor] = useState(recommended?.survivor_asset_id ?? '');
   const [sources, setSources] = useState<string[]>(recommended?.source_asset_ids ?? []);
@@ -144,11 +146,11 @@ export function AssetMergeModal({ proposal, initialAssets = [], note, onClose }:
       if (response.status === 409) {
         setStale(true); setError('The assets or evidence changed. Refresh the preview and review it before merging.'); return;
       }
-      if (failure) throw new Error(errorMessage(failure) ?? 'Could not merge the selected assets.');
+      if (failure || !response.ok) throw new Error(errorMessage(failure) ?? 'Could not merge the selected assets.');
       // A merge changes asset children, findings, topology and dashboard totals.
-      // Invalidate all read models so an already-open detail panel cannot keep
+      // Invalidate those read models so an already-open detail panel cannot keep
       // showing associations on the archived source.
-      await cache.invalidateQueries();
+      await invalidateAfterMerge(cache);
       onClose();
     } catch (e) { setError(e instanceof Error ? e.message : 'Could not merge the selected assets.'); }
     finally { setBusy(false); }

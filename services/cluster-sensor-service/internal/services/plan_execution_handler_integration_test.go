@@ -82,6 +82,7 @@ func newExecFixture(t *testing.T) *execFixture {
 	jp := services.NewPlanJobProcessorForTest(t, db, svc, fake)
 	h := handlers.NewDiscoveryHandler(svc, services.NewRateLimiter(db), nil, nil)
 	r := gin.New()
+	r.Use(auditWired(t))
 	as := func(next gin.HandlerFunc) gin.HandlerFunc {
 		return func(c *gin.Context) {
 			c.Set(sharedmw.CtxKeyTenantID, tenant)

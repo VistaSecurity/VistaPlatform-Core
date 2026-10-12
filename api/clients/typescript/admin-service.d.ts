@@ -679,7 +679,8 @@ export interface paths {
          *     retires any manual subscription the tenant had. One transaction. A
          *     private custom plan may only be assigned to its owning tenant (409). A
          *     reason is required, and the assignment — or its refusal — is recorded
-         *     in the platform audit log.
+         *     in the platform audit log. Requires platform.billing
+         *     (not platform.settings, which governs editing the plan catalogue).
          */
         post: operations["assignTier"];
         delete?: never;
@@ -1938,13 +1939,13 @@ export interface paths {
         get: operations["getTenant"];
         /**
          * Update a tenant
-         * @description Partial update of name / domain / billing_email / payment_status. An empty body (no updatable fields) returns 400. `subscription_tier` in the body is accepted but ignored. `payment_status` is an MSP concept: on any install not licensed as MSP (Enterprise, Core, expired) a body carrying it returns 409 and nothing is written.
+         * @description Partial update of name / domain / billing_email / payment_status. An empty body (no updatable fields) returns 400. `subscription_tier` in the body is accepted but ignored. `payment_status` is an MSP concept: on any install not licensed as MSP (Enterprise, Core, expired) a body carrying it returns 409 and nothing is written. A `payment_status` outside trial / active / past_due / canceled / incomplete / suspended is 400; an id that is not a UUID is 400; an unknown tenant is 404 and audits nothing; setting `suspended` or `canceled` on the operator's own tenant is 409. A successful edit records a `tenant.updated` platform audit event naming the changed fields (and `tenant.suspended` when the status becomes suspended).
          */
         put: operations["updateTenant"];
         post?: never;
         /**
          * Soft-delete a tenant
-         * @description Soft-deletes the tenant (sets deleted_at, ends its sessions, refuses sign-in). Undo with POST /admin/tenants/{id}/restore; for an irreversible hard delete use the purge endpoint.
+         * @description Soft-deletes the tenant (sets deleted_at, ends its sessions, refuses sign-in). Undo with POST /admin/tenants/{id}/restore; for an irreversible hard delete use the purge endpoint. 400 for an id that is not a UUID; 404 (no audit record) for an unknown tenant; 409 for the operator's own tenant (unmark it first). Deleting an already-deleted tenant is a 200 that changes and audits nothing.
          */
         delete: operations["deleteTenant"];
         options?: never;
@@ -2007,7 +2008,10 @@ export interface paths {
          *     `tenant_suspended` by auth-service and every service's JWT middleware
          *     (within the per-request cache TTL, 30s by default). Platform
          *     administrators are unaffected and may still impersonate the tenant's
-         *     users for support.
+         *     users for support. 400 for an id that is not a UUID; 404 (no audit
+         *     record) for an unknown tenant; 409 for the operator's own tenant.
+         *     Suspending an already-suspended tenant is a 200 that changes and
+         *     audits nothing.
          */
         post: operations["suspendTenant"];
         delete?: never;
@@ -2612,7 +2616,7 @@ export interface paths {
         };
         /**
          * Cross-tenant legal acceptance audit ledger
-         * @description Returns the acceptance ledger across all tenants (bypass read). Optional doc_type filter; limit caps at 500.
+         * @description Returns the acceptance ledger across all tenants (bypass read). Optional doc_type filter; limit caps at 500 (default 100) and offset skips rows. A non-numeric, zero or negative limit, or a non-numeric or negative offset, is a 400.
          */
         get: operations["listLegalAcceptances"];
         put?: never;
@@ -2803,7 +2807,12 @@ export interface paths {
         get: operations["getPlatformSettings"];
         /**
          * Update platform-wide settings
-         * @description Partial update: only the provided fields are persisted. The route needs
+         * @description Partial update: only the provided fields are persisted. For the plain
+         *     string settings (`platform_name`, `platform_domain`, `admin_ui_base_url`,
+         *     `support_email`) a key that is present with `""` CLEARS the setting and
+         *     a key that is absent (or null) keeps it. The whole save is one
+         *     transaction: it lands entirely or not at all. The body is capped at 1 MiB
+         *     (413 beyond it). The route needs
          *     platform.settings. Writing any of the keys that shape how staff
          *     authenticate or where their password-reset and invitation email goes —
          *     `admin_ui_base_url`, `email_config`, `password_min_length`,
@@ -5978,6 +5987,15 @@ export interface components {
                 "application/json": components["schemas"]["LegacyError"];
             };
         };
+        /** @description The request body exceeds the route's ceiling (1 MiB on authenticated admin routes; the upload routes have their own larger bounds). Nothing was read or saved. */
+        PayloadTooLarge: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyError"];
+            };
+        };
         /** @description The tier's entitlement composition changed since the caller read it; nothing was written. `current_version` is the version now in force. */
         CompositionConflict: {
             headers: {
@@ -6007,9 +6025,9 @@ export interface operations {
     listTenantInvoices: {
         parameters: {
             query?: {
-                /** @description Page size (1–100, default 20). */
+                /** @description Page size (1–100, default 20); a larger value is clamped to 100. A non-numeric, zero or negative value is a 400. */
                 limit?: number;
-                /** @description Row offset (default 0). */
+                /** @description Row offset (>= 0, default 0). A non-numeric or negative value is a 400. */
                 offset?: number;
                 /** @description Filter by invoice status (e.g. paid). */
                 status?: string;
@@ -6029,6 +6047,7 @@ export interface operations {
                     "application/json": components["schemas"]["InvoiceListResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             404: components["responses"]["BillingNotMSP"];
             500: components["responses"]["LegacyServerError"];
@@ -7191,8 +7210,9 @@ export interface operations {
     getSecurityEvents: {
         parameters: {
             query?: {
-                /** @description Page size (1–100, default 50). */
+                /** @description Page size (1–100, default 50); a larger value is clamped to 100. A non-numeric, zero or negative value is a 400. */
                 limit?: number;
+                /** @description Row offset (>= 0, default 0). A non-numeric or negative value is a 400. */
                 offset?: number;
                 event_type?: string;
                 /** @description activity_logs event_category (authentication, user, tenant, config, …). */
@@ -7217,6 +7237,7 @@ export interface operations {
                     "application/json": components["schemas"]["SecurityEventListResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
             503: components["responses"]["LegacyServerError"];
@@ -7818,6 +7839,7 @@ export interface operations {
                     "application/json": components["schemas"]["CatalogMissListResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             403: components["responses"]["LegacyForbidden"];
             500: components["responses"]["LegacyServerError"];
@@ -8957,6 +8979,7 @@ export interface operations {
                     "application/json": components["schemas"]["TenantsListResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
         };
@@ -9013,6 +9036,7 @@ export interface operations {
             };
             400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
             409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
@@ -9037,7 +9061,10 @@ export interface operations {
                     "application/json": components["schemas"]["MessageResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -9110,7 +9137,10 @@ export interface operations {
                     "application/json": components["schemas"]["MessageResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
+            409: components["responses"]["LegacyConflict"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -9134,7 +9164,9 @@ export interface operations {
                     "application/json": components["schemas"]["TenantActivateResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
+            404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
         };
     };
@@ -9528,6 +9560,7 @@ export interface operations {
                     "application/json": components["schemas"]["PlatformUserListResponse"];
                 };
             };
+            400: components["responses"]["LegacyBadRequest"];
             401: components["responses"]["LegacyUnauthorized"];
             500: components["responses"]["LegacyServerError"];
         };
@@ -10018,6 +10051,7 @@ export interface operations {
             query?: {
                 doc_type?: "terms_of_service" | "privacy_policy";
                 limit?: number;
+                offset?: number;
             };
             header?: never;
             path?: never;
@@ -10315,6 +10349,7 @@ export interface operations {
                     "application/json": components["schemas"]["SecurityManageRequiredError"];
                 };
             };
+            413: components["responses"]["PayloadTooLarge"];
             500: components["responses"]["LegacyServerError"];
         };
     };

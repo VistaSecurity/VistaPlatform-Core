@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -15,8 +16,8 @@ import (
 // *services.AssetService satisfies it in production; the contract test passes an
 // in-memory stub (mirrors cbom-service/scopes' scopeStore pattern).
 type assetApprovalStore interface {
-	ApproveAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, actorUserID uuid.UUID) error
-	DenyAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, userID uuid.UUID) error
+	ApproveAssetsReport(tenantID uuid.UUID, assetIDs []uuid.UUID, actorUserID uuid.UUID) (services.LifecycleChangeResult, error)
+	DenyAssetsReport(tenantID uuid.UUID, assetIDs []uuid.UUID, userID uuid.UUID) (services.LifecycleChangeResult, error)
 	// AutoApproveAgentHost admits the host a tenant's device agent runs on.
 	// See services.AssetService.AutoApproveAgentHost for the rules.
 	AutoApproveAgentHost(tenantID, assetID, agentID uuid.UUID) (bool, error)
@@ -32,6 +33,52 @@ func NewAssetApprovalHandler(assetService assetApprovalStore) *AssetApprovalHand
 
 type approvalRequest struct {
 	AssetIDs []string `json:"asset_ids" binding:"required"`
+}
+
+// maxApprovalAssetIDs caps one approve/deny request, matching merge proposals.
+// Each id costs a history row, an event and a deferred-crypto replay.
+const maxApprovalAssetIDs = 200
+
+// parseApprovalIDs validates the id list of an approve/deny request. It writes
+// the 400/413 itself and reports ok=false; otherwise it returns the parseable
+// ids and the strings that were not UUIDs, which the response reports back
+// rather than silently dropping.
+func parseApprovalIDs(c *gin.Context, raw []string) (ids []uuid.UUID, invalid []string, ok bool) {
+	if len(raw) > maxApprovalAssetIDs {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"error": fmt.Sprintf("too many asset ids: %d (max %d per request)", len(raw), maxApprovalAssetIDs),
+		})
+		return nil, nil, false
+	}
+	for _, idStr := range raw {
+		if id, err := uuid.Parse(idStr); err == nil {
+			ids = append(ids, id)
+		} else {
+			invalid = append(invalid, idStr)
+		}
+	}
+	if len(ids) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid asset ids provided"})
+		return nil, nil, false
+	}
+	return ids, invalid, true
+}
+
+// approvalResponse reports what really happened. count is the number of assets
+// whose status moved, not the number requested; skipped are valid ids that did
+// not move (unknown, already in the target state, or not in a state this
+// decision applies to) and invalid_ids are strings that were not UUIDs.
+func approvalResponse(message string, res services.LifecycleChangeResult, invalid []string) gin.H {
+	out := gin.H{
+		"message": message,
+		"count":   len(res.Changed),
+		"changed": res.Changed,
+		"skipped": res.Skipped,
+	}
+	if len(invalid) > 0 {
+		out["invalid_ids"] = invalid
+	}
+	return out
 }
 
 // ApproveAssets moves assets from pending_approval to monitoring
@@ -53,18 +100,13 @@ func (h *AssetApprovalHandler) ApproveAssets(c *gin.Context) {
 		return
 	}
 
-	var ids []uuid.UUID
-	for _, idStr := range req.AssetIDs {
-		if id, err := uuid.Parse(idStr); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	if len(ids) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid asset ids provided"})
+	ids, invalid, ok := parseApprovalIDs(c, req.AssetIDs)
+	if !ok {
 		return
 	}
 
-	if err := h.assetService.ApproveAssets(tenantID, ids, approvalActor(c)); err != nil {
+	res, err := h.assetService.ApproveAssetsReport(tenantID, ids, approvalActor(c))
+	if err != nil {
 		if errors.Is(err, services.ErrAssetLifecycleConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
@@ -73,18 +115,19 @@ func (h *AssetApprovalHandler) ApproveAssets(c *gin.Context) {
 		return
 	}
 
-	// Log audit event
+	// Audit only what changed: a repeated approve, or an id that matched
+	// nothing, did not happen and must not read as if it did.
 	resourceType := "asset"
-	for _, assetID := range ids {
+	for _, assetID := range res.Changed {
 		logAuditActivity(c, "asset.approved", "asset", "approve", &resourceType, &assetID, nil, map[string]interface{}{
 			"status":      "monitoring",
 			"approved_at": time.Now(),
 		}, []string{"status"}, map[string]interface{}{
-			"asset_count": len(ids),
+			"asset_count": len(res.Changed),
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "assets approved", "count": len(ids)})
+	c.JSON(http.StatusOK, approvalResponse("assets approved", res, invalid))
 }
 
 // DenyAssets moves assets to denied and suppresses rediscovery
@@ -117,18 +160,13 @@ func (h *AssetApprovalHandler) DenyAssets(c *gin.Context) {
 		return
 	}
 
-	var ids []uuid.UUID
-	for _, idStr := range req.AssetIDs {
-		if id, err := uuid.Parse(idStr); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	if len(ids) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no valid asset ids provided"})
+	ids, invalid, ok := parseApprovalIDs(c, req.AssetIDs)
+	if !ok {
 		return
 	}
 
-	if err := h.assetService.DenyAssets(tenantID, ids, userID); err != nil {
+	res, err := h.assetService.DenyAssetsReport(tenantID, ids, userID)
+	if err != nil {
 		if errors.Is(err, services.ErrAssetLifecycleConflict) {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 			return
@@ -137,18 +175,17 @@ func (h *AssetApprovalHandler) DenyAssets(c *gin.Context) {
 		return
 	}
 
-	// Log audit event
 	resourceType := "asset"
-	for _, assetID := range ids {
+	for _, assetID := range res.Changed {
 		logAuditActivity(c, "asset.denied", "asset", "deny", &resourceType, &assetID, nil, map[string]interface{}{
 			"status":    "denied",
 			"denied_at": time.Now(),
 		}, []string{"status"}, map[string]interface{}{
-			"asset_count": len(ids),
+			"asset_count": len(res.Changed),
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "assets denied", "count": len(ids)})
+	c.JSON(http.StatusOK, approvalResponse("assets denied", res, invalid))
 }
 
 // approvalActor is the person deciding, or uuid.Nil when the session carries no

@@ -896,6 +896,20 @@ http:
       middlewares:
         - deny-internal-plane
       priority: 900
+    deny_internal_route_v1_get_inventory_service_tenant_id_activity_summary:
+      rule: Method(`GET`) && PathRegexp(`^/api/v1/inventory-service/tenant/[^/]+/activity-summary/?$`)
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_route_v2_get_inventory_service_tenant_id_activity_summary:
+      rule: Method(`GET`) && PathRegexp(`^/api/v2/inventory-service/tenant/[^/]+/activity-summary/?$`)
+      entryPoints: *a1
+      service: inventory_service
+      middlewares:
+        - deny-internal-plane
+      priority: 900
   services:
     auth_service:
       loadBalancer:

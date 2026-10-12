@@ -13,6 +13,7 @@
 //   - value back to stats.sensor_count → "1"; red.
 //   - label back to "Sensors" → red.
 //   - agentBreakdown drops the platform-managed clause → red.
+import { MemoryRouter } from 'react-router';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -105,7 +106,7 @@ describe('Tenant drawer Usage ▸ Agents', () => {
     root = createRoot(host);
     act(() => root!.render(
       <QueryClientProvider client={qc}>
-        <scope.ScopeProvider><page.TenantsPage /></scope.ScopeProvider>
+        <MemoryRouter><scope.ScopeProvider><page.TenantsPage /></scope.ScopeProvider></MemoryRouter>
       </QueryClientProvider>,
     ));
     const row = await until(() => Array.from(host.querySelectorAll('tr')).find((tr) => tr.textContent?.includes('Northwind')), 'the tenant row');

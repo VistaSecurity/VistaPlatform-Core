@@ -50,13 +50,18 @@ const ASSETS = [
   { id: 'a-1', hostname: 'switch-core-01', display_name: 'switch-core-01', class_key: 'switch', environment: 'production' },
   { id: 'a-2', hostname: 'switch-edge-02', display_name: 'switch-edge-02', class_key: 'switch', environment: 'production' },
 ];
+const OK = { ok: true, status: 200 };
+const SERVER_ERROR = { data: undefined, error: { error: 'boom' }, response: { ok: false, status: 500 } };
+// Flip to make every read answer 500.
+const reads = { fail: false };
 vi.mock('../lib/clients', () => ({
   clients: {
     inventory: { GET: vi.fn(async (path: string) => (
-      path === '/infrastructure-assets' ? { data: { assets: ASSETS } } : { data: {} }
+      reads.fail ? SERVER_ERROR
+        : path === '/infrastructure-assets' ? { data: { assets: ASSETS }, response: OK } : { data: {}, response: OK }
     )) },
-    devices: { GET: vi.fn(async () => ({ data: { devices: [] } })) },
-    sensors: { GET: vi.fn(async () => ({ data: { sensors: [] } })) },
+    devices: { GET: vi.fn(async () => (reads.fail ? SERVER_ERROR : { data: { devices: [] }, response: OK })) },
+    sensors: { GET: vi.fn(async () => (reads.fail ? SERVER_ERROR : { data: { sensors: [] }, response: OK })) },
   },
 }));
 
@@ -158,6 +163,7 @@ beforeEach(() => {
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
   vi.useFakeTimers({ shouldAdvanceTime: true });
   open = true;
+  reads.fail = false;
   navigate.mockClear();
   onOpenChange.mockClear();
 });
@@ -190,6 +196,16 @@ describe('the command palette, mounted', () => {
     const labels = rowLabels();
     expect(labels.some((l) => l.includes('switch-core-01'))).toBe(true);
     expect(labels.some((l) => l.includes('switch-edge-02'))).toBe(true);
+  });
+
+  it('shows an error row, not "No results found", when the reads fail', async () => {
+    reads.fail = true;
+    await mount();
+    await type('zzzz-no-such-thing');
+    await settle(() => !!container.querySelector('[data-testid="palette-error"]'));
+    const err = container.querySelector('[data-testid="palette-error"]');
+    expect(err?.textContent).toContain('Could not search');
+    expect(container.textContent).not.toContain('No results found');
   });
 
   it('moves the highlight with the arrows and opens the highlighted row on Enter', async () => {

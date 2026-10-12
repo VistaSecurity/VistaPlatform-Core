@@ -304,6 +304,10 @@ func TestSeverityRollupScopes_AreWhatTheirNamesSay(t *testing.T) {
 			"rows the Findings page hides behind its Open chip, so a tenant who suppressed a Critical "+
 			"with a reason keeps seeing it counted and cannot find it at the destination:\n%s", where)
 	}
+	if !strings.Contains(where, sharedfindings.ExpiredSuppressionSQL("cf")) {
+		t.Errorf("the workflow-open filter ignores suppression expiry; a lapsed suppression would be "+
+			"counted open by the control counts but hidden from the findings list:\n%s", where)
+	}
 	// The licence gate must still apply to compliance rows — findings on
 	// frameworks the tenant has not activated are not theirs to see — while NOT
 	// applying to producers that have no control to ask about.

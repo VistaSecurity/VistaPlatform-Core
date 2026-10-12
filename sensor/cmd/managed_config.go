@@ -16,7 +16,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -188,18 +187,10 @@ func (s *Sensor) registerManagedSettings(a *desiredstate.Applier) {
 	}))
 
 	a.Handle(agentconfig.KeyLogLevel, desiredstate.TextSetter(func(level string) error {
-		// The sensor logs at one level; the four map onto verbose/quiet. Stated
-		// rather than pretended away — an operator selecting "warn" gets quiet
-		// logging, and the platform is not told the sensor has four levels.
-		switch level {
-		case "debug":
-			log.SetFlags(log.LstdFlags | log.Lshortfile)
-			return nil
-		case "info", "warn", "error":
-			log.SetFlags(log.LstdFlags)
-			return nil
-		}
-		return fmt.Errorf("unknown log level %q", level)
+		// Stated rather than pretended away: the sensor has two log formats,
+		// and warn and error map onto the normal one (see applyLogLevel).
+		_, err := s.applyLogLevel(level)
+		return err
 	}))
 }
 

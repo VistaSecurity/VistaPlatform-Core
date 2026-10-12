@@ -38,9 +38,12 @@ type stubSecurityProvider struct {
 	eventsErr error
 	stats     map[string]interface{}
 	statsErr  error
+
+	gotLimit, gotOffset int
 }
 
-func (s *stubSecurityProvider) GetSecurityEvents(map[string]interface{}, int, int) ([]security.SecurityEvent, int, error) {
+func (s *stubSecurityProvider) GetSecurityEvents(_ map[string]interface{}, limit, offset int) ([]security.SecurityEvent, int, error) {
+	s.gotLimit, s.gotOffset = limit, offset
 	return s.events, s.total, s.eventsErr
 }
 func (s *stubSecurityProvider) GetSecurityDashboardStats(string) (map[string]interface{}, error) {

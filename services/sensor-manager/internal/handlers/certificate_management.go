@@ -1,14 +1,19 @@
 package handlers
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/certificates"
+	"github.com/vistasecurity/vistaplatform/shared/agentsecret"
+	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 )
 
 // RevokeCertificateRequest represents a certificate revocation request
@@ -27,6 +32,9 @@ type RevokeCertificateResponse struct {
 // RotateCertificateRequest represents a certificate rotation request
 type RotateCertificateRequest struct {
 	CSR string `json:"csr" binding:"required"` // Certificate Signing Request (PEM format)
+	// SupportsAgentSecret is sent by a sensor build that stores the per-sensor
+	// secret; a rotation from an older build changes nothing about it.
+	SupportsAgentSecret bool `json:"supports_agent_secret,omitempty"`
 }
 
 // RotateCertificateResponse represents the response to a rotation request
@@ -36,6 +44,37 @@ type RotateCertificateResponse struct {
 	ServerCACert         string    `json:"server_ca_cert"`
 	CertificateExpiresAt time.Time `json:"certificate_expires_at"`
 	Message              string    `json:"message"`
+	// AgentSecret is the replacement per-sensor secret, present only
+	// when the request asked for one. The sensor keeps the secret it replaces for
+	// agentcreds.PreviousSecretWindow; the platform uses this one from now on.
+	AgentSecret        string `json:"agent_secret,omitempty"`
+	AgentSecretVersion int    `json:"agent_secret_version,omitempty"`
+}
+
+// issueSensorSecret generates a new per-sensor secret, stores it wrapped under
+// the master key (bumping agent_secret_version) and returns the plaintext once.
+//
+// Used at enrolment and at certificate rotation. Keyed by sensor id on
+// the bypass handle, like the rest of the sensor-outbound path.
+func (h *Handler) issueSensorSecret(ctx context.Context, sensorID uuid.UUID) (string, int, error) {
+	cipher, err := credentials.NewCipher("sensor agent secret", h.encryptionKey, credentials.Policy{})
+	if err != nil {
+		return "", 0, err
+	}
+	secret, wrapped, err := agentsecret.Issue(cipher)
+	if err != nil {
+		return "", 0, err
+	}
+	var version int
+	err = h.sensorService.GetBypassDB().QueryRowContext(ctx, `
+		UPDATE sensors
+		   SET agent_secret_enc = $2, agent_secret_version = agent_secret_version + 1, updated_at = NOW()
+		 WHERE id = $1 AND deleted_at IS NULL
+		RETURNING agent_secret_version`, sensorID, wrapped).Scan(&version)
+	if err != nil {
+		return "", 0, fmt.Errorf("store agent secret: %w", err)
+	}
+	return secret, version, nil
 }
 
 // RevokeSensorCertificate revokes a sensor's certificate
@@ -190,6 +229,23 @@ func (h *Handler) RotateSensorCertificate(c *gin.Context) {
 		ServerCACert:         advertisedServerCACert(ca.CACertPEM),
 		CertificateExpiresAt: certificateExpiresAt,
 		Message:              "Certificate rotated successfully",
+	}
+
+	// The new per-sensor secret rides on the certificate rotation. It is
+	// issued AFTER the certificate and a failure never withholds the certificate:
+	// the old one is already superseded, so the sensor must receive its
+	// replacement. With no secret in the response the sensor keeps the one it
+	// has, which is still the platform's current one; the next rotation retries.
+	if req.SupportsAgentSecret {
+		secret, version, serr := h.issueSensorSecret(c.Request.Context(), sensorID)
+		if serr != nil {
+			if h.log != nil {
+				h.log.WithError(serr).WithField("sensor_id", sensorIDStr).Error("sensor agent secret NOT rotated (certificate was)")
+			}
+		} else {
+			response.AgentSecret = secret
+			response.AgentSecretVersion = version
+		}
 	}
 
 	c.JSON(http.StatusOK, response)

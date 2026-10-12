@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import type { complianceEnginePaths } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import type { ComplianceFinding, CryptoRisk } from './model';
+import { unwrap } from '../../lib/api-result';
 
 export const RISK_PAGE_SIZE = 100; // contract max
 export const RISK_PAGE_CAP = 5;
@@ -13,25 +14,27 @@ export const RISK_PAGE_CAP = 5;
  * result because every Findings-page filter, count, export and bulk action
  * operates on these rows; callers must say when more rows exist.
  */
-export function useCryptoRisks() {
+export function useCryptoRisks(enabled = true) {
   return useQuery({
     queryKey: ['findings', 'crypto-risks'],
+    enabled,
     queryFn: async () => {
-      const all: CryptoRisk[] = [];
-      let page = 1;
-      let totalPages: number;
-      let total: number;
-      do {
+      const fetchPage = async (page: number) => {
         const { data, error } = await clients.inventory.GET('/crypto-risks', {
           params: { query: { page, page_size: RISK_PAGE_SIZE } },
         });
         if (error || !data) throw new Error('Failed to load crypto risks');
-        all.push(...(data.risks ?? []));
-        totalPages = data.total_pages;
-        total = data.total;
-        page++;
-      } while (page <= totalPages && page <= RISK_PAGE_CAP);
-      return { risks: all, total, loaded: all.length, truncated: all.length < total };
+        return data;
+      };
+      // Page 1 reveals the total; the remaining pages are independent of each
+      // other, so they go out together rather than one round trip at a time.
+      const first = await fetchPage(1);
+      const lastPage = Math.min(first.total_pages, RISK_PAGE_CAP);
+      const rest = await Promise.all(
+        Array.from({ length: Math.max(0, lastPage - 1) }, (_, i) => fetchPage(i + 2)),
+      );
+      const all: CryptoRisk[] = [first, ...rest].flatMap((d) => d.risks ?? []);
+      return { risks: all, total: first.total, loaded: all.length, truncated: all.length < first.total };
     },
     staleTime: 60_000,
   });
@@ -98,46 +101,13 @@ export function useBatchEvaluate(frameworkIds: string[] | undefined) {
     queryKey: ['findings', 'batch-evaluate', frameworkIds],
     enabled: !!frameworkIds && frameworkIds.length > 0,
     queryFn: async () => {
-      const { data, error } = await clients.compliance.POST('/frameworks/batch-evaluate', {
+      const data = unwrap(await clients.compliance.POST('/frameworks/batch-evaluate', {
         params: { query: { include_details: true } },
         body: { framework_ids: frameworkIds! },
-      });
-      if (error || !data) throw new Error('Failed to evaluate frameworks');
+      }), 'Failed to evaluate frameworks', { requireData: true });
       return data;
     },
     staleTime: 5 * 60_000,
-  });
-}
-
-/** Tenant-wide asset risk counts (hero rollup). */
-export function useRiskSummary() {
-  return useQuery({
-    queryKey: ['findings', 'risk-summary'],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/risk/summary', {});
-      if (error || !data) throw new Error('Failed to load risk summary');
-      return data.risk_summary;
-    },
-    staleTime: 60_000,
-  });
-}
-
-/**
- * Day-by-day posture trend (risk index) for the Dashboard / Posture trend line
- * (ADR-0007). New tenants get a flat seeded baseline at their current posture
- * (each such point has `seeded: true`) rather than an empty chart.
- */
-export function usePostureTrend(days = 30) {
-  return useQuery({
-    queryKey: ['findings', 'posture-trend', days],
-    queryFn: async () => {
-      const { data, error } = await clients.inventory.GET('/risk/posture/trend', {
-        params: { query: { days } },
-      });
-      if (error || !data) throw new Error('Failed to load posture trend');
-      return data.trend ?? [];
-    },
-    staleTime: 60_000,
   });
 }
 

@@ -42,7 +42,9 @@ metadata:
 spec:
   accessModes:
     - {{ $p.accessMode }}
-  storageClassName: {{ $p.storageClassName | default .Values.datastores.storageClassName }}
+  {{- with ($p.storageClassName | default .Values.datastores.storageClassName) }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
   resources:
     requests:
       storage: {{ $p.size }}

@@ -17,11 +17,11 @@ import type { deviceInterrogationComponents } from '@vistasecurity/api-contract'
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import { useDevices, useIntegrations } from './queries';
-import { serverErrorMessage } from './cloud-modals';
 import {
   type Cadence, type Frequency, HOUR_INTERVALS, MAX_DAY_OF_MONTH, WEEKDAY_ORDER, DAY_SHORT,
   cadenceError, defaultCadence, describeCadence, parseCron, timeZoneOptions, toCron,
 } from './schedule-cadence';
+import { unwrap } from '../../lib/api-result';
 
 type Schedule = deviceInterrogationComponents['schemas']['InterrogationSchedule'];
 
@@ -70,7 +70,7 @@ export function ScheduleFormModal({ schedule, open, onClose }: {
     mutationFn: async () => {
       if (isEdit) {
         // UpdateScheduleRequest: name / description / cron_expression / is_enabled.
-        const { data, error } = await clients.devices.PUT('/schedules/{id}', {
+        const data = unwrap(await clients.devices.PUT('/schedules/{id}', {
           params: { path: { id: schedule!.id } },
           body: {
             name: name.trim(),
@@ -78,12 +78,11 @@ export function ScheduleFormModal({ schedule, open, onClose }: {
             cron_expression: cron,
             is_enabled: enabled,
           },
-        });
-        if (error || !data) throw new Error(serverErrorMessage(error, 'Failed to update schedule'));
+        }), 'Failed to update schedule', { requireData: true });
         return data;
       }
       // CreateScheduleRequest: name / cron_expression / target_type / target_id (+ description, is_enabled).
-      const { data, error } = await clients.devices.POST('/schedules', {
+      const data = unwrap(await clients.devices.POST('/schedules', {
         body: {
           name: name.trim(),
           description: description.trim() || undefined,
@@ -92,8 +91,7 @@ export function ScheduleFormModal({ schedule, open, onClose }: {
           target_id: targetId,
           is_enabled: enabled,
         },
-      });
-      if (error || !data) throw new Error(serverErrorMessage(error, 'Failed to create schedule'));
+      }), 'Failed to create schedule', { requireData: true });
       return data;
     },
     onSuccess: () => {
@@ -280,8 +278,7 @@ export function ScheduleDeleteModal({ schedule, open, onClose }: {
   const del = useMutation({
     mutationFn: async () => {
       if (!schedule) return;
-      const { error } = await clients.devices.DELETE('/schedules/{id}', { params: { path: { id: schedule.id } } });
-      if (error) throw new Error('Failed to delete schedule');
+      unwrap(await clients.devices.DELETE('/schedules/{id}', { params: { path: { id: schedule.id } } }), 'Failed to delete schedule');
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['discovery', 'schedules'] });

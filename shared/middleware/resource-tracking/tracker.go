@@ -176,7 +176,7 @@ func (t *Tracker) Middleware() gin.HandlerFunc {
 			"status_code":   c.Writer.Status(),
 			"response_time": duration.Milliseconds(),
 			"network_bytes": totalNetworkBytes,
-		}).Info("Resource metric recorded")
+		}).Debug("Resource metric recorded")
 	}
 }
 

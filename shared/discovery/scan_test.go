@@ -100,7 +100,16 @@ func TestScan_OTPortsAreSerializedPerHost(t *testing.T) {
 	d := newFakeDialer(allBehave(behOpen))
 	d.latency = 3 * time.Millisecond
 	const spacing = 5 * time.Millisecond
-	s := newTestScanner(t, d, WithAssumeUp(), WithOTSpacing(spacing))
+	// The connect timeout is a wall-clock bound on each fake dial. At the
+	// default 50ms it races the 3ms fake latency: on a loaded machine the
+	// timer goroutine is scheduled late, the dial context expires first, and
+	// an open port is counted as filtered (open=435, want 436). This test
+	// proves OT serialisation, not timeout handling, so give every dial a
+	// timeout that load cannot reach; no port here is filtered, so nothing
+	// ever waits it out.
+	prof := testPace
+	prof.ConnectTimeout = 30 * time.Second
+	s := newTestScanner(t, d, WithPaceProfile(prof), WithAssumeUp(), WithOTSpacing(spacing))
 	hosts := []netip.Addr{mustAddr(t, "10.0.1.1"), mustAddr(t, "10.0.1.2")}
 	ports := OTPorts().Union(portRange(t, 1, 200))
 	res, err := s.Scan(context.Background(), hosts, ports)

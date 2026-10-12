@@ -130,6 +130,11 @@ export const NAV_ITEMS: CommandItem[] = [
 
 type Mode = 'search' | 'ask';
 
+/** Throw on a non-2xx read so react-query reports an error instead of an empty list. */
+function assertOk(response: Response, what: string): void {
+  if (!response.ok) throw new Error(`Failed to search ${what} (${response.status})`);
+}
+
 export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const navigate = useNavigate();
   const [requestedMode, setMode] = useState<Mode>('search');
@@ -211,9 +216,10 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     staleTime: 30_000,
     placeholderData: keepPreviousData,
     queryFn: async () => {
-      const { data } = await clients.inventory.GET('/infrastructure-assets', {
+      const { data, response } = await clients.inventory.GET('/infrastructure-assets', {
         params: { query: { page: 1, page_size: 6, search: dq } },
       });
+      assertOk(response, 'assets');
       return data?.assets ?? [];
     },
   });
@@ -225,9 +231,10 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     staleTime: 30_000,
     placeholderData: keepPreviousData,
     queryFn: async (): Promise<CommandItem[]> => {
-      const { data } = await clients.inventory.GET('/certificates', {
+      const { data, response } = await clients.inventory.GET('/certificates', {
         params: { query: { page: 1, page_size: 5, search: dq, sort_by: 'not_after', sort_order: 'asc' } },
       });
+      assertOk(response, 'certificates');
       return (data?.certificates ?? []).map((c) => {
         const label = c.common_name || c.subject_dn || c.id;
         const days = c.not_after ? Math.ceil((new Date(c.not_after).getTime() - Date.now()) / 86_400_000) : undefined;
@@ -250,7 +257,8 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     enabled,
     staleTime: 60_000,
     queryFn: async () => {
-      const { data } = await clients.devices.GET('/devices', {});
+      const { data, response } = await clients.devices.GET('/devices', {});
+      assertOk(response, 'devices');
       return data?.devices ?? [];
     },
   });
@@ -259,7 +267,8 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     enabled,
     staleTime: 60_000,
     queryFn: async () => {
-      const { data } = await clients.sensors.GET('/sensors', {});
+      const { data, response } = await clients.sensors.GET('/sensors', {});
+      assertOk(response, 'sensors');
       return data?.sensors ?? [];
     },
   });
@@ -290,14 +299,27 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     enabled: open && !!topAsset?.id,
     staleTime: 60_000,
     queryFn: async () => {
-      const { data } = await clients.inventory.GET('/infrastructure-assets/{id}/relationships', {
+      const { data, response } = await clients.inventory.GET('/infrastructure-assets/{id}/relationships', {
         params: { path: { id: topAsset!.id }, query: { direction: 'both', limit: 4 } },
       });
+      assertOk(response, 'relationships');
       return data?.relationships ?? [];
     },
   });
 
   const isFetching = enabled && (assetsQ.isFetching || certsQ.isFetching);
+
+  // A failed read is not "nothing matches": name the sources that could not be
+  // searched so an outage does not read as an empty estate.
+  const failedSources = mode === 'search' && enabled
+    ? [
+        assetsQ.isError && 'assets',
+        certsQ.isError && 'certificates',
+        devicesQ.isError && 'devices',
+        sensorsQ.isError && 'sensors',
+        relsQ.isError && 'relationships',
+      ].filter((x): x is string => !!x)
+    : [];
 
   const items: CommandItem[] = useMemo(() => {
     if (mode === 'ask') {
@@ -540,7 +562,16 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
 
         {/* Results */}
         <div ref={listRef} role="listbox" style={{ maxHeight: '56vh', overflowY: 'auto', padding: '4px 0' }}>
-          {items.length === 0 && (
+          {failedSources.length > 0 && (
+            <p
+              role="alert"
+              data-testid="palette-error"
+              style={{ margin: 0, padding: items.length === 0 ? '36px 16px' : '9px 16px', textAlign: items.length === 0 ? 'center' : 'left', fontSize: 12.5, color: 'var(--danger-soft)' }}
+            >
+              Could not search {failedSources.join(', ')}. Results may be incomplete — try again.
+            </p>
+          )}
+          {items.length === 0 && failedSources.length === 0 && (
             <p style={{ padding: '36px 16px', textAlign: 'center', fontSize: 13, color: 'var(--app-t3)' }}>
               {mode === 'ask'
                 ? (askCall.isPending ? 'Writing a query…' : askResult ? 'No assets matched.' : 'Ask a question and press ↵.')

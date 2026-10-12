@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -36,6 +38,19 @@ const RevokedUserKeyPrefix = "revoked_user:"
 // RevokedUserKey builds the denylist Redis key for every token belonging to a user.
 func RevokedUserKey(userID uuid.UUID) string { return RevokedUserKeyPrefix + userID.String() }
 
+// RevokedUserCutoffKeyPrefix is the Redis key prefix for a per-user "tokens
+// issued before T are invalid" cutoff. Unlike RevokedUserKey (permanent, for an
+// erased user) the cutoff expires once every token minted before it has, and a
+// token minted AFTER it is honoured, so reactivating a user or letting them
+// sign in again after a password reset works without clearing anything.
+const RevokedUserCutoffKeyPrefix = "revoked_user_before:"
+
+// RevokedUserCutoffKey builds the Redis key holding a user's token cutoff
+// (unix seconds).
+func RevokedUserCutoffKey(userID uuid.UUID) string {
+	return RevokedUserCutoffKeyPrefix + userID.String()
+}
+
 // RevocationChecker reports whether a token (identified by its jti) is on the
 // revocation denylist. Implementations must fail OPEN (return false) on backend
 // errors so a Redis outage degrades to "not revoked" rather than locking
@@ -49,6 +64,31 @@ type RevocationChecker interface {
 // production Redis checker implements both.
 type UserRevocationChecker interface {
 	IsUserRevoked(ctx context.Context, userID uuid.UUID) bool
+}
+
+// UserCutoffChecker is the optional per-user issued-before cutoff, set when a
+// user is deactivated or deleted, has a password reset or changed, or has a
+// session revoked. A token whose iat is earlier than the cutoff is rejected.
+type UserCutoffChecker interface {
+	IsIssuedBeforeUserCutoff(ctx context.Context, userID uuid.UUID, issuedAt time.Time) bool
+}
+
+// IsUserTokenRevoked reports whether a validated token for userID, issued at
+// issuedAt, is refused by the per-user denylist (permanent erase entry) or the
+// per-user cutoff. Every JWT-verifying middleware calls this ONE helper so the
+// two stay in step. A zero issuedAt counts as "before" any cutoff. Fails open
+// when rc is nil or Redis errors, like the jti check.
+func IsUserTokenRevoked(ctx context.Context, rc RevocationChecker, userID uuid.UUID, issuedAt time.Time) bool {
+	if userID == uuid.Nil {
+		return false
+	}
+	if ur, ok := rc.(UserRevocationChecker); ok && ur.IsUserRevoked(ctx, userID) {
+		return true
+	}
+	if cc, ok := rc.(UserCutoffChecker); ok && cc.IsIssuedBeforeUserCutoff(ctx, userID, issuedAt) {
+		return true
+	}
+	return false
 }
 
 // AuthConfig configures the shared JWT authentication middleware.
@@ -185,9 +225,12 @@ func IsTenantBlockAllowedPath(path string) bool {
 // middleware so the response shape (status, code, message) is identical
 // everywhere the web UI can meet it.
 //
-// Skipped for platform tokens (no tenant), for impersonation tokens (a platform
-// administrator may still look at a suspended tenant — documented in the admin
-// guide), and for sign-out.
+// Skipped for platform tokens (no tenant) and for sign-out. Impersonation
+// tokens are checked too, but only for a deleted or purged tenant: a platform
+// administrator may still look at a SUSPENDED tenant (documented in the admin
+// guide), yet there is nothing left to support in a deleted one. They are not
+// subject to the session-generation check (they are minted per support
+// session and revoked by jti).
 func EnforceTenantState(c *gin.Context, checker TenantStateChecker, tenantID uuid.UUID, tokenType string) bool {
 	return enforceTenantState(c, checker, tenantID, tokenType, 0, false)
 }
@@ -200,14 +243,14 @@ func EnforceTenantSession(c *gin.Context, checker TenantStateChecker, tenantID u
 }
 
 func enforceTenantState(c *gin.Context, checker TenantStateChecker, tenantID uuid.UUID, tokenType string, tokenVersion int64, session bool) bool {
-	if checker == nil || tenantID == uuid.Nil || tokenType == "impersonation" ||
-		IsTenantBlockAllowedPath(c.Request.URL.Path) {
+	if checker == nil || tenantID == uuid.Nil || IsTenantBlockAllowedPath(c.Request.URL.Path) {
 		return true
 	}
+	impersonation := tokenType == "impersonation"
 	var code string
 	var blocked, revoked bool
 	var err error
-	if sc, ok := checker.(tenantSessionChecker); session && ok {
+	if sc, ok := checker.(tenantSessionChecker); session && ok && !impersonation {
 		code, blocked, revoked, err = sc.CheckSession(c.Request.Context(), tenantID, tokenVersion)
 	} else {
 		code, blocked, err = checker.Check(c.Request.Context(), tenantID)
@@ -220,6 +263,9 @@ func enforceTenantState(c *gin.Context, checker TenantStateChecker, tenantID uui
 		})
 		c.Abort()
 		return false
+	}
+	if blocked && impersonation && code != tenantstate.CodeDeleted {
+		blocked = false // support access to a suspended tenant is allowed
 	}
 	if blocked {
 		c.JSON(http.StatusForbidden, gin.H{"error": tenantstate.Message(code), "code": code})
@@ -400,9 +446,7 @@ func RequireJWTAuth(cfg AuthConfig) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if userRevocation, ok := revocation.(UserRevocationChecker); ok &&
-			claims.UserID != uuid.Nil &&
-			userRevocation.IsUserRevoked(c.Request.Context(), claims.UserID) {
+		if IsUserTokenRevoked(c.Request.Context(), revocation, claims.UserID, NumericDateTime(claims.IssuedAt)) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token revoked"})
 			c.Abort()
 			return
@@ -445,6 +489,15 @@ func RequireJWTAuth(cfg AuthConfig) gin.HandlerFunc {
 		c.Set(CtxKeyRole, claims.Role)
 		c.Set(CtxKeyUserType, userType)
 		c.Set(CtxKeyTokenType, claims.Type)
+		// Publish the verified token's jti and exp so sign-out can denylist THIS
+		// token (RevokeRequestAccessToken) without re-reading and re-parsing the
+		// request, which would trust an unverified copy of user input.
+		if claims.ID != "" {
+			c.Set(CtxKeyTokenID, claims.ID)
+		}
+		if claims.ExpiresAt != nil {
+			c.Set(CtxKeyTokenExpiresAt, claims.ExpiresAt.Time)
+		}
 
 		// PAT scope narrowing: when the token carries scopes (a PAT-derived
 		// access token), surface them so the RBAC permission checks authorize each
@@ -601,6 +654,34 @@ func (c redisRevocationChecker) IsUserRevoked(ctx context.Context, userID uuid.U
 		return false
 	}
 	return n > 0
+}
+
+func (c redisRevocationChecker) IsIssuedBeforeUserCutoff(ctx context.Context, userID uuid.UUID, issuedAt time.Time) bool {
+	v, err := c.rdb.Get(ctx, RevokedUserCutoffKey(userID)).Result()
+	if err == redis.Nil {
+		return false
+	}
+	if err != nil {
+		logrus.WithError(err).Warn("JWT user cutoff check failed; allowing request (fail-open)")
+		return false
+	}
+	cutoff, perr := strconv.ParseInt(v, 10, 64)
+	if perr != nil {
+		return false
+	}
+	// iat has one-second resolution, so compare in whole seconds. Writers store
+	// the NEXT whole second, which makes the rule "iat <= second of the event":
+	// a token minted in the very second of the event is refused too, rather
+	// than slipping through a sub-second race.
+	return issuedAt.IsZero() || issuedAt.Unix() < cutoff
+}
+
+// NumericDateTime unwraps a JWT NumericDate; a missing claim is the zero time.
+func NumericDateTime(d *jwt.NumericDate) time.Time {
+	if d == nil {
+		return time.Time{}
+	}
+	return d.Time
 }
 
 // NewRedisRevocationChecker wraps a Redis client as a RevocationChecker. Returns

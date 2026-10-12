@@ -5,6 +5,15 @@ import type { adminServiceComponents, tenantHealthServiceComponents } from '@vis
 import { clients } from '../../lib/clients';
 import { usePlatformEdition } from '../../lib/edition';
 import { licenseCapKey } from '../../lib/license-cap';
+import { fetchAllPages, type Paged } from '../../lib/paged';
+import { unwrap } from '@vistasecurity/primitives/shared';
+
+/** Server page size for the all-pages walks (the endpoints clamp at 200). */
+const PAGE_SIZE = 200;
+
+/** What the Tenants page shows when the ceiling cut the list short. */
+export interface ListTruncation { truncated: boolean; total: number; shown: number }
+const truncation = <T,>(r: Paged<T>): ListTruncation => ({ truncated: r.truncated, total: r.total, shown: r.items.length });
 
 export type Tenant = adminServiceComponents['schemas']['Tenant'];
 export type TenantHealthSummary = tenantHealthServiceComponents['schemas']['TenantHealthSummary'];
@@ -55,9 +64,26 @@ export function tenantStatus(t: Tenant): TenantDisplayStatus {
 
 const tenantsKey = ['platform', 'tenants'] as const;
 
-/** Tenant directory (page_size capped at 100 server-side; fine for the admin set).
- *  When an operator scope is set, narrow to that tenant server-side so the
- *  directory ships only the in-scope row. */
+const tenantListQuery = (scopeId: string | null, enabled: boolean) => ({
+  queryKey: [...tenantsKey, scopeId],
+  enabled,
+  queryFn: (): Promise<Paged<Tenant>> =>
+    fetchAllPages(
+      async (page) => {
+        const { data, error } = await clients.admin.GET('/admin/tenants', {
+          params: { query: { page, page_size: PAGE_SIZE, ...(scopeId ? { tenant_id: scopeId } : {}) } },
+        });
+        if (error || !data) throw new Error('Failed to load tenants');
+        return { items: data.tenants ?? [], total: data.pagination?.total };
+      },
+      { pageSize: PAGE_SIZE },
+    ),
+  staleTime: 60 * 1000,
+});
+
+/** Tenant directory, every page (up to the helper's ceiling). When an operator
+ *  scope is set, narrow to that tenant server-side so the directory ships only
+ *  the in-scope row. */
 export function useTenants(scopeId: string | null = null) {
   // The tenant directory lives in admin-service/ee/msp: a Core build never
   // mounts /admin/tenants, so the call 404s. This hook has four callers — the
@@ -66,16 +92,40 @@ export function useTenants(scopeId: string | null = null) {
   // meant a Core operator collected a 404 on every navigation. Gating here
   // rather than at each call site means no caller can forget.
   const { has, resolved } = usePlatformEdition();
-  return useQuery({
-    queryKey: [...tenantsKey, scopeId],
-    enabled: resolved && has('msp'),
-    queryFn: async (): Promise<Tenant[]> => {
-      const { data, error } = await clients.admin.GET('/admin/tenants', {
-        params: { query: { page_size: 100, ...(scopeId ? { tenant_id: scopeId } : {}) } },
+  return useQuery({ ...tenantListQuery(scopeId, resolved && has('msp')), select: (r): Tenant[] => r.items });
+}
+
+/** Whether the directory hit the ceiling — same cache entry as `useTenants`. */
+export function useTenantsTruncation(scopeId: string | null = null) {
+  const { has, resolved } = usePlatformEdition();
+  return useQuery({ ...tenantListQuery(scopeId, resolved && has('msp')), select: truncation<Tenant> });
+}
+
+/**
+ * Cross-tenant health board, every page. The ONE tenant-health list query:
+ * the Tenants page enrichment and the Support board both read it.
+ * tenant-health-service pages by limit/offset and reports no total, so a
+ * short page ends the walk.
+ */
+const HEALTH_PAGE = 200;
+const tenantHealthKey = ['platform', 'tenant-health'] as const;
+const fetchTenantHealth = (): Promise<Paged<TenantHealthSummary>> =>
+  fetchAllPages(
+    async (page) => {
+      const { data, error } = await clients.tenantHealth.GET('/tenants', {
+        params: { query: { limit: HEALTH_PAGE, offset: (page - 1) * HEALTH_PAGE } },
       });
-      if (error || !data) throw new Error('Failed to load tenants');
-      return data.tenants ?? [];
+      if (error || !data) throw new Error('Failed to load tenant health');
+      return { items: data.tenants ?? [] };
     },
+    { pageSize: HEALTH_PAGE },
+  );
+
+export function useTenantHealthList() {
+  return useQuery({
+    queryKey: tenantHealthKey,
+    queryFn: fetchTenantHealth,
+    select: (r): TenantHealthSummary[] => r.items,
     staleTime: 60 * 1000,
   });
 }
@@ -87,14 +137,9 @@ export function useTenants(scopeId: string | null = null) {
  */
 export function useTenantHealthMap() {
   return useQuery({
-    queryKey: ['platform', 'tenant-health'],
-    queryFn: async (): Promise<Map<string, TenantHealthSummary>> => {
-      const { data, error } = await clients.tenantHealth.GET('/tenants', { params: { query: { limit: 200 } } });
-      if (error || !data) throw new Error('Failed to load tenant health');
-      const m = new Map<string, TenantHealthSummary>();
-      for (const s of data.tenants ?? []) m.set(s.tenant_id, s);
-      return m;
-    },
+    queryKey: tenantHealthKey,
+    queryFn: fetchTenantHealth,
+    select: (r): Map<string, TenantHealthSummary> => new Map(r.items.map((s) => [s.tenant_id, s])),
     staleTime: 60 * 1000,
     retry: 0, // enrichment is best-effort; don't hammer if the service is down
   });
@@ -192,8 +237,7 @@ export function useTenantStatusMutation() {
   return useMutation({
     mutationFn: async ({ id, action }: { id: string; action: 'suspend' | 'activate' }) => {
       const path = action === 'suspend' ? '/admin/tenants/{id}/suspend' : '/admin/tenants/{id}/activate';
-      const { error } = await clients.admin.POST(path, { params: { path: { id } } });
-      if (error) throw new Error(`Failed to ${action} tenant`);
+      unwrap(await clients.admin.POST(path, { params: { path: { id } } }), `Failed to ${action} tenant`);
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: tenantsKey }); },
   });
@@ -204,8 +248,7 @@ export function useUpdateTenant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, body }: { id: string; body: UpdateTenantInput }) => {
-      const { error } = await clients.admin.PUT('/admin/tenants/{id}', { params: { path: { id } }, body });
-      if (error) throw new Error('Failed to update tenant');
+      unwrap(await clients.admin.PUT('/admin/tenants/{id}', { params: { path: { id } }, body }), 'Failed to update tenant');
     },
     onSuccess: (_d, { id }) => {
       qc.invalidateQueries({ queryKey: tenantsKey });
@@ -224,21 +267,18 @@ export function useSetTenantOperator() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, isOperator }: { id: string; isOperator: boolean }) => {
-      const { data, error } = await clients.admin.PUT('/admin/tenants/{id}/operator', {
+      const data = unwrap(await clients.admin.PUT('/admin/tenants/{id}/operator', {
         params: { path: { id } },
         body: { is_operator: isOperator },
-      });
-      if (error || !data) {
-        throw new Error((error as { error?: string } | undefined)?.error ?? 'Failed to update the tenant');
-      }
+      }), 'Failed to update the tenant', { requireData: true });
       return data;
     },
     onSuccess: (data) => {
       // Patch every cached directory (one per operator scope) with the saved
       // value first, so the drawer — which reads its tenant from this cache —
       // shows it immediately instead of after the refetch lands.
-      qc.setQueriesData<Tenant[]>({ queryKey: tenantsKey }, (rows) =>
-        rows?.map((t) => (t.id === data.id ? { ...t, is_operator: data.is_operator } : t)),
+      qc.setQueriesData<Paged<Tenant>>({ queryKey: tenantsKey }, (list) =>
+        list && { ...list, items: list.items.map((t) => (t.id === data.id ? { ...t, is_operator: data.is_operator } : t)) },
       );
       void qc.invalidateQueries({ queryKey: tenantsKey });
       if (data.cap) qc.setQueryData(licenseCapKey, data.cap);
@@ -252,8 +292,7 @@ export function useDeleteTenant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id }: { id: string }) => {
-      const { error } = await clients.admin.DELETE('/admin/tenants/{id}', { params: { path: { id } } });
-      if (error) throw new Error('Failed to delete tenant');
+      unwrap(await clients.admin.DELETE('/admin/tenants/{id}', { params: { path: { id } } }), 'Failed to delete tenant');
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: tenantsKey });
@@ -267,20 +306,31 @@ const deletedTenantsKey = [...tenantsKey, 'deleted'] as const;
 
 /** Soft-deleted tenants (GET /admin/tenants?deleted=only), for the Deleted
  * view. Never mixed into the live directory: its own query. */
+const deletedListQuery = (enabled: boolean) => ({
+  queryKey: deletedTenantsKey,
+  enabled,
+  queryFn: (): Promise<Paged<Tenant>> =>
+    fetchAllPages(
+      async (page) => {
+        const { data, error } = await clients.admin.GET('/admin/tenants', {
+          params: { query: { page, page_size: PAGE_SIZE, deleted: 'only' } },
+        });
+        if (error || !data) throw new Error('Failed to load deleted tenants');
+        return { items: data.tenants ?? [], total: data.pagination?.total };
+      },
+      { pageSize: PAGE_SIZE },
+    ),
+  staleTime: 60 * 1000,
+});
+
 export function useDeletedTenants(enabled = true) {
   const { has, resolved } = usePlatformEdition();
-  return useQuery({
-    queryKey: deletedTenantsKey,
-    enabled: enabled && resolved && has('msp'),
-    queryFn: async (): Promise<Tenant[]> => {
-      const { data, error } = await clients.admin.GET('/admin/tenants', {
-        params: { query: { page_size: 100, deleted: 'only' } },
-      });
-      if (error || !data) throw new Error('Failed to load deleted tenants');
-      return data.tenants ?? [];
-    },
-    staleTime: 60 * 1000,
-  });
+  return useQuery({ ...deletedListQuery(enabled && resolved && has('msp')), select: (r): Tenant[] => r.items });
+}
+
+export function useDeletedTenantsTruncation(enabled = true) {
+  const { has, resolved } = usePlatformEdition();
+  return useQuery({ ...deletedListQuery(enabled && resolved && has('msp')), select: truncation<Tenant> });
 }
 
 /** Restore a soft-deleted tenant (POST /admin/tenants/{id}/restore). */
@@ -288,9 +338,8 @@ export function useRestoreTenant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id }: { id: string }) => {
-      const { error } = await clients.admin.POST('/admin/tenants/{id}/restore', { params: { path: { id } } });
       // The server's text when it sent one: the cap refusal names the counts.
-      if (error) throw new Error(serverError(error, 'Failed to restore tenant'));
+      unwrap(await clients.admin.POST('/admin/tenants/{id}/restore', { params: { path: { id } } }), 'Failed to restore tenant');
     },
     onSuccess: () => {
       // tenantsKey is a prefix of deletedTenantsKey: both lists refresh.
@@ -306,8 +355,7 @@ export function usePurgeTenant() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id }: { id: string }) => {
-      const { error } = await clients.admin.DELETE('/admin/tenants/{id}/purge', { params: { path: { id } } });
-      if (error) throw new Error(serverError(error, 'Failed to purge tenant'));
+      unwrap(await clients.admin.DELETE('/admin/tenants/{id}/purge', { params: { path: { id } } }), 'Failed to purge tenant');
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: tenantsKey });
@@ -380,14 +428,13 @@ export function useAdminChangePlan() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, tierId, reason }: { id: string; tierId: string; reason: string }) => {
-      const { data, error } = await clients.admin.POST('/admin/tenants/{id}/billing/change-plan', {
-        params: { path: { id } },
-        body: { tier_id: tierId, reason },
-      });
       // Surface the server's own message: "no Stripe subscription — assign
       // the plan instead", or "changed in Stripe but recording it here
       // failed" (RC-25) are things the operator must read, not a generic toast.
-      if (error || !data) throw new Error(serverError(error, 'Failed to change the tenant plan'));
+      const data = unwrap(await clients.admin.POST('/admin/tenants/{id}/billing/change-plan', {
+        params: { path: { id } },
+        body: { tier_id: tierId, reason },
+      }), 'Failed to change the tenant plan', { requireData: true });
       return data;
     },
     onSuccess: (_d, { id }) => {
@@ -404,10 +451,9 @@ export function useAdminChangePlan() {
 export function useTenantReevaluateMutation() {
   return useMutation({
     mutationFn: async ({ id }: { id: string }) => {
-      const { error } = await clients.compliance.POST('/admin/tenants/{tenantId}/reevaluate', {
+      unwrap(await clients.compliance.POST('/admin/tenants/{tenantId}/reevaluate', {
         params: { path: { tenantId: id } },
-      });
-      if (error) throw new Error('Failed to enqueue re-evaluation');
+      }), 'Failed to enqueue re-evaluation');
     },
   });
 }
@@ -466,11 +512,11 @@ export function useUpdateTenantSettings() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, settings, version }: { id: string; settings: TenantSettings; version?: number }) => {
-      const { data, error } = await clients.admin.PUT('/admin/tenants/{id}/settings', {
+      const { data, error, response } = await clients.admin.PUT('/admin/tenants/{id}/settings', {
         params: { path: { id } },
         body: { settings, ...(version !== undefined ? { version } : {}) },
       });
-      if (error || !data) {
+      if (!response.ok || error || !data) {
         throw new Error(
           (error as { error?: string } | undefined)?.error === 'Version conflict'
             ? 'These settings were changed by someone else. Reload and try again.'

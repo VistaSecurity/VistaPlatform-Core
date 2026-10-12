@@ -7,6 +7,7 @@ import { clients } from '../../lib/clients';
 import { DrawerCloseBtn, DrawerShell, Icon, MetaRow, Modal, Pill, SectionLabel } from '../../components/ui';
 import { relTime } from '../settings/kit';
 import { alertSubjectHref, alertSubjectText } from './alert-subject-link';
+import { unwrap } from '../../lib/api-result';
 
 // Remediation → Alerts. The stateful-alerts work surface: lifecycle
 // active → acknowledged → snoozed → resolved, with an append-only evidence
@@ -128,24 +129,21 @@ export function AlertsPage() {
 
   const ack = useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await clients.compliance.POST('/alerts/{id}/acknowledge', { params: { path: { id } } });
-      if (error || !data) throw new Error(error?.error ?? 'Failed to acknowledge alert');
+      const data = unwrap(await clients.compliance.POST('/alerts/{id}/acknowledge', { params: { path: { id } } }), 'Failed to acknowledge alert', { requireData: true });
       return data.alert;
     },
     onSuccess: onOk, onError,
   });
   const unsnooze = useMutation({
     mutationFn: async (id: string) => {
-      const { data, error } = await clients.compliance.POST('/alerts/{id}/unsnooze', { params: { path: { id } } });
-      if (error || !data) throw new Error(error?.error ?? 'Failed to unsnooze alert');
+      const data = unwrap(await clients.compliance.POST('/alerts/{id}/unsnooze', { params: { path: { id } } }), 'Failed to unsnooze alert', { requireData: true });
       return data.alert;
     },
     onSuccess: onOk, onError,
   });
   const ticket = useMutation({
     mutationFn: async (id: string) => {
-      const { data, error, response } = await clients.compliance.POST('/alerts/{id}/ticket', { params: { path: { id } } });
-      if (!response.ok || error || !data) throw new Error(error?.error ?? 'Failed to create ticket');
+      const data = unwrap(await clients.compliance.POST('/alerts/{id}/ticket', { params: { path: { id } } }), 'Failed to create ticket', { requireData: true });
       return data.ticket;
     },
     onSuccess: onOk, onError,
@@ -344,11 +342,10 @@ function SnoozeModal({ alert, onClose, onDone, onError }: { alert: Alert; onClos
     mutationFn: async () => {
       const until = new Date(Date.now() + days * 86400000).toISOString();
       const trimmed = reason.trim();
-      const { data, error } = await clients.compliance.POST('/alerts/{id}/snooze', {
+      unwrap(await clients.compliance.POST('/alerts/{id}/snooze', {
         params: { path: { id: alert.id } },
         body: trimmed ? { until, reason: trimmed } : { until },
-      });
-      if (error || !data) throw new Error(error?.error ?? 'Failed to snooze alert');
+      }), 'Failed to snooze alert', { requireData: true });
     },
     onSuccess: onDone,
     onError: (e) => { onError(e); onClose(); },
@@ -401,11 +398,10 @@ function ResolveModal({ alert, onClose, onDone, onError }: { alert: Alert; onClo
   const resolve = useMutation({
     mutationFn: async () => {
       const trimmed = note.trim();
-      const { data, error } = await clients.compliance.POST('/alerts/{id}/resolve', {
+      unwrap(await clients.compliance.POST('/alerts/{id}/resolve', {
         params: { path: { id: alert.id } },
         body: trimmed ? { note: trimmed } : {},
-      });
-      if (error || !data) throw new Error(error?.error ?? 'Failed to resolve alert');
+      }), 'Failed to resolve alert', { requireData: true });
     },
     onSuccess: onDone,
     onError: (e) => { onError(e); onClose(); },

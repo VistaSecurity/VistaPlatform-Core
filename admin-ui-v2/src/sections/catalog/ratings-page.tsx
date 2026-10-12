@@ -94,7 +94,7 @@ function useUpdateAlgorithm() {
   return useMutation({
     mutationFn: async ({ code, body }: { code: string; body: UpdateAlgorithmRequest }) => {
       const { error, response } = await clients.inventory.PUT('/admin/algorithms/{code}', { params: { path: { code } }, body });
-      if (error) {
+      if (!response.ok || error) {
         if (response?.status === 403) throw new Error('You do not have permission to edit algorithms (algorithms.manage required)');
         throw new Error('Update failed');
       }
@@ -108,7 +108,7 @@ function useCreateAlgorithm() {
   return useMutation({
     mutationFn: async (body: CreateAlgorithmRequest) => {
       const { error, response } = await clients.inventory.POST('/admin/algorithms', { body });
-      if (error) {
+      if (!response.ok || error) {
         if (response?.status === 409) throw new Error('An algorithm with this code already exists');
         if (response?.status === 403) throw new Error('You do not have permission to create algorithms (algorithms.manage required)');
         if (response?.status === 400) throw new Error('Check the required fields (code, name, category, risk score) and enum values');
@@ -434,9 +434,9 @@ export function RatingsPage() {
                 <td className="t-muted" style={{ whiteSpace: 'normal', maxWidth: 360 }}>{a.migration_guidance || '—'}</td>
                 <td className="t-muted mono" style={{ fontSize: 11 }}>{relTime(a.updated_at)}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>
-                  <button className="op-btn icon sm" title="Edit" onClick={() => setEditing(a)}><Pencil size={13} /></button>
+                  <button className="op-btn icon sm" title="Edit" aria-label="Edit" onClick={() => setEditing(a)}><Pencil size={13} /></button>
                   {a.deprecation_status !== 'obsolete' && (
-                    <button className="op-btn icon sm" title="Deprecate (mark obsolete)" onClick={() => setDeprecating(a)} style={{ marginLeft: 6 }}><Archive size={13} /></button>
+                    <button className="op-btn icon sm" title="Deprecate (mark obsolete)" aria-label="Deprecate (mark obsolete)" onClick={() => setDeprecating(a)} style={{ marginLeft: 6 }}><Archive size={13} /></button>
                   )}
                 </td>
               </tr>

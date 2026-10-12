@@ -14,15 +14,30 @@ spec:
       {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 6 }}
   template:
     metadata:
+      {{- if .Values.datastores.postgres.tls.enabled }}
+      annotations:
+        # Stakater Reloader restarts this StatefulSet when cert-manager rotates
+        # its server cert Secret. Postgres reads the cert at start only, so
+        # without a restart every verifying client fails at expiry. Requires
+        # Reloader installed in the cluster (see NOTES.txt).
+        secret.reloader.stakater.com/reload: postgres-mtls
+      {{- end }}
+      # Selector labels + the static part-of label only. The full
+      # vistaplatform.labels set carries helm.sh/chart and the app version, so
+      # on a pod template every chart bump would roll this single-replica
+      # datastore. part-of is what the NetworkPolicies select on.
       labels:
-        {{- include "vistaplatform.labels" . | nindent 8 }}
-        app.kubernetes.io/component: postgres
+        {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "postgres") | nindent 8 }}
+        app.kubernetes.io/part-of: vistaplatform
     spec:
+      terminationGracePeriodSeconds: 120
       automountServiceAccountToken: false
+      {{- with include "vistaplatform.pullSecrets" . }}
+      {{- . | nindent 6 }}
+      {{- end }}
       securityContext:
-        {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
-        fsGroup: 70
-        runAsUser: 70
+        {{- $psc := mergeOverwrite (fromYaml (include "vistaplatform.podSecurityContext" .)) (dict "fsGroup" 70 "runAsUser" 70) }}
+        {{- toYaml $psc | nindent 8 }}
       containers:
         - name: postgres
           image: "{{ .Values.datastores.postgres.image.repository }}:{{ .Values.datastores.postgres.image.tag }}"
@@ -79,6 +94,24 @@ spec:
               mountPath: /etc/postgres-hba
               readOnly: true
             {{- end }}
+          # Fast shutdown on termination: SIGTERM alone is a *smart* shutdown
+          # that waits for every connected backend to disconnect, so a pod with
+          # live clients ran out its grace period and was SIGKILLed into crash
+          # recovery on the next start. pg_ctl reads PGDATA from the env above
+          # and runs as the pod's postgres user.
+          lifecycle:
+            preStop:
+              exec:
+                command: [sh, -c, "pg_ctl -m fast -w stop || true"]
+          # Holds liveness/readiness off while Postgres replays WAL after an
+          # unclean stop (up to ~10 min), so crash recovery is not killed
+          # midway by the liveness probe.
+          startupProbe:
+            exec:
+              command: [pg_isready, -U, {{ .Values.datastores.postgres.user }}, -d, {{ .Values.datastores.postgres.db }}]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
           livenessProbe:
             exec:
               command: [pg_isready, -U, {{ .Values.datastores.postgres.user }}, -d, {{ .Values.datastores.postgres.db }}]

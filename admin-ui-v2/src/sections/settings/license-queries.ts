@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { adminServiceComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { platformEditionKey } from '../../lib/edition';
+import { unwrap } from '@vistasecurity/primitives/shared';
 
 export type LicenseInfo = adminServiceComponents['schemas']['LicenseInfo'];
 export type RetentionSetting = adminServiceComponents['schemas']['RetentionSetting'];
@@ -40,8 +41,7 @@ export function useSaveRetention() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (maxDays: number | null): Promise<RetentionSetting> => {
-      const { data, error } = await clients.admin.PUT('/admin/license/retention', { body: { max_days: maxDays } });
-      if (error || !data) throw new Error((error as { error?: string } | undefined)?.error ?? 'Could not save the retention setting');
+      const data = unwrap(await clients.admin.PUT('/admin/license/retention', { body: { max_days: maxDays } }), 'Could not save the retention setting', { requireData: true });
       return data;
     },
     onSuccess: (data) => {

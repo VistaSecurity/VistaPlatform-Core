@@ -234,7 +234,7 @@ func (s *FrameworkContextService) countControlsWithOpenFindings(tenantID, framew
 			  AND pfc.framework_id = $2
 			  AND cf.detection_state = 'ACTIVE'
 			  AND `+complianceProducerScope("cf")+`
-			  AND (cf.workflow_status <> 'SUPPRESSED' OR cf.workflow_status IS NULL)
+			  AND `+notSuppressedPredicate("cf")+`
 		`, tenantID, frameworkID).Scan(&count)
 	})
 	if err != nil {
@@ -532,7 +532,7 @@ func (s *FrameworkContextService) evaluateSingleFramework(tenantID, frameworkID 
 				WHERE tenant_id = $1 AND control_id = ANY($2::uuid[])
 				  AND detection_state = 'ACTIVE'
 				  AND ` + complianceProducerScope("findings") + `
-				  AND (workflow_status != 'SUPPRESSED' OR workflow_status IS NULL)
+				  AND ` + notSuppressedPredicate("findings") + `
 				ORDER BY control_id
 			`
 			rows, qErr := tx.QueryContext(ctx, query, tenantID, pq.Array(controlIDs))

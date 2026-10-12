@@ -114,7 +114,7 @@ func foldTLSEnrichmentPairs(discoveries []*models.SensorDiscovery) ([]*models.Se
 	}
 
 	followers := tlsFoldFollowers{}
-	out := make([]*models.SensorDiscovery, 0, len(discoveries)-len(partner))
+	out := make([]*models.SensorDiscovery, 0, len(discoveries))
 	for i, c := range candidates {
 		switch {
 		case c.role == tlsFoldRoleActive && c.paired:
@@ -236,7 +236,7 @@ func mergeTLSPair(passive, active *tlsFoldCandidate) (*models.SensorDiscovery, e
 // envelope rule: active wins unless empty, passive fills, false is a value,
 // and source_ip stays the passive observation's.
 func mergeEnrichmentMetadata(passive, active map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(passive)+len(active))
+	out := make(map[string]interface{}, len(passive))
 	for k, v := range passive {
 		out[k] = v
 	}

@@ -12,6 +12,7 @@ import { SignupPage } from './pages/signup-page';
 import { VerifyEmailPage } from './pages/verify-email-page';
 import { LegalPage } from './pages/legal-page';
 import { ResetPasswordPage } from './pages/reset-password-page';
+import { ForgotPasswordPage } from './pages/forgot-password-page';
 import { AboutPage } from './pages/about-page';
 import { InventoryPage } from './sections/inventory/inventory-page';
 import { AssetPage } from './sections/inventory/asset-page';
@@ -70,6 +71,7 @@ export default function App() {
           with ?sso_token= after the IdP verifies the founder (#895). */}
       <Route path="/register/complete-profile" element={<CompleteProfilePage />} />
       <Route path="/accept-invite" element={<AcceptInvitePage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
       {/* Public self-service signup front door + email-verification landing (#725). */}
       <Route path="/signup" element={<SignupPage />} />

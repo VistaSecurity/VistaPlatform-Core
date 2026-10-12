@@ -40,7 +40,8 @@ export interface paths {
          *     returns `{ "logs": [...] }` with no pagination metadata (export uses a
          *     large page size); `format=csv` returns a `text/csv` file download
          *     (Content-Disposition: attachment). Accepts the same filter query params
-         *     as `GET /activity-logs`. Tenant users are auto-scoped to their own tenant.
+         *     as `GET /activity-logs` (paging params are ignored), so the file holds
+         *     exactly the rows the filtered list shows. Tenant users are auto-scoped to their own tenant.
          */
         get: operations["exportActivityLogs"];
         put?: never;
@@ -939,6 +940,38 @@ export interface operations {
             query?: {
                 /** @description Output format. Defaults to json. */
                 format?: "json" | "csv";
+                /** @description Scope the export to one tenant. Ignored for tenant users, who are always pinned to their own tenant. */
+                tenant_id?: string;
+                /** @description Only entries by this user. */
+                user_id?: string;
+                /** @description Only entries by this actor type (e.g. platform, tenant, system). */
+                user_type?: string;
+                /** @description Only these event types (repeatable). */
+                event_type?: string[];
+                /** @description Only these event categories (repeatable). */
+                event_category?: string[];
+                /** @description Only these actions (repeatable). */
+                action?: string[];
+                /** @description Only entries for this resource type. */
+                resource_type?: string;
+                /** @description Only entries for this resource. */
+                resource_id?: string;
+                /** @description Only entries carrying these compliance tags (repeatable). */
+                compliance_tag?: string[];
+                /** @description Only entries carrying these tags (repeatable). */
+                tag?: string[];
+                /** @description Only successful (true) or failed (false) entries. */
+                success?: boolean;
+                /** @description Only entries flagged (true) or not flagged (false) for attention. */
+                requires_attention?: boolean;
+                /** @description Only impersonated (true) or non-impersonated (false) actions. */
+                impersonation?: boolean;
+                /** @description Free-text search, as in the list endpoint. */
+                search?: string;
+                /** @description Inclusive lower bound on occurred_at (RFC3339). */
+                start_date?: string;
+                /** @description Inclusive upper bound on occurred_at (RFC3339). */
+                end_date?: string;
             };
             header?: never;
             path?: never;

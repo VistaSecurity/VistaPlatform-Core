@@ -10,9 +10,8 @@
 // bucket row links back into the Inventory list filtered to exactly the rows it
 // counted. Nothing here is a new endpoint or a new number: it is the facet rail
 // the Inventory page already draws, read as a page rather than as a filter.
-import { useQuery } from '@tanstack/react-query';
 import { Icon, PercentageGauge, hygienePercentageColor } from '../../components/ui';
-import { clients } from '../../lib/clients';
+import { useFrameworksAvailable } from '../../lib/shared-queries';
 import { useAssetFacets, type FacetLevel } from '../inventory/asset-queries';
 import {
   BandHeading, BucketBars, DashboardHeader, DashboardShell, Grid, PageError, Panel, PanelLink, PanelNote, StatTile,
@@ -58,15 +57,7 @@ const PENDING_LEVELS: readonly FacetLevel[] = ['status'];
  * three read one cached row and cannot report different scores for one tenant.
  */
 function useHygiene() {
-  return useQuery({
-    queryKey: ['posture', 'available-frameworks'],
-    queryFn: async () => {
-      const { data, error } = await clients.compliance.GET('/frameworks/available', {});
-      if (error || !data) throw new Error('Failed to load frameworks');
-      return data.frameworks ?? [];
-    },
-    staleTime: 60_000,
-  });
+  return useFrameworksAvailable();
 }
 
 export function AssetsDashboardPage() {

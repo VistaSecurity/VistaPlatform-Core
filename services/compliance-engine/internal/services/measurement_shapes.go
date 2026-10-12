@@ -429,8 +429,7 @@ var measurementShapes = map[string]measurementShape{
 // (framework_score.go): a suppressed finding is a decision somebody made, not a
 // gap in the inventory.
 func findingCountSQL(via, predicate string) string {
-	open := "f.detection_state = 'ACTIVE'" +
-		" AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL)"
+	open := openFindingPredicate("f")
 	if predicate == "" {
 		predicate = "TRUE"
 	}

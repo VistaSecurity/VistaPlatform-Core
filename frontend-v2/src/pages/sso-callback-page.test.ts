@@ -14,9 +14,22 @@ describe('SSO callback security contract', () => {
     expect(getSsoCallbackError(new URLSearchParams())).toBeNull();
   });
 
-  it('preserves provider errors for the signed-out failure page', () => {
+  it('never renders provider-supplied text: a bare error_description gets the generic message', () => {
     const params = new URLSearchParams({ error_description: 'Identity provider rejected sign-in' });
-    expect(getSsoCallbackError(params)).toBe('Identity provider rejected sign-in');
+    const msg = getSsoCallbackError(params);
+    expect(msg).toContain('couldn’t complete single sign-on');
+    expect(msg).not.toContain('rejected');
+  });
+
+  it('maps a known error code to our own wording', () => {
+    expect(getSsoCallbackError(new URLSearchParams({ error: 'no_account' }))).toContain('No account is linked');
+  });
+
+  it('shows the generic message for an unknown, attacker-chosen error value', () => {
+    const msg = getSsoCallbackError(new URLSearchParams({ error: '<script>phish', error_description: 'Call 555-0100' }));
+    expect(msg).toContain('couldn’t complete single sign-on');
+    expect(msg).not.toContain('phish');
+    expect(msg).not.toContain('555');
   });
 
   it('fails closed before considering a provider error when a URL token is present', () => {
