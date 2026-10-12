@@ -26,6 +26,11 @@ import (
 )
 
 func main() {
+	// Run Gin in release mode unless the operator chose a mode via GIN_MODE.
+	if os.Getenv("GIN_MODE") == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, using system environment variables")

@@ -725,6 +725,7 @@ func TestAutoActiveScan_MainStartsTheWorker(t *testing.T) {
 		// nil here and every automatic scan silently runs from the platform
 		// again, with the settings switch still shown.
 		"jobs.NewAutoActiveScanJob(autoScanStore, discoveryService, sensorrouting.NewStore(db), bypassDB)",
+		"autoScanJob.SetReach(jobs.NewAutoScanReach(db, autoScanStore, sensorrouting.NewStore(db)))",
 		"autoScanJob.Start(ctx)",
 		// ...and the first-observation trigger is subscribed to it. Without
 		// this the product still rescans on schedule and silently stops doing

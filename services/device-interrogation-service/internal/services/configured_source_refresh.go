@@ -401,10 +401,10 @@ func (s *ConfiguredSourceRefresh) plan(ctx context.Context, tenant, observationI
 		return plan, reason, err
 	}
 	if !prior {
-		return plan, "executor_scope_unknown", nil
+		return plan, reasonNeverInterrogated, nil
 	}
 	if !agent.Valid && !platformReinterrogationAllowed(device.Metadata) {
-		return plan, "executor_scope_unknown", nil
+		return plan, reasonExecutorScopeUnknown, nil
 	}
 	if agent.Valid {
 		var reachable bool

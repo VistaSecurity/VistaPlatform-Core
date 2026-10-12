@@ -119,3 +119,13 @@ describe('executor_scope_unknown explains the way out', () => {
     expect(text).not.toContain('executor scope unknown');
   });
 });
+
+describe('never_interrogated explains the way out', () => {
+  it('asks for one interrogation and does not blame consent', () => {
+    const text = enrichmentExplanation('never_interrogated');
+    expect(text).toContain('Never interrogated');
+    expect(text).toContain('Discovery → Devices');
+    expect(text).not.toContain('never_interrogated');
+    expect(text).not.toContain(REINTERROGATION_LABEL);
+  });
+});

@@ -29,9 +29,18 @@ package services
 //     finding on an asset still pending approval;
 //   - an OBSERVATION (observation_id set): written on the identity engine's own
 //     transaction when the tenant's identity admission is `enforce` or
-//     `paused`. It replays once the observation is linked to a monitoring asset
-//     by a decision that attached its evidence (not `supporting`; an operator's
-//     scan request only for the receipts that scan produced), and not while
+//     `paused`. It replays once the observation is bound to a monitoring asset
+//     (`asset_id` set) and either (1) it is `linked` by a decision that attached
+//     its evidence (not `supporting`), or (2) it is DIRECT evidence (a
+//     completed exchange, not traffic only: platform ADR-0003 D2 still holds
+//     traffic-only evidence for an operator's Link) and the finding's own address (its
+//     ip_address, else raw_data.dest_ip) is one the asset already owns — an
+//     `ip_address` identifier or its primary address — whether the
+//     observation's contribution was `supporting` or is still `unresolved`
+//     (an authorized scan that created a provisional asset). Owning the address
+//     is what makes the crypto the asset's; an observation that carried only
+//     someone else's address never lands here. An operator's scan request
+//     replays only the receipts that scan produced, and nothing replays while
 //     admission is paused.
 
 import (
@@ -211,6 +220,28 @@ func (s *AssetService) replayDeferredCrypto(ctx context.Context, tenantID, asset
 	return total, nil
 }
 
+// deferredObservationDirectSQL is true when observation o is direct evidence
+// (identity.DirectEvidence): it met the device on a completed exchange and was
+// not relayed, or it is authoritative. Traffic-only evidence is not, and
+// platform ADR-0003 D2 keeps it from attaching sockets or crypto until an
+// operator links it.
+const deferredObservationDirectSQL = `((COALESCE(o.evidence->'admission'->>'direct', 'false') = 'true'
+			                      AND COALESCE(o.evidence->'admission'->>'relayed', 'false') <> 'true')
+			                  OR COALESCE(o.evidence->'admission'->>'authoritative', 'false') = 'true')`
+
+// deferredFindingAddressOwnedSQL is true when the held finding's address is
+// one the asset $2 owns: an `ip_address` identifier of any scope, or its
+// primary address. The finding's address is its ip_address, falling back to
+// raw_data.dest_ip. A finding with no address owns nothing.
+const deferredFindingAddressOwnedSQL = `(
+			                   COALESCE(NULLIF(w.finding->>'ip_address', ''), NULLIF(w.finding->'raw_data'->>'dest_ip', '')) IS NOT NULL
+			               AND (EXISTS (SELECT 1 FROM asset_identifiers ai
+			                             WHERE ai.tenant_id = w.tenant_id AND ai.asset_id = $2 AND ai.kind = 'ip_address'
+			                               AND ai.value = COALESCE(NULLIF(w.finding->>'ip_address', ''), NULLIF(w.finding->'raw_data'->>'dest_ip', '')))
+			                 OR EXISTS (SELECT 1 FROM assets pa
+			                             WHERE pa.tenant_id = w.tenant_id AND pa.id = $2 AND pa.primary_address IS NOT NULL
+			                               AND host(pa.primary_address) = COALESCE(NULLIF(w.finding->>'ip_address', ''), NULLIF(w.finding->'raw_data'->>'dest_ip', '')))))`
+
 // replayDeferredCryptoRound claims and replays one batch. The caller holds the
 // asset's lifecycle read lock, so the asset cannot be merged, denied or deleted
 // underneath it.
@@ -235,8 +266,11 @@ func (s *AssetService) replayDeferredCryptoRound(ctx context.Context, tenantID, 
 			   LEFT JOIN identity_observations o ON o.tenant_id = w.tenant_id AND o.id = w.observation_id
 			   WHERE w.tenant_id = $1 AND w.replayed_at IS NULL AND w.next_attempt_at <= now()
 			     AND ((w.observation_id IS NULL AND w.asset_id = $2)
-			       OR (w.observation_id IS NOT NULL AND o.asset_id = $2 AND o.state = 'linked'
-			           AND o.resolution_outcome IS DISTINCT FROM 'supporting'
+			       OR (w.observation_id IS NOT NULL AND o.asset_id = $2
+			           AND ((o.state = 'linked' AND o.resolution_outcome IS DISTINCT FROM 'supporting')
+			             OR (o.state IN ('linked', 'unresolved')
+			                 AND `+deferredObservationDirectSQL+`
+			                 AND `+deferredFindingAddressOwnedSQL+`))
 			           AND (o.resolution_outcome IS DISTINCT FROM $3 OR w.finding ? $4)
 			           AND COALESCE((SELECT config->'identity_admission'->>'mode' FROM tenant_admin_settings WHERE tenant_id = $1), 'disabled') <> 'paused'))
 			   ORDER BY w.last_seen_at, w.created_at, w.id
@@ -313,8 +347,9 @@ func (s *AssetService) replayDeferredCryptoRound(ctx context.Context, tenantID, 
 		}
 		err := func() error {
 			if g.observation {
-				// The link attached this evidence (the claim excludes
-				// `supporting`), so the finding's socket is the asset's.
+				// The claim only selects evidence that is the asset's: a link
+				// that attached it, or a finding at an address the asset owns,
+				// so the finding's socket is the asset's.
 				// Attached here explicitly, as the engine's own match would,
 				// before the crypto lookup that never creates one.
 				if err := s.attachDecidedFindingEndpoint(ctx, tenantID, assetID, f, identity.DecidedByLinkedObservation); err != nil {

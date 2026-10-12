@@ -43,6 +43,11 @@ import (
 )
 
 func main() {
+	// Run Gin in release mode unless the operator chose a mode via GIN_MODE.
+	if os.Getenv("GIN_MODE") == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
 	// Load configuration
 	cfg := config.Load()
 
@@ -1036,6 +1041,10 @@ func main() {
 	// that observed the host instead of the platform; without it every scan
 	// runs from the cluster and a host only a sensor can reach is never scanned.
 	autoScanJob := jobs.NewAutoActiveScanJob(autoScanStore, discoveryService, sensorrouting.NewStore(db), bypassDB)
+	// Unattended scans skip what no executor can reach (cloud networks, hosts
+	// on a network none of the tenant's sensors is on) instead of probing it
+	// from the platform. Pinned by TestAutoActiveScan_MainStartsTheWorker.
+	autoScanJob.SetReach(jobs.NewAutoScanReach(db, autoScanStore, sensorrouting.NewStore(db)))
 	go jobs.StartIdentityEvidenceWorker(ctx, bypassDB, assetService, mergeProposalService)
 
 	// The same-device rule's merges ( Phase 4). The identification engine

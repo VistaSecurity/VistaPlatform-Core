@@ -154,6 +154,22 @@ func (s *JobQueueService) createJobTx(ctx context.Context, tx *sql.Tx, jobID uui
 	return job, nil
 }
 
+// HasInterrogationJob reports whether the device already has a device
+// interrogation that is queued, running or completed. A failed or cancelled run
+// does not count: the device has still never been interrogated, but the
+// automatic kickoff only runs once, so callers use this to avoid piling a second
+// job on a first that is still in flight.
+func (s *JobQueueService) HasInterrogationJob(ctx context.Context, tenantID, assetID uuid.UUID) (bool, error) {
+	var exists bool
+	err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM device_jobs
+			WHERE tenant_id=$1 AND asset_id=$2 AND job_type=$3 AND deleted_at IS NULL
+			  AND status IN ('pending','assigned','in_progress','completed'))`,
+			tenantID, assetID, string(models.JobTypeDeviceInterrogation)).Scan(&exists)
+	})
+	return exists, err
+}
+
 func (s *JobQueueService) publishJob(job *models.DeviceJob) {
 	// Publish job event to NATS for immediate processing by subscribers
 	if s.natsClient != nil && s.natsClient.IsConnected() {

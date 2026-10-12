@@ -424,6 +424,18 @@ func AutomaticSegmentPrefixes(segments []Segment) []netip.Prefix {
 // values describe addresses; a segment can equally be a domain or a VPC id, and
 // ParsePrefixes drops those.
 func (s *Store) segmentPrefixes(ctx context.Context, tenantID uuid.UUID) ([]netip.Prefix, error) {
+	segments, err := s.Segments(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return AutomaticSegmentPrefixes(segments), nil
+}
+
+// Segments returns the tenant's active registered network segments with their
+// types, unfiltered. The reachability rule reads the type itself (a `cloud`
+// segment is never reachable from the platform), so it needs more than the
+// in-scope prefixes segmentPrefixes returns.
+func (s *Store) Segments(ctx context.Context, tenantID uuid.UUID) ([]Segment, error) {
 	var segments []Segment
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.SelectContext(ctx, &segments, `
@@ -433,7 +445,7 @@ func (s *Store) segmentPrefixes(ctx context.Context, tenantID uuid.UUID) ([]neti
 	if err != nil {
 		return nil, fmt.Errorf("read the tenant's network segments: %w", err)
 	}
-	return AutomaticSegmentPrefixes(segments), nil
+	return segments, nil
 }
 
 // AddressesWithScanInFlight returns the target inputs that already have an

@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.5.0-rc.6] - 2026-10-07
+## [4.5.0-rc.7] - 2026-10-12
 
 **Version 4.5.0 is a security-hardening and dependency release, and it also improves
 classification, DHCP matching, the agent installers and the discovery pipeline, and adds
@@ -87,6 +87,13 @@ storage class before upgrading.
   Jobs, **Merge as is** / **Review merge** on proposals, one QUIC report per flow, scan jobs
   picked up after a restart, packet captures that report truncation, and a quieter asset
   timeline and NATS log.
+- **Every observed host is inventoried further on its own.** A browser's QUIC ClientHello split
+  over two packets is reassembled, so QUIC connections carry server name, ciphers and
+  fingerprints; crypto seen by a direct probe at an address an asset owns is recorded even
+  when the sighting only confirmed what was known; a direct probe of a provisional host
+  corroborates it instead of creating a twin; a device added with credentials is interrogated
+  at once; automatic scans skip hosts no sensor can reach and say so; Key Store assets show
+  their key's spec, state and rotation; hourly connector syncs run hourly.
 - **Bundled NATS 2.14,** Caddy 2.11.7 in the user-interface images, Go 1.26.9, refreshed Go
   and npm modules (no called vulnerability; one accepted build-time npm advisory).
 

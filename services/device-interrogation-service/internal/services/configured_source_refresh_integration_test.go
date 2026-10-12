@@ -323,6 +323,17 @@ func TestIntegration_SourceRefreshCloudAndExecutorOwnership(t *testing.T) {
 	if err != nil || result.State != "blocked" || result.Reason != "executor_unreachable_or_unsuitable" {
 		t.Fatalf("foreign executor %+v: %v", result, err)
 	}
+	// A device that has never completed an interrogation has no executor to
+	// re-run. That is not a missing consent, and it must not be reported as one.
+	fresh, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", Hostname: strptr("fresh.example.test"), ManagementURL: strptr("https://192.0.2.3"), PlatformReinterrogationAllowed: boolPtr(true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = refreshObservation(t, db, tenant, "sensor:"+uuid.NewString(), &fresh.ID)
+	result, err = service.Refresh(context.Background(), req)
+	if err != nil || result.State != "blocked" || result.Reason != reasonNeverInterrogated {
+		t.Fatalf("never interrogated %+v: %v", result, err)
+	}
 	// The app role cannot browse another tenant's request (RLS, not just APIs).
 	tx, err := db.Begin()
 	if err != nil {

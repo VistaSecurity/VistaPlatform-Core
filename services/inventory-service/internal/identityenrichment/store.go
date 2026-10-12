@@ -366,6 +366,19 @@ type Collector struct {
 	reported []netip.Addr
 }
 
+// NewCollector builds a collector from interfaces whose prefix lengths were
+// reported (only the address part of each prefix is used). For callers that
+// plan against a collector set without reading it from the database.
+func NewCollector(id uuid.UUID, name string, interfaces ...netip.Prefix) Collector {
+	c := Collector{ID: id, Name: name}
+	for _, p := range interfaces {
+		a := p.Addr()
+		c.Addresses = append(c.Addresses, netip.PrefixFrom(a, a.BitLen()))
+		c.reported = append(c.reported, a)
+	}
+	return c
+}
+
 // Reaches reports whether the collector has an interface inside network.
 // Only an interface whose prefix length was REPORTED counts — a guessed /24
 // or /64 does not.

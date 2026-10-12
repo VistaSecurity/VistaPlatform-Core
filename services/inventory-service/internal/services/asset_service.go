@@ -3715,6 +3715,16 @@ func (s *AssetService) resolveDiscoveryObservation(segs *importSegments, tenantI
 			// The OS is a class attribute now (ADR-0002 D2), not a column.
 			in.Attributes = map[string]interface{}{"operating_system": os}
 		}
+		if attrs := kmsKeyStoreAttributesFromFinding(f); len(attrs) > 0 {
+			// A cloud KMS key's Key Store asset shows the key's posture and
+			// its provider, account and region (merged, so a refresh updates).
+			if in.Attributes == nil {
+				in.Attributes = map[string]interface{}{}
+			}
+			for k, v := range attrs {
+				in.Attributes[k] = v
+			}
+		}
 		return in
 	}
 

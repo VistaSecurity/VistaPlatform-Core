@@ -102,6 +102,49 @@ func (e *Engine) provisionalMatchMode(ctx context.Context, ref AssetRef, matched
 	return provisionalYield, nil
 }
 
+// corroboratedByDirectProbe reports whether an observation that matched a
+// provisional asset by ADDRESS ALONE should corroborate it instead of making
+// the address yield ( D3).
+//
+// Yielding is for evidence that names or binds a DIFFERENT thing at the
+// address: a MAC or a name the provisional asset does not hold says another
+// device now answers there. A direct, authorized probe (an SSH host key, a TLS
+// endpoint) says only that something answers, and the only thing known to be
+// there is the provisional asset. Yielding on it created a second asset beside
+// the guess the probe had just confirmed, and left the guess holding the names
+// while the address and the strong identifiers lived on its twin.
+//
+// It holds only when the observation is a direct, non-relayed measurement;
+// every identifier anyone owns belongs to the ONE matched asset (a second owner
+// stays a contested case); and no MAC, hostname or fqdn it carries is missing
+// from that asset.
+func corroboratedByDirectProbe(obs Observation, ids []Identifier, owners map[string][]AssetRef, matched string) bool {
+	if !directMeasurement(obs) {
+		return false
+	}
+	for owner := range ownerSet(owners) {
+		if owner != matched {
+			return false
+		}
+	}
+	for _, id := range ids {
+		switch id.Kind {
+		case KindMACAddress, KindHostname, KindFQDN:
+			if id.Generic {
+				continue
+			}
+			held := false
+			for _, ref := range owners[id.Key()] {
+				held = held || ref.ID == matched
+			}
+			if !held {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // yieldToDirectEvidence implements the "hearsay yields" half of D3.
 //
 // It re-runs the decision with the provisional asset's addresses MUTED — they

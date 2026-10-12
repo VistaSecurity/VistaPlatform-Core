@@ -25,6 +25,7 @@ import (
 	"log"
 	"os"
 
+	"github.com/gin-gonic/gin"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/api"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/admin-service/internal/database"
@@ -34,6 +35,11 @@ import (
 // main initializes and starts the SaaS Admin Service.
 // It loads configuration, establishes database connection, and starts the HTTP server.
 func main() {
+	// Run Gin in release mode unless the operator chose a mode via GIN_MODE.
+	if os.Getenv("GIN_MODE") == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
 	// Load configuration from environment variables with sensible defaults
 	cfg := config.Load()
 

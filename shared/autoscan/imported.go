@@ -69,6 +69,14 @@ import (
 // does not allow active scanning.
 const ReasonImportedWithoutConsent Reason = "imported_without_scan_consent"
 
+// ReasonNoEligibleCollector is an asset the sweep declined to probe because no
+// executor can reach it: it sits in a cloud network, or the tenant has deployed
+// sensors and none of them has an interface in its network. The platform
+// sensor is not on the target's network either, so the probe would only ever
+// time out. The string is the one identity enrichment records for the same
+// condition (identityenrichment.ReasonNoEligibleCollector).
+const ReasonNoEligibleCollector Reason = "no_eligible_collector_in_target_network"
+
 // ImportedWithoutConsentSQL is a boolean SQL expression, TRUE when the asset
 // aliased `a` is import-only (its stored import_only_sources) and no
 // connection that reported it consents. `a` must expose tenant_id, id and

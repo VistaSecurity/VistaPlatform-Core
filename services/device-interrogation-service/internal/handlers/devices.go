@@ -56,6 +56,13 @@ type jobCreator interface {
 	CreateJob(ctx context.Context, req models.CreateDeviceJobRequest) (*models.DeviceJob, error)
 }
 
+// interrogationHistory is implemented by the real job queue. The first-
+// interrogation kickoff on a credential update uses it to avoid queueing a
+// second job; a queue without it is treated as having no history.
+type interrogationHistory interface {
+	HasInterrogationJob(ctx context.Context, tenantID, assetID uuid.UUID) (bool, error)
+}
+
 // DeviceHandlers handles device-related HTTP requests
 type DeviceHandlers struct {
 	deviceService deviceStore
@@ -181,7 +188,59 @@ func (h *DeviceHandlers) CreateDevice(c *gin.Context) {
 		return
 	}
 
+	h.startFirstInterrogation(c.Request.Context(), tenantID, device)
 	c.JSON(http.StatusCreated, device)
+}
+
+// startFirstInterrogation queues the device's first interrogation when it has
+// credentials the platform can use, so a device added in the UI is interrogated
+// without a second click. It goes through the same job construction as
+// POST /devices/:id/interrogate (newInterrogationJobRequest): no executor is
+// named, so the platform worker or one of the tenant's agents claims it.
+//
+// It never fails the caller. The device is already saved; a job that could not
+// be queued is logged and the operator can still press Interrogate.
+func (h *DeviceHandlers) startFirstInterrogation(ctx context.Context, tenantID uuid.UUID, device *models.Device) {
+	if device == nil || h.jobQueue == nil {
+		return
+	}
+	// A cloud resource is enumerated by its integration, not interrogated.
+	if services.IsCloudDeviceType(device.DeviceType) {
+		return
+	}
+	masterKey := os.Getenv("ENCRYPTION_MASTER_KEY")
+	if masterKey == "" {
+		log.Printf("device %s: first interrogation not queued: encryption master key not configured", device.ID)
+		return
+	}
+	credentials, err := h.buildJobCredentials(ctx, tenantID, device, masterKey)
+	if err != nil {
+		if !errors.Is(err, errNoDeviceCredentials) {
+			log.Printf("device %s: first interrogation not queued: could not prepare credentials", device.ID)
+		}
+		return
+	}
+	job, err := h.jobQueue.CreateJob(ctx, newInterrogationJobRequest(tenantID, device, models.JobTypeDeviceInterrogation, nil, credentials, nil))
+	if err != nil {
+		log.Printf("device %s: first interrogation not queued: %v", device.ID, err)
+		return
+	}
+	log.Printf("device %s: first interrogation queued as job %s", device.ID, job.ID)
+}
+
+// newInterrogationJobRequest builds the job a device interrogation (or host
+// inventory) runs as. agentID is nil for a device interrogation: whoever can
+// reach the device claims it.
+func newInterrogationJobRequest(tenantID uuid.UUID, device *models.Device, jobType models.DeviceJobType, agentID *uuid.UUID, credentials, extra map[string]interface{}) models.CreateDeviceJobRequest {
+	assetID := device.ID
+	return models.CreateDeviceJobRequest{
+		TenantID:    tenantID,
+		JobType:     jobType,
+		AssetID:     &assetID,
+		AgentID:     agentID,
+		Credentials: credentials,
+		Parameters:  buildJobParameters(device, extra),
+	}
 }
 
 // writeDeviceIdentityConflict answers 409 when every identifier the operator
@@ -316,6 +375,7 @@ func (h *DeviceHandlers) DiscoverAndCreateDevice(c *gin.Context) {
 			device.SSHHostKeyFingerprint = &fp
 		}
 	}
+	h.startFirstInterrogation(c.Request.Context(), tenantID, device)
 	c.JSON(http.StatusCreated, device)
 }
 
@@ -480,7 +540,27 @@ func (h *DeviceHandlers) UpdateDevice(c *gin.Context) {
 		return
 	}
 
+	if (req.Username != nil || req.Password != nil || req.CredentialID != nil) && !h.hasInterrogationJob(c.Request.Context(), tenantID, id) {
+		h.startFirstInterrogation(c.Request.Context(), tenantID, device)
+	}
 	c.JSON(http.StatusOK, device)
+}
+
+// hasInterrogationJob reports whether the device already has an interrogation
+// queued, running or completed. When that cannot be determined it answers true:
+// not queueing is the safe side of a doubt, and the operator can always press
+// Interrogate.
+func (h *DeviceHandlers) hasInterrogationJob(ctx context.Context, tenantID, deviceID uuid.UUID) bool {
+	history, ok := h.jobQueue.(interrogationHistory)
+	if !ok {
+		return false
+	}
+	has, err := history.HasInterrogationJob(ctx, tenantID, deviceID)
+	if err != nil {
+		log.Printf("device %s: could not check interrogation history: %v", deviceID, err)
+		return true
+	}
+	return has
 }
 
 // DeleteDevice handles DELETE /devices/:id
@@ -666,14 +746,7 @@ func (h *DeviceHandlers) InterrogateDevice(c *gin.Context) {
 		message = "Host inventory job created"
 	}
 
-	jobRequest := models.CreateDeviceJobRequest{
-		TenantID:    tenantID,
-		JobType:     req.JobType,
-		AssetID:     &deviceID,
-		AgentID:     agentID,
-		Credentials: credentials,
-		Parameters:  buildJobParameters(device, extra),
-	}
+	jobRequest := newInterrogationJobRequest(tenantID, device, req.JobType, agentID, credentials, extra)
 
 	deviceJob, err := h.jobQueue.CreateJob(c.Request.Context(), jobRequest)
 	if err != nil {
@@ -1023,13 +1096,7 @@ func (h *DeviceHandlers) BulkInterrogateDevices(c *gin.Context) {
 		}
 
 		// Create job
-		jobRequest := models.CreateDeviceJobRequest{
-			TenantID:    tenantID,
-			JobType:     models.JobTypeDeviceInterrogation,
-			AssetID:     &deviceID,
-			Credentials: credentials,
-			Parameters:  buildJobParameters(device, map[string]interface{}{"bulk": true}),
-		}
+		jobRequest := newInterrogationJobRequest(tenantID, device, models.JobTypeDeviceInterrogation, nil, credentials, map[string]interface{}{"bulk": true})
 
 		deviceJob, err := h.jobQueue.CreateJob(c.Request.Context(), jobRequest)
 		if err != nil {

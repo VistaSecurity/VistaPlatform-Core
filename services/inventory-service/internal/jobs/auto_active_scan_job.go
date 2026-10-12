@@ -49,8 +49,12 @@ type AutoActiveScanJob struct {
 	store      autoScanStore
 	dispatcher autoScanDispatcher
 	router     autoScanRouter
-	bypassDB   *sql.DB
-	logger     *log.Logger
+	// reach applies the same reachability rule identity enrichment applies to
+	// the addresses the router would send to the platform. Optional (nil = the
+	// pre-rule behaviour); set with SetReach.
+	reach    autoScanReach
+	bypassDB *sql.DB
+	logger   *log.Logger
 
 	enabled         bool
 	sweepInterval   time.Duration
@@ -142,6 +146,10 @@ func NewAutoActiveScanJob(store autoScanStore, dispatcher autoScanDispatcher, ro
 	j.now = time.Now
 	return j
 }
+
+// SetReach wires the reachability rule for addresses that would run from the
+// platform (see auto_active_scan_reach.go).
+func (j *AutoActiveScanJob) SetReach(r autoScanReach) { j.reach = r }
 
 func durationFromEnv(key string, def time.Duration) time.Duration {
 	if raw := os.Getenv(key); raw != "" {
@@ -414,6 +422,20 @@ func (j *AutoActiveScanJob) SweepTenant(ctx context.Context, tenantID uuid.UUID,
 	dispatched, scannedAssets, skippedOffline := 0, 0, 0
 	for _, batch := range batches {
 		for _, routed := range j.routeBatch(ctx, tenantID, policy, batch, now) {
+			if routed.unreachable {
+				// No executor can reach these (cloud network, or a tenant
+				// with sensors none of which is on the target's network).
+				// Not stamped: they stay eligible and are re-evaluated when a
+				// sensor appears. Surfaced as a refusal so the settings page
+				// says so instead of leaving the host looking unscanned for
+				// no reason.
+				if refusals == nil {
+					refusals = map[sharedautoscan.Reason]int{}
+				}
+				refusals[sharedautoscan.ReasonNoEligibleCollector] += len(routed.assetIDs)
+				j.logger.Printf("tenant %s: %d address(es) not scanned: %s", tenantID, len(routed.addresses), sharedautoscan.ReasonNoEligibleCollector)
+				continue
+			}
 			if routed.skipped != nil {
 				// The observing sensor is offline and no other live sensor
 				// covers the host's segment (the router hands it to one when
@@ -517,6 +539,8 @@ type routedBatch struct {
 	preferredSensorIDs []string
 	sensorName         string
 	skipped            *sensorrouting.Skip
+	// unreachable: no executor can reach these addresses; not dispatched.
+	unreachable bool
 }
 
 func (r routedBatch) describe() string {
@@ -538,14 +562,13 @@ func (r routedBatch) describe() string {
 // is the behaviour every tenant had until today and refusing to scan anything
 // is the worse failure.
 func (j *AutoActiveScanJob) routeBatch(ctx context.Context, tenantID uuid.UUID, policy autoscan.Policy, batch autoscan.Batch, now time.Time) []routedBatch {
-	platformOnly := []routedBatch{{addresses: batch.Addresses, assetIDs: batch.AssetIDs, executionMode: "async"}}
 	if !policy.PreferObservingSensor || j.router == nil {
-		return platformOnly
+		return j.platformBatches(ctx, tenantID, policy, batch, batch.Addresses, now)
 	}
 	plan, err := j.router.Resolve(ctx, tenantID, batch.Addresses, now)
 	if err != nil {
 		j.logger.Printf("ERROR: tenant %s: could not route %d address(es) to sensors, scanning from the platform this pass: %v", tenantID, len(batch.Addresses), err)
-		return platformOnly
+		return j.platformBatches(ctx, tenantID, policy, batch, batch.Addresses, now)
 	}
 
 	var out []routedBatch
@@ -558,9 +581,7 @@ func (j *AutoActiveScanJob) routeBatch(ctx context.Context, tenantID uuid.UUID, 
 			sensorName:         group.Sensor.Name,
 		})
 	}
-	if len(plan.Platform) > 0 {
-		out = append(out, routedBatch{addresses: plan.Platform, assetIDs: batch.AssetsFor(plan.Platform), executionMode: "async"})
-	}
+	out = append(out, j.platformBatches(ctx, tenantID, policy, batch, plan.Platform, now)...)
 	// Skips are reported per observing sensor, not per address, so a sensor
 	// that is down does not produce a thousand log lines. Ordered by first
 	// appearance so the log reads the same for the same inventory.
@@ -694,4 +715,43 @@ func (j *AutoActiveScanJob) tenantIsScannable(tenantID uuid.UUID) (bool, error) 
 		return false, err
 	}
 	return ok, nil
+}
+
+// platformBatches turns the addresses headed for the platform into batches,
+// after the reachability rule has moved them to a sensor that can reach them
+// or dropped them as unreachable. With no reach reader wired, or a reader that
+// cannot answer, everything stays on the platform (logged), as before.
+func (j *AutoActiveScanJob) platformBatches(ctx context.Context, tenantID uuid.UUID, policy autoscan.Policy, batch autoscan.Batch, addresses []string, now time.Time) []routedBatch {
+	if len(addresses) == 0 {
+		return nil
+	}
+	platform := func(addrs []string) routedBatch {
+		return routedBatch{addresses: addrs, assetIDs: batch.AssetsFor(addrs), executionMode: "async"}
+	}
+	if j.reach == nil {
+		return []routedBatch{platform(addresses)}
+	}
+	reach, err := j.reach.Reachability(ctx, tenantID, now)
+	if err != nil {
+		j.logger.Printf("ERROR: tenant %s: could not read reachability, keeping %d address(es) on the platform this pass: %v", tenantID, len(addresses), err)
+		return []routedBatch{platform(addresses)}
+	}
+	d := decidePlatformTargets(addresses, reach, policy.PreferObservingSensor)
+	var out []routedBatch
+	if len(d.Platform) > 0 {
+		out = append(out, platform(d.Platform))
+	}
+	for _, via := range d.ViaCollector {
+		out = append(out, routedBatch{
+			addresses:          via.Addresses,
+			assetIDs:           batch.AssetsFor(via.Addresses),
+			executionMode:      "sensors",
+			preferredSensorIDs: []string{via.Collector.ID.String()},
+			sensorName:         via.Collector.Name,
+		})
+	}
+	if len(d.Unreachable) > 0 {
+		out = append(out, routedBatch{addresses: d.Unreachable, assetIDs: batch.AssetsFor(d.Unreachable), unreachable: true})
+	}
+	return out
 }

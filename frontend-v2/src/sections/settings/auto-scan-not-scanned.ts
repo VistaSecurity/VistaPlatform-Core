@@ -76,6 +76,11 @@ const REASONS: Record<string, ReasonCopy> = {
     label: 'Not an address',
     detail: 'A stored value that does not parse as an address — look at the asset.',
   },
+  no_eligible_collector_in_target_network: {
+    label: 'No sensor on the network',
+    detail:
+      'Automatic scans only run from a place that can reach the host. These are in a cloud network, or on a network none of your sensors is on, and the platform sensor cannot reach them either. Install a sensor on that network (Discovery → Sensors & Agents) and they are scanned on the next pass.',
+  },
   imported_without_scan_consent: {
     label: 'Imported, not cleared for scanning',
     detail:

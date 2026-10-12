@@ -64,7 +64,8 @@ func parseQUICInitialWithDecrypt(data []byte, srcIP, dstIP string, srcPort, dstP
 
 	// Attempt QUIC Initial decryption to extract full ClientHello
 	if enableDecrypt && (isQUICv1 || isQUICv2) {
-		chInfo, err := decryptQUICInitial(data)
+		flow := quicFlowKey{srcIP: srcIP, srcPort: srcPort, dstIP: dstIP, dstPort: dstPort}
+		chInfo, err := decryptQUICInitial(data, flow)
 		if err == nil && chInfo != nil {
 			log.Printf("QUIC ClientHello decrypted from %s:%d -> %s:%d (SNI=%s)", srcIP, srcPort, dstIP, dstPort, chInfo.SNI)
 

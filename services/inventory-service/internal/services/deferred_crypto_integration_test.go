@@ -369,3 +369,131 @@ func TestIntegration_DeferredCrypto_MigrationMovesLegacyStores(t *testing.T) {
 		t.Fatalf("after approval: %+v, want all three moved rows replayed", got)
 	}
 }
+
+// deferralBoundSetup creates one asset through a real pending ingest of a
+// finding at ip, discards the asset-gated row that ingest held, and leaves the
+// asset with the given status and exactly one ip_address identifier (ip). It
+// returns the asset.
+func deferralBoundSetup(t *testing.T, f leafLinkFixture, host, ip, status string) uuid.UUID {
+	t.Helper()
+	finding := leafCertFinding(host, ip, 443, hexFingerprint(host))
+	if _, err := f.svc.IngestFindingsReport(f.tenant, []IngestFinding{finding}, identity.StatusPendingApproval); err != nil {
+		t.Fatal(err)
+	}
+	var asset uuid.UUID
+	if err := f.db.QueryRow(`SELECT id FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, f.tenant).Scan(&asset); err != nil {
+		t.Fatalf("setup: want the one asset: %v", err)
+	}
+	for _, q := range []string{
+		`DELETE FROM deferred_crypto_findings WHERE tenant_id=$1`,
+		`DELETE FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address'`,
+		`UPDATE assets SET primary_address=NULL WHERE tenant_id=$1`,
+	} {
+		if _, err := f.db.Exec(q, f.tenant); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := f.db.Exec(`INSERT INTO asset_identifiers(tenant_id,asset_id,kind,value,scope) VALUES($1,$2,'ip_address',$3,'scope-a')`,
+		f.tenant, asset, ip); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`UPDATE assets SET asset_status=$3 WHERE tenant_id=$1 AND id=$2`, f.tenant, asset, status); err != nil {
+		t.Fatal(err)
+	}
+	return asset
+}
+
+// deferralHoldObservation inserts an observation bound to asset with the given
+// state/outcome and one held finding waiting on it, at findingIP.
+func deferralHoldObservation(t *testing.T, f leafLinkFixture, asset uuid.UUID, state, outcome, host, findingIP string, direct bool) {
+	t.Helper()
+	evidence := `{"admission":{"direct":true}}`
+	if !direct {
+		evidence = `{"admission":{}}`
+	}
+	obs := uuid.New()
+	var outcomeArg interface{}
+	if outcome != "" {
+		outcomeArg = outcome
+	}
+	if _, err := f.db.Exec(`INSERT INTO identity_observations(tenant_id,id,fingerprint,source_kind,source_ref,evidence,state,asset_id,resolution_outcome,first_seen_at,last_seen_at)
+		VALUES($1,$2,$3,'sensor','deferral-test',$7::jsonb,$4,$5,$6,now(),now())`,
+		f.tenant, obs, "fp-"+obs.String(), state, asset, outcomeArg, evidence); err != nil {
+		t.Fatal(err)
+	}
+	finding := leafCertFinding(host, findingIP, 8443, hexFingerprint(host+findingIP))
+	finding.RawData["observed_at"] = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	body, err := json.Marshal(finding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`INSERT INTO deferred_crypto_findings(tenant_id,observation_id,source_ref,dedup_key,finding)
+		VALUES($1,$2,'deferral-test',$3,$4)`, f.tenant, obs, "receipt-"+obs.String(), string(body)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A held observation finding is replayed onto a monitoring asset that owns the
+// finding's address whether the observation was `supporting` or is still
+// `unresolved`, and is not replayed for an address the asset does not own or an
+// asset that is not monitoring. Driven through the per-minute sweep.
+//
+// Mutation log: restoring the pre-change claim (linked AND NOT supporting only)
+// → SupportingOwnedAddress and UnresolvedOwnedAddress fail.
+func TestIntegration_DeferredCrypto_BoundObservationOwnedAddress(t *testing.T) {
+	cases := []struct {
+		name, state, outcome, status, findingIP string
+		trafficOnly, wantReplayed               bool
+	}{
+		{"SupportingOwnedAddress", "linked", "supporting", "monitoring", "192.0.2.10", false, true},
+		{"SupportingForeignAddress", "linked", "supporting", "monitoring", "192.0.2.99", false, false},
+		{"UnresolvedOwnedAddress", "unresolved", "", "monitoring", "192.0.2.10", false, true},
+		{"UnresolvedForeignAddress", "unresolved", "", "monitoring", "192.0.2.99", false, false},
+		{"PendingAssetOwnedAddress", "linked", "supporting", "pending_approval", "192.0.2.10", false, false},
+		{"DismissedOwnedAddress", "dismissed", "", "monitoring", "192.0.2.10", false, false},
+		{"SupportingTrafficOnlyOwnedAddress", "linked", "supporting", "monitoring", "192.0.2.10", true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newLeafLinkFixture(t)
+			asset := deferralBoundSetup(t, f, "bound-"+strings.ToLower(c.name)+".example.test", "192.0.2.10", c.status)
+			deferralHoldObservation(t, f, asset, c.state, c.outcome, "bound-"+strings.ToLower(c.name)+".example.test", c.findingIP, !c.trafficOnly)
+
+			n, err := f.svc.replayDueDeferredCrypto(context.Background(), f.tenant)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := deferralRowState{observationHeld: 1}
+			wantCrypto := 0
+			if c.wantReplayed {
+				want = deferralRowState{replayed: 1}
+				wantCrypto = 1
+			}
+			if got := deferralRows(t, f); got != want {
+				t.Fatalf("rows after the sweep (replayed %d): %+v, want %+v", n, got, want)
+			}
+			if got := deferralCryptoCount(t, f, asset); got != wantCrypto {
+				t.Fatalf("%d crypto configurations, want %d", got, wantCrypto)
+			}
+		})
+	}
+}
+
+// The asset's primary address alone also proves ownership.
+func TestIntegration_DeferredCrypto_BoundObservationPrimaryAddress(t *testing.T) {
+	f := newLeafLinkFixture(t)
+	asset := deferralBoundSetup(t, f, "bound-primary.example.test", "192.0.2.10", "monitoring")
+	if _, err := f.db.Exec(`DELETE FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address'`, f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`UPDATE assets SET primary_address='192.0.2.20' WHERE tenant_id=$1 AND id=$2`, f.tenant, asset); err != nil {
+		t.Fatal(err)
+	}
+	deferralHoldObservation(t, f, asset, "linked", "supporting", "bound-primary.example.test", "192.0.2.20", true)
+	if _, err := f.svc.replayDueDeferredCrypto(context.Background(), f.tenant); err != nil {
+		t.Fatal(err)
+	}
+	if got := deferralRows(t, f); got != (deferralRowState{replayed: 1}) {
+		t.Fatalf("rows: %+v, want the row replayed", got)
+	}
+}

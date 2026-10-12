@@ -137,6 +137,66 @@ func kmsKeyStoreResourceMetadata(r CloudKeyRecord) map[string]interface{} {
 	}
 }
 
+// kmsKeyStoreAttributesKey is the RawData key that carries the class attributes
+// of a Key Store finding from kmsKeyStoreFinding to IngestFindings, which
+// merges them into the asset's `attributes` on creation and on every refresh.
+const kmsKeyStoreAttributesKey = "asset_attributes"
+
+// kmsKeyStoreAttributes is the explicit allowlist of posture fields a Key Store
+// asset shows: the cloud_resource base set (provider, account_id, region) plus
+// the key's identity and configuration. Projected field by field from the
+// record — never the whole collector response — and none of them is key
+// material. Empty values are dropped (absent, not "collected as nothing");
+// rotation_enabled=false is an answer and is kept.
+func kmsKeyStoreAttributes(r CloudKeyRecord) map[string]interface{} {
+	out := map[string]interface{}{}
+	put := func(k, v string) {
+		if v = strings.TrimSpace(v); v != "" {
+			out[k] = v
+		}
+	}
+	put("provider", strings.ToLower(strings.TrimSpace(r.Provider)))
+	put("account_id", r.AccountID)
+	put("region", r.Region)
+	put("key_id", r.KeyID)
+	put("cloud_resource_id", r.KeyARN)
+	if strings.EqualFold(strings.TrimSpace(r.Provider), "aws") {
+		put("arn", r.KeyARN)
+	}
+	put("key_spec", r.KeySpec)
+	put("key_usage", r.KeyUsage)
+	put("key_state", r.KeyState)
+	put("origin", r.Origin)
+	out["rotation_enabled"] = r.RotationEnabled
+	if r.CreationDate != nil && !r.CreationDate.IsZero() {
+		out["creation_date"] = r.CreationDate.UTC().Format(time.RFC3339Nano)
+	}
+	var aliases []interface{}
+	for _, a := range r.Aliases {
+		if a = strings.TrimSpace(a); a != "" {
+			aliases = append(aliases, a)
+		}
+	}
+	if len(aliases) > 0 {
+		out["aliases"] = aliases
+	}
+	return out
+}
+
+// kmsKeyStoreAttributesFromFinding reads back what kmsKeyStoreFinding put in a
+// finding, for the ingest path. Only a cloud_discovery finding of a KMS class
+// is honoured, so no other producer can write class attributes through it.
+func kmsKeyStoreAttributesFromFinding(f IngestFinding) map[string]interface{} {
+	if src, _ := f.RawData["source"].(string); src != "cloud_discovery" {
+		return nil
+	}
+	if dt, _ := f.RawData["device_type"].(string); dt != "aws_kms" && dt != "azure_keyvault_key" && dt != "gcp_kms_crypto_key" {
+		return nil
+	}
+	attrs, _ := f.RawData[kmsKeyStoreAttributesKey].(map[string]interface{})
+	return attrs
+}
+
 // kmsKeyStoreEnvelope is the sensor_discoveries metadata envelope the old row
 // carried (device-interrogation's fallback branch for an at-rest device). Its
 // cloud_region is the device's `region` key, which only the AWS shape has — so
@@ -183,6 +243,7 @@ func kmsKeyStoreFinding(r CloudKeyRecord, sensorID uuid.UUID, observedAt time.Ti
 	raw["confidence"] = kmsKeyStoreConfidence
 	raw["timestamp"] = observedAt.UTC().Format(time.RFC3339Nano)
 	raw["pqc_kex_detected"] = false
+	raw[kmsKeyStoreAttributesKey] = kmsKeyStoreAttributes(r)
 	raw["source"] = "cloud_discovery"
 	raw["network_ownership"] = ownership
 	raw["network_type"] = networkType

@@ -696,6 +696,13 @@ func (e *Engine) resolve(ctx context.Context, obs Observation) (Resolution, erro
 		if err != nil {
 			return Resolution{}, err
 		}
+		if mode == provisionalYield && corroboratedByDirectProbe(obs, ids, owners, decided) {
+			// The address is all the two agree about, but nothing here
+			// disagrees about WHO is at it: a direct probe of a provisional
+			// asset's address that brings no competing name or interface is
+			// that asset, met directly (provisional_engine.go).
+			mode = provisionalCorroborate
+		}
 		switch mode {
 		case provisionalCorroborate:
 			changes["corroborated_provisional"] = true

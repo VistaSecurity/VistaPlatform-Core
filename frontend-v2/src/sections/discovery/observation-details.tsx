@@ -18,7 +18,8 @@ const explanations: Record<string, string> = {
   no_configured_source: 'No configured source can add evidence for this observation.',
   //: the planner will not have the platform re-interrogate a device on its
   // own without the operator's consent. Say where that consent lives.
-  executor_scope_unknown: 'The device that can answer this has not been cleared for automatic re-checks. To allow it, open Discovery → Devices, edit the device and turn on “Allow the platform to re-check this device automatically”. A device that has never been interrogated needs one interrogation first.',
+  executor_scope_unknown: 'The device that can answer this has not been cleared for automatic re-checks. To allow it, open Discovery → Devices, edit the device and turn on “Allow the platform to re-check this device automatically”.',
+  never_interrogated: 'Never interrogated: there is nothing to re-run yet. Run an interrogation from Discovery → Devices to enable automatic refresh.',
   observation_from_configured_source: 'This evidence came from the configured source itself, so there is nothing further to ask it.',
   //: a peer a device reported, which identity could not place, is not a
   // reason to interrogate that device again — it would repeat the same answer.

@@ -27,6 +27,14 @@ describe('describeNotScanned', () => {
     expect(row.registerSegmentsHref).toBeUndefined();
   });
 
+  it('names the no-eligible-collector skip and points at installing a sensor', () => {
+    const [row] = describeNotScanned([{ reason: 'no_eligible_collector_in_target_network', count: 3 }]);
+    expect(row.label).toBe('No sensor on the network');
+    expect(row.detail).toContain('Install a sensor');
+    expect(row.detail).not.toContain('does not describe');
+    expect(row.registerSegmentsHref).toBeUndefined();
+  });
+
   it('names carrier-grade NAT by its range and the networks that use it', () => {
     // The row this panel exists for. A Tailscale or ZeroTier estate lives
     // entirely in 100.64/10; calling that "public" sends the tenant to look

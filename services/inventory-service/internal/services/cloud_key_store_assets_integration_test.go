@@ -26,6 +26,7 @@ package services
 
 import (
 	"database/sql"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -252,5 +253,58 @@ func TestIntegration_KMSCloudKeys_ApprovalFollowsTheTenantsRules(t *testing.T) {
 		if len(stores[arn]) != 1 || stores[arn][0].Status != want {
 			t.Errorf("%s: %v, want one asset %s", arn, stores[arn], want)
 		}
+	}
+}
+
+// The Key Store asset a tenant opens shows the key's posture, provider, account
+// and region, and a later run updates it rather than only creating it.
+func TestIntegration_KMSCloudKeys_AssetCarriesAndRefreshesAttributes(t *testing.T) {
+	svc, raw, tenant := kmsKeyStoreFixture(t)
+	created := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	key := CloudKeyRecord{
+		Provider: "aws", KeyID: "00000000-0000-4000-8000-0000000000b1",
+		KeyARN:  "arn:aws:kms:us-east-1:123456789012:key/00000000-0000-4000-8000-0000000000b1",
+		KeySpec: "RSA_2048", KeyUsage: "SIGN_VERIFY", KeyState: "Enabled", Origin: "AWS_KMS",
+		Region: "us-east-1", AccountID: "123456789012", CreationDate: &created,
+		Aliases: []string{"alias/app"}, RotationEnabled: true,
+	}
+	read := func() map[string]interface{} {
+		t.Helper()
+		var b []byte
+		if err := raw.QueryRow(`SELECT attributes FROM assets
+			WHERE tenant_id=$1 AND class_key='key_store' AND deleted_at IS NULL`, tenant).Scan(&b); err != nil {
+			t.Fatalf("read attributes: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("decode attributes %s: %v", b, err)
+		}
+		return m
+	}
+
+	kmsIngest(t, svc, tenant, []CloudKeyRecord{key})
+	a := read()
+	for k, want := range map[string]interface{}{
+		"provider": "aws", "account_id": "123456789012", "region": "us-east-1", "key_id": key.KeyID,
+		"arn": key.KeyARN, "key_spec": "RSA_2048", "key_usage": "SIGN_VERIFY", "key_state": "Enabled",
+		"origin": "AWS_KMS", "rotation_enabled": true, "creation_date": "2026-02-03T04:05:06Z",
+	} {
+		if a[k] != want {
+			t.Errorf("attributes[%s] = %v, want %v (all: %v)", k, a[k], want, a)
+		}
+	}
+	if al, _ := a["aliases"].([]interface{}); len(al) != 1 || al[0] != "alias/app" {
+		t.Errorf("attributes[aliases] = %v", a["aliases"])
+	}
+
+	key.RotationEnabled = false
+	key.KeyState = "Disabled"
+	kmsIngest(t, svc, tenant, []CloudKeyRecord{key})
+	a = read()
+	if a["rotation_enabled"] != false || a["key_state"] != "Disabled" {
+		t.Errorf("a later run did not refresh the attributes: %v", a)
+	}
+	if n := kmsCount(t, raw, `SELECT count(*) FROM assets WHERE tenant_id=$1 AND class_key='key_store' AND deleted_at IS NULL`, tenant); n != 1 {
+		t.Errorf("%d Key Store assets after the refresh, want 1", n)
 	}
 }

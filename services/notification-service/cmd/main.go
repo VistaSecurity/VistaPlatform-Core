@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
 	"github.com/vistasecurity/vistaplatform/notification-service/internal/api"
 	"github.com/vistasecurity/vistaplatform/notification-service/internal/config"
@@ -19,6 +20,11 @@ import (
 )
 
 func main() {
+	// Run Gin in release mode unless the operator chose a mode via GIN_MODE.
+	if os.Getenv("GIN_MODE") == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
 	// Load configuration
 	cfg := config.Load()
 

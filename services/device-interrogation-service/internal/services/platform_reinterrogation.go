@@ -33,6 +33,12 @@ const platformExecutorValue = "platform"
 // granting the consent re-opens.
 const reasonExecutorScopeUnknown = "executor_scope_unknown"
 
+// reasonNeverInterrogated is the enrichment reason the planner gives a device
+// that has no completed interrogation: there is no executor to re-run, so the
+// answer is to interrogate it once, not to grant any consent. It is distinct
+// from reasonExecutorScopeUnknown, which names the missing consent.
+const reasonNeverInterrogated = "never_interrogated"
+
 // platformReinterrogationAllowed reads the consent off a device's metadata.
 func platformReinterrogationAllowed(meta map[string]interface{}) bool {
 	v, _ := meta[PlatformReinterrogationKey].(string)

@@ -43,8 +43,18 @@ type QUICClientHelloInfo struct {
 }
 
 // decryptQUICInitial attempts to decrypt a QUIC Initial packet and extract the TLS ClientHello.
-// data is the raw UDP payload. Returns the ClientHello info or an error.
-func decryptQUICInitial(data []byte) (*QUICClientHelloInfo, error) {
+// data is the raw UDP payload and flow identifies the client's connection.
+//
+// A ClientHello that does not fit in one Initial (a hybrid post-quantum key
+// share alone is over 1 KB) arrives as CRYPTO frames spread across several
+// Initial packets, so the frames are fed to the package reassembler and the
+// hello is parsed once its declared length is covered. While it is not,
+// errQUICClientHelloIncomplete is returned.
+func decryptQUICInitial(data []byte, flow quicFlowKey) (*QUICClientHelloInfo, error) {
+	return decryptQUICInitialWith(quicReassembly, data, flow)
+}
+
+func decryptQUICInitialWith(r *quicReassembler, data []byte, flow quicFlowKey) (*QUICClientHelloInfo, error) {
 	if len(data) < 7 {
 		return nil, errors.New("packet too short")
 	}
@@ -73,6 +83,7 @@ func decryptQUICInitial(data []byte) (*QUICClientHelloInfo, error) {
 	}
 	dcid := data[offset : offset+dcidLen]
 	offset += dcidLen
+	flow.dcid = string(dcid)
 
 	// SCID
 	if offset >= len(data) {
@@ -170,13 +181,13 @@ func decryptQUICInitial(data []byte) (*QUICClientHelloInfo, error) {
 	}
 
 	// Extract CRYPTO frames from decrypted payload
-	cryptoData := extractCRYPTOFrames(plaintext)
-	if len(cryptoData) == 0 {
+	frags := extractCRYPTOFragments(plaintext)
+	if len(frags) == 0 {
 		return nil, errors.New("no CRYPTO frames found")
 	}
 
-	// Parse TLS ClientHello from CRYPTO frame data
-	return parseQUICClientHello(cryptoData)
+	// Reassemble the CRYPTO stream and parse the ClientHello once complete
+	return r.add(flow, frags)
 }
 
 // quicSaltForVersion returns the HKDF salt for the given QUIC version.
@@ -269,10 +280,26 @@ func decryptAESGCM(key, nonce, ciphertext, aad []byte) ([]byte, error) {
 	return aesGCM.Open(nil, nonce, ciphertext, aad)
 }
 
-// extractCRYPTOFrames extracts and concatenates CRYPTO frame data from a QUIC payload.
-// CRYPTO frame type is 0x06.
+// quicCryptoFragment is one CRYPTO frame's data at its stream offset.
+type quicCryptoFragment struct {
+	offset uint64
+	data   []byte
+}
+
+// extractCRYPTOFrames concatenates the CRYPTO frame data of one QUIC payload
+// in frame order, ignoring stream offsets. Kept for single-packet callers.
 func extractCRYPTOFrames(payload []byte) []byte {
 	var result []byte
+	for _, f := range extractCRYPTOFragments(payload) {
+		result = append(result, f.data...)
+	}
+	return result
+}
+
+// extractCRYPTOFragments extracts the CRYPTO frames (type 0x06) of a QUIC
+// payload together with their stream offsets.
+func extractCRYPTOFragments(payload []byte) []quicCryptoFragment {
+	var result []quicCryptoFragment
 	offset := 0
 
 	for offset < len(payload) {
@@ -291,7 +318,7 @@ func extractCRYPTOFrames(payload []byte) []byte {
 			if offset >= len(payload) {
 				return result
 			}
-			_, oSize := readQUICVarInt(payload, offset)
+			frameOff, oSize := readQUICVarInt(payload, offset)
 			offset += oSize
 
 			// Length field (variable-length integer)
@@ -301,10 +328,10 @@ func extractCRYPTOFrames(payload []byte) []byte {
 			dataLen, lSize := readQUICVarInt(payload, offset)
 			offset += lSize
 
-			if offset+int(dataLen) > len(payload) {
+			if dataLen > uint64(len(payload)-offset) {
 				return result
 			}
-			result = append(result, payload[offset:offset+int(dataLen)]...)
+			result = append(result, quicCryptoFragment{offset: frameOff, data: payload[offset : offset+int(dataLen)]})
 			offset += int(dataLen)
 		case 0x02, 0x03: // ACK (RFC 9000 §19.3) or ACK with ECN (§19.3.1)
 			offset++
