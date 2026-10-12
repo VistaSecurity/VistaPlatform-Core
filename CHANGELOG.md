@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.5.0-rc.7] - 2026-10-12
+## [4.5.0] - 2026-10-12
 
 **Version 4.5.0 is a security-hardening and dependency release, and it also improves
 classification, DHCP matching, the agent installers and the discovery pipeline, and adds
