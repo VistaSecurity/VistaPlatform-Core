@@ -1,13 +1,13 @@
 {
   "schema_version": 2,
   "release": {
-    "tag": "v4.4.0",
-    "commit": "e8389150e4c784007678e3616aefbb683ffd6cb7",
-    "published_at": "2026-10-05T17:16:54Z",
-    "url": "https://github.com/VistaSecurity/VistaPlatform-Core/releases/tag/v4.4.0"
+    "tag": "v4.5.0",
+    "commit": "5282923a851226fa1c13573c9ed125c8957da09d",
+    "published_at": "2026-10-12T17:14:33Z",
+    "url": "https://github.com/VistaSecurity/VistaPlatform-Core/releases/tag/v4.5.0"
   },
-  "generated_at": "2026-10-05T17:17:15Z",
-  "run_url": "https://github.com/VistaSecurity/VistaPlatform-Core/actions/runs/37347259315",
+  "generated_at": "2026-10-12T17:14:59Z",
+  "run_url": "https://github.com/VistaSecurity/VistaPlatform-Core/actions/runs/38282908987",
   "groups": [
     {
       "id": "deploy_operate",
@@ -183,6 +183,15 @@
       "status": "available",
       "edition": "core",
       "docs_url": "https://vistasecurity.io/docs/features/certificate-chain-management/"
+    },
+    {
+      "id": "certificate_trust",
+      "group": "discover_inventory",
+      "name": "Certificate trust",
+      "summary": "Decide which CAs you trust; every certificate is classed public, trusted, self-signed, untrusted or distrusted, so what you never agreed to trust is findable.",
+      "status": "available",
+      "edition": "core",
+      "docs_url": "https://vistasecurity.io/docs/features/certificate-trust/"
     },
     {
       "id": "third_party_connections",
