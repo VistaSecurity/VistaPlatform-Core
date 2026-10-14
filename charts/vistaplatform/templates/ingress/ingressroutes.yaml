@@ -1847,6 +1847,91 @@ spec:
       middlewares:
         - name: deny-admin-plane
     {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v1/maintenance-service/admin/`) || Path(`/api/v1/maintenance-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: maintenance-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-maintenance-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v1/maintenance-service/admin/`) || Path(`/api/v1/maintenance-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: maintenance-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+    - match: Host(`{{ $adminDnsName }}`) && (PathPrefix(`/api/v2/maintenance-service/admin/`) || Path(`/api/v2/maintenance-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: maintenance-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        {{- if $adminAllowList }}
+        - name: admin-plane-allowlist
+        {{- end }}
+        - name: cors-headers
+        - name: circuit-breaker-maintenance-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-maintenance-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+    - match: Host(`{{ $dnsName }}`) && (PathPrefix(`/api/v2/maintenance-service/admin/`) || Path(`/api/v2/maintenance-service/admin`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: maintenance-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-admin-plane
+    {{- end }}
   {{- if $tlsSecret }}
   tls:
     secretName: {{ $tlsSecret }}
@@ -2015,6 +2100,38 @@ spec:
       priority: 900
       services:
         - name: inventory-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/maintenance-service/internal/`) || Path(`/api/v1/maintenance-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: maintenance-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/maintenance-service/internal/`) || Path(`/api/v2/maintenance-service/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: maintenance-service
           {{- if $.Values.serviceMtls.enabled }}
           port: 8443
           scheme: https
@@ -3037,70 +3154,6 @@ spec:
         - name: retry
         - name: v2-to-v1-monitoring-service
     {{- end }}
-    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "resource-tracker-service") }}
-    - match: {{ $apiHost }} && (Path(`/api/v1/resource-tracker-service/health`))
-      kind: Rule
-      priority: 950
-      services:
-        - name: resource-tracker-service
-          {{- if $.Values.serviceMtls.enabled }}
-          port: 8443
-          scheme: https
-          serversTransport: backends-mtls
-          {{- else }}
-          port: 8080
-          {{- end }}
-      middlewares:
-        - name: rewrite-resource-tracker-service-health
-        - name: retry
-    {{- end }}
-    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "resource-tracker-service") }}
-    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/resource-tracker-service/`))
-      kind: Rule
-      priority: 100
-      services:
-        - name: resource-tracker-service
-          {{- if $.Values.serviceMtls.enabled }}
-          port: 8443
-          scheme: https
-          serversTransport: backends-mtls
-          {{- else }}
-          port: 8080
-          {{- end }}
-      middlewares:
-        - name: cors-headers
-        - name: circuit-breaker-resource-tracker-service
-        - name: strip-backend-cors
-        - name: security-headers
-        - name: rate-limit-api
-        - name: compress
-        - name: body-size-limit
-        - name: retry
-    {{- end }}
-    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "resource-tracker-service") }}
-    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/resource-tracker-service/`))
-      kind: Rule
-      priority: 100
-      services:
-        - name: resource-tracker-service
-          {{- if $.Values.serviceMtls.enabled }}
-          port: 8443
-          scheme: https
-          serversTransport: backends-mtls
-          {{- else }}
-          port: 8080
-          {{- end }}
-      middlewares:
-        - name: cors-headers
-        - name: circuit-breaker-resource-tracker-service
-        - name: strip-backend-cors
-        - name: security-headers
-        - name: rate-limit-api
-        - name: compress
-        - name: body-size-limit
-        - name: retry
-        - name: v2-to-v1-resource-tracker-service
-    {{- end }}
     {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/tenant-health-service/health`))
       kind: Rule
@@ -3506,6 +3559,70 @@ spec:
         - name: body-size-limit
         - name: retry
         - name: v2-to-v1-mcp-service
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+    - match: {{ $apiHost }} && (Path(`/api/v1/maintenance-service/health`))
+      kind: Rule
+      priority: 950
+      services:
+        - name: maintenance-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: rewrite-maintenance-service-health
+        - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/maintenance-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: maintenance-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-maintenance-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/maintenance-service/`))
+      kind: Rule
+      priority: 100
+      services:
+        - name: maintenance-service
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: cors-headers
+        - name: circuit-breaker-maintenance-service
+        - name: strip-backend-cors
+        - name: security-headers
+        - name: rate-limit-api
+        - name: compress
+        - name: body-size-limit
+        - name: retry
+        - name: v2-to-v1-maintenance-service
     {{- end }}
     {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "pcap-processor") }}
     - match: {{ $apiHost }} && (Path(`/api/v1/pcap-processor/health`))

@@ -1,0 +1,173 @@
+{{/*
+The backup Job template (maintenance.backups). maintenance-service reads it
+from this ConfigMap (mounted into its pod, so no RBAC on ConfigMaps is
+needed), sets BACKUP_ID on the container and gives the Job its name — and
+changes NOTHING else: image, database connection, volume and security context
+are all rendered here by Helm, so a backup Job is exactly what the chart says.
+
+What the Job does: `pg_dump -Fc` of the platform database into
+<backups volume>/<BACKUP_ID>/database.dump, with `pg_dump --version` and the
+newest schema_migration_status row beside it. The service then writes the
+manifest, packs (and, with secrets, encrypts) the bundle and removes the
+plaintext pieces. The Job reports its step to the service with
+`VISTA_STEP <name> <status>` lines on stdout.
+
+Database connection: EXACTLY the schema-migration Job's wiring
+(templates/jobs/schema-migration.yaml) — the in-cluster owner user via the
+generated Secret, or the platform Secret's database-url for an external
+database — and its image, schemaMigration.image (postgres:17-alpine, the
+server's major version, so pg_dump matches it).
+
+The ReadWriteOnce constraint: maintenance-service mounts the backups volume
+read-write at all times, and this Job mounts the same claim. A ReadWriteOnce
+volume can be mounted by several pods only on ONE node, so the Job carries a
+required pod affinity to the maintenance-service pod's node (dropped for
+ReadWriteMany, where any node can mount it). ReadWriteOncePod cannot work at
+all — the Job could never mount a claim the service pod holds — and is refused.
+*/}}
+{{- if include "vistaplatform.maintenanceBackupsEnabled" . }}
+{{- $accessMode := include "vistaplatform.maintenanceBackupsAccessMode" . }}
+{{- if eq $accessMode "ReadWriteOncePod" }}
+{{- fail "maintenance.backups.accessMode=ReadWriteOncePod cannot work: maintenance-service and the backup Job mount the same backups volume. Use ReadWriteOnce (both pods are scheduled on one node) or ReadWriteMany." }}
+{{- end }}
+{{- $pg := .Values.datastores.postgres }}
+{{- $conn := "" }}
+{{- if not $pg.enabled }}{{ $conn = " -d \"$DATABASE_URL\"" }}{{ end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vistaplatform.maintenanceJobsConfigMapName" . }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance-service
+data:
+  backup-job.yaml: |
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: maintenance-backup
+    spec:
+      # One attempt: a retry would dump into the same directory, and the
+      # operator should see the failure, not a second try that hides it.
+      backoffLimit: 0
+      activeDeadlineSeconds: 21600
+      template:
+        metadata:
+          labels:
+            {{- include "vistaplatform.labels" . | nindent 12 }}
+            app.kubernetes.io/component: maintenance-backup
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          {{- with include "vistaplatform.pullSecrets" . }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          securityContext:
+            {{- include "vistaplatform.podSecurityContext" . | nindent 12 }}
+          {{- if ne $accessMode "ReadWriteMany" }}
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      {{- include "vistaplatform.selectorLabels" (dict "ctx" . "component" "maintenance-service") | nindent 22 }}
+                  topologyKey: kubernetes.io/hostname
+          {{- end }}
+          containers:
+            - name: pg-dump
+              image: "{{ .Values.schemaMigration.image.repository }}:{{ .Values.schemaMigration.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- include "vistaplatform.containerSecurityContext" . | nindent 16 }}
+              env:
+                # Set by maintenance-service for each backup.
+                - name: BACKUP_ID
+                  value: ""
+                - name: BACKUP_ROOT
+                  value: /backups
+                {{- if $pg.enabled }}
+                - name: PGHOST
+                  value: postgres
+                - name: PGPORT
+                  value: "5432"
+                - name: PGUSER
+                  value: {{ $pg.user | quote }}
+                - name: PGDATABASE
+                  value: {{ $pg.db | quote }}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "vistaplatform.generatedSecretName" . }}
+                      key: postgres-password
+                {{- if $pg.tls.enabled }}
+                - name: PGSSLMODE
+                  value: prefer
+                - name: PGSSLROOTCERT
+                  value: /etc/db-ca/ca.crt
+                {{- end }}
+                {{- else }}
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "vistaplatform.platformSecretName" . }}
+                      key: database-url
+                {{- end }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  umask 077
+                  case "${BACKUP_ID:-}" in
+                    ''|*[!0-9a-f-]*) echo "BACKUP_ID is missing or malformed" >&2; exit 2 ;;
+                  esac
+                  dir="$BACKUP_ROOT/$BACKUP_ID"
+                  mkdir -p "$dir"
+                  echo "VISTA_STEP dump running"
+                  pg_dump --version | tee "$dir/pg_dump.version"
+                  echo "Waiting for Postgres to be ready..."
+                  tries=0
+                  until pg_isready{{ $conn }}; do
+                    tries=$((tries + 1))
+                    if [ "$tries" -ge 150 ]; then echo "Postgres did not become ready"; echo "VISTA_STEP dump failed"; exit 1; fi
+                    sleep 2
+                  done
+                  # The schema the database is on, for the manifest. An install
+                  # whose schema the chart's Job did not apply has no such table.
+                  psql -X -tA{{ $conn }} -c "SELECT row_to_json(s) FROM (SELECT schema_hash, app_version, chart_version, applied_at FROM public.schema_migration_status ORDER BY applied_at DESC LIMIT 1) s" > "$dir/schema.json" 2>/dev/null || echo null > "$dir/schema.json"
+                  echo "Dumping the database (pg_dump -Fc)..."
+                  if pg_dump -Fc{{ $conn }} -f "$dir/database.dump.partial"; then
+                    mv "$dir/database.dump.partial" "$dir/database.dump"
+                    ls -l "$dir"
+                    echo "VISTA_STEP dump succeeded"
+                  else
+                    rm -f "$dir/database.dump.partial"
+                    echo "VISTA_STEP dump failed"
+                    exit 1
+                  fi
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: tmp
+                  mountPath: /tmp
+                {{- if and $pg.enabled $pg.tls.enabled }}
+                - name: db-ca
+                  mountPath: /etc/db-ca
+                  readOnly: true
+                {{- end }}
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ include "vistaplatform.maintenanceBackupsClaimName" . }}
+            - name: tmp
+              emptyDir: {}
+            {{- if and $pg.enabled $pg.tls.enabled }}
+            - name: db-ca
+              secret:
+                secretName: postgres-mtls
+                items:
+                  - { key: ca.crt, path: ca.crt }
+            {{- end }}
+{{- end }}

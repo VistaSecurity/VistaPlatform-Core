@@ -144,7 +144,6 @@ jobs:
           - { name: admin-service,                context: ., dockerfile: services/admin-service/Dockerfile.prod }
           - { name: monitoring-service,           context: ., dockerfile: services/monitoring-service/Dockerfile.prod }
           - { name: cluster-sensor-service,       context: ., dockerfile: services/cluster-sensor-service/Dockerfile.prod }
-          - { name: resource-tracker-service,     context: ., dockerfile: services/resource-tracker-service/Dockerfile.prod }
           - { name: tenant-health-service,        context: ., dockerfile: services/tenant-health-service/Dockerfile.prod }
           - { name: audit-service,                context: ., dockerfile: services/audit-service/Dockerfile.prod }
           - { name: device-interrogation-service, context: ., dockerfile: services/device-interrogation-service/Dockerfile.prod }
@@ -152,6 +151,7 @@ jobs:
           - { name: notification-service,         context: ., dockerfile: services/notification-service/Dockerfile.prod }
           - { name: pcap-processor,               context: ., dockerfile: services/pcap-processor/Dockerfile.prod }
           - { name: mcp-service,                  context: ., dockerfile: services/mcp-service/Dockerfile.prod }
+          - { name: maintenance-service,          context: ., dockerfile: services/maintenance-service/Dockerfile.prod }
           - { name: web-ui,                       context: ., dockerfile: frontend-v2/Dockerfile.prod }
           - { name: admin-ui,                     context: ., dockerfile: admin-ui-v2/Dockerfile.prod }
     steps:

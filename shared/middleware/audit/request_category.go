@@ -55,11 +55,12 @@ var serviceEventCategory = map[string]string{
 
 	// Platform operation. admin-service's tenant, platform-user and settings
 	// routes are picked out by the resource overrides.
-	"admin-service":            EventCategorySystem,
-	"monitoring-service":       EventCategorySystem,
-	"resource-tracker-service": EventCategorySystem,
-	"audit-service":            EventCategorySystem,
-	"notification-service":     EventCategorySystem,
+	"admin-service":        EventCategorySystem,
+	"monitoring-service":   EventCategorySystem,
+	"audit-service":        EventCategorySystem,
+	"notification-service": EventCategorySystem,
+	// Platform backups, updates and rollbacks.
+	"maintenance-service": EventCategorySystem,
 
 	"tenant-health-service": EventCategoryTenant,
 

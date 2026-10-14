@@ -181,7 +181,11 @@ function AlgorithmDrawer({ algo, onClose }: { algo: AlgorithmRow; onClose: () =>
         <SectionLabel icon="gauge">Our assessment</SectionLabel>
         <MetaRow k="Strength" v={cap(algo.strength)} />
         <MetaRow k="Deprecation status" v={cap(algo.deprecation_status)} />
-        {algo.deprecation_date && <MetaRow k="Deprecation date" v={algo.deprecation_date} />}
+        {/* A date on a row that is still 'current' is the scheduled retirement
+            (NIST's transition timeline), not something that already happened. */}
+        {algo.deprecation_date && (
+          <MetaRow k={algo.deprecation_status === 'current' ? 'Scheduled deprecation' : 'Deprecation date'} v={algo.deprecation_date} />
+        )}
         <MetaRow k="Risk score" v={formatAlgorithmRiskScore(algo.risk_score, true)} mono />
         {algo.is_pqc && <MetaRow k="PQC standardization" v={cap(algo.pqc_standardization_status)} />}
         {typeof algo.is_standard === 'boolean' && <MetaRow k="Standardized" v={algo.is_standard ? 'Yes' : 'No'} />}

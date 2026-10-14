@@ -63,6 +63,7 @@ const (
 	ExplainNoCollectorInNetwork   = "no_collector_in_network"
 	ExplainNameOnly               = "name_only"
 	ExplainNoAddressOrService     = "no_address_or_service"
+	ExplainNoAddressToPlace       = "no_address_to_place"
 	ExplainNotSeenRecently        = "not_seen_recently"
 	ExplainNoSuggestion           = "no_suggestion"
 	ExplainNotAwaitingReview      = "not_awaiting_review"
@@ -103,8 +104,9 @@ type ObservationSuggestionInput struct {
 	LastSeenAt       time.Time
 	// Owners are the DISTINCT existing assets owning any identifier of the
 	// evidence. Confirm is refused whenever there is one (the declared
-	// identity would collide with it), so ownership decides whether the
-	// dynamic-address row may be offered as Confirm at all.
+	// identity would collide with it), so ownership is decided first: one
+	// linkable owner is offered as Link whatever the network or collector
+	// state, and only an unowned row can be offered as Confirm.
 	Owners      []ObservationOwner
 	NetworkName string
 	SourceName  string
@@ -124,22 +126,33 @@ type ObservationSuggestion struct {
 // when several reasons are present, first match wins:
 //
 //  1. state other than unresolved           → none (decided or held elsewhere)
-//  2. network_scope_unresolved              → needs_network
-//  3. relayed advertisement, or no eligible
-//     collector in the target network       → needs_sensor
-//  4. dynamic address with an address AND
-//     at least one endpoint                 → ready_to_confirm when no existing
-//     asset owns an identifier of it; link_existing when exactly one
+//  2. an existing asset already owns an
+//     identifier of the evidence            → link_existing when exactly one
 //     linkable asset does; needs_review when more than one does, or the
 // one that does cannot be linked
-//  5. name only, nothing to create from, or
+//  3. network_scope_unresolved AND the
+//     evidence carries an address           → needs_network
+//  4. relayed advertisement, or no eligible
+//     collector in the target network       → needs_sensor
+//  5. dynamic address with an address AND
+//     at least one endpoint                 → ready_to_confirm (nothing owns it,
+//     or rule 2 would have taken it)
+//  6. name only, unplaced with no address
+//     to place, nothing to create from, or
 //     not seen for 30 days                  → likely_noise
-//  6. otherwise                             → none (no suggestion)
+//  7. otherwise                             → none (no suggestion)
 //
-// A network is asked for before a sensor because a sensor cannot be placed on a
-// network the tenant has not described, and both are asked for before Confirm
-// because confirming evidence the platform could still corroborate itself
-// spends the person's attention on work a sensor would do.
+// Ownership comes before the network and sensor rows because a row whose
+// identifiers already belong to one asset has its answer — linking it needs
+// neither a network nor a collector, and asking for a sensor instead hid the
+// one-click Link from a whole tenant whose collectors were offline. A network
+// is asked for before a sensor because a sensor cannot be placed on a network
+// the tenant has not described, and both are asked for before Confirm because
+// confirming evidence the platform could still corroborate itself spends the
+// person's attention on work a sensor would do. A network is only asked for
+// when there is an address to place in it: a MAC-only row cannot be covered by
+// any CIDR, so "add a network" would send the person to work that cannot
+// resolve it.
 func SuggestObservation(in ObservationSuggestionInput, now time.Time) ObservationSuggestion {
 	out := ObservationSuggestion{Needs: NeedsNone, SuggestedAction: SuggestNone, ExplanationCode: ExplainNotAwaitingReview}
 	if in.State != "unresolved" {
@@ -163,7 +176,15 @@ func SuggestObservation(in ObservationSuggestionInput, now time.Time) Observatio
 		return ObservationSuggestion{Needs: needs, SuggestedAction: action, ExplanationCode: code}
 	}
 	switch {
-	case has(identity.ReasonNetworkScopeUnresolved):
+	case len(in.Owners) == 1 && in.Owners[0].Linkable:
+		owner := in.Owners[0]
+		out = set(NeedsLinkExisting, SuggestLink, ExplainOwnedByAsset)
+		out.LinkAsset = &owner
+		out.SuggestedReason = "Linked from Observations: " + seenPhrase(in) + " — already belongs to " + ownerPhrase(owner) + "."
+	case len(in.Owners) > 0:
+		out = set(NeedsReview, SuggestNone, ExplainOwnedBySeveralAssets)
+		out.SuggestedReason = dismissSentence(in, "its identifiers already belong to assets that need comparing first")
+	case has(identity.ReasonNetworkScopeUnresolved) && address:
 		out = set(NeedsNetwork, SuggestAddNetwork, ExplainNetworkNotConfigured)
 		out.SuggestedReason = dismissSentence(in, "which is not inside any configured network")
 	case has("unverified_relayed_advertisement"):
@@ -172,17 +193,12 @@ func SuggestObservation(in ObservationSuggestionInput, now time.Time) Observatio
 	case in.EnrichmentReason == identityenrichment.ReasonNoEligibleCollector:
 		out = set(NeedsSensor, SuggestSensorOptions, ExplainNoCollectorInNetwork)
 		out.SuggestedReason = dismissSentence(in, "where no collector can confirm it")
-	case has(identity.ReasonDynamicAddressWithoutDeviceBinding) && address && endpoints && len(in.Owners) == 1 && in.Owners[0].Linkable:
-		owner := in.Owners[0]
-		out = set(NeedsLinkExisting, SuggestLink, ExplainOwnedByAsset)
-		out.LinkAsset = &owner
-		out.SuggestedReason = "Linked from Observations: " + seenPhrase(in) + " — already belongs to " + ownerPhrase(owner) + "."
-	case has(identity.ReasonDynamicAddressWithoutDeviceBinding) && address && endpoints && len(in.Owners) > 0:
-		out = set(NeedsReview, SuggestNone, ExplainOwnedBySeveralAssets)
-		out.SuggestedReason = dismissSentence(in, "its identifiers already belong to assets that need comparing first")
 	case has(identity.ReasonDynamicAddressWithoutDeviceBinding) && address && endpoints:
 		out = set(NeedsReadyToConfirm, SuggestConfirm, ExplainDynamicAddressAnswered)
 		out.SuggestedReason = "Confirmed from Observations: " + seenPhrase(in) + "."
+	case has(identity.ReasonNetworkScopeUnresolved) && !address:
+		out = set(NeedsLikelyNoise, SuggestDismiss, ExplainNoAddressToPlace)
+		out.SuggestedReason = dismissSentence(in, "no address was seen, so no network could place it")
 	case has(identity.ReasonNoDeviceOrAddressBinding):
 		out = set(NeedsLikelyNoise, SuggestDismiss, ExplainNameOnly)
 		out.SuggestedReason = dismissSentence(in, "only a name, with no address or service")
@@ -207,19 +223,25 @@ func SuggestObservation(in ObservationSuggestionInput, now time.Time) Observatio
 //
 // The endpoint test checks the JSON type before taking a length because
 // jsonb_array_length raises on anything but an array, and a CASE gives no
-// guarantee that a sibling AND short-circuits first.
+// guarantee that a sibling AND short-circuits first. Ownership is the
+// expensive test (a correlated join over the evidence's identifiers), so it
+// is the subject of ONE simple CASE rather than being named twice.
 const observationNeedsSQL = `(CASE
  WHEN o.state <> 'unresolved' THEN 'none'
- WHEN 'network_scope_unresolved' = ANY(o.admission_reasons) THEN 'needs_network'
- WHEN 'unverified_relayed_advertisement' = ANY(o.admission_reasons)
-   OR o.enrichment_reason = 'no_eligible_collector_in_target_network' THEN 'needs_sensor'
- WHEN 'dynamic_address_without_device_binding' = ANY(o.admission_reasons)
-   AND ` + observationHasAddressSQL + ` AND ` + observationHasEndpointSQL + ` THEN (CASE ` + observationOwnershipSQL + `
-     WHEN 0 THEN 'ready_to_confirm' WHEN 1 THEN 'link_existing' ELSE 'needs_review' END)
- WHEN 'no_device_or_address_binding' = ANY(o.admission_reasons)
-   OR (NOT ` + observationHasAddressSQL + ` AND NOT ` + observationHasEndpointSQL + `)
-   OR o.last_seen_at < now() - interval '30 days' THEN 'likely_noise'
- ELSE 'none' END)`
+ ELSE (CASE ` + observationOwnershipSQL + `
+  WHEN 1 THEN 'link_existing'
+  WHEN 2 THEN 'needs_review'
+  ELSE (CASE
+   WHEN 'network_scope_unresolved' = ANY(o.admission_reasons) AND ` + observationHasAddressSQL + ` THEN 'needs_network'
+   WHEN 'unverified_relayed_advertisement' = ANY(o.admission_reasons)
+     OR o.enrichment_reason = 'no_eligible_collector_in_target_network' THEN 'needs_sensor'
+   WHEN 'dynamic_address_without_device_binding' = ANY(o.admission_reasons)
+     AND ` + observationHasAddressSQL + ` AND ` + observationHasEndpointSQL + ` THEN 'ready_to_confirm'
+   WHEN 'no_device_or_address_binding' = ANY(o.admission_reasons)
+     OR ('network_scope_unresolved' = ANY(o.admission_reasons) AND NOT ` + observationHasAddressSQL + `)
+     OR (NOT ` + observationHasAddressSQL + ` AND NOT ` + observationHasEndpointSQL + `)
+     OR o.last_seen_at < now() - interval '30 days' THEN 'likely_noise'
+   ELSE 'none' END) END) END)`
 
 // observationOwnersSQL is the DISTINCT existing assets that own an identifier
 // of the observation's evidence — the same lookup DecideIdentityObservation
@@ -240,7 +262,7 @@ const observationOwnersSQL = `(SELECT DISTINCT ai.asset_id,
 
 // observationOwnershipSQL collapses the owners to 0 (none), 1 (exactly one,
 // and it can be linked) or 2 (anything else: several, or one that cannot be
-// linked), matching the three outcomes of the dynamic-address branch.
+// linked), matching the ownership rows at the top of the ladder.
 const observationOwnershipSQL = `(SELECT CASE WHEN count(*) = 0 THEN 0 WHEN count(*) = 1 AND bool_and(ow.linkable) THEN 1 ELSE 2 END FROM ` + observationOwnersSQL + ` ow)`
 
 // observationOwnersJSONSQL is the owners as a JSON array for the read path,

@@ -66,9 +66,9 @@ SERVICES=(
     "cbom-service"
     "monitoring-service"
     "tenant-health-service"
-    "resource-tracker-service"
     "cluster-sensor-service"
     "mcp-service"
+    "maintenance-service"
 )
 
 for service in "${SERVICES[@]}"; do

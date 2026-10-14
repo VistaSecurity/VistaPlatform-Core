@@ -8897,7 +8897,7 @@ components:
         suggested_action: { type: string, enum: [confirm, link, add_network, sensor_options, dismiss, none] }
         explanation_code:
           type: string
-          enum: [dynamic_address_answered, owned_by_asset, owned_by_several_assets, network_not_configured, relayed_advertisement, no_collector_in_network, name_only, no_address_or_service, not_seen_recently, no_suggestion, not_awaiting_review]
+          enum: [dynamic_address_answered, owned_by_asset, owned_by_several_assets, network_not_configured, relayed_advertisement, no_collector_in_network, name_only, no_address_or_service, no_address_to_place, not_seen_recently, no_suggestion, not_awaiting_review]
           description: Which row of the suggestion table applied. Stable; the UI maps it to words.
         suggested_reason:
           type: string
@@ -13941,6 +13941,13 @@ components:
           type: string
         mode:
           type: string
+        origin:
+          type: string
+          description: >-
+            The stable producer behind a per-run ref, when the ref names a run
+            (`interrogation:<job>` carries `device:<asset>`). Observations group
+            by it in the ref's place, so repeat runs of one device are receipts on
+            one observation. Absent for producers whose ref is already stable.
     SightedIdentifier:
       type: object
       required:

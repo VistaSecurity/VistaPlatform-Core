@@ -71,7 +71,6 @@
         "otel_grpc": "OTEL_GRPC_HOST_PORT",
         "otel_http": "OTEL_HTTP_HOST_PORT",
         "jaeger_ui": "JAEGER_UI_HOST_PORT",
-        "resource-tracker-service": "RESOURCE_TRACKER_HOST_PORT",
         "tenant-health-service": "TENANT_HEALTH_HOST_PORT",
         "cluster-sensor-service": "CLUSTER_SENSOR_HOST_PORT"
       }
@@ -123,14 +122,16 @@
       "/compliance-engine/admin/",
       "/device-interrogation-service/admin/",
       "/notification-service/platform/",
-      "/tenant-health-service/"
+      "/tenant-health-service/",
+      "/maintenance-service/admin/"
     ],
     "internal_prefixes": [
       "/notification-service/internal/",
       "/sensor-manager/internal/",
       "/auth-service/internal/",
       "/audit-service/internal/",
-      "/inventory-service/internal/"
+      "/inventory-service/internal/",
+      "/maintenance-service/internal/"
     ],
     "internal_routes": [
       {
@@ -495,43 +496,6 @@
       ]
     },
     {
-      "key": "resource-tracker-service",
-      "name": "resource-tracker-service",
-      "dir": "services/resource-tracker-service",
-      "description": "Resource tracking and management",
-      "internal_port": 8080,
-      "external_port": 8092,
-      "route_prefix": "/resource-tracker-service",
-      "gateway_timeout": "15s",
-      "status": "active",
-      "required_secrets": [
-        "INTERNAL_AUTH_SECRET",
-        "ENCRYPTION_MASTER_KEY",
-        "JWT_SECRET"
-      ],
-      "docker": {
-        "type": "go-service",
-        "dependencies": [
-          "postgres",
-          "redis",
-          "nats"
-        ],
-        "env_template": "standard-go-service"
-      },
-      "endpoints": [
-        {
-          "path": "/tenant/:id/resource-summary",
-          "method": "GET",
-          "description": "Get resource health metrics for a specific tenant (for tenant health service)",
-          "auth_required": true,
-          "rbac_permissions": [
-            "platform.analytics",
-            "platform.health"
-          ]
-        }
-      ]
-    },
-    {
       "key": "tenant-health-service",
       "name": "tenant-health-service",
       "dir": "services/tenant-health-service",
@@ -671,6 +635,104 @@
         ],
         "env_template": "standard-go-service"
       }
+    },
+    {
+      "key": "maintenance-service",
+      "name": "maintenance-service",
+      "dir": "services/maintenance-service",
+      "description": "Platform maintenance — backups, update check and one-click update from the admin console (the one backend holding a Kubernetes credential)",
+      "internal_port": 8080,
+      "external_port": 8102,
+      "route_prefix": "/maintenance-service",
+      "gateway_timeout": "30s",
+      "status": "active",
+      "required_secrets": [
+        "INTERNAL_AUTH_SECRET",
+        "JWT_SECRET"
+      ],
+      "docker": {
+        "type": "go-service",
+        "dependencies": [
+          "postgres",
+          "redis",
+          "nats"
+        ],
+        "env_template": "standard-go-service"
+      },
+      "endpoints": [
+        {
+          "path": "/admin/maintenance/status",
+          "method": "GET",
+          "description": "Maintenance capabilities (helm_managed/gitops/backups/updates), release, single-node flag and running versions (admin-ui Maintenance)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.health"
+          ]
+        },
+        {
+          "path": "/admin/maintenance/updates/check",
+          "method": "POST",
+          "description": "Run the update check now (WP2; 501 until then)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.maintenance"
+          ]
+        },
+        {
+          "path": "/admin/maintenance/updates/preflight",
+          "method": "POST",
+          "description": "Pre-flight an update to a target version (WP4; 501 until then)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.maintenance"
+          ]
+        },
+        {
+          "path": "/admin/maintenance/updates",
+          "method": "POST",
+          "description": "Start an update run (WP4; 501 until then)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.maintenance"
+          ]
+        },
+        {
+          "path": "/admin/maintenance/rollbacks",
+          "method": "POST",
+          "description": "Start a rollback run (WP4; 501 until then)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.maintenance"
+          ]
+        },
+        {
+          "path": "/admin/maintenance/backups",
+          "method": "POST",
+          "description": "Create a platform backup (WP3; 501 until then)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.maintenance"
+          ]
+        },
+        {
+          "path": "/admin/maintenance/backups/:id/download",
+          "method": "GET",
+          "description": "Download a platform backup (WP3; 501 until then)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.maintenance"
+          ]
+        },
+        {
+          "path": "/admin/maintenance/backups/:id",
+          "method": "DELETE",
+          "description": "Delete a platform backup (WP3; 501 until then)",
+          "auth_required": true,
+          "rbac_permissions": [
+            "platform.maintenance"
+          ]
+        }
+      ]
     },
     {
       "key": "pcap-processor",

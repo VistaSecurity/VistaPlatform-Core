@@ -115,7 +115,7 @@ async function main() {
 
   await fs.ensureDir(outDir);
 
-  await writeMiddlewares(services, path.join(outDir, 'middlewares.yaml'));
+  await writeMiddlewares(services, adminPlane, path.join(outDir, 'middlewares.yaml'));
   await writeIngressRoutes(services, adminPlane, path.join(outDir, 'ingressroutes.yaml'));
 
   console.log(`Generated ${path.relative(root, path.join(outDir, 'middlewares.yaml'))}`);
@@ -320,7 +320,7 @@ function buildMiddlewares(services) {
     docs.push({
       apiVersion: 'traefik.io/v1alpha1',
       kind: 'Middleware',
-      metadata: { name: `circuit-breaker-${svc.name}` },
+      metadata: { name: `circuit-breaker-${svc.name}`, annotations: { __BACKEND__: svc.name } },
       spec: { circuitBreaker: CIRCUIT_BREAKER },
     });
   }
@@ -331,7 +331,7 @@ function buildMiddlewares(services) {
     docs.push({
       apiVersion: 'traefik.io/v1alpha1',
       kind: 'Middleware',
-      metadata: { name: `rewrite-${svc.name}-health` },
+      metadata: { name: `rewrite-${svc.name}-health`, annotations: { __BACKEND__: svc.name } },
       spec: { replacePath: { path: '/health' } },
     });
   }
@@ -343,7 +343,7 @@ function buildMiddlewares(services) {
     docs.push({
       apiVersion: 'traefik.io/v1alpha1',
       kind: 'Middleware',
-      metadata: { name: `v2-to-v1-${svc.name}` },
+      metadata: { name: `v2-to-v1-${svc.name}`, annotations: { __BACKEND__: svc.name } },
       spec: {
         replacePathRegex: {
           regex: `^/api/v2${svc.route_prefix}/(.*)`,
@@ -978,13 +978,28 @@ const HEADER = [
 
 const FOOTER = '{{- end }}\n';
 
-async function writeMiddlewares(services, outPath) {
+async function writeMiddlewares(services, adminPlane, outPath) {
   const docs = buildMiddlewares(services);
   const lines = [HEADER];
+
+  // A backend's own middlewares render only while the backend does
+  // (vistaplatform.backendEnabled), like its routes — so `enabled: false` (or,
+  // for maintenance-service, maintenance.enabled=false) leaves no object
+  // naming it behind. Exception: a URL prefix another backend answers
+  // (admin_plane.service_overrides, e.g. /admin-service/status/ →
+  // monitoring-service) routes through the prefix owner's v2→v1 rewrite, so
+  // that owner's middlewares stay unconditional.
+  const overrides = (adminPlane && adminPlane.service_overrides) || {};
+  const sharedOwners = new Set(Object.keys(overrides).map(urlSegmentOf));
 
   for (const doc of docs) {
     const isRedirect = doc.metadata.name === 'redirect-https';
     const isAllowlist = doc.metadata.annotations && doc.metadata.annotations.__ALLOWLIST_GATE__;
+    const backend = doc.metadata.annotations && doc.metadata.annotations.__BACKEND__;
+    const gateBackend = backend && !sharedOwners.has(backend) ? backend : null;
+    if (gateBackend) {
+      lines.push(`{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "${gateBackend}") }}`);
+    }
     if (isRedirect) {
       lines.push('{{- if ne $tlsMode "none" }}');
     }
@@ -1065,6 +1080,9 @@ async function writeMiddlewares(services, outPath) {
       lines.push('{{- end }}');
     }
     if (isRedirect) {
+      lines.push('{{- end }}');
+    }
+    if (gateBackend) {
       lines.push('{{- end }}');
     }
   }

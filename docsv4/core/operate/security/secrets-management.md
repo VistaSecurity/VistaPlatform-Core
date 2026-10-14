@@ -320,7 +320,6 @@ Redis. If Redis is unreachable the check fails open.
 
 - [Platform Integrations Setup](../configuration/platform-integrations.md) - Detailed integration configuration guide
 - [Service-mesh mTLS](service-mesh-mtls.md) - Overall internal-transport security design
-- AWS Cost Explorer Setup - AWS-specific integration setup
 
 ## Future Enhancements
 

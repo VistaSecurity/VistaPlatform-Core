@@ -81,6 +81,10 @@ the off-toggle render is unchanged. */}}
 {{- if .Values.serviceRls.enabled }}
   {{- $pgConsumers = append $pgConsumers "rls-roles" }}
 {{- end }}
+{{- /* The platform backup Job (WP3) runs pg_dump against Postgres. */}}
+{{- if include "vistaplatform.maintenanceBackupsEnabled" . }}
+  {{- $pgConsumers = append $pgConsumers "maintenance-backup" }}
+{{- end }}
 {{- range $name, $svc := .Values.backends }}
   {{- if (default (dict) $svc.needs).postgres }}
     {{- $pgConsumers = append $pgConsumers $name }}

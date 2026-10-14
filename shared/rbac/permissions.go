@@ -11,6 +11,14 @@ const (
 	PermissionPlatformImpersonate         = "platform.impersonate"
 	PermissionPlatformNotificationsManage = "platform.notifications.manage"
 
+	// PermissionPlatformMaintenance gates maintenance-service's write verbs:
+	// create, download and delete a platform backup, run an update, roll one
+	// back. Separate from platform.settings so staff who may read dashboards
+	// can be kept from rewriting the cluster and downloading the database.
+	// Seeded to super_admin (auto) + platform_admin. Reads stay on
+	// platform.health.
+	PermissionPlatformMaintenance = "platform.maintenance"
+
 	// PermissionPlatformAudit is the platform side of audit-service's
 	// audit.read: reading the platform activity trail, retention policies and
 	// SIEM integrations. Held by every seeded platform role.

@@ -84,7 +84,6 @@ infrastructure:
       otel_http: OTEL_HTTP_HOST_PORT
       jaeger_ui: JAEGER_UI_HOST_PORT
       # Service-specific port env vars (matching docker-compose.yml)
-      resource-tracker-service: RESOURCE_TRACKER_HOST_PORT
       tenant-health-service: TENANT_HEALTH_HOST_PORT
       cluster-sensor-service: CLUSTER_SENSOR_HOST_PORT
 
@@ -212,6 +211,10 @@ admin_plane:
     # tenant-health-service — the WHOLE service is a cross-tenant governance
     # surface consumed only by admin-ui.
     - /tenant-health-service/
+    # maintenance-service — platform backups, the update check and the
+    # one-click update (spec platform-maintenance.md). Platform admins only:
+    # these verbs rewrite the cluster and export the database.
+    - /maintenance-service/admin/
 
   # ─── Internal plane ──────────────────────────────────────────────
   #
@@ -259,6 +262,9 @@ admin_plane:
     # inventory-service's one identity engine (platform ADR-0003 D3); same
     # gate. cmd/sighting_edge_deny_test.go pins the generated deny.
     - /inventory-service/internal/
+    # maintenance-service holds no service-to-service route yet; the prefix is
+    # denied from day one so one added later is deny-by-default at the edge.
+    - /maintenance-service/internal/
 
   # Internal ROUTES: service-to-service endpoints that do not live under an
   # `/internal/` prefix, so a prefix deny would swallow tenant-facing siblings
@@ -429,7 +435,7 @@ services:
     status: active
     # Compliance engine validates tenant bearer tokens (JWT_SECRET) AND acts as
     # an HMAC client: the resource-tracking middleware signs metric posts to
-    # resource-tracker-service and the audit middleware/job-logger sign activity
+    # auth-service's ingest and the audit middleware/job-logger sign activity
     # logs to audit-service — both via serviceauth.SignRequestFromEnv, which
     # reads INTERNAL_AUTH_SECRET. Without it, those calls degrade to an unsigned
     # X-Internal-Call header and every receiver rejects them with 401.
@@ -569,27 +575,6 @@ services:
         auth_required: true
         rbac_permissions: []
 
-  - key: resource-tracker-service
-    name: resource-tracker-service
-    dir: services/resource-tracker-service
-    description: Resource tracking and management
-    internal_port: 8080
-    external_port: 8092
-    route_prefix: /resource-tracker-service
-    gateway_timeout: 15s
-    status: active
-    required_secrets: [INTERNAL_AUTH_SECRET, ENCRYPTION_MASTER_KEY, JWT_SECRET]
-    docker:
-      type: go-service
-      dependencies: [postgres, redis, nats]
-      env_template: standard-go-service
-    endpoints:
-      - path: /tenant/:id/resource-summary
-        method: GET
-        description: "Get resource health metrics for a specific tenant (for tenant health service)"
-        auth_required: true
-        rbac_permissions: [platform.analytics, platform.health]
-
   - key: tenant-health-service
     name: tenant-health-service
     dir: services/tenant-health-service
@@ -692,6 +677,71 @@ services:
       type: go-service
       dependencies: [redis]
       env_template: standard-go-service
+
+  - key: maintenance-service
+    name: maintenance-service
+    dir: services/maintenance-service
+    description: Platform maintenance — backups, update check and one-click update from the admin console (the one backend holding a Kubernetes credential)
+    internal_port: 8080
+    external_port: 8102
+    route_prefix: /maintenance-service
+    # A backup download streams the whole database through this service (WP3);
+    # the headroom is reviewed there against a multi-GB file.
+    gateway_timeout: 30s
+    status: active
+    # No ENCRYPTION_MASTER_KEY: the service stores no credential. INTERNAL_AUTH_SECRET
+    # signs the version read from monitoring-service and the audit trail writes.
+    required_secrets: [INTERNAL_AUTH_SECRET, JWT_SECRET]
+    docker:
+      type: go-service
+      # postgres: the platform permission check, and later the run and backup
+      # records. redis: the shared JWT middleware reads REDIS_URL for the
+      # revocation denylist — without it a revoked platform session keeps
+      # working here, and make audit refuses a JWT service without it.
+      # nats: the update-completed event.
+      dependencies: [postgres, redis, nats]
+      env_template: standard-go-service
+    endpoints:
+      - path: /admin/maintenance/status
+        method: GET
+        description: "Maintenance capabilities (helm_managed/gitops/backups/updates), release, single-node flag and running versions (admin-ui Maintenance)"
+        auth_required: true
+        rbac_permissions: [platform.health]
+      - path: /admin/maintenance/updates/check
+        method: POST
+        description: "Run the update check now (WP2; 501 until then)"
+        auth_required: true
+        rbac_permissions: [platform.maintenance]
+      - path: /admin/maintenance/updates/preflight
+        method: POST
+        description: "Pre-flight an update to a target version (WP4; 501 until then)"
+        auth_required: true
+        rbac_permissions: [platform.maintenance]
+      - path: /admin/maintenance/updates
+        method: POST
+        description: "Start an update run (WP4; 501 until then)"
+        auth_required: true
+        rbac_permissions: [platform.maintenance]
+      - path: /admin/maintenance/rollbacks
+        method: POST
+        description: "Start a rollback run (WP4; 501 until then)"
+        auth_required: true
+        rbac_permissions: [platform.maintenance]
+      - path: /admin/maintenance/backups
+        method: POST
+        description: "Create a platform backup (WP3; 501 until then)"
+        auth_required: true
+        rbac_permissions: [platform.maintenance]
+      - path: /admin/maintenance/backups/:id/download
+        method: GET
+        description: "Download a platform backup (WP3; 501 until then)"
+        auth_required: true
+        rbac_permissions: [platform.maintenance]
+      - path: /admin/maintenance/backups/:id
+        method: DELETE
+        description: "Delete a platform backup (WP3; 501 until then)"
+        auth_required: true
+        rbac_permissions: [platform.maintenance]
 
 
   - key: pcap-processor

@@ -189,3 +189,74 @@ func TestIntegration_Observations_ObserveModeCommitsWithResolution(t *testing.T)
 		t.Fatalf("observe mode changed admission or replayed evidence: %s %s %d", state, status, occurrences)
 	}
 }
+
+// TestIntegration_ConfirmedLink_SurvivesARefRollForward: a source with an
+// Origin groups every run of one device under one row, and the row's
+// source_ref follows the newest evidence. A delivery from an OLDER run (a
+// replayed retained context, a slow agent-path job) therefore carries a ref the
+// row no longer has. The operator's confirmation of exactly that row must
+// still be found by id, or the late delivery resolves afresh and can put a
+// confirmed row into conflict. The overlap branch (other rows) still keys on
+// the ref.
+func TestIntegration_ConfirmedLink_SurvivesARefRollForward(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
+	tenant := testdb.NewTenant(t, db).String()
+	repo := pgrepo.New(db)
+	ctx := context.Background()
+
+	owner, err := repo.CreateAsset(ctx, tenant, newAsset("hs200", identity.Identifier{Kind: identity.KindSerialNumber, Value: "SN-ROLL-1", Confidence: 1}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
+	runA := identity.Observation{
+		TenantID:    tenant,
+		Source:      identity.Source{Kind: identity.SourceMeasured, Ref: "interrogation:run-a", Mode: identity.ModeActive, Origin: "device:router-1"},
+		Network:     identity.Network{SegmentID: identity.ScopeTenantDefault},
+		ObservedAt:  first,
+		Identifiers: []identity.Identifier{{Kind: identity.KindMACAddress, Value: "78:8c:b5:69:4f:3c", Confidence: 1}},
+	}
+	id, err := repo.StoreObservation(ctx, runA, identity.AssessAdmission(runA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The operator confirms the row under run A.
+	if _, err := db.Exec(`UPDATE identity_observations SET asset_id=$3, state='linked', confirmed_by=$4, confirmed_at=now() WHERE tenant_id=$1 AND id=$2`, tenant, id, owner.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Run B lands on the same row and rolls its ref forward.
+	runB := runA
+	runB.Source.Ref, runB.ObservedAt = "interrogation:run-b", first.Add(time.Hour)
+	if got, err := repo.StoreObservation(ctx, runB, identity.AssessAdmission(runB)); err != nil || got != id {
+		t.Fatalf("run B: id=%s err=%v, want the row run A made (%s)", got, err, id)
+	}
+	var ref string
+	if err := db.QueryRow(`SELECT source_ref FROM identity_observations WHERE tenant_id=$1 AND id=$2`, tenant, id).Scan(&ref); err != nil || ref != "interrogation:run-b" {
+		t.Fatalf("source_ref=%q err=%v, want run B", ref, err)
+	}
+	// A late delivery from run A asks about its own row.
+	lookup := func(obs identity.Observation, observationID string) []identity.ConfirmedObservationLink {
+		var links []identity.ConfirmedObservationLink
+		err := repo.RunInTx(ctx, tenant, func(bound *pgrepo.Repository) error {
+			var err error
+			links, err = bound.ConfirmedObservationLinks(ctx, obs, observationID)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return links
+	}
+	links := lookup(runA, id)
+	if len(links) != 1 || !links[0].Exact || links[0].Asset.ID != owner.ID {
+		t.Fatalf("late run A found %+v, want the exact confirmed link to %s", links, owner.ID)
+	}
+	// The overlap branch is still per ref: an unrelated row's lookup under
+	// run A, with the same identifier, does not see a row confirmed under run B.
+	stranger := runA
+	stranger.Source.Origin = ""
+	if links = lookup(stranger, "00000000-0000-0000-0000-000000000000"); len(links) != 0 {
+		t.Fatalf("overlap under ref run-a matched a row whose ref is run-b: %+v", links)
+	}
+}

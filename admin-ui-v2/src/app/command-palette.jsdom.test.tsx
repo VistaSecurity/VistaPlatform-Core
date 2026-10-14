@@ -18,6 +18,7 @@ vi.mock('../lib/edition', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/edition')>();
   return { ...actual, usePlatformEdition: () => ({ capabilities: { msp: true, billing: true }, license: 'msp', edition: 'msp', has: () => true, resolved: true }) };
 });
+vi.mock('../sections/maintenance/maintenance-queries', () => ({ useMaintenanceAvailability: () => 'available' }));
 vi.mock('../sections/tenants/queries', () => ({
   useTenants: () => ({ data: [{ id: 'tenant-1', name: 'Acme Corp', slug: 'acme' }] }),
   planLabel: () => 'Pro',

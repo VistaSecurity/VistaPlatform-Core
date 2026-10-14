@@ -27,12 +27,11 @@ func unreachableService(t *testing.T) *HealthService {
 	srv.Close()
 
 	return &HealthService{
-		scorer:                    scoring.NewHealthScorer(),
-		httpClient:                &http.Client{},
-		monitoringServiceURL:      dead,
-		authServiceURL:            dead,
-		inventoryServiceURL:       dead,
-		resourceTrackerServiceURL: dead,
+		scorer:               scoring.NewHealthScorer(),
+		httpClient:           &http.Client{},
+		monitoringServiceURL: dead,
+		authServiceURL:       dead,
+		inventoryServiceURL:  dead,
 	}
 }
 
@@ -45,8 +44,7 @@ func TestCollectMetrics_UnreachablePeers_AreNamedAndNotFabricated(t *testing.T) 
 	}
 
 	for _, src := range []string{
-		models.SourceMonitoring, models.SourceAuth,
-		models.SourceInventory, models.SourceResourceTracker,
+		models.SourceMonitoring, models.SourceAuth, models.SourceInventory,
 	} {
 		if !got.IsSourceUnavailable(src) {
 			t.Errorf("source %q was unreachable but is not listed in UnavailableSources (%v)", src, got.UnavailableSources)
@@ -89,14 +87,15 @@ func TestCollectMetrics_UnreachablePeers_AreNamedAndNotFabricated(t *testing.T) 
 }
 
 func TestCollectMetrics_RelaysInventoryServiceOwnUnavailablePeers(t *testing.T) {
-	// inventory-service answers, but reports that IT could not reach
-	// resource-tracker-service (so api_calls is unknown, not measured).
+	// inventory-service answers, but reports a downstream peer of its own it
+	// could not reach (so whatever that peer feeds is unknown, not measured).
+	const downstream = "some-downstream-peer"
 	inv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(ActivityMetrics{
 			ActiveUsers:        4,
 			APICalls:           0,
 			UserEngagement:     55,
-			UnavailableSources: []string{models.SourceResourceTracker},
+			UnavailableSources: []string{downstream},
 		})
 	}))
 	defer inv.Close()
@@ -111,18 +110,18 @@ func TestCollectMetrics_RelaysInventoryServiceOwnUnavailablePeers(t *testing.T) 
 	if got.IsSourceUnavailable(models.SourceInventory) {
 		t.Error("inventory-service answered; it must not be listed as unavailable")
 	}
-	if !got.IsSourceUnavailable(models.SourceResourceTracker) {
-		t.Errorf("inventory-service reported resource-tracker-service unreachable; it must be relayed (%v)", got.UnavailableSources)
+	if !got.IsSourceUnavailable(downstream) {
+		t.Errorf("inventory-service reported %s unreachable; it must be relayed (%v)", downstream, got.UnavailableSources)
 	}
-	// It is named once, not twice, even though our own poll also failed.
+	// Relayed names are deduplicated with our own.
 	n := 0
 	for _, s := range got.UnavailableSources {
-		if s == models.SourceResourceTracker {
+		if s == downstream {
 			n++
 		}
 	}
 	if n != 1 {
-		t.Errorf("resource-tracker-service listed %d times, want 1", n)
+		t.Errorf("%s listed %d times, want 1", downstream, n)
 	}
 	if got.ActiveUsers != 4 {
 		t.Errorf("ActiveUsers = %d, want 4 (measured value must survive)", got.ActiveUsers)

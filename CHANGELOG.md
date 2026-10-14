@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.6.0-rc.1] - 2026-10-14
+
+**Version 4.6.0 adds platform maintenance to the admin console — backups, new-release
+notices and a one-click update — retires `resource-tracker-service`, and aligns the
+algorithm catalogue with current NIST guidance.** A platform administrator can now take a
+backup of the platform database as a downloadable file (optionally with the encryption keys
+and install secrets, encrypted under a passphrase), see when a newer release exists, and run
+the upgrade itself from the console, backup first, with a progress page and a rollback
+button. The service that metered resource usage is gone: its figures are written by
+auth-service and read directly from the metering table, and the invented numbers it used to
+fill gaps with are no longer reported as measurements. The algorithm reference table now
+grades key sizes NIST disallowed in 2013, DSA and RC4-in-Kerberos as obsolete, and corrects
+mappings that overstated NIST approval.
+
+Both product lines are cut from the same commit: `v4.6.0` (commercial) and `core-v4.6.0`
+(Core). Upgrade from 4.5.0.
+
+**Read Upgrading first.** The schema upgrade drops the retired service's tables, so a
+rollback is a restore; a new backend holds a namespace-scoped Kubernetes credential; some
+tenant health indices and crypto risk scores move on upgrade; and two leftovers of the
+retired service are deleted by hand.
+
+### Highlights
+
+- **Back up the platform from the admin console.** **Maintenance → Backups** takes a
+  `pg_dump` of the platform database as a downloadable file, keeps the newest few and records
+  who ran what. **Include encryption keys and install secrets** packs the master key, JWT
+  signing key, install identity, generated datastore passwords and CBOM signing key into the
+  file, encrypted with a passphrase you choose (AES-256-GCM, key from Argon2id) that is stored
+  nowhere. Restoring is a documented procedure with a `bundle-decrypt` tool.
+- **The admin console tells you when a newer release exists.** A banner on every admin page
+  and **Maintenance → About & Updates** compare the running version with the tags of the
+  chart's OCI repository, so an install that pulls from a mirror checks its mirror. The check
+  can be turned off for air-gapped sites. About & Updates also carries the per-service
+  version table and skew badge the tenant About page has.
+- **Update the platform from the admin console.** **Update to X** runs pre-flight checks,
+  takes a database backup, verifies the chart's cosign signature and runs
+  `helm upgrade --reset-then-reuse-values` as a Job, with a progress page that survives the
+  services restarting and a **Roll back** button if the upgrade or its smoke step fails.
+- **A new Core `maintenance-service`** (port 8102) does all of this. It is the only backend
+  with a Kubernetes credential — a namespace-scoped ServiceAccount and Role, no ClusterRole —
+  rendered only while `maintenance.enabled` (default on). It detects installs not managed by
+  Helm and says so instead of offering an update. The new permission `platform.maintenance`
+  is granted to Platform Administrator.
+- **`resource-tracker-service` is retired.** Usage metering is written by auth-service's
+  `/internal/resource-metrics` ingest and read from `tenant_resource_usage` by billing, the
+  MSP dashboard, inventory-service and monitoring-service. The MSP dashboard's API-call and
+  data-ingestion series are real hourly buckets; its response-time, error-rate and throughput
+  figures are marked unmeasured instead of generated; and the tenant health **cost
+  optimization** factor, whose inputs were an estimated price and an invented efficiency
+  score, is no longer scored. The AWS Cost Explorer sync, which nothing read, is gone with it.
+- **Algorithm catalogue aligned with NIST.** RSA-1024, DH-1024 and DH-768, P-192, the RFC
+  5114 1024-bit group, DSA and RC4 in Kerberos now grade obsolete / Critical; five obsolete
+  rows that scored below the Critical band are raised to it; X25519 / X448 and
+  ChaCha20-Poly1305 no longer claim NIST approval they do not have; every quantum-vulnerable
+  public-key row carries the IR 8547 (draft) 2030 deprecation and 2035 disallowance; the RFC
+  8009 Kerberos AES-SHA2 types, SHA-512/256, SHA-512/224, SHA3-224 and the SP 800-208 stateful
+  hash signatures are catalogued. Rows a platform admin has edited are left alone.
+- **Observations review stops growing per run.** A repeat interrogation of the same
+  controller groups its sightings under the device instead of re-creating every client it
+  could not admit, and a row that already matches one asset is offered **Link** ahead of
+  "needs a network" / "needs a sensor". A hardware-address-only row is no longer told to add
+  a network.
+
+### Upgrading
+
+Back up your database (`pg_dump`) first. Upgrade from 4.5.0 with a `helm upgrade --timeout`
+that covers the migration plus the rollout. The schema upgrade is additive except for
+dropping the retired service's objects. The full per-change list is in the release notes
+linked at the end.
+
+- **Rolling back to 4.5.0 needs your backup, not `helm rollback`.** The schema Job drops
+  `resource_alerts`, `active_resource_alerts`, `aws_cost_data`, `aws_cost_sync_jobs` and
+  their views and function; nothing in 4.6.0 reads them, but 4.5.0's `resource-tracker-service`
+  does.
+- **`resource-tracker-service` is gone from the chart, Compose and the image sets.** Remove
+  any `backends.resource-tracker-service` override from your values and any
+  `RESOURCE_TRACKER_URL` or `RESOURCE_TRACKER_HOST_PORT` setting; `RESOURCE_METRICS_INGEST_URL`
+  overrides the ingest URL in full. The commercial image set is 19 images (17 backends and 2
+  UIs) and Core is 18. After upgrading, delete the orphaned JetStream stream
+  (`nats stream rm METRICS`) and, if you mirror images, the service's repository.
+- **A new backend, `maintenance-service`, holds a Kubernetes credential.** The chart renders a
+  namespace-scoped ServiceAccount, Role and RoleBinding for it (no ClusterRole) and a backups
+  volume (`maintenance.backups`). Set `maintenance.enabled=false` to ship without the service,
+  its RBAC, the volume and the console section. Pull the new image if you mirror the
+  registry. The console updater cannot change its own Role, so this first release that
+  carries it — and any later release that changes the Role — is applied once from the command
+  line with `helm upgrade`.
+- **The update check makes an outbound request** to the chart's OCI repository every
+  `maintenance.updateCheck.interval`; set `maintenance.updateCheck.enabled=false` on
+  air-gapped sites. Signature verification of the chart before a console update can be
+  relaxed for air-gapped mirrors with `maintenance.updates.skipSignatureVerify`.
+- **Tenant health indices move for every tenant.** The cost optimization factor is no longer
+  scored; the index is the three remaining factors at 25/20/15 over 60, and the admin console
+  shows the factor as "Not measured". `unavailable_sources` always lists `cost-metering`.
+- **Some crypto risk scores and grades change** once the catalogue update is applied:
+  configurations using the key sizes, DSA and Kerberos types named above move to obsolete /
+  Critical, and Kerberos AES-CTS-HMAC-SHA1-96 moves from strong to acceptable. Catalogue rows
+  a platform administrator has edited keep their values.
+- **API behaviour changes:** `resource-tracker-service`'s nine read endpoints, its OpenAPI
+  spec and typed client are removed; the MSP dashboard's response-time, error-rate and
+  throughput KPIs carry a `measured` flag and an empty series when unmeasured;
+  inventory-service's tenant activity summary and monitoring-service's tenant performance
+  summary read the metering table directly. Observations gain the explanation code
+  `no_address_to_place`.
+- **Observation rows created before the upgrade keep their old per-run grouping** and age
+  out or can be dismissed; new runs do not add to them.
+
+### Editions
+
+**Core** includes everything above except what is named below.
+
+**Enterprise** and **MSP** are affected by the retirement as described: the MSP dashboard's
+usage series now come from the metering table, and the billing usage source is unchanged.
+The authoritative list of what each edition includes is generated, not asserted:
+[`docsv4/core/editions.md`](docsv4/core/editions.md).
+
+### Verify
+
+Core: there is no key to trust, because the signing identity *is* the workflow that built it (chart included):
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v4.6.0 \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the chart, substitute `oci://ghcr.io/vistasecurity/vistaplatform:4.6.0` for the image.
+Enterprise and MSP customers verify the commercial images and chart against the commercial
+release workflow's identity; the command `helm install` prints carries the exact regexp.
+
+The complete per-change list is in
+[Vista Platform 4.6.0 — full list of changes](docsv4/core/releases/4.6.0.md).
+
+<!-- release-notes-end -->
+
 ## [4.5.0] - 2026-10-12
 
 **Version 4.5.0 is a security-hardening and dependency release, and it also improves

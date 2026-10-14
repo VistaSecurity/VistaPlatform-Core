@@ -68,7 +68,7 @@ func newTestRouter(t *testing.T) (*gin.Engine, *sharedhttp.AgentRoutes, *config.
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	t.Setenv("AUDIT_LOGGING_ENABLED", "false")
-	t.Setenv("RESOURCE_TRACKER_URL", "http://127.0.0.1:1")
+	t.Setenv("RESOURCE_METRICS_INGEST_URL", "http://127.0.0.1:1/x")
 
 	// A lazy handle that never connects: these tests are about routing, and
 	// every agent request is answered by SensorAuth before any query.

@@ -53,12 +53,12 @@ export type {
   operations as monitoringServiceOperations,
 } from "./monitoring-service";
 export type {
-  paths as resourceTrackerServicePaths,
-  components as resourceTrackerServiceComponents,
-  operations as resourceTrackerServiceOperations,
-} from "./resource-tracker-service";
-export type {
   paths as tenantHealthServicePaths,
   components as tenantHealthServiceComponents,
   operations as tenantHealthServiceOperations,
 } from "./tenant-health-service";
+export type {
+  paths as maintenanceServicePaths,
+  components as maintenanceServiceComponents,
+  operations as maintenanceServiceOperations,
+} from "./maintenance-service";

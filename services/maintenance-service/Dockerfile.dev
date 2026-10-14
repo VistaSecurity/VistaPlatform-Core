@@ -1,0 +1,65 @@
+# Development Dockerfile for Maintenance Service (Core; platform backups and updates)
+ARG GO_BUILDER_IMAGE=golang:1.26.9-alpine
+ARG RUNTIME_IMAGE=alpine:3.24.2
+FROM ${GO_BUILDER_IMAGE} AS builder
+
+WORKDIR /workspace
+RUN apk add --no-cache ca-certificates tzdata git
+
+# Explicitly enable workspace mode
+ENV GOWORK=/workspace/go.work
+ENV GOTOOLCHAIN=go1.26.9
+
+# Copy workspace files in correct order
+COPY go.work ./
+COPY shared ./shared
+COPY shared/rbac ./shared/rbac
+COPY services ./services
+COPY sensor ./sensor
+COPY device-agent ./device-agent
+# Build from workspace root
+RUN CGO_ENABLED=0 GOOS=linux go build -o /out/main ./services/maintenance-service/cmd
+
+# helm + cosign for the update and rollback Jobs (spec platform-maintenance.md
+# WP4). The Job runs this same image as the vistaplatform-updater
+# ServiceAccount, and the service runs `cosign verify` in-process during
+# pre-flight. Pinned versions, verified against hardcoded SHA-256 sums per
+# architecture — a bump changes the version AND both sums together:
+#   helm   v3.22.0  https://get.helm.sh/helm-v3.22.0-linux-<arch>.tar.gz.sha256sum
+#                   (cross-checked against the v3.22.0 GitHub release notes)
+#   cosign v2.6.5   https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign_checksums.txt
+# Fetched and re-hashed from the downloaded files on 2026-10-14. cosign stays on
+# the v2 line, the line release-core.yml signs with. Helm stays on 3.x (4.x
+# changed --wait to kstatus and the updater Role is sized for 3.x).
+FROM ${GO_BUILDER_IMAGE} AS tools
+ARG TARGETARCH
+RUN apk add --no-cache ca-certificates curl
+RUN set -eu; \
+    arch="${TARGETARCH:-amd64}"; \
+    case "$arch" in \
+      amd64) helm_sha=1e4ab49e429626cf6c6958d914248b78c9730803c2751b87627e171dc800e7bb; cosign_sha=c3b4f5410e608af03a5eb0aaac84a4313d8da131248e08ff1759ac70c79d1644 ;; \
+      arm64) helm_sha=f14e804dfee240f55525b667488fe9adca349e63e00c9af634c0beb1421ac310; cosign_sha=426193b4c5da4d4d643e822f48fe0cc8a476ca1782a272704831f5a0cef716d7 ;; \
+      *) echo "unsupported TARGETARCH: $arch" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /out /tmp/helm; \
+    curl -fsSL -o /tmp/helm.tgz "https://get.helm.sh/helm-v3.22.0-linux-${arch}.tar.gz"; \
+    echo "${helm_sha}  /tmp/helm.tgz" | sha256sum -c -; \
+    tar -xzf /tmp/helm.tgz -C /tmp/helm; \
+    install -m 0755 "/tmp/helm/linux-${arch}/helm" /out/helm; \
+    curl -fsSL -o /tmp/cosign "https://github.com/sigstore/cosign/releases/download/v2.6.5/cosign-linux-${arch}"; \
+    echo "${cosign_sha}  /tmp/cosign" | sha256sum -c -; \
+    install -m 0755 /tmp/cosign /out/cosign; \
+    rm -rf /tmp/helm /tmp/helm.tgz /tmp/cosign
+
+FROM ${RUNTIME_IMAGE}
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /app
+RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+COPY --from=builder /out/main ./main
+COPY --from=tools /out/helm /usr/local/bin/helm
+COPY --from=tools /out/cosign /usr/local/bin/cosign
+RUN chown appuser:appgroup ./main && chmod +x ./main
+USER appuser
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+CMD ["./main"]

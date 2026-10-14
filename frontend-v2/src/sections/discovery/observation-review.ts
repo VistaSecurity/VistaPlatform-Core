@@ -108,7 +108,7 @@ export const EXPLANATIONS: Record<ExplanationCode, Explanation> = {
     fix: 'Confirming says you recognise it. The asset is created and then follows its network’s approval rules.',
   },
   owned_by_asset: {
-    why: 'An asset you already have owns this address, so confirming it would create a second record of the same device.',
+    why: 'An asset you already have owns an identifier of this observation — its address, or its hardware address — so confirming it would create a second record of the same device.',
     fix: 'Link this observation to that asset. Its approval and history are kept.',
   },
   owned_by_several_assets: {
@@ -134,6 +134,10 @@ export const EXPLANATIONS: Record<ExplanationCode, Explanation> = {
   no_address_or_service: {
     why: 'No address or service was seen — nothing to create an asset from.',
     fix: 'Dismiss it. If the device is real, it is picked up when something sees its address.',
+  },
+  no_address_to_place: {
+    why: 'Only a hardware address was seen, with no network address — there is no network that could cover it, so adding one would not place it.',
+    fix: 'Dismiss it. If the device is real, it is picked up when something sees its network address.',
   },
   not_seen_recently: {
     why: 'Nothing has seen this for more than 30 days.',

@@ -125,14 +125,6 @@ func buildDefaultStreams() []StreamConfig {
 			Replicas:   r,
 		},
 		{
-			Name:       "METRICS",
-			Subjects:   []string{"metrics.>"},
-			MaxAge:     24 * time.Hour,
-			MaxMsgSize: 1 << 20,
-			Storage:    nats.FileStorage,
-			Replicas:   r,
-		},
-		{
 			Name:       "PCAP_JOBS",
 			Subjects:   []string{"pcap.jobs.>"},
 			MaxAge:     24 * time.Hour,

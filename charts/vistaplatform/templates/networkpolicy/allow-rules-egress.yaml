@@ -67,6 +67,10 @@ spec:
 {{- if .Values.serviceRls.enabled }}
   {{- $pgConsumers = append $pgConsumers "rls-roles" }}
 {{- end }}
+{{- /* The platform backup Job (WP3) runs pg_dump against Postgres. */}}
+{{- if include "vistaplatform.maintenanceBackupsEnabled" . }}
+  {{- $pgConsumers = append $pgConsumers "maintenance-backup" }}
+{{- end }}
 {{- range $name, $svc := .Values.backends }}
   {{- if (default (dict) $svc.needs).postgres }}
     {{- $pgConsumers = append $pgConsumers $name }}
@@ -256,6 +260,13 @@ spec:
 {{- if not $egressPorts }}
   {{- fail "networkPolicy.externalEgressPorts must list at least one port; an empty list would deny all outbound traffic for externalEgressBackends." }}
 {{- end }}
+{{- /* The update / rollback Job (component maintenance-updater) pulls the
+       chart from the same registry maintenance-service's update check lists,
+       so it leaves the cluster exactly when maintenance-service may. */}}
+{{- $outbound := .Values.networkPolicy.externalEgressBackends }}
+{{- if and (has "maintenance-service" $outbound) (include "vistaplatform.maintenanceEnabled" .) }}
+{{- $outbound = append $outbound "maintenance-updater" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -265,7 +276,7 @@ metadata:
 spec:
   podSelector:
     matchExpressions:
-      - { key: app.kubernetes.io/component, operator: In, values: [{{ .Values.networkPolicy.externalEgressBackends | join "," }}] }
+      - { key: app.kubernetes.io/component, operator: In, values: [{{ $outbound | join "," }}] }
   policyTypes: [Egress]
   egress:
     - to:

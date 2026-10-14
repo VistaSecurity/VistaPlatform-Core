@@ -74,6 +74,14 @@ spec:
     rollingUpdate:
       maxSurge: 0
       maxUnavailable: 1
+  {{- else if and (not $strategy) (eq $name "maintenance-service") (include "vistaplatform.maintenanceBackupsEnabled" $ctx) (ne (include "vistaplatform.maintenanceBackupsAccessMode" $ctx) "ReadWriteMany") }}
+  {{- /* maintenance-service mounts the backups volume (WP3): the same no-surge
+         rule as admin-service above, for the same reason. */}}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   {{- else if $strategy }}
   strategy:
     type: {{ $strategy }}
@@ -104,7 +112,21 @@ spec:
         {{- include "vistaplatform.labels" $ctx | nindent 8 }}
         app.kubernetes.io/component: {{ $name }}
     spec:
+      {{- /*
+        No backend talks to the Kubernetes API, so none mounts a token — except
+        maintenance-service (spec platform-maintenance.md D1), which reads the
+        Helm release state and runs the backup and update Jobs with its own
+        namespace-scoped ServiceAccount (templates/maintenance/). Keyed on the
+        NAME, not on a value, so no override can hand a token to another
+        backend; scripts/test-chart-maintenance-rbac.mjs fails if a second
+        Deployment mounts one.
+      */}}
+      {{- if eq $name "maintenance-service" }}
+      serviceAccountName: maintenance-service
+      automountServiceAccountToken: true
+      {{- else }}
       automountServiceAccountToken: false
+      {{- end }}
       securityContext:
         {{- include "vistaplatform.podSecurityContext" $ctx | nindent 8 }}
       {{- $antiAffinity := include "vistaplatform.podAntiAffinity" (dict "ctx" $ctx "component" $name) }}
@@ -546,6 +568,76 @@ spec:
                   name: {{ include "vistaplatform.platformSecretName" $ctx }}
                   key: internal-auth-secret
             {{- end }}
+            {{- if eq $name "maintenance-service" }}
+            {{- $maint := $ctx.Values.maintenance | default dict }}
+            {{- $maintBackups := $maint.backups | default dict }}
+            {{/*
+              What maintenance-service needs to find its own release: the Helm
+              release name (it looks for sh.helm.release.v1.<release>.v*
+              Secrets) and, from the downward API, its namespace and pod name.
+              The single-node flag is a value because nodes are cluster-scoped
+              and the service holds no ClusterRole. MAINTENANCE_CHART_SOURCE is
+              where updates install from (maintenance.chartSource, or derived
+              from the image registry).
+            */}}
+            - name: HELM_RELEASE_NAME
+              value: {{ $ctx.Release.Name | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MAINTENANCE_BACKUPS_ENABLED
+              value: {{ ternary "true" "false" (eq (toString $maintBackups.enabled) "true") | quote }}
+            - name: MAINTENANCE_SINGLE_NODE
+              value: {{ ternary "true" "false" (eq (toString $maint.singleNode) "true") | quote }}
+            - name: MAINTENANCE_CHART_SOURCE
+              value: {{ include "vistaplatform.maintenanceChartSource" $ctx | quote }}
+            {{/*
+              The update check (WP2): maintenance.updateCheck.*. The pull
+              credential is the first image.pullSecrets entry, read through the
+              service's own Role (secrets get); none -> anonymous, right for the
+              public ghcr.io / docker.io repositories.
+            */}}
+            {{- $uc := $maint.updateCheck | default dict }}
+            {{- /* hasKey, not default: `default true false` is true, which
+                   would turn an explicit enabled=false back on. */}}
+            {{- $ucEnabled := true }}
+            {{- if hasKey $uc "enabled" }}{{ $ucEnabled = $uc.enabled }}{{ end }}
+            - name: MAINTENANCE_UPDATE_CHECK_ENABLED
+              value: {{ ternary "true" "false" (ne (toString $ucEnabled) "false") | quote }}
+            - name: MAINTENANCE_UPDATE_CHECK_INTERVAL
+              value: {{ default "24h" $uc.interval | quote }}
+            - name: MAINTENANCE_UPDATE_INCLUDE_PRERELEASES
+              value: {{ ternary "true" "false" (eq (toString $uc.includePrereleases) "true") | quote }}
+            {{- with $uc.notesBaseUrl }}
+            - name: MAINTENANCE_NOTES_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $ctx.Values.image.pullSecrets }}
+            - name: MAINTENANCE_PULL_SECRET_NAME
+              value: {{ first . | quote }}
+            {{- end }}
+            {{/*
+              The one-click update and rollback (WP4): pre-flight verifies the
+              chart's signature in-process against the identity NOTES.txt
+              prints (toJson: the regexp's backslashes must survive YAML), and
+              the Job template the service instantiates is mounted below.
+            */}}
+            - name: MAINTENANCE_VERIFICATION_IDENTITY_REGEXP
+              value: {{ $ctx.Values.verification.certificateIdentityRegexp | toJson }}
+            - name: MAINTENANCE_SKIP_SIGNATURE_VERIFY
+              value: {{ include "vistaplatform.maintenanceUpdatesFlag" (dict "ctx" $ctx "key" "skipSignatureVerify") | quote }}
+            - name: MAINTENANCE_UPDATE_TIMEOUT
+              value: {{ include "vistaplatform.maintenanceUpdateTimeout" $ctx | quote }}
+            - name: MAINTENANCE_UPDATE_JOB_TEMPLATE_CONFIGMAP
+              value: {{ include "vistaplatform.maintenanceUpdateJobConfigMapName" $ctx | quote }}
+            - name: MAINTENANCE_UPDATE_JOB_TEMPLATE_DIR
+              value: {{ include "vistaplatform.maintenanceUpdateJobMountPath" $ctx | quote }}
+            {{- end }}
             {{- if and (include "vistaplatform.aiProvider" $ctx) $ctx.Values.ai.apiKey.existingSecret }}
             # The generative provider's credential, under the name
             # AI_API_KEY_ENV points at. Injected on EVERY backend, from one
@@ -563,6 +655,66 @@ spec:
                 secretKeyRef:
                   name: {{ $ctx.Values.ai.apiKey.existingSecret }}
                   key: {{ $ctx.Values.ai.apiKey.existingSecretKey | default "api-key" }}
+            {{- end }}
+            {{- if and (eq $name "maintenance-service") (include "vistaplatform.maintenanceBackupsEnabled" $ctx) }}
+            {{- $maintBackups := ($ctx.Values.maintenance | default dict).backups | default dict }}
+            {{/*
+              Platform backups (WP3). The backups volume and the backup Job
+              template (templates/maintenance/backup-job-configmap.yaml) are
+              mounted below. The four Secret names are the chart's own, from
+              the helpers the Secret templates use, so a backup that includes
+              the install's Secrets reads exactly the Secrets this release
+              renders (or the operator's existing* ones). MAINTENANCE_DB_* name
+              where the database credential lives — the same Secret and key the
+              schema-migration Job uses — for the backup manifest.
+            */}}
+            - name: MAINTENANCE_BACKUPS_PATH
+              value: {{ include "vistaplatform.maintenanceBackupsMountPath" $ctx | quote }}
+            - name: MAINTENANCE_BACKUPS_RETENTION
+              value: {{ $maintBackups.retention | default 5 | quote }}
+            - name: MAINTENANCE_JOB_TEMPLATE_CONFIGMAP
+              value: {{ include "vistaplatform.maintenanceJobsConfigMapName" $ctx | quote }}
+            - name: MAINTENANCE_JOB_TEMPLATE_DIR
+              value: {{ include "vistaplatform.maintenanceJobsMountPath" $ctx | quote }}
+            - name: MAINTENANCE_SECRET_INSTALL
+              value: {{ include "vistaplatform.installSecretName" $ctx | quote }}
+            - name: MAINTENANCE_SECRET_PLATFORM
+              value: {{ include "vistaplatform.platformSecretName" $ctx | quote }}
+            - name: MAINTENANCE_SECRET_JWT_SIGNING
+              value: {{ include "vistaplatform.jwtSigningSecretName" $ctx | quote }}
+            - name: MAINTENANCE_SECRET_GENERATED
+              value: {{ include "vistaplatform.generatedSecretName" $ctx | quote }}
+            {{- $cbomSigning := $ctx.Values.cbomSigning | default dict }}
+            {{- if or $cbomSigning.existingSecretName (include "vistaplatform.generateSecrets" $ctx) ($cbomSigning.keyPEM | default "" | toString | trim) }}
+            {{/*
+              The CBOM artifact signing key, so restored artifacts still
+              verify: whatever Secret cbom-service signs with is in the
+              bundle. vistaplatform.cbomSigningSecretName is
+              cbomSigning.existingSecretName when set (operator-managed, as
+              platform.existingSecretName is backed up), else the chart-managed
+              Secret, named here under exactly the condition
+              secrets-cbom-signing.yaml renders it on. Unset only when
+              cbom-service has no signing Secret; a secrets-included backup
+              then records the key as not included.
+            */}}
+            - name: MAINTENANCE_SECRET_CBOM_SIGNING
+              value: {{ include "vistaplatform.cbomSigningSecretName" $ctx | quote }}
+            {{- end }}
+            {{- if $ctx.Values.datastores.postgres.enabled }}
+            - name: MAINTENANCE_DB_EXTERNAL
+              value: "false"
+            - name: MAINTENANCE_DB_SECRET_NAME
+              value: {{ include "vistaplatform.generatedSecretName" $ctx | quote }}
+            - name: MAINTENANCE_DB_SECRET_KEY
+              value: postgres-password
+            {{- else }}
+            - name: MAINTENANCE_DB_EXTERNAL
+              value: "true"
+            - name: MAINTENANCE_DB_SECRET_NAME
+              value: {{ include "vistaplatform.platformSecretName" $ctx | quote }}
+            - name: MAINTENANCE_DB_SECRET_KEY
+              value: database-url
+            {{- end }}
             {{- end }}
             {{- if eq $name "cbom-service" }}
             {{/*
@@ -803,6 +955,18 @@ spec:
               mountPath: {{ $ctx.Values.licensing.reports.dir }}
             {{- end }}
             {{- end }}
+            {{- if and (eq $name "maintenance-service") (include "vistaplatform.maintenanceBackupsEnabled" $ctx) }}
+            - name: maintenance-backups
+              mountPath: {{ include "vistaplatform.maintenanceBackupsMountPath" $ctx }}
+            - name: maintenance-jobs
+              mountPath: {{ include "vistaplatform.maintenanceJobsMountPath" $ctx }}
+              readOnly: true
+            {{- end }}
+            {{- if eq $name "maintenance-service" }}
+            - name: maintenance-update-job
+              mountPath: {{ include "vistaplatform.maintenanceUpdateJobMountPath" $ctx }}
+              readOnly: true
+            {{- end }}
             {{- with $svc.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -870,6 +1034,19 @@ spec:
           persistentVolumeClaim:
             claimName: {{ include "vistaplatform.licenseReportsClaimName" $ctx }}
         {{- end }}
+        {{- end }}
+        {{- if and (eq $name "maintenance-service") (include "vistaplatform.maintenanceBackupsEnabled" $ctx) }}
+        - name: maintenance-backups
+          persistentVolumeClaim:
+            claimName: {{ include "vistaplatform.maintenanceBackupsClaimName" $ctx }}
+        - name: maintenance-jobs
+          configMap:
+            name: {{ include "vistaplatform.maintenanceJobsConfigMapName" $ctx }}
+        {{- end }}
+        {{- if eq $name "maintenance-service" }}
+        - name: maintenance-update-job
+          configMap:
+            name: {{ include "vistaplatform.maintenanceUpdateJobConfigMapName" $ctx }}
         {{- end }}
         {{- with $svc.extraVolumes }}
         {{- toYaml . | nindent 8 }}

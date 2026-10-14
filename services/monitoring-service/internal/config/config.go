@@ -199,11 +199,6 @@ func Load() *Config {
 				Timeout: time.Duration(timeout) * time.Second,
 				Enabled: true,
 			},
-			"resource-tracker-service": {
-				URL:     sharedconfig.PeerServiceURLAuto("RESOURCE_TRACKER_SERVICE_URL", "resource-tracker-service"),
-				Timeout: time.Duration(timeout) * time.Second,
-				Enabled: true,
-			},
 			"device-interrogation-service": {
 				URL:     sharedconfig.PeerServiceURLAuto("DEVICE_INTERROGATION_SERVICE_URL", "device-interrogation-service"),
 				Timeout: time.Duration(timeout) * time.Second,
@@ -231,6 +226,11 @@ func Load() *Config {
 			},
 			"mcp-service": {
 				URL:     sharedconfig.PeerServiceURLAuto("MCP_SERVICE_URL", "mcp-service"),
+				Timeout: time.Duration(timeout) * time.Second,
+				Enabled: true,
+			},
+			"maintenance-service": {
+				URL:     sharedconfig.PeerServiceURLAuto("MAINTENANCE_SERVICE_URL", "maintenance-service"),
 				Timeout: time.Duration(timeout) * time.Second,
 				Enabled: true,
 			},

@@ -35,6 +35,10 @@ vi.mock('../lib/edition', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/edition')>();
   return { ...actual, usePlatformEdition: () => ({ capabilities: { msp: true, billing: true }, edition: 'enterprise', has: () => true, resolved: true }) };
 });
+vi.mock('../sections/maintenance/maintenance-queries', () => ({
+  useMaintenanceAvailability: () => 'available',
+  useUpdateStatus: () => ({ data: undefined, isLoading: false, isError: false }),
+}));
 vi.mock('./platform-branding', () => ({ usePlatformBranding: () => ({ name: 'Vista', logoUrl: null }), BrandLogo: () => null }));
 vi.mock('./command-palette', () => ({ CommandPalette: () => null }));
 vi.mock('./tenant-switcher', () => ({ TenantSwitcher: () => null, ScopeBar: () => null }));

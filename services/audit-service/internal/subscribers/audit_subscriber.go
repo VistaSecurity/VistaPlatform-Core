@@ -201,8 +201,23 @@ func convertAuditEventToActivityLog(e *events.AuditEvent) *models.ActivityLog {
 	// system-originated events with no user context) arrive without a
 	// user_type — default those to 'platform' so the insert never violates
 	// the constraint.
+	//
+	// A value outside {tenant, platform} is mapped to 'platform' too. The
+	// shared job logger's audit-unreachable fallback publishes "system", which
+	// the CHECK rejects — and that fallback fires exactly when the record has
+	// nowhere else to go. The original value is kept in metadata.
 	log.UserType = e.UserType
-	if log.UserType == "" {
+	switch log.UserType {
+	case "tenant", "platform":
+	case "":
+		log.UserType = "platform"
+	default:
+		md := make(map[string]interface{}, len(log.Metadata)+1)
+		for k, v := range log.Metadata {
+			md[k] = v
+		}
+		md["origin_user_type"] = log.UserType
+		log.Metadata = md
 		log.UserType = "platform"
 	}
 

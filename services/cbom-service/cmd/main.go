@@ -134,10 +134,6 @@ func main() {
 	// Resource tracking middleware.
 	trackerConfig := resourcetracking.DefaultConfig()
 	trackerConfig.ServiceName = "cbom-service"
-	trackerConfig.TrackerURL = os.Getenv("RESOURCE_TRACKER_URL")
-	if trackerConfig.TrackerURL == "" {
-		trackerConfig.TrackerURL = sharedconfig.PeerURL("resource-tracker-service", sharedconfig.MTLSEnabled())
-	}
 	trackerConfig.UseMTLS = cfg.UseMTLS
 	trackerConfig.ClientCertPath = cfg.ClientCertPath
 	trackerConfig.ClientKeyPath = cfg.ClientKeyPath

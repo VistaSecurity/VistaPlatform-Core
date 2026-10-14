@@ -22,21 +22,25 @@ type HealthScorer struct {
 // contribution. Owner decision 8 (ADMIN_UI_DATA_REVIEW_2026-09, RC-14) dropped
 // it and re-weighted the rest PROPORTIONALLY: the old 25/20/15/15 split is
 // kept, each divided by the 75% that remains.
+//
+// Cost optimization followed it when resource-tracker-service was retired
+//: its inputs were an estimated price and an invented efficiency
+// score, so the factor is always nil and models.SourceCostMetering is always
+// listed. The three that remain keep their 25/20/15 proportions over the 60
+// points left.
 type HealthWeights struct {
-	PerformanceMetrics float64 // 25/75
-	SecurityPosture    float64 // 20/75
-	BusinessActivity   float64 // 15/75
-	CostOptimization   float64 // 15/75
+	PerformanceMetrics float64 // 25/60
+	SecurityPosture    float64 // 20/60
+	BusinessActivity   float64 // 15/60
 }
 
 // NewHealthScorer creates a new health scorer with default weights
 func NewHealthScorer() *HealthScorer {
 	return &HealthScorer{
 		weights: HealthWeights{
-			PerformanceMetrics: 25.0 / 75.0,
-			SecurityPosture:    20.0 / 75.0,
-			BusinessActivity:   15.0 / 75.0,
-			CostOptimization:   15.0 / 75.0,
+			PerformanceMetrics: 25.0 / 60.0,
+			SecurityPosture:    20.0 / 60.0,
+			BusinessActivity:   15.0 / 60.0,
 		},
 	}
 }
@@ -55,10 +59,12 @@ func unavailableFactors(sources []string) map[string]bool {
 }
 
 // reportedSources is the breakdown's unavailable_sources: the peers that
-// failed during collection, plus SourceResourceMetering, which is always
-// absent (no producer exists). Deduplicated, collection order preserved.
+// failed during collection, plus SourceResourceMetering and
+// SourceCostMetering, which are always absent (no producer exists).
+// Deduplicated, collection order preserved.
 func reportedSources(collected []string) []string {
-	all := append(append(make([]string, 0, len(collected)+1), collected...), models.SourceResourceMetering)
+	all := append(append(make([]string, 0, len(collected)+2), collected...),
+		models.SourceResourceMetering, models.SourceCostMetering)
 	out := make([]string, 0, len(all))
 	seen := make(map[string]bool, len(all))
 	for _, s := range all {
@@ -79,8 +85,9 @@ func reportedSources(collected []string) []string {
 // status models.HealthStatusUnknown — deliberately distinguishable from a
 // genuine score of 0, which is what a fabricated placeholder could never be.
 //
-// Resource efficiency is never scored: it is always nil in the breakdown and
-// SourceResourceMetering is always listed in unavailable_sources.
+// Resource efficiency and cost optimization are never scored: both are always
+// nil in the breakdown, and SourceResourceMetering / SourceCostMetering are
+// always listed in unavailable_sources.
 func (hs *HealthScorer) CalculateHealthScore(metrics models.HealthMetrics) models.HealthScoreResponse {
 	sources := reportedSources(metrics.UnavailableSources)
 	missing := unavailableFactors(sources)
@@ -98,7 +105,6 @@ func (hs *HealthScorer) CalculateHealthScore(metrics models.HealthMetrics) model
 	performanceScore := score(models.FactorPerformanceMetrics, hs.calculatePerformanceMetrics)
 	securityScore := score(models.FactorSecurityPosture, hs.calculateSecurityPosture)
 	businessScore := score(models.FactorBusinessActivity, hs.calculateBusinessActivity)
-	costScore := score(models.FactorCostOptimization, hs.calculateCostOptimization)
 
 	// Weighted overall score over the MEASURED factors only, renormalised by
 	// the weight actually present. Treating an unmeasured factor as 0 would
@@ -114,9 +120,8 @@ func (hs *HealthScorer) CalculateHealthScore(metrics models.HealthMetrics) model
 	accumulate(performanceScore, hs.weights.PerformanceMetrics)
 	accumulate(securityScore, hs.weights.SecurityPosture)
 	accumulate(businessScore, hs.weights.BusinessActivity)
-	accumulate(costScore, hs.weights.CostOptimization)
 
-	allWeight := hs.weights.PerformanceMetrics + hs.weights.SecurityPosture + hs.weights.BusinessActivity + hs.weights.CostOptimization
+	allWeight := hs.weights.PerformanceMetrics + hs.weights.SecurityPosture + hs.weights.BusinessActivity
 
 	var overallScore, completeness float64
 	healthStatus := models.HealthStatusUnknown
@@ -133,7 +138,7 @@ func (hs *HealthScorer) CalculateHealthScore(metrics models.HealthMetrics) model
 		PerformanceMetrics: performanceScore,
 		SecurityPosture:    securityScore,
 		BusinessActivity:   businessScore,
-		CostOptimization:   costScore,
+		CostOptimization:   nil, // not measured — see models.SourceCostMetering
 		UnavailableSources: sources,
 		DataCompleteness:   completeness,
 	}
@@ -218,21 +223,6 @@ func (hs *HealthScorer) calculateBusinessActivity(metrics models.HealthMetrics) 
 
 	// Weighted average
 	return (userScore*0.3 + apiScore*0.3 + engagementScore*0.25 + featureScore*0.15)
-}
-
-// calculateCostOptimization calculates score based on cost efficiency
-func (hs *HealthScorer) calculateCostOptimization(metrics models.HealthMetrics) float64 {
-	// Cost per user score (lower is better)
-	costPerUserScore := hs.calculateCostPerUserScore(metrics.CostPerUser)
-
-	// Cost efficiency score (higher is better)
-	efficiencyScore := metrics.CostEfficiency
-
-	// Resource cost optimization (normalized)
-	resourceCostScore := hs.calculateResourceCostScore(metrics.ResourceCost)
-
-	// Weighted average
-	return (costPerUserScore*0.4 + efficiencyScore*0.4 + resourceCostScore*0.2)
 }
 
 // Helper functions for individual score calculations
@@ -334,19 +324,6 @@ func (hs *HealthScorer) calculateFeatureUsageScore(featureUsage map[string]int) 
 	return featureBonus + diversityScore
 }
 
-func (hs *HealthScorer) calculateCostPerUserScore(costPerUser float64) float64 {
-	// Lower cost per user is better (assumes optimal < $10/user)
-	if costPerUser <= 10.0 {
-		return 100.0
-	}
-	return math.Max(0, 100.0-(costPerUser-10.0)*5.0) // 5 point penalty per dollar
-}
-
-func (hs *HealthScorer) calculateResourceCostScore(resourceCost float64) float64 {
-	// Normalized score (assumes max $1000/month)
-	return math.Min(100.0, 100.0-resourceCost/10.0)
-}
-
 // determineHealthStatus converts score to status
 func (hs *HealthScorer) determineHealthStatus(score float64) string {
 	return healthbands.Status(&score)
@@ -426,22 +403,6 @@ func (hs *HealthScorer) generateRecommendations(metrics models.HealthMetrics, br
 				Impact:        "medium",
 				Effort:        "medium",
 				PotentialGain: 8.0,
-			})
-		}
-	}
-
-	// Cost optimization recommendations
-	if belowThreshold(breakdown.CostOptimization, 70) {
-		if metrics.CostPerUser > 20 {
-			recommendations = append(recommendations, models.Recommendation{
-				ID:            uuid.New(),
-				Category:      "cost",
-				Priority:      "medium",
-				Title:         "Optimize Cost Per User",
-				Description:   "Cost per user is above benchmark. Consider resource optimization or pricing review.",
-				Impact:        "medium",
-				Effort:        "medium",
-				PotentialGain: 12.0,
 			})
 		}
 	}

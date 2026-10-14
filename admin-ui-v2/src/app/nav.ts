@@ -124,6 +124,23 @@ export interface NavItem {
    * a Tenants tab that 404s.
    */
   edition?: EditionCapability;
+  /**
+   * Optional backend SERVICE this section needs, when the chart can leave it
+   * out of an install (maintenance-service: maintenance.enabled=false). Absent
+   * in the running install ⇒ the section is hidden and its route renders a
+   * notice — the same "absent, not forbidden" rule as `edition`, but decided
+   * by the service itself answering (src/app/require-service.tsx), because
+   * admin-service cannot speak for another binary.
+   */
+  service?: OptionalService;
+}
+
+/** Backends a chart install may omit, by the name the console probes. */
+export type OptionalService = 'maintenance';
+
+/** True if `entry`'s optional service is present (ungated entries always pass). */
+export function serviceAllows(entry: { service?: OptionalService }, available: (s: OptionalService) => boolean): boolean {
+  return !entry.service || available(entry.service);
 }
 
 export type LicenseGate = 'msp';
@@ -186,9 +203,10 @@ export function visibleSections(
   capabilities: EditionCapabilities,
   sections: NavItem[] = SECTIONS,
   license: LicenseState = 'unknown',
+  serviceAvailable: (s: OptionalService) => boolean = () => true,
 ): NavItem[] {
   return sections
-    .filter((s) => sectionVisible(s, has) && editionAllows(s, capabilities) && licenseAllows(s, license))
+    .filter((s) => sectionVisible(s, has) && editionAllows(s, capabilities) && licenseAllows(s, license) && serviceAllows(s, serviceAvailable))
     .map((s) => {
       if (!s.children?.length) return s;
       const children = s.children
@@ -291,6 +309,23 @@ export const SECTIONS: NavItem[] = [
       { id: 'services', label: 'Services', title: 'Service Health', subtitle: 'Backend service status and latency' },
       { id: 'gateway', label: 'Gateway', title: 'API Gateway', subtitle: 'Routers, services, and routing health' },
       { id: 'alerts', label: 'Alerts', title: 'System Alerts', subtitle: 'Alert history and thresholds' },
+    ] },
+  // Maintenance — platform versions, updates and backups (spec
+  // platform-maintenance.md). Its own section, not more System Health
+  // sub-views: System Health is read-only observability, and these are
+  // privileged actions with their own permission (D5). Reads are
+  // platform.health (maintenance-service GET /admin/maintenance/status); every
+  // write button is additionally gated on platform.maintenance in its page.
+  // Core in every edition, but the chart can leave the service out
+  // (maintenance.enabled=false), so `service` hides the section when its
+  // status route 404s.
+  { id: 'maintenance', label: 'Maintenance', icon: 'Wrench', group: 'Platform',
+    title: 'Maintenance', subtitle: 'Versions, updates and backups', source: '(new — platform maintenance)',
+    anyOf: [P.platform.health],
+    service: 'maintenance',
+    children: [
+      { id: 'about', label: 'About & Updates', title: 'About & Updates', subtitle: 'What this install runs, how it is managed, and updates' },
+      { id: 'backups', label: 'Backups', title: 'Backups', subtitle: 'Platform backups you can download and restore' },
     ] },
   // There is no Comms section (owner decision 9, RC-20). Its two sub-views
   // are gone:

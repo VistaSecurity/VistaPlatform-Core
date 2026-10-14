@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	neturl "net/url"
 	"sync"
 	"time"
 
@@ -203,19 +204,7 @@ func (bp *BatchProcessor) sendSingleRequest(request *BatchRequest) error {
 		return fmt.Errorf("failed to marshal metrics request: %w", err)
 	}
 
-	// Build URL - convert to HTTPS if mTLS is enabled
-	trackerURL := bp.config.TrackerURL
-	if bp.config.UseMTLS {
-		// Convert http:// to https:// and port 8080 to 8443
-		if len(trackerURL) > 7 && trackerURL[:7] == "http://" {
-			trackerURL = "https://" + trackerURL[7:]
-		}
-		// Replace :8080 with :8443 if present
-		if len(trackerURL) > len("https://") && trackerURL[len(trackerURL)-5:] == ":8080" {
-			trackerURL = trackerURL[:len(trackerURL)-5] + ":8443"
-		}
-	}
-	url := fmt.Sprintf("%s/api/v1/resource-tracker/metrics", trackerURL)
+	url := ingestURLFor(bp.config)
 
 	// Retry logic
 	for attempt := 0; attempt < bp.config.RetryAttempts; attempt++ {
@@ -316,4 +305,24 @@ func (cb *CircuitBreaker) RecordFailure() {
 	if cb.State == CircuitBreakerHalfOpen || cb.FailureCount >= cb.Threshold {
 		cb.State = CircuitBreakerOpen
 	}
+}
+
+// ingestURLFor returns the URL a batch is posted to. Under mTLS a plaintext
+// peer URL is rewritten to the TLS listener (http→https, :8080→:8443) so a
+// config that was resolved before USE_MTLS was known still reaches the
+// right port; an explicit https URL is left alone.
+func ingestURLFor(cfg *Config) string {
+	raw := cfg.IngestURL
+	if !cfg.UseMTLS {
+		return raw
+	}
+	u, err := neturl.Parse(raw)
+	if err != nil || u.Scheme != "http" {
+		return raw
+	}
+	u.Scheme = "https"
+	if u.Port() == "8080" {
+		u.Host = u.Hostname() + ":8443"
+	}
+	return u.String()
 }

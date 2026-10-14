@@ -13,7 +13,7 @@ import (
 //
 // InternalSecret enables the HMAC-signed service-to-service path every other
 // peer already uses (sensor-manager, monitoring-service, notification-service,
-// device-interrogation-service, resource-tracker-service). Without it this
+// device-interrogation-service). Without it this
 // service is reachable ONLY by a request carrying a person's JWT — which is
 // fine while every discovery job is something a person pressed a button for,
 // and is exactly what blocks the automatic active scan: the sweep runs in

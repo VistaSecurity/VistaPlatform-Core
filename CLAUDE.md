@@ -43,7 +43,7 @@ auth), `models` (shared DB types), `middleware` (logging, CORS, recovery),
 Backend services live under `services/<name>/`, one Go module each, listed in
 `go.work`: `auth-service`, `inventory-service`, `compliance-engine`,
 `cbom-service`, `sensor-manager`, `cluster-sensor-service`, `admin-service`,
-`monitoring-service`, `resource-tracker-service`, `tenant-health-service`,
+`monitoring-service`, `tenant-health-service`,
 `device-interrogation-service`, `audit-service`, `discovery-processor-service`,
 `pcap-processor` (CGO + libpcap), `notification-service`, `mcp-service`.
 

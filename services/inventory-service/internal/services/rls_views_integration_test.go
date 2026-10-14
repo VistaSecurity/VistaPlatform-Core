@@ -42,8 +42,6 @@ var invokerViews = []string{
 	// covers their isolation.
 	"sensor_discoveries", "crypto_implementations",
 	// flipped by the view-isolation hardening
-	"active_resource_alerts",
-	"aws_daily_cost_summary", "aws_daily_service_cost_summary", "aws_tenant_monthly_cost_summary",
 	"current_resource_usage_summary", "health_metrics_aggregated_view",
 	"platform_integrations_summary", "tenant_health_summary_view",
 	"user_tenant_permissions", "v_ci_inventory",

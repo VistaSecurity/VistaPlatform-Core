@@ -1,0 +1,33 @@
+{{/*
+Platform backups volume (maintenance.backups). Backup Jobs write
+`pg_dump -Fc` archives and their manifest here; maintenance-service streams a
+download from it and prunes to maintenance.backups.retention after each
+success. Mounted by maintenance-service (read-write) and by each backup Job
+(templates/maintenance/backup-job-configmap.yaml), on the same node for
+ReadWriteOnce.
+
+helm.sh/resource-policy: keep — an uninstall must not delete the backups an
+operator would restore the platform from.
+*/}}
+{{- $m := .Values.maintenance | default dict }}
+{{- $b := $m.backups | default dict }}
+{{- if and (include "vistaplatform.maintenanceEnabled" .) (eq (toString $b.enabled) "true") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vistaplatform.maintenanceBackupsClaimName" . }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance-backups
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ $b.accessMode | default "ReadWriteOnce" }}
+  {{- with ($b.storageClassName | default .Values.datastores.storageClassName) }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $b.size | default "20Gi" }}
+{{- end }}

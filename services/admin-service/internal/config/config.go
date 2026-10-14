@@ -5,16 +5,15 @@ import (
 )
 
 type Config struct {
-	Port                      string
-	DatabaseURL               string
-	RedisURL                  string // Redis URL for caching
-	JWTSecret                 string
-	Environment               string
-	StripeWebhookSecret       string
-	StripeSecretKey           string
-	StripePublishableKey      string
-	MonitoringServiceURL      string
-	ResourceTrackerServiceURL string
+	Port                 string
+	DatabaseURL          string
+	RedisURL             string // Redis URL for caching
+	JWTSecret            string
+	Environment          string
+	StripeWebhookSecret  string
+	StripeSecretKey      string
+	StripePublishableKey string
+	MonitoringServiceURL string
 
 	// FrontendBaseURL is the public URL of the web-UI, used as the default
 	// return_url when opening a Stripe billing portal session. Customers can
@@ -85,7 +84,6 @@ func Load() *Config {
 		// Helm/K8s deployment (cluster Traefik routes external traffic only).
 		// These default to the Compose/K8s Service names and are HMAC-signed.
 		MonitoringServiceURL:        sharedconfig.PeerServiceURLAuto("MONITORING_SERVICE_URL", "monitoring-service"),
-		ResourceTrackerServiceURL:   sharedconfig.PeerServiceURLAuto("RESOURCE_TRACKER_SERVICE_URL", "resource-tracker-service"),
 		FrontendBaseURL:             sharedconfig.GetEnv("FRONTEND_BASE_URL", "http://localhost:3000"),
 		EncryptionMasterKey:         sharedconfig.GetEnv("ENCRYPTION_MASTER_KEY", "change-this-master-key-in-production"), // Should use AWS KMS or similar in production
 		InternalAuthSecret:          sharedconfig.GetEnv("INTERNAL_AUTH_SECRET", "dev-internal-auth-secret-change-in-production"),

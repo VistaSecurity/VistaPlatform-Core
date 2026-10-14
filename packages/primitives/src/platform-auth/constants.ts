@@ -47,6 +47,9 @@ export const PLATFORM_PERMISSIONS = {
     auditManage: 'platform.audit.manage',
     notificationsManage: 'platform.notifications.manage',
     impersonate: 'platform.impersonate',
+    // Platform backups, updates and rollbacks (maintenance-service write verbs).
+    // Reads stay on platform.health.
+    maintenance: 'platform.maintenance',
   },
   support: {
     tenants: 'support.tenants',

@@ -113,7 +113,6 @@ func TestDeterminedEventCategoriesAreAllValid(t *testing.T) {
 		{"/api/v1/monitoring-service/platform/metrics", EventCategorySystem},
 		{"/api/v1/notification-service/tenant/notifications", EventCategorySystem},
 		{"/api/v1/audit-service/activity-logs", EventCategorySystem},
-		{"/api/v1/resource-tracker-service/usage", EventCategorySystem},
 		{"/api/v1/mcp-service/mcp", EventCategoryData},
 		// v2 and prefix-less mounts are the same service.
 		{"/api/v2/inventory-service/assets", EventCategoryAsset},

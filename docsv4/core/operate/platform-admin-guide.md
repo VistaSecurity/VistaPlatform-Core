@@ -26,11 +26,12 @@ It documents the administration console (admin-ui v2). The console has a single,
 7. [Billing & Revenue](#billing--revenue)
 8. [Plans & Pricing](#plans--pricing)
 9. [System Health](#system-health)
-10. [Catalog](#catalog)
-11. [Settings](#settings)
-12. [Staff & Access](#staff--access)
-13. [Security & Trust](#security--trust)
-14. [Appendix: Tenant Roles (support reference)](#appendix-tenant-roles-support-reference)
+10. [Maintenance](#maintenance)
+11. [Catalog](#catalog)
+12. [Settings](#settings)
+13. [Staff & Access](#staff--access)
+14. [Security & Trust](#security--trust)
+15. [Appendix: Tenant Roles (support reference)](#appendix-tenant-roles-support-reference)
 
 ---
 
@@ -99,7 +100,7 @@ The left rail is the spine of the console. Top-level sections in order:
 | Block | Sections |
 |---|---|
 | (top) | Mission Control · Tenants · Support · Fleet · Jobs & Queues · Billing & Revenue · Plans & Pricing |
-| **Platform** | System Health · Catalog · Settings |
+| **Platform** | System Health · Maintenance · Catalog · Settings |
 | **Governance** | Staff & Access · Security & Trust |
 
 When a section has sub-pages, selecting it expands them indented in the rail; the first sub-page is the section's default view. The topbar shows the active section's title and a one-line subtitle so you always know where you are.
@@ -185,6 +186,21 @@ Sub-pages: **Entitlements** · **Tiers** · **Add-ons**.
 - **Alerts** — system alert history, the thresholds that fire them, and **maintenance windows**. While a maintenance window is active, notification delivery is suppressed, so planned work does not page anyone. This is the console's only maintenance-window setting.
 
 **Key tasks:** confirm all services are healthy, diagnose latency or routing problems, review what's been alerting, and schedule a maintenance window before planned work.
+
+---
+
+## Maintenance
+
+**What it's for:** looking after the platform itself: seeing what is running and whether a newer release exists, and backing up the platform. Sub-pages:
+
+- **About & Updates** — the version each service is running (with a badge that flags version skew after an interrupted upgrade), how this install is managed, and the update check. When a newer Vista Platform release is out, a banner on every console page says so and links here; **What's new** opens the release notes, and **Check now** runs the check immediately.
+- **Backups** — **Create backup** takes a backup of the platform database as a downloadable file, optionally with the install's encryption keys (which requires a passphrase of at least 12 characters that is stored nowhere — losing it loses that backup). The list keeps the newest few (default 5) to **Download** or **Delete**, and **Run history** shows who ran what and how it ended.
+
+**Key tasks:** take and download a backup before any upgrade, keep a copy off the cluster, and watch for the update banner.
+
+**Access:** viewing needs the System Health permission (`platform.health`); creating, downloading or deleting a backup, checking for updates and running an update need `platform.maintenance`, which Platform Administrator has. Every write action is audited.
+
+The section only appears on a Helm install with the maintenance component on (`maintenance.enabled`, default on). On a GitOps-managed install the console tells you to update from your values repository. The full guide, including restoring a backup and air-gapped installs, is [Maintenance in the admin console](./maintenance.md).
 
 ---
 

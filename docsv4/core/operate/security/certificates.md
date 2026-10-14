@@ -624,7 +624,6 @@ This creates certificates for all services:
 - `cluster-sensor-service`
 - `admin-service`
 - `monitoring-service`
-- `resource-tracker-service`
 - `tenant-health-service`
 - `device-interrogation-service`
 - `audit-service`

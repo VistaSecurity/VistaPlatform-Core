@@ -256,6 +256,7 @@ spec:
     scheme: https
     permanent: true
 {{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -269,6 +270,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -282,6 +285,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -295,6 +300,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cbom-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -308,6 +315,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -321,6 +330,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cluster-sensor-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -334,6 +345,7 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -347,6 +359,7 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -360,19 +373,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
----
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: circuit-breaker-resource-tracker-service
-  labels:
-    {{- include "vistaplatform.labels" . | nindent 4 }}
-spec:
-  circuitBreaker:
-    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
-    checkPeriod: 10s
-    fallbackDuration: 30s
-    recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -386,6 +388,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -399,6 +403,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -412,6 +418,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -425,6 +433,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "discovery-processor-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -438,6 +448,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "mcp-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -451,6 +463,23 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: circuit-breaker-maintenance-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  circuitBreaker:
+    expression: ResponseCodeRatio(500, 600, 0, 600) > 0.30
+    checkPeriod: 10s
+    fallbackDuration: 30s
+    recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "pcap-processor") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -464,6 +493,8 @@ spec:
     checkPeriod: 10s
     fallbackDuration: 30s
     recoveryDuration: 60s
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -474,6 +505,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "inventory-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -484,6 +517,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -494,6 +529,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cbom-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -504,6 +541,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -514,6 +553,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cluster-sensor-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -524,6 +565,7 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -534,6 +576,7 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -544,16 +587,8 @@ metadata:
 spec:
   replacePath:
     path: /health
----
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: rewrite-resource-tracker-service-health
-  labels:
-    {{- include "vistaplatform.labels" . | nindent 4 }}
-spec:
-  replacePath:
-    path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -564,6 +599,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -574,6 +611,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -584,6 +623,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -594,6 +635,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "discovery-processor-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -604,6 +647,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "mcp-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -614,6 +659,20 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rewrite-maintenance-service-health
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePath:
+    path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "pcap-processor") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -624,6 +683,8 @@ metadata:
 spec:
   replacePath:
     path: /health
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "auth-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -635,6 +696,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/auth-service/(.*)
     replacement: /api/v1/auth-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -646,6 +709,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/compliance-engine/(.*)
     replacement: /api/v1/compliance-engine/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cbom-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -657,6 +722,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/cbom-service/(.*)
     replacement: /api/v1/cbom-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "sensor-manager") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -668,6 +735,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/sensor-manager/(.*)
     replacement: /api/v1/sensor-manager/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "cluster-sensor-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -679,6 +748,7 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/cluster-sensor-service/(.*)
     replacement: /api/v1/cluster-sensor-service/$1
+{{- end }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -690,6 +760,7 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/admin-service/(.*)
     replacement: /api/v1/admin-service/$1
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "monitoring-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -701,17 +772,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/monitoring-service/(.*)
     replacement: /api/v1/monitoring-service/$1
----
-apiVersion: traefik.io/v1alpha1
-kind: Middleware
-metadata:
-  name: v2-to-v1-resource-tracker-service
-  labels:
-    {{- include "vistaplatform.labels" . | nindent 4 }}
-spec:
-  replacePathRegex:
-    regex: ^/api/v2/resource-tracker-service/(.*)
-    replacement: /api/v1/resource-tracker-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "tenant-health-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -723,6 +785,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/tenant-health-service/(.*)
     replacement: /api/v1/tenant-health-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "device-interrogation-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -734,6 +798,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/device-interrogation-service/(.*)
     replacement: /api/v1/device-interrogation-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -745,6 +811,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/audit-service/(.*)
     replacement: /api/v1/audit-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "notification-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -756,6 +824,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/notification-service/(.*)
     replacement: /api/v1/notification-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "discovery-processor-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -767,6 +837,8 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/discovery-processor-service/(.*)
     replacement: /api/v1/discovery-processor-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "mcp-service") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -778,6 +850,21 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/mcp-service/(.*)
     replacement: /api/v1/mcp-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "maintenance-service") }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: v2-to-v1-maintenance-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+spec:
+  replacePathRegex:
+    regex: ^/api/v2/maintenance-service/(.*)
+    replacement: /api/v1/maintenance-service/$1
+{{- end }}
+{{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "pcap-processor") }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
@@ -789,4 +876,5 @@ spec:
   replacePathRegex:
     regex: ^/api/v2/pcap-processor/(.*)
     replacement: /api/v1/pcap-processor/$1
+{{- end }}
 {{- end }}

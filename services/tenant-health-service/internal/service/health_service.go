@@ -23,13 +23,12 @@ import (
 )
 
 type HealthService struct {
-	repo                      *repository.HealthRepository
-	scorer                    *scoring.HealthScorer
-	httpClient                *http.Client
-	monitoringServiceURL      string
-	authServiceURL            string
-	inventoryServiceURL       string
-	resourceTrackerServiceURL string
+	repo                 *repository.HealthRepository
+	scorer               *scoring.HealthScorer
+	httpClient           *http.Client
+	monitoringServiceURL string
+	authServiceURL       string
+	inventoryServiceURL  string
 }
 
 // NewHealthService wires the collectors' HTTP client to the service mesh.
@@ -66,13 +65,12 @@ func NewHealthService(repo *repository.HealthRepository) *HealthService {
 	}
 
 	return &HealthService{
-		repo:                      repo,
-		scorer:                    scoring.NewHealthScorer(),
-		httpClient:                httpClient,
-		monitoringServiceURL:      getURL("MONITORING_SERVICE_URL", sharedconfig.PeerURL("monitoring-service", sharedconfig.MTLSEnabled())),
-		authServiceURL:            getURL("AUTH_SERVICE_URL", sharedconfig.PeerURL("auth-service", sharedconfig.MTLSEnabled())),
-		inventoryServiceURL:       getURL("INVENTORY_SERVICE_URL", sharedconfig.PeerURL("inventory-service", sharedconfig.MTLSEnabled())),
-		resourceTrackerServiceURL: getURL("RESOURCE_TRACKER_SERVICE_URL", sharedconfig.PeerURL("resource-tracker-service", sharedconfig.MTLSEnabled())),
+		repo:                 repo,
+		scorer:               scoring.NewHealthScorer(),
+		httpClient:           httpClient,
+		monitoringServiceURL: getURL("MONITORING_SERVICE_URL", sharedconfig.PeerURL("monitoring-service", sharedconfig.MTLSEnabled())),
+		authServiceURL:       getURL("AUTH_SERVICE_URL", sharedconfig.PeerURL("auth-service", sharedconfig.MTLSEnabled())),
+		inventoryServiceURL:  getURL("INVENTORY_SERVICE_URL", sharedconfig.PeerURL("inventory-service", sharedconfig.MTLSEnabled())),
 	}
 }
 
@@ -187,34 +185,18 @@ func (s *HealthService) collectMetricsFromServices(tenantID uuid.UUID) (*models.
 		metrics.APICalls = actMetrics.APICalls
 		metrics.FeatureUsage = actMetrics.FeatureUsage
 		metrics.UserEngagement = actMetrics.UserEngagement
-		// inventory-service reports its OWN unreachable peers (it polls
-		// resource-tracker-service for the API-call count). Propagate them so a
-		// downstream gap is not silently absorbed into this tenant's score.
+		// inventory-service may report its OWN unreachable peers. Propagate them
+		// so a downstream gap is not silently absorbed into this tenant's score.
 		metrics.UnavailableSources = append(metrics.UnavailableSources, actMetrics.UnavailableSources...)
 	} else {
 		markUnavailable(models.SourceInventory, err)
 	}
 
-	// Collect cost metrics from resource-tracker-service.
-	//
-	// CPU, memory, storage and network utilisation are deliberately NOT
-	// collected: nothing meters them per tenant (the CPU and memory columns are
-	// never written, and storage/network were the constants 50 and 60), so the
-	// resource-efficiency factor they fed was dropped from the index — owner
-	// decision 8, RC-14. The scorer reports it as not measured
-	// (models.SourceResourceMetering).
-	if resMetrics, err := s.getResourceMetrics(tenantID); err == nil {
-		metrics.ResourceCost = resMetrics.TotalCostUSD
-		metrics.CostEfficiency = resMetrics.ResourceEfficiencyScore
-		// Calculate cost per user
-		if metrics.ActiveUsers > 0 {
-			metrics.CostPerUser = resMetrics.TotalCostUSD / float64(metrics.ActiveUsers)
-		} else {
-			metrics.CostPerUser = resMetrics.TotalCostUSD // Fallback if no active users
-		}
-	} else {
-		markUnavailable(models.SourceResourceTracker, err)
-	}
+	// Cost optimization is never collected. The figures resource-tracker-service
+	// used to return (an estimated per-sample price, an invented efficiency
+	// score) were not measurements, and the service is retired. The
+	// scorer always reports the factor as not measured
+	// (models.SourceCostMetering), as it does resource efficiency (RC-14).
 
 	metrics.UnavailableSources = dedupeSources(metrics.UnavailableSources)
 	return metrics, nil
@@ -344,8 +326,8 @@ type ActivityMetrics struct {
 	FeatureUsage   map[string]int `json:"feature_usage"`
 	UserEngagement float64        `json:"user_engagement"`
 	// UnavailableSources are peers inventory-service itself could not reach
-	// while assembling this summary (it polls resource-tracker-service for the
-	// API-call count). Relayed so a gap two hops away is still visible here.
+	// while assembling this summary. Relayed so a gap two hops away is still
+	// visible here (none today: inventory-service reads its figures by SQL).
 	UnavailableSources []string `json:"unavailable_sources,omitempty"`
 }
 
@@ -371,42 +353,6 @@ func (s *HealthService) getActivityMetrics(tenantID uuid.UUID) (*ActivityMetrics
 	}
 
 	var data ActivityMetrics
-
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &data, nil
-}
-
-// ResourceMetrics represents resource metrics from resource-tracker-service
-type ResourceMetrics struct {
-	TotalCostUSD            float64 `json:"total_cost_usd"`
-	ResourceEfficiencyScore float64 `json:"resource_efficiency_score"`
-}
-
-// getResourceMetrics retrieves resource metrics from resource-tracker-service
-func (s *HealthService) getResourceMetrics(tenantID uuid.UUID) (*ResourceMetrics, error) {
-	url := fmt.Sprintf("%s/api/v1/resource-tracker-service/tenant/%s/resource-summary", s.resourceTrackerServiceURL, tenantID.String())
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("X-Tenant-ID", tenantID.String())
-	serviceauth.SignRequestFromEnv(req)
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to call resource-tracker-service: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("resource-tracker-service returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var data ResourceMetrics
 
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)

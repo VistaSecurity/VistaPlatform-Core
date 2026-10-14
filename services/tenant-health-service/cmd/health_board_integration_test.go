@@ -217,7 +217,7 @@ func TestIntegration_HealthAlertsReconcileThroughRealRouter(t *testing.T) {
 	// A calculation that measured NOTHING (every peer down) is no evidence of
 	// recovery: the open alerts must stay open, not be resolved by default.
 	unknown := models.HealthMetrics{TenantID: tenant, Timestamp: time.Now(), FeatureUsage: map[string]int{},
-		UnavailableSources: []string{models.SourceMonitoring, models.SourceAuth, models.SourceInventory, models.SourceResourceTracker}}
+		UnavailableSources: []string{models.SourceMonitoring, models.SourceAuth, models.SourceInventory}}
 	if w := h.do(http.MethodPost, "/api/v1/tenant-health-service/calculate",
 		models.HealthScoreRequest{TenantID: tenant, Metrics: unknown}); w.Code != http.StatusOK {
 		t.Fatalf("POST /calculate (unknown) = %d %s", w.Code, w.Body.String())

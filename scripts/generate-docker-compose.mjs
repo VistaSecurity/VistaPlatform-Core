@@ -164,7 +164,7 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
   // Services that sign OR verify HMAC service-to-service requests
   // (shared/serviceauth) need the shared secret. Registry-driven: every service
   // that declares INTERNAL_AUTH_SECRET in required_secrets gets it — not a
-  // single hardcoded service. (Hardcoding it to resource-tracker-service only
+  // single hardcoded service. (Hardcoding it to one service only
   // meant HMAC clients like compliance-engine silently sent unsigned calls and
   // got 401s in dev compose, matching the K8s bug.)
   if ((service.required_secrets || []).includes('INTERNAL_AUTH_SECRET')) {
@@ -194,8 +194,7 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
     'discovery-processor-service', 'device-interrogation-service',
     'admin-service', 'monitoring-service', 'audit-service',
     'cluster-sensor-service', 'inventory-service',
-    'notification-service', 'resource-tracker-service',
-    'tenant-health-service'
+    'notification-service', 'tenant-health-service'
   ].includes(service.name)) {
     baseEnv.push(
       'NATS_URL=nats://nats_user:nats_pass_dev@nats:4222'
@@ -224,7 +223,7 @@ function generateEnvironmentVariables(service, webUIPort = 3000, adminUIPort = 3
 }
 
 function generateDependencies(service) {
-  const deps = service.name === 'resource-tracker-service' ? ['postgres', 'nats'] : ['postgres'];
+  const deps = ['postgres'];
   const declared = new Set(service.docker?.dependencies || []);
   
   // Add service-specific dependencies
@@ -237,8 +236,7 @@ function generateDependencies(service) {
     'discovery-processor-service', 'device-interrogation-service',
     'admin-service', 'monitoring-service', 'audit-service',
     'cluster-sensor-service', 'inventory-service',
-    'notification-service', 'resource-tracker-service',
-    'tenant-health-service'
+    'notification-service', 'tenant-health-service'
   ].includes(service.name)) {
     deps.push('nats');
   }
@@ -264,7 +262,6 @@ function getEnvVarName(serviceName) {
     'cluster-sensor-service': 'CLUSTER_SENSOR_HOST_PORT',
     'admin-service': 'ADMIN_SERVICE_HOST_PORT',
     'monitoring-service': 'MONITORING_SERVICE_HOST_PORT',
-    'resource-tracker-service': 'RESOURCE_TRACKER_HOST_PORT',
     'tenant-health-service': 'TENANT_HEALTH_HOST_PORT'
   };
   

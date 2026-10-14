@@ -195,6 +195,7 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 	if obs.Empty() {
 		return nil
 	}
+	source = interrogationOrigin(source, assetID)
 	repo := s.store()
 
 	// Defence in depth: re-run the collector-boundary redactor over anything

@@ -1048,6 +1048,48 @@
         }
       }
     },
+    "maintenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Platform maintenance from the admin console (maintenance-service): backups, the update check and the one-click update. enabled=false removes the service, its namespace-scoped RBAC and the backups volume.",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "singleNode": { "type": "boolean", "description": "The cluster has one node. The service cannot count nodes itself: nodes are cluster-scoped and the chart grants no ClusterRole." },
+        "updateCheck": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "interval": { "type": "string", "pattern": "^[0-9]+(s|m|h)$" },
+            "includePrereleases": { "type": "boolean" },
+            "notesBaseUrl": { "type": "string" }
+          }
+        },
+        "backups": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string" },
+            "retention": { "type": "integer", "minimum": 1 },
+            "storageClassName": { "type": "string" },
+            "accessMode": { "type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany"], "description": "ReadWriteOnce schedules each backup Job onto the maintenance-service pod's node; ReadWriteOncePod cannot work (the Job mounts the same claim)." }
+          }
+        },
+        "chartSource": { "type": "string", "pattern": "^(oci://.+)?$", "description": "OCI chart repository updates install from. Empty derives oci://<image.registry>/<image.repoPrefix>/vistaplatform." },
+        "kubeApiServerCidr": { "type": "string", "pattern": "^$|^[0-9a-fA-F:.]+/[0-9]{1,3}$", "description": "With networkPolicy.egressEnabled: the CIDR maintenance-service may reach the Kubernetes API at (TCP 443/6443). Empty = 0.0.0.0/0 on those ports for that pod only." },
+        "updates": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The one-click update and rollback Job (helm as the vistaplatform-updater ServiceAccount).",
+          "properties": {
+            "skipSignatureVerify": { "type": "boolean", "description": "Skip cosign verification of the chart before an update (an air-gapped mirror that re-signs nothing). Pre-flight warns and the run records the skip." },
+            "timeout": { "type": "string", "pattern": "^[1-9][0-9]*(s|m|h)$", "description": "helm --timeout of an update or rollback; the Job's deadline is this plus 10 minutes." },
+            "plainHttp": { "type": "boolean", "description": "Pull the chart over plain HTTP (a mirror without TLS)." }
+          }
+        }
+      }
+    },
     "schemaMigration": {
       "type": "object",
       "properties": {

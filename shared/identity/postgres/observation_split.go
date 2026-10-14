@@ -163,13 +163,15 @@ func splitObservation(ctx context.Context, tx *sql.Tx, tenantID, oldID, fingerpr
 	var newID string
 	// The new row is this sighting: its evidence and time come from the
 	// receipt (receipts written before receipts carried evidence hold '{}',
-	// and fall back to the row's). Provenance and admission reasons are the
-	// row's — the fingerprint guarantees the same source and scope.
+	// and fall back to the row's). Admission reasons are the row's. The
+	// source ref is the receipt's own run when its evidence names one: the
+	// fingerprint guarantees the same source ORIGIN and scope, not the same
+	// run, so the row's ref may be a newer run than this receipt's.
 	if err := tx.QueryRowContext(ctx, `
 		INSERT INTO identity_observations
 		 (tenant_id,fingerprint,source_kind,source_ref,collector_version,network_scope,evidence,
 		  admission_reasons,first_seen_at,last_seen_at,enrichment_state,enrichment_reason)
-		SELECT o.tenant_id,$3,o.source_kind,o.source_ref,o.collector_version,o.network_scope,
+		SELECT o.tenant_id,$3,o.source_kind,COALESCE(NULLIF(rc.evidence->'source'->>'ref',''),o.source_ref),o.collector_version,o.network_scope,
 		       CASE WHEN rc.evidence='{}'::jsonb THEN o.evidence ELSE rc.evidence END,
 		       o.admission_reasons,rc.observed_at,rc.observed_at,o.enrichment_state,o.enrichment_reason
 		  FROM identity_observations o

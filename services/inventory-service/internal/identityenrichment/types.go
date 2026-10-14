@@ -103,6 +103,10 @@ func Generation(o Observation) string {
 	e := o.Evidence
 	e.ObservedAt = time.Time{}
 	e.Admission.ReceiptID = ""
+	// Two runs of one device are the same delivery for this purpose: the
+	// per-run ref is folded to the source's Origin, as the fingerprint folds
+	// it, or a repeat interrogation would schedule a probe per run.
+	e.Source = e.Source.Grouping()
 	e.Hostname = strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(e.Hostname)), "."), ".local")
 	e.DisplayName = strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(e.DisplayName)), "."), ".local")
 	e.Endpoints = append([]identity.EndpointObservation(nil), e.Endpoints...)

@@ -39,11 +39,15 @@ const BREAKDOWN_LABELS: { key: FactorKey; label: string }[] = [
 // replaced (an unreachable peer showing as a plausible number). Show the gap.
 const UNAVAILABLE = 'Unavailable';
 
-// `resource-metering` in unavailable_sources is not a service that failed: it
-// is the per-tenant CPU/memory producer that does not exist. Resource
-// efficiency is therefore never measured and carries no weight in the index
-// (owner decision 8, RC-14) — say "not measured", not "unreachable".
+// `resource-metering` and `cost-metering` in unavailable_sources are not
+// services that failed: they name producers that do not exist — nothing
+// meters per-tenant CPU/memory, and nothing prices a tenant's usage. Resource
+// efficiency (owner decision 8, RC-14) and cost optimization (the
+// resource-tracker retirement) are therefore never measured and carry
+// no weight in the index — say "not measured", not "unreachable".
 const RESOURCE_METERING_SOURCE = 'resource-metering';
+const COST_METERING_SOURCE = 'cost-metering';
+const NOT_MEASURED_SOURCES: readonly string[] = [RESOURCE_METERING_SOURCE, COST_METERING_SOURCE];
 const NOT_MEASURED = 'Not measured';
 
 export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealthSummary; onClose: () => void }) {
@@ -61,9 +65,10 @@ export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealth
   const reported = detail?.score_breakdown.unavailable_sources ?? [];
   // Real peers that failed this calculation — distinct from the factor no
   // producer measures at all.
-  const unavailableSources = reported.filter((s) => s !== RESOURCE_METERING_SOURCE);
+  const unavailableSources = reported.filter((s) => !NOT_MEASURED_SOURCES.includes(s));
   const notMeasured = (key: FactorKey) =>
-    key === 'resource_efficiency' && reported.includes(RESOURCE_METERING_SOURCE);
+    (key === 'resource_efficiency' && reported.includes(RESOURCE_METERING_SOURCE)) ||
+    (key === 'cost_optimization' && reported.includes(COST_METERING_SOURCE));
 
   return (
     <Modal
@@ -110,6 +115,12 @@ export function TenantHealthDrawer({ summary, onClose }: { summary: TenantHealth
             {reported.includes(RESOURCE_METERING_SOURCE) && (
               <div className="t-muted" style={{ fontSize: 11.5, marginTop: 2 }}>
                 Resource efficiency is not measured: nothing meters per-tenant CPU and memory, so it is
+                left out of the health index rather than estimated.
+              </div>
+            )}
+            {reported.includes(COST_METERING_SOURCE) && (
+              <div className="t-muted" style={{ fontSize: 11.5, marginTop: 2 }}>
+                Cost optimization is not measured: nothing prices a tenant&apos;s usage, so it is
                 left out of the health index rather than estimated.
               </div>
             )}

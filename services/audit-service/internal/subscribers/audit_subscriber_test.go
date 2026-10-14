@@ -39,6 +39,33 @@ func TestConvertAuditEventToActivityLog_UserType(t *testing.T) {
 	}
 }
 
+// TestConvertAuditEventToActivityLog_UnknownUserTypeMapsToPlatform: the shared
+// job logger's fallback publishes user_type "system", which valid_user_type
+// rejects. It must persist as 'platform' with the original kept in metadata.
+func TestConvertAuditEventToActivityLog_UnknownUserTypeMapsToPlatform(t *testing.T) {
+	orig := map[string]interface{}{"k": "v"}
+	evt := &events.AuditEvent{
+		EventID:   uuid.New(),
+		UserType:  "system",
+		Action:    "update",
+		Timestamp: time.Now(),
+		Metadata:  orig,
+	}
+	got := convertAuditEventToActivityLog(evt)
+	if got.UserType != "platform" {
+		t.Errorf("UserType = %q, want %q", got.UserType, "platform")
+	}
+	if got.Metadata["origin_user_type"] != "system" {
+		t.Errorf("origin_user_type = %v, want system", got.Metadata["origin_user_type"])
+	}
+	if got.Metadata["k"] != "v" {
+		t.Errorf("existing metadata lost: %v", got.Metadata)
+	}
+	if _, ok := orig["origin_user_type"]; ok {
+		t.Error("input event metadata was mutated")
+	}
+}
+
 // TestConvertAuditEventToActivityLog_FieldMapping verifies the rest of the
 // event-to-log mapping alongside the user_type fix.
 func TestConvertAuditEventToActivityLog_FieldMapping(t *testing.T) {

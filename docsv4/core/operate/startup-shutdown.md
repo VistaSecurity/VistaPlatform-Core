@@ -42,7 +42,7 @@ sleep 10
 # 3. Start backend services
 docker compose up -d auth-service inventory-service compliance-engine \
   cbom-service sensor-manager admin-service cluster-sensor-service \
-  monitoring-service resource-tracker-service tenant-health-service \
+  monitoring-service tenant-health-service \
   device-interrogation-service audit-service notification-service \
   discovery-processor-service pcap-processor mcp-service
 
@@ -127,9 +127,9 @@ kubectl -n vista logs deployment/notification-service
 > from. If a service is added or its datastores change, update the registry —
 > this page is a mirror and will otherwise drift, as it did before v0.12.5.
 
-- **PostgreSQL**: primary datastore — required by 15 service(s): admin-service, audit-service, auth-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, discovery-processor-service, inventory-service, monitoring-service, notification-service, pcap-processor, resource-tracker-service, sensor-manager, tenant-health-service
-- **Redis**: caching, sessions, and the JWT revocation denylist — required by 13 service(s): admin-service, audit-service, auth-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, inventory-service, monitoring-service, notification-service, resource-tracker-service, sensor-manager, tenant-health-service
-- **NATS**: message queue — required by 14 service(s): admin-service, audit-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, discovery-processor-service, inventory-service, monitoring-service, notification-service, pcap-processor, resource-tracker-service, sensor-manager, tenant-health-service
+- **PostgreSQL**: primary datastore — required by 14 service(s): admin-service, audit-service, auth-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, discovery-processor-service, inventory-service, monitoring-service, notification-service, pcap-processor, sensor-manager, tenant-health-service
+- **Redis**: caching, sessions, and the JWT revocation denylist — required by 12 service(s): admin-service, audit-service, auth-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, inventory-service, monitoring-service, notification-service, sensor-manager, tenant-health-service
+- **NATS**: message queue — required by 13 service(s): admin-service, audit-service, cbom-service, cluster-sensor-service, compliance-engine, device-interrogation-service, discovery-processor-service, inventory-service, monitoring-service, notification-service, pcap-processor, sensor-manager, tenant-health-service
 
 ### Backend Service Dependencies
 
@@ -159,7 +159,6 @@ in-cluster interrogation worker.
 - **monitoring-service**: nats, postgres, redis
 - **notification-service**: nats, postgres, redis
 - **pcap-processor**: nats, postgres
-- **resource-tracker-service**: nats, postgres, redis
 - **sensor-manager**: nats, postgres, redis
 - **tenant-health-service**: nats, postgres, redis
 

@@ -26,8 +26,8 @@ import (
 // The probe was api_format_preferences until that table was dropped as one of
 // the 31 reader-less/writer-less tables retired in, which took this test
 // with it ("relation does not exist") every night for three weeks. Pick a table
-// with REAL readers and writers — tenant_resource_usage is resource-tracker's
-// live usage table — so the probe cannot be swept up by the next dead-table
+// with REAL readers and writers — tenant_resource_usage is the live usage
+// table auth-service's resource-metrics ingest writes — so the probe cannot be swept up by the next dead-table
 // audit. A schema-shaped probe is not the same as a load-bearing one.
 
 const probeTable = "public.tenant_resource_usage"

@@ -243,7 +243,7 @@ func NewServerWithConnections(cfg *config.Config, db, bypassDB *sql.DB, hooks Ed
 	//
 	// NOTE: the metered/overage billing pipeline (OverageCalculator +
 	// UsageSyncWorker) was removed 2026-07 — billing is flat per-tier.
-	// Usage MONITORING still lives in resource-tracker-service.
+	// Usage METERING is tenant_resource_usage, written by auth-service's ingest.
 
 	log.Printf("admin-service edition: %s", hooks.Edition())
 
@@ -291,10 +291,6 @@ func (s *Server) setupRouter() {
 	// Resource tracking middleware
 	trackerConfig := resourcetracking.DefaultConfig()
 	trackerConfig.ServiceName = "admin-service"
-	trackerConfig.TrackerURL = os.Getenv("RESOURCE_TRACKER_URL")
-	if trackerConfig.TrackerURL == "" {
-		trackerConfig.TrackerURL = sharedconfig.PeerURL("resource-tracker-service", sharedconfig.MTLSEnabled())
-	}
 	// mTLS configuration
 	trackerConfig.UseMTLS = s.config.UseMTLS
 	trackerConfig.ClientCertPath = s.config.ClientCertPath

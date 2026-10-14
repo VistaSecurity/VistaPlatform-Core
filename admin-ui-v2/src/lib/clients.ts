@@ -6,8 +6,8 @@
 // behind). See docsv4/internal/developer/design/admin-ui-v2/.
 //
 // The set below is the platform-admin surface: admin-service is the spine, plus
-// the services the admin console reads from. resource-tracker + tenant-health
-// were spec'd as part of this prep (they had no contract before).
+// the services the admin console reads from. tenant-health was spec'd as part
+// of this prep (it had no contract before).
 import {
   createAdminServiceClient,
   createAuthServiceClient,
@@ -15,9 +15,9 @@ import {
   createComplianceEngineClient,
   createDeviceInterrogationServiceClient,
   createInventoryServiceClient,
+  createMaintenanceServiceClient,
   createMonitoringServiceClient,
   createNotificationServiceClient,
-  createResourceTrackerServiceClient,
   createTenantHealthServiceClient,
   createSensorManagerClient,
 } from '@vistasecurity/api-contract';
@@ -36,9 +36,10 @@ export const clients = {
   compliance: createComplianceEngineClient(ADMIN_CSRF),
   devices: createDeviceInterrogationServiceClient(ADMIN_CSRF),
   inventory: createInventoryServiceClient(ADMIN_CSRF),
+  // Platform maintenance (Core): versions, backups and updates.
+  maintenance: createMaintenanceServiceClient(ADMIN_CSRF),
   monitoring: createMonitoringServiceClient(ADMIN_CSRF),
   notifications: createNotificationServiceClient(ADMIN_CSRF),
-  resourceTracker: createResourceTrackerServiceClient(ADMIN_CSRF),
   tenantHealth: createTenantHealthServiceClient(ADMIN_CSRF),
   sensors: createSensorManagerClient(ADMIN_CSRF),
 };

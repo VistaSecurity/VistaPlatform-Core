@@ -74,10 +74,5 @@ func (s *DiscoverySubscriber) handleAssetDiscovered(ctx context.Context, msg *na
 	log.Printf("[DiscoverySubscriber] Asset discovered: asset=%s hostname=%s tenant=%s source=%s",
 		payload.AssetID, hostname, envelope.TenantID, payload.Source)
 
-	// Record the discovery as a metric event for dashboard visibility
-	if s.metricsService != nil {
-		s.metricsService.RecordDiscoveryEvent(envelope.TenantID, payload.AssetID, payload.Source)
-	}
-
 	return nil
 }

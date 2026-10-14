@@ -97,9 +97,9 @@ describe('CSRF double-submit header (X-CSRF-Token)', () => {
       'createComplianceEngineClient',
       'createDeviceInterrogationServiceClient',
       'createInventoryServiceClient',
+      'createMaintenanceServiceClient',
       'createMonitoringServiceClient',
       'createNotificationServiceClient',
-      'createResourceTrackerServiceClient',
       'createSensorManagerClient',
       'createTenantHealthServiceClient',
     ]);

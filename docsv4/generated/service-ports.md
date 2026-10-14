@@ -9,11 +9,11 @@
 | cluster-sensor-service | services/cluster-sensor-service | 8088:8080 | /api/v1/cluster-sensor-service |
 | admin-service | services/admin-service | 8089:8080 | /api/v1/admin-service |
 | monitoring-service | services/monitoring-service | 8091:8080 | /api/v1/monitoring-service |
-| resource-tracker-service | services/resource-tracker-service | 8092:8080 | /api/v1/resource-tracker-service |
 | tenant-health-service | services/tenant-health-service | 8093:8080 | /api/v1/tenant-health-service |
 | device-interrogation-service | services/device-interrogation-service | 8095:8080 | /api/v1/device-interrogation-service |
 | audit-service | services/audit-service | 8096:8080 | /api/v1/audit-service |
 | notification-service | services/notification-service | 8097:8080 | /api/v1/notification-service |
 | discovery-processor-service | services/discovery-processor-service | 8090:8080 | /api/v1/discovery-processor-service |
 | mcp-service | services/mcp-service | 8100:8080 | /api/v1/mcp-service |
+| maintenance-service | services/maintenance-service | 8102:8080 | /api/v1/maintenance-service |
 | pcap-processor | services/pcap-processor | 8098:8080 | /api/v1/pcap-processor |

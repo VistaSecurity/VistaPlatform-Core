@@ -47,6 +47,7 @@ func TestSuggestObservation_TableRows(t *testing.T) {
 	nameOnly := identity.Observation{Identifiers: []identity.Identifier{{Kind: identity.KindHostname, Value: "printer"}}}
 	addressNoEndpoint := identity.Observation{Identifiers: []identity.Identifier{{Kind: identity.KindIPAddress, Value: "192.0.2.17"}}}
 	endpointOnly := identity.Observation{Endpoints: []identity.EndpointObservation{{Address: "192.0.2.18", Port: 443, Transport: "tcp"}}}
+	macOnly := identity.Observation{Identifiers: []identity.Identifier{{Kind: identity.KindMACAddress, Value: "aa:bb:cc:00:00:77"}}}
 	for _, tc := range []struct {
 		row        string
 		state      string
@@ -61,6 +62,10 @@ func TestSuggestObservation_TableRows(t *testing.T) {
 		{"dynamic address + address + endpoint → ready", "unresolved", []string{rDynamic}, "", scanEvidence(), recent, NeedsReadyToConfirm, SuggestConfirm, ExplainDynamicAddressAnswered},
 		{"dynamic, address only from an endpoint → ready", "unresolved", []string{rDynamic}, "", endpointOnly, recent, NeedsReadyToConfirm, SuggestConfirm, ExplainDynamicAddressAnswered},
 		{"network_scope_unresolved → needs network", "unresolved", []string{rUnplaced}, "", scanEvidence(), recent, NeedsNetwork, SuggestAddNetwork, ExplainNetworkNotConfigured},
+		{"network_scope_unresolved, address only from an endpoint → needs network", "unresolved", []string{rUnplaced}, "", endpointOnly, recent, NeedsNetwork, SuggestAddNetwork, ExplainNetworkNotConfigured},
+		{"network_scope_unresolved, address only from an identifier → needs network", "unresolved", []string{rUnplaced}, "", addressNoEndpoint, recent, NeedsNetwork, SuggestAddNetwork, ExplainNetworkNotConfigured},
+		{"network_scope_unresolved on a MAC-only row → likely noise, no address to place", "unresolved", []string{rUnplaced}, "", macOnly, recent, NeedsLikelyNoise, SuggestDismiss, ExplainNoAddressToPlace},
+		{"network_scope_unresolved on a MAC-only row, no collector → the sensor ask still wins", "unresolved", []string{rUnplaced}, rNoCollect, macOnly, recent, NeedsSensor, SuggestSensorOptions, ExplainNoCollectorInNetwork},
 		{"relayed advertisement → needs sensor", "unresolved", []string{rRelayed}, "", scanEvidence(), recent, NeedsSensor, SuggestSensorOptions, ExplainRelayedAdvertisement},
 		{"no eligible collector → needs sensor", "unresolved", []string{rDynamic}, rNoCollect, scanEvidence(), recent, NeedsSensor, SuggestSensorOptions, ExplainNoCollectorInNetwork},
 		{"name only → likely noise", "unresolved", []string{rNameOnly}, "", nameOnly, recent, NeedsLikelyNoise, SuggestDismiss, ExplainNameOnly},
@@ -114,6 +119,28 @@ func TestSuggestObservation_Precedence(t *testing.T) {
 			}
 		})
 	}
+	// Without an address there is nothing a network could cover, so unplaced
+	// no longer asks for one; a collector question still wins over noise.
+	macOnly := identity.Observation{Identifiers: []identity.Identifier{{Kind: identity.KindMACAddress, Value: "aa:bb:cc:00:00:77"}}}
+	for _, tc := range []struct {
+		name       string
+		reasons    []string
+		enrichment string
+		needs      string
+		code       string
+	}{
+		{"MAC-only unplaced is noise, not a network ask", []string{rUnplaced}, "", NeedsLikelyNoise, ExplainNoAddressToPlace},
+		{"MAC-only unplaced: no-address-to-place beats name-only wording", []string{rUnplaced, rNameOnly}, "", NeedsLikelyNoise, ExplainNoAddressToPlace},
+		{"MAC-only unplaced: relayed still asks for a sensor", []string{rUnplaced, rRelayed}, "", NeedsSensor, ExplainRelayedAdvertisement},
+		{"MAC-only unplaced: no-collector still asks for a sensor", []string{rUnplaced}, rNoCollect, NeedsSensor, ExplainNoCollectorInNetwork},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := suggest("unresolved", tc.reasons, tc.enrichment, macOnly, reviewNow.Add(-time.Hour))
+			if got.Needs != tc.needs || got.ExplanationCode != tc.code {
+				t.Fatalf("got %s/%s, want %s/%s", got.Needs, got.ExplanationCode, tc.needs, tc.code)
+			}
+		})
+	}
 }
 
 // Ownership: the dynamic-address row is only "ready to confirm" when no
@@ -152,10 +179,58 @@ func TestSuggestObservation_Ownership(t *testing.T) {
 	if none := with(); none.Needs != NeedsReadyToConfirm {
 		t.Fatalf("no owner: %+v", none)
 	}
-	// Ownership only reshapes the dynamic-address row; the rows above it keep their precedence.
-	if got := SuggestObservation(ObservationSuggestionInput{State: "unresolved", AdmissionReasons: []string{rUnplaced}, Evidence: scanEvidence(), LastSeenAt: recent,
-		Owners: []ObservationOwner{{ID: router, Linkable: true}}}, reviewNow); got.Needs != NeedsNetwork {
-		t.Fatalf("an owned row that needs a network: %s", got.Needs)
+}
+
+// Ownership comes first: a row whose identifiers already belong to one asset
+// has its answer, whatever the network or collector state. This is what let
+// 31 rows on a tenant with every collector offline sit under "needs a sensor"
+// while each already matched exactly one asset, so bulk Link was never
+// offered. Swapping the ownership rows below the network/sensor rows turns
+// every case here red.
+func TestSuggestObservation_OwnershipBeatsNetworkAndSensor(t *testing.T) {
+	recent := reviewNow.Add(-time.Hour)
+	router := uuid.New()
+	one := []ObservationOwner{{ID: router, Name: "dream-router", Linkable: true}}
+	two := []ObservationOwner{{ID: router, Linkable: true}, {ID: uuid.New(), Linkable: true}}
+	unlinkable := []ObservationOwner{{ID: router, Linkable: false}}
+	macOnly := identity.Observation{Identifiers: []identity.Identifier{{Kind: identity.KindMACAddress, Value: "aa:bb:cc:00:00:02"}}}
+	for _, tc := range []struct {
+		name       string
+		reasons    []string
+		enrichment string
+		evidence   identity.Observation
+		owners     []ObservationOwner
+		needs      string
+		action     string
+		code       string
+	}{
+		{"one owner beats needs_network", []string{rUnplaced}, "", scanEvidence(), one, NeedsLinkExisting, SuggestLink, ExplainOwnedByAsset},
+		{"one owner beats no-collector", []string{rDynamic}, rNoCollect, scanEvidence(), one, NeedsLinkExisting, SuggestLink, ExplainOwnedByAsset},
+		{"one owner beats relayed advertisement", []string{rRelayed}, "", scanEvidence(), one, NeedsLinkExisting, SuggestLink, ExplainOwnedByAsset},
+		{"one owner beats network and no-collector together", []string{rUnplaced, rRelayed}, rNoCollect, scanEvidence(), one, NeedsLinkExisting, SuggestLink, ExplainOwnedByAsset},
+		{"one owner needs no address or endpoint", []string{rUnplaced}, rNoCollect, macOnly, one, NeedsLinkExisting, SuggestLink, ExplainOwnedByAsset},
+		{"one owner beats noise", []string{rNameOnly}, "", macOnly, one, NeedsLinkExisting, SuggestLink, ExplainOwnedByAsset},
+		{"two owners beat needs_network", []string{rUnplaced}, "", scanEvidence(), two, NeedsReview, SuggestNone, ExplainOwnedBySeveralAssets},
+		{"two owners beat no-collector", []string{rDynamic}, rNoCollect, scanEvidence(), two, NeedsReview, SuggestNone, ExplainOwnedBySeveralAssets},
+		{"an unlinkable owner beats no-collector", []string{rDynamic}, rNoCollect, scanEvidence(), unlinkable, NeedsReview, SuggestNone, ExplainOwnedBySeveralAssets},
+		{"no owner: no-collector still asks for a sensor", []string{rDynamic}, rNoCollect, scanEvidence(), nil, NeedsSensor, SuggestSensorOptions, ExplainNoCollectorInNetwork},
+		{"no owner: unplaced still asks for a network", []string{rUnplaced}, "", scanEvidence(), nil, NeedsNetwork, SuggestAddNetwork, ExplainNetworkNotConfigured},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SuggestObservation(ObservationSuggestionInput{
+				State: "unresolved", AdmissionReasons: tc.reasons, EnrichmentReason: tc.enrichment, Evidence: tc.evidence, LastSeenAt: recent, Owners: tc.owners,
+				NetworkName: "Office LAN", SourceName: "Platform sensor",
+			}, reviewNow)
+			if got.Needs != tc.needs || got.SuggestedAction != tc.action || got.ExplanationCode != tc.code {
+				t.Fatalf("got needs=%s action=%s code=%s, want %s/%s/%s", got.Needs, got.SuggestedAction, got.ExplanationCode, tc.needs, tc.action, tc.code)
+			}
+			if (got.LinkAsset != nil) != (tc.needs == NeedsLinkExisting) {
+				t.Fatalf("link asset %+v for %s", got.LinkAsset, tc.needs)
+			}
+			if got.SuggestedReason == "" {
+				t.Fatal("an unresolved row must carry a suggested reason")
+			}
+		})
 	}
 }
 

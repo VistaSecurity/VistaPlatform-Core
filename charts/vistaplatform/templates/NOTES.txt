@@ -235,6 +235,12 @@ Verify chart authenticity (run on a machine with cosign installed):
 
 For day-2 operations (upgrade, backup, rollback), see
 docsv4/core/operate/deployment/production-checklist.md.
+{{- if (default dict .Values.maintenance).enabled }}
+
+In the admin console: Maintenance -> Backups takes a downloadable backup of the
+database (before every upgrade), and Maintenance -> About & Updates shows what
+is running and whether a newer release is available.
+{{- end }}
 
 {{- if .Release.IsUpgrade }}
 

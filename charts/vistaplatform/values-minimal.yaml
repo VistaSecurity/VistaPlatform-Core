@@ -52,8 +52,6 @@ backends:
     strategy: Recreate
   cluster-sensor-service:
     strategy: Recreate
-  resource-tracker-service:
-    strategy: Recreate
   tenant-health-service:
     strategy: Recreate
   device-interrogation-service:
@@ -65,4 +63,6 @@ backends:
   discovery-processor-service:
     strategy: Recreate
   mcp-service:
+    strategy: Recreate
+  maintenance-service:
     strategy: Recreate

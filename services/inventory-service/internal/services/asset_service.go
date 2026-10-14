@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -39,12 +37,10 @@ import (
 	shareddb "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	sharedevents "github.com/vistasecurity/vistaplatform/shared/events"
-	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	auditmiddleware "github.com/vistasecurity/vistaplatform/shared/middleware/audit"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
-	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -4396,7 +4392,7 @@ func (s *AssetService) HardDeleteAsset(tenantID, assetID uuid.UUID) error {
 type TenantActivitySummary struct {
 	TenantID       uuid.UUID      `json:"tenant_id"`
 	ActiveUsers    int            `json:"active_users"`    // Users who have interacted (estimate from asset updates)
-	APICalls       int            `json:"api_calls"`       // API calls, measured by resource-tracker-service; 0 with the source listed in UnavailableSources when it could not be reached
+	APICalls       int            `json:"api_calls"`       // API calls over the last 30 days, read from the tenant_resource_usage metering table
 	FeatureUsage   map[string]int `json:"feature_usage"`   // Feature usage counts
 	UserEngagement float64        `json:"user_engagement"` // Engagement score (0-100)
 	LastUpdated    time.Time      `json:"last_updated"`
@@ -4434,11 +4430,21 @@ func (s *AssetService) GetTenantActivitySummary(tenantID uuid.UUID) (*TenantActi
 	`
 
 	var assetCount, cryptoCount, keyCount, libraryCount, integrationCount, recentUpdates, newAssets int
+	var apiCalls int64
 
 	// RLS-scoped read over assets / crypto_implementations / keys /
-	// crypto_libraries / integrations (single-tenant aggregate, WHERE a.tenant_id = $1).
+	// crypto_libraries / integrations (single-tenant aggregate, WHERE a.tenant_id = $1),
+	// plus the tenant's metered API calls over the last 30 days from
+	// tenant_resource_usage (written by auth-service's resource-metrics
+	// ingest; also RLS-policied, same tenant context).
+	//
+	// There is deliberately NO estimation fallback for api_calls. The previous
+	// one derived a number from inventory size — a formula that has nothing to
+	// do with API traffic — and it was indistinguishable from a measurement
+	// downstream. A read failure fails the summary, which tenant-health reports
+	// as inventory-service unavailable (UNKNOWN), never as a plausible count.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.QueryRow(query, tenantID).Scan(
+		if err := tx.QueryRow(query, tenantID).Scan(
 			&assetCount,
 			&cryptoCount,
 			&keyCount,
@@ -4446,7 +4452,14 @@ func (s *AssetService) GetTenantActivitySummary(tenantID uuid.UUID) (*TenantActi
 			&integrationCount,
 			&recentUpdates,
 			&newAssets,
-		)
+		); err != nil {
+			return err
+		}
+		return tx.QueryRow(`
+			SELECT COALESCE(SUM(api_calls), 0)
+			FROM tenant_resource_usage
+			WHERE tenant_id = $1 AND "timestamp" >= NOW() - INTERVAL '30 days'
+		`, tenantID).Scan(&apiCalls)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tenant activity metrics: %w", err)
@@ -4472,22 +4485,7 @@ func (s *AssetService) GetTenantActivitySummary(tenantID uuid.UUID) (*TenantActi
 		summary.ActiveUsers = 0
 	}
 
-	// Query API calls from resource-tracker-service.
-	//
-	// There is deliberately NO estimation fallback. The previous one derived a
-	// number from inventory size — a formula that has nothing to do with API
-	// traffic — and it was indistinguishable from a measurement downstream, so
-	// an unreachable peer silently became a plausible metric on every tenant's
-	// health score. When the peer cannot be reached the count is 0 and the
-	// source is named, which the consumer reads as UNKNOWN.
-	apiCalls, err := s.getAPICallsFromResourceTracker(tenantID)
-	if err != nil {
-		log.Printf("[AssetService] resource-tracker-service unreachable for tenant %s: %v — reporting api_calls as UNKNOWN", tenantID, err)
-		summary.APICalls = 0
-		summary.UnavailableSources = append(summary.UnavailableSources, "resource-tracker-service")
-	} else {
-		summary.APICalls = apiCalls
-	}
+	summary.APICalls = int(apiCalls)
 
 	// Calculate user engagement score (0-100)
 	// Based on recent activity: new assets, updates, feature diversity
@@ -4527,89 +4525,4 @@ func (s *AssetService) GetTenantActivitySummary(tenantID uuid.UUID) (*TenantActi
 	summary.UserEngagement = engagementScore
 
 	return summary, nil
-}
-
-// peerHTTPClientOnce guards the lazily-built S2S client below.
-var (
-	peerHTTPClientOnce sync.Once
-	peerHTTPClientVal  *http.Client
-)
-
-// peerHTTPClient returns the HTTP client used for service-to-service polls.
-//
-// Under serviceMtls the peer URL resolves to https://<svc>:8443, which is
-// RequireAndVerifyClientCert: a bare &http.Client{} fails the handshake on
-// every call. Built once, from the same CLIENT_CERT_PATH / CLIENT_KEY_PATH /
-// PLATFORM_CA_CERT_PATH the chart already mounts for this service.
-func peerHTTPClient() *http.Client {
-	peerHTTPClientOnce.Do(func() {
-		peerHTTPClientVal = newPeerHTTPClient(
-			sharedconfig.GetEnvAsBool("USE_MTLS", true),
-			sharedconfig.GetEnv("CLIENT_CERT_PATH", "/app/certs/client-cert.pem"),
-			sharedconfig.GetEnv("CLIENT_KEY_PATH", "/app/certs/client-key.pem"),
-			sharedconfig.GetEnv("PLATFORM_CA_CERT_PATH", "/app/certs/platform-ca-cert.pem"),
-		)
-	})
-	return peerHTTPClientVal
-}
-
-// newPeerHTTPClient is peerHTTPClient's construction step, split out so it can
-// be exercised without the package-level sync.Once.
-func newPeerHTTPClient(useMTLS bool, certPath, keyPath, caPath string) *http.Client {
-	plain := &http.Client{Timeout: 5 * time.Second}
-	if !useMTLS {
-		return plain
-	}
-	c, err := sharedhttp.NewMTLSClient(certPath, keyPath, caPath)
-	if err != nil {
-		// Not fatal — the caller reports the peer as unavailable rather than
-		// inventing a value, so this degrades visibly.
-		log.Printf("[AssetService] USE_MTLS is set but the mTLS client could not be built: %v — peer polls will fail and report UNKNOWN", err)
-		return plain
-	}
-	c.Timeout = 5 * time.Second
-	return c
-}
-
-// getAPICallsFromResourceTracker queries the resource-tracker-service for API call count
-func (s *AssetService) getAPICallsFromResourceTracker(tenantID uuid.UUID) (int, error) {
-	trackerURL := os.Getenv("RESOURCE_TRACKER_URL")
-	if trackerURL == "" {
-		trackerURL = sharedconfig.PeerURL("resource-tracker-service", sharedconfig.MTLSEnabled())
-	}
-
-	// Query for last 30 days of usage
-	url := fmt.Sprintf("%s/api/v1/resource-tracker-service/tenants/%s/usage?period=30d", trackerURL, tenantID.String())
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil) //nolint:gosec // intentional — internal service-to-service call to resource-tracker URL from trusted config, not user input
-	if err != nil {
-		return 0, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	serviceauth.SignRequestFromEnv(req)
-
-	resp, err := peerHTTPClient().Do(req) //nolint:gosec // intentional — internal service-to-service call, URL from trusted config not user input
-	if err != nil {
-		return 0, fmt.Errorf("failed to query resource-tracker: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("resource-tracker returned status %d", resp.StatusCode)
-	}
-
-	var usageResponse struct {
-		CurrentUsage struct {
-			TotalAPICalls int `json:"total_api_calls"`
-		} `json:"current_usage"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&usageResponse); err != nil {
-		return 0, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return usageResponse.CurrentUsage.TotalAPICalls, nil
 }

@@ -72,6 +72,8 @@ $(SCRIPTS_NPM_STAMP): scripts/package.json scripts/package-lock.json
 .PHONY: scripts-deps
 scripts-deps: $(SCRIPTS_NPM_STAMP)
 
+.PHONY:
+.PHONY:
 .PHONY: generate generate-docker-compose generate-k8s-ingress cluster-suspend cluster-resume cluster-status verify-generated verify-db-files \
 	sign-content-bundle verify-content-bundle stage-content-bundle unstage-content-bundle \
 	build-catalog-bundle
@@ -252,9 +254,9 @@ build-services: ## Build all Go backend services
 		cd ../admin-service && go build -o ../../bin/admin-service ./cmd && \
 		cd ../monitoring-service && go build -o ../../bin/monitoring-service ./cmd && \
 		cd ../cluster-sensor-service && go build -o ../../bin/cluster-sensor-service ./cmd && \
-		cd ../resource-tracker-service && go build -o ../../bin/resource-tracker-service ./cmd && \
 		cd ../tenant-health-service && go build -o ../../bin/tenant-health-service ./cmd && \
 		cd ../mcp-service && go build -o ../../bin/mcp-service ./cmd && \
+		cd ../maintenance-service && go build -o ../../bin/maintenance-service ./cmd && \
 		cd ../audit-service && go build -o ../../bin/audit-service ./cmd && \
 		cd ../notification-service && go build -o ../../bin/notification-service ./cmd && \
 		cd ../discovery-processor-service && go build -o ../../bin/discovery-processor-service ./cmd && \
@@ -275,8 +277,8 @@ build-services-parallel: ## Build all Go services in parallel
 	@echo "Building Go services in parallel..."
 	@$(MAKE) -j$(shell nproc) build-auth-service build-inventory-service build-compliance-engine \
 		build-cbom-service build-sensor-manager build-admin-service build-monitoring-service \
-		build-cluster-sensor-service build-resource-tracker-service build-tenant-health-service \
-		build-pcap-processor build-mcp-service
+		build-cluster-sensor-service build-tenant-health-service \
+		build-pcap-processor build-mcp-service build-maintenance-service
 
 # ---------------------------------------------------------------------------
 # Licensed image targets — two variants:
@@ -331,9 +333,9 @@ LICENSED_REPO_PREFIX ?= vistaplatform
 
 _ALL_SVCS = auth-service inventory-service compliance-engine cbom-service \
 	sensor-manager admin-service monitoring-service cluster-sensor-service \
-	resource-tracker-service tenant-health-service audit-service \
+	tenant-health-service audit-service \
 	device-interrogation-service discovery-processor-service notification-service \
-	pcap-processor mcp-service
+	pcap-processor mcp-service maintenance-service
 
 
 # Frontend images — distinct list because they don't have license-protected
@@ -344,7 +346,7 @@ _ALL_SVCS = auth-service inventory-service compliance-engine cbom-service \
 # (build-and-swap, ADR-0013).
 _ALL_UIS = web-ui admin-ui
 
-# Full commercial release-image set (19 total: 17 backends, one of them
+# Full commercial release-image set (20 total: 18 backends, one of them
 # Enterprise-only and absent from a Core tree, + 2 UIs). The release-customer.yml
 # workflow iterates over this same set when promoting Harbor → Docker Hub, so
 # keep them in sync.
@@ -354,10 +356,11 @@ _ALL_IMAGES = $(_ALL_SVCS) $(_ALL_UIS)
 	build-licensed-auth-service build-licensed-inventory-service build-licensed-compliance-engine \
 	build-licensed-cbom-service build-licensed-sensor-manager build-licensed-admin-service \
 	build-licensed-monitoring-service build-licensed-cluster-sensor-service \
-	build-licensed-resource-tracker-service build-licensed-tenant-health-service \
+	build-licensed-tenant-health-service \
 	build-licensed-audit-service \
 	build-licensed-device-interrogation-service build-licensed-discovery-processor-service \
-	build-licensed-notification-service build-licensed-pcap-processor build-licensed-mcp-service
+	build-licensed-notification-service build-licensed-pcap-processor build-licensed-mcp-service \
+	build-licensed-maintenance-service
 
 build-licensed: ## Build licensed (dev-key, no obfuscation) images for all services
 	@if [ -z "$(IMAGE_REGISTRY)" ]; then echo "ERROR: IMAGE_REGISTRY is required. Run: make build-licensed LICENSED_TAG=<tag> IMAGE_REGISTRY=<registry>"; exit 1; fi
@@ -399,10 +402,6 @@ build-licensed-cluster-sensor-service:
 	docker build $(BASE_IMAGE_ARGS) -f services/cluster-sensor-service/Dockerfile.licensed \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/cluster-sensor-service:$(LICENSED_TAG) .
 
-build-licensed-resource-tracker-service:
-	docker build $(BASE_IMAGE_ARGS) -f services/resource-tracker-service/Dockerfile.licensed \
-		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/resource-tracker-service:$(LICENSED_TAG) .
-
 build-licensed-tenant-health-service:
 	docker build $(BASE_IMAGE_ARGS) -f services/tenant-health-service/Dockerfile.licensed \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/tenant-health-service:$(LICENSED_TAG) .
@@ -427,6 +426,10 @@ build-licensed-mcp-service:
 	docker build $(BASE_IMAGE_ARGS) -f services/mcp-service/Dockerfile.licensed \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/mcp-service:$(LICENSED_TAG) .
 
+build-licensed-maintenance-service:
+	docker build $(BASE_IMAGE_ARGS) -f services/maintenance-service/Dockerfile.licensed \
+		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/maintenance-service:$(LICENSED_TAG) .
+
 build-licensed-pcap-processor: ## pcap-processor uses CGO — same as prod build, no garble
 	docker build $(BASE_IMAGE_ARGS) -f services/pcap-processor/Dockerfile.prod \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/pcap-processor:$(LICENSED_TAG) .
@@ -442,13 +445,13 @@ push-licensed: ## Push licensed images to registry (requires LICENSED_TAG and IM
 # ---------------------------------------------------------------------------
 # Dist image targets — the full customer release set.
 #
-# Backends (17): garble-obfuscated Enterprise edition (-tags ee)
+# Backends (18): garble-obfuscated Enterprise edition (-tags ee)
 #                via per-service Dockerfile.dist. pcap-processor uses
 #                Dockerfile.prod because CGO can't be garble-obfuscated.
 # Frontends (2): web-ui + admin-ui from Dockerfile.prod. No license code to
 #                obfuscate; Vite already produces minified production assets.
 #
-# Total: 19 images (_ALL_IMAGES), matching the matrix in
+# Total: 20 images (_ALL_IMAGES), matching the matrix in
 # .github/workflows/release-customer.yml.
 # Use these when staging a release to Harbor for promotion to Docker Hub.
 # ---------------------------------------------------------------------------
@@ -456,10 +459,11 @@ push-licensed: ## Push licensed images to registry (requires LICENSED_TAG and IM
 	build-dist-auth-service build-dist-inventory-service build-dist-compliance-engine \
 	build-dist-cbom-service build-dist-sensor-manager build-dist-admin-service \
 	build-dist-monitoring-service build-dist-cluster-sensor-service \
-	build-dist-resource-tracker-service build-dist-tenant-health-service \
+	build-dist-tenant-health-service \
 	build-dist-audit-service \
 	build-dist-device-interrogation-service build-dist-discovery-processor-service \
 	build-dist-notification-service build-dist-pcap-processor build-dist-mcp-service \
+	build-dist-maintenance-service \
 	build-dist-web-ui build-dist-admin-ui
 
 build-dist: ## Build the 19-image dist set (17 backends + web-ui + admin-ui). Requires DIST_TAG and IMAGE_REGISTRY.
@@ -502,10 +506,6 @@ build-dist-cluster-sensor-service:
 	docker build $(BASE_IMAGE_ARGS) -f services/cluster-sensor-service/Dockerfile.dist \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/cluster-sensor-service:$(DIST_TAG) .
 
-build-dist-resource-tracker-service:
-	docker build $(BASE_IMAGE_ARGS) -f services/resource-tracker-service/Dockerfile.dist \
-		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/resource-tracker-service:$(DIST_TAG) .
-
 build-dist-tenant-health-service:
 	docker build $(BASE_IMAGE_ARGS) -f services/tenant-health-service/Dockerfile.dist \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/tenant-health-service:$(DIST_TAG) .
@@ -529,6 +529,10 @@ build-dist-notification-service:
 build-dist-mcp-service:
 	docker build $(BASE_IMAGE_ARGS) -f services/mcp-service/Dockerfile.dist \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/mcp-service:$(DIST_TAG) .
+
+build-dist-maintenance-service:
+	docker build $(BASE_IMAGE_ARGS) -f services/maintenance-service/Dockerfile.dist \
+		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/maintenance-service:$(DIST_TAG) .
 
 
 build-dist-pcap-processor: ## pcap-processor uses CGO — no garble, but included in dist release
@@ -556,7 +560,7 @@ build-dist-admin-ui: ## Admin console (VISTA Operations) — built from admin-ui
 print-release-images: ## Print the commercial release-image set (_ALL_IMAGES), one per line
 	@printf '%s\n' $(_ALL_IMAGES)
 
-push-dist: ## Push the 19-image dist set to registry (requires DIST_TAG and IMAGE_REGISTRY)
+push-dist: ## Push the 20-image dist set to registry (requires DIST_TAG and IMAGE_REGISTRY)
 	@if [ -z "$(IMAGE_REGISTRY)" ]; then echo "ERROR: IMAGE_REGISTRY is required."; exit 1; fi
 	@echo "Pushing dist images with tag $(DIST_TAG) ..."
 	@for img in $(_ALL_IMAGES); do \
@@ -597,10 +601,6 @@ build-cluster-sensor-service: ## Build cluster-sensor-service
 	@echo "Building cluster-sensor-service..."
 	@cd services/cluster-sensor-service && go build -o ../../bin/cluster-sensor-service ./cmd
 
-build-resource-tracker-service: ## Build resource-tracker-service
-	@echo "Building resource-tracker-service..."
-	@cd services/resource-tracker-service && go build -o ../../bin/resource-tracker-service ./cmd
-
 build-tenant-health-service: ## Build tenant-health-service
 	@echo "Building tenant-health-service..."
 	@cd services/tenant-health-service && go build -o ../../bin/tenant-health-service ./cmd
@@ -608,6 +608,10 @@ build-tenant-health-service: ## Build tenant-health-service
 build-mcp-service: ## Build mcp-service
 	@echo "Building mcp-service..."
 	@cd services/mcp-service && go build -o ../../bin/mcp-service ./cmd
+
+build-maintenance-service: ## Build maintenance-service
+	@echo "Building maintenance-service..."
+	@cd services/maintenance-service && go build -o ../../bin/maintenance-service ./cmd
 
 build-pcap-processor: ## Build pcap-processor (requires CGO + libpcap)
 	@echo "Building pcap-processor..."
@@ -793,9 +797,9 @@ test-unit: ## Run unit tests for all services (needs CGO + libpcap-dev — see c
 		cd ../admin-service && go test ./... && \
 		cd ../monitoring-service && go test ./... && \
 		cd ../cluster-sensor-service && go test ./... && \
-		cd ../resource-tracker-service && go test ./... && \
 		cd ../tenant-health-service && go test ./... && \
 		cd ../mcp-service && go test ./... && \
+		cd ../maintenance-service && go test ./... && \
 		cd ../audit-service && go test ./... && \
 		cd ../notification-service && go test ./... && \
 		cd ../discovery-processor-service && go test ./... && \
@@ -810,7 +814,7 @@ test-unit: ## Run unit tests for all services (needs CGO + libpcap-dev — see c
 # hand-maintained-list hazard applies here too.
 test-parallel: ## Run tests in parallel across all services (needs CGO + libpcap-dev — see test-unit comment)
 	@echo "Running tests in parallel..."
-	@for service in auth-service inventory-service compliance-engine cbom-service sensor-manager admin-service monitoring-service cluster-sensor-service resource-tracker-service tenant-health-service mcp-service audit-service notification-service discovery-processor-service device-interrogation-service pcap-processor; do \
+	@for service in auth-service inventory-service compliance-engine cbom-service sensor-manager admin-service monitoring-service cluster-sensor-service tenant-health-service mcp-service maintenance-service audit-service notification-service discovery-processor-service device-interrogation-service pcap-processor; do \
 		(cd services/$$service && go test -v ./... &) \
 	done; \
 	(cd sensor && go test -v ./... &) \
@@ -854,9 +858,6 @@ test-monitoring-service: ## Test monitoring-service
 
 test-cluster-sensor-service: ## Test cluster-sensor-service
 	@cd services/cluster-sensor-service && go test -v ./...
-
-test-resource-tracker-service: ## Test resource-tracker-service
-	@cd services/resource-tracker-service && go test -v ./...
 
 test-tenant-health-service: ## Test tenant-health-service
 	@cd services/tenant-health-service && go test -v ./...
@@ -981,9 +982,6 @@ lint-monitoring-service: ## Lint monitoring-service
 lint-cluster-sensor-service: ## Lint cluster-sensor-service
 	@./scripts/lint-go.sh services/cluster-sensor-service
 
-lint-resource-tracker-service: ## Lint resource-tracker-service
-	@./scripts/lint-go.sh services/resource-tracker-service
-
 lint-tenant-health-service: ## Lint tenant-health-service
 	@./scripts/lint-go.sh services/tenant-health-service
 
@@ -1061,6 +1059,12 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@cd services/monitoring-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/api/ -run Contract
 	@echo "==> API contract: tenant-health-service rating vocabulary and serialized scorer output..."
 	@cd services/tenant-health-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/scoring/ -run Contract
+	@echo "==> API contract: running Go contract tests (maintenance-service: status + update check + spec routes)..."
+	@cd services/maintenance-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/handlers/ ./cmd/ -run Contract
+	@echo "==> API contract: running Go contract tests (maintenance-service: backups + runs)..."
+	@cd services/maintenance-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/backups/ -run Contract
+	@echo "==> API contract: running Go contract tests (maintenance-service: pre-flight + update + rollback + releases)..."
+	@cd services/maintenance-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/upgrade/ -run Contract
 	@echo "==> API contract: mcp-service tool-surface snapshot (JSON-RPC, so OpenAPI does not apply)..."
 	@cd services/mcp-service && GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go test ./internal/server/ -run ToolSurface
 	@echo "✅ Contract tests pass — live handlers conform to the spec."

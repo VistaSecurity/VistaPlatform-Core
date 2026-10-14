@@ -193,9 +193,12 @@ the evaluation install exposes the tenant UI only.
 ## Run it
 
 > **Upgrading an existing install? Back up first, and read the release notes.**
-> `pg_dump` your database before every `helm upgrade` — the chart ships no
-> backup tooling, and a schema statement that fails against your data leaves the
-> migration half-applied, with a restore as the only way back. Each release's
+> Take a backup before every upgrade: in the admin console, **Maintenance →
+> Backups → Create backup** (see
+> [Maintenance in the admin console](docsv4/core/operate/maintenance.md)), or
+> `pg_dump` your database yourself. A schema statement that fails against your
+> data leaves the migration half-applied, with a restore as the only way back.
+> Each release's
 > **Upgrading** section in the [CHANGELOG](CHANGELOG.md) lists what you have to
 > do, including breaking changes. A **new install** is unaffected.
 >
@@ -279,6 +282,21 @@ for the supported way to fix that (mounting the CA bundle), and why
 lab cluster.
 
 ### Upgrading across versions
+
+**The usual way: from the admin console.** When a newer release exists, a banner
+across the admin console says so ("Vista Platform X is available"), and
+**Maintenance → About & Updates** shows the running versions, the release notes
+and the update. **Maintenance → Backups** takes the backup that should come
+first. Both are described in
+[Maintenance in the admin console](docsv4/core/operate/maintenance.md), including
+restoring a backup, installs with no outbound internet access, and turning the
+feature off (`maintenance.enabled=false`).
+
+**The manual Helm procedure below** is for installs managed by Argo CD or Flux
+(the console tells you when that is the case and points you to your values
+repository), for installs where the maintenance component is off, and as the
+fallback if the console is unavailable. It is the same procedure the console runs
+for you.
 
 `ENCRYPTION_MASTER_KEY` encrypts stored integration credentials. If it changes,
 those become permanently undecryptable. The chart therefore reads the existing

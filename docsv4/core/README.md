@@ -19,6 +19,9 @@ Documentation for **tenants** and **tenant admins** — people who use Vista Pla
 ## Contents
 
 ### Release notes
+- [4.6.0](./releases/4.6.0.md) — the full, per-change record for the 4.6.0 (platform maintenance) release.
+- [4.5.0](./releases/4.5.0.md) — the full, per-change record for the 4.5.0 (security hardening) release.
+- [4.4.0](./releases/4.4.0.md) — the full, per-change record for the 4.4.0 release.
 - [4.2.0](./releases/4.2.0.md) — the full, per-change record for the 4.2.0 (CMDB sync) release.
 - [4.1.0](./releases/4.1.0.md) — the full, per-change record for the 4.1.0 (integrations) release.
 - [1.0.0](./releases/1.0.0.md) — the full, per-change record for the 1.0.0 release. The summary for each release is in `CHANGELOG.md` at the root of the repository; an unusually large release keeps its detail here.

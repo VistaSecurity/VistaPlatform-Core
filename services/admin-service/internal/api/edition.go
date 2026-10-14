@@ -104,7 +104,7 @@ type MSPDeps struct {
 	BypassDB *sql.DB
 	// Config is the loaded service configuration. MSP reads
 	// EncryptionMasterKey (tenant integration credentials) and the
-	// monitoring/resource-tracker peer URLs (dashboard aggregation).
+	// monitoring-service peer URL (dashboard aggregation).
 	Config *config.Config
 
 	// Protected is the platform-admin group (/api/v1/admin-service/admin) with

@@ -269,4 +269,3 @@ Configure Grafana alert rules for:
 
 - [Production Deployment Checklist](../deployment/production-checklist.md)
 - [Log Management](./log-management.md)
-- AWS Cost Explorer Setup

@@ -74,13 +74,6 @@ services:
       - CHART_VERSION=${CHART_VERSION:-dev}
       - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
 
-  resource-tracker-service:
-    environment:
-      - USE_MTLS=false
-      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
-      - CHART_VERSION=${CHART_VERSION:-dev}
-      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
-
   tenant-health-service:
     environment:
       - USE_MTLS=false
@@ -117,6 +110,13 @@ services:
       - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
 
   mcp-service:
+    environment:
+      - USE_MTLS=false
+      - SERVICE_VERSION=${SERVICE_VERSION:-dev}
+      - CHART_VERSION=${CHART_VERSION:-dev}
+      - CHART_APP_VERSION=${CHART_APP_VERSION:-dev}
+
+  maintenance-service:
     environment:
       - USE_MTLS=false
       - SERVICE_VERSION=${SERVICE_VERSION:-dev}

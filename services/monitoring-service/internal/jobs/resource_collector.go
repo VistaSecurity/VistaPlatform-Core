@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -15,13 +14,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
-	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
-	"github.com/vistasecurity/vistaplatform/shared/events"
+	resourcetracking "github.com/vistasecurity/vistaplatform/shared/middleware/resource-tracking"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
-// ResourceCollector collects host-level metrics and sends them to the resource
-// tracker.
+// ResourceCollector collects host-level metrics and posts them to the
+// resource-metrics ingest (auth-service; see
+// shared/middleware/resource-tracking.IngestPath).
 //
 // Two properties of this collector are load-bearing and easy to undo by
 // accident:
@@ -37,9 +36,8 @@ import (
 //     boot. Publishing that figure as period usage charges a tenant for the
 //     pod's entire uptime, and does so again, larger, on every tick.
 type ResourceCollector struct {
-	trackerURL string
+	ingestURL  string
 	httpClient *http.Client
-	natsClient *events.NATSClient
 	logger     *logrus.Logger
 	interval   time.Duration
 
@@ -85,10 +83,9 @@ func NewResourceCollector(logger *logrus.Logger) *ResourceCollector {
 		logger = logrus.New()
 	}
 
-	trackerURL := os.Getenv("RESOURCE_TRACKER_URL")
-	if trackerURL == "" {
-		trackerURL = sharedconfig.PeerURL("resource-tracker-service", sharedconfig.MTLSEnabled())
-	}
+	// Same resolution as the metering middleware every service runs:
+	// RESOURCE_METRICS_INGEST_URL, else the auth-service peer URL per USE_MTLS.
+	ingestURL := resourcetracking.DefaultConfig().IngestURL
 
 	interval := 5 * time.Minute
 	if intervalStr := os.Getenv("RESOURCE_COLLECTION_INTERVAL"); intervalStr != "" {
@@ -97,23 +94,13 @@ func NewResourceCollector(logger *logrus.Logger) *ResourceCollector {
 		}
 	}
 
-	// Initialize NATS client for metrics publishing
-	var natsClient *events.NATSClient
-	nc, natsErr := events.NewNATSClient("")
-	if natsErr != nil {
-		log.Printf("[ResourceCollector] Warning: NATS unavailable, falling back to HTTP: %v", natsErr)
-	} else {
-		natsClient = nc
-	}
-
 	return &ResourceCollector{
-		trackerURL: trackerURL,
+		ingestURL: ingestURL,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		natsClient: natsClient,
-		logger:     logger,
-		interval:   interval,
+		logger:   logger,
+		interval: interval,
 	}
 }
 
@@ -265,7 +252,7 @@ func parseNetworkStats(data string) (int64, int64, bool) {
 	return totalIn, totalOut, found
 }
 
-// sendMetrics sends metrics via NATS (preferred) or HTTP (fallback).
+// sendMetrics posts the host sample to the resource-metrics ingest.
 //
 // Sending is skipped entirely unless an operator has declared this host's
 // tenant. See resolveMetricsTenantID.
@@ -279,42 +266,12 @@ func (rc *ResourceCollector) sendMetrics(metrics *SystemMetrics) error {
 		rc.logger.Debug("RESOURCE_METRICS_TENANT_ID is unset; host metrics are not attributed to any tenant")
 		return nil
 	}
-	tenantIDStr := tenantUUID.String()
 
 	// Only measured values go on the wire. A key the collector omits arrives at
-	// resource-tracker as "not measured" and is not priced; a key present with
-	// a zero value means the collector measured zero.
-	payload := map[string]interface{}{
-		"tenant_id":    tenantIDStr,
-		"container_id": metrics.ContainerID,
-		"hostname":     metrics.Hostname,
-	}
-	if metrics.NetworkBytesIn != nil {
-		payload["network_bytes_in"] = float64(*metrics.NetworkBytesIn)
-	}
-	if metrics.NetworkBytesOut != nil {
-		payload["network_bytes_out"] = float64(*metrics.NetworkBytesOut)
-	}
-	if metrics.NetworkBytesDelta != nil {
-		// The costable figure, under the key resource-tracker reads.
-		payload["network_bytes"] = float64(*metrics.NetworkBytesDelta)
-	}
-
-	// Try NATS first
-	if rc.natsClient != nil && rc.natsClient.IsConnected() {
-		metricsEvent := events.MetricsEvent{
-			EventID:   uuid.New(),
-			Source:    metrics.ServiceName,
-			Timestamp: metrics.Timestamp,
-			Metrics:   payload,
-		}
-		if err := events.PublishJSON(rc.natsClient, events.SubjectMetricsSystem, metricsEvent); err == nil {
-			return nil
-		}
-		rc.logger.Warn("NATS publish failed; falling back to HTTP for metrics")
-	}
-
-	// Fallback: HTTP to resource tracker (same JSON shape as RecordResourceMetrics)
+	// the ingest as "not measured" and is stored as NULL; a key present with a
+	// zero value means the collector measured zero. network_bytes is the
+	// since-last-tick DELTA (see networkDelta), the only host figure the
+	// ingest's request shape carries.
 	httpPayload := struct {
 		TenantID     uuid.UUID `json:"tenant_id"`
 		NetworkBytes *int64    `json:"network_bytes,omitempty"`
@@ -328,8 +285,7 @@ func (rc *ResourceCollector) sendMetrics(metrics *SystemMetrics) error {
 		return fmt.Errorf("failed to marshal metrics: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/api/v1/resource-tracker/metrics", rc.trackerURL)
-	req, err := http.NewRequestWithContext(context.Background(), "POST", url, strings.NewReader(string(jsonData)))
+	req, err := http.NewRequestWithContext(context.Background(), "POST", rc.ingestURL, strings.NewReader(string(jsonData)))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}

@@ -2,8 +2,8 @@
 // formula for tenant resource usage.
 //
 // Before this package there were four independent implementations of "what
-// does this tenant's usage cost": the resource-tracker persister, the
-// resource-tracker repository, the admin cost-monitoring breakdown, and a
+// does this tenant's usage cost": the (since retired) resource-tracker persister
+// and repository, the admin cost-monitoring breakdown, and a
 // platform rollup that fabricated compute as 30% of the total. They disagreed
 // on unit conversion (a per-GB rate applied per MB is a 1024x error), on
 // aggregation (SUM of a point-in-time gauge multiplies by the sample count),

@@ -192,6 +192,16 @@ reference data, and pulling ~18 images.
       return `401`.
 - [ ] Test your configured notification channels (Settings → Notification
       Delivery) and confirm delivery history records the attempt.
+- [ ] **Take a backup and prove it.** Admin console → Maintenance → Backups →
+      Create backup, download it, and keep a copy outside the cluster. If you
+      tick "Include encryption keys and install secrets", store the passphrase in
+      your password manager: it is not recoverable. Walk through the Restore
+      procedure in [Maintenance](../maintenance.md#restore) on a scratch
+      cluster before you need it.
+- [ ] **Decide on update checks.** `maintenance.updateCheck.enabled` is `true` by
+      default and makes one outbound registry call a day. On an air-gapped site
+      set it to `false` (and point `image.registry` / `maintenance.chartSource`
+      at your mirror); see [Maintenance](../maintenance.md#where-latest-comes-from).
 
 ### Verify what you're running
 
@@ -270,6 +280,13 @@ as one.
 
 ## Upgrading
 
+**From the admin console.** The usual way to back up and update is the console's
+**Maintenance** section: **Backups → Create backup** first, then
+**About & Updates → Update**. See
+[Maintenance in the admin console](../maintenance.md). Installs managed by
+Argo CD or Flux are updated from the values repository instead (the console says
+so), and the manual Helm procedure below always works and is the fallback.
+
 `ENCRYPTION_MASTER_KEY` encrypts stored integration credentials — see
 [Secrets Management](../security/secrets-management.md). The chart reads the
 existing Secret back on upgrade rather than generating a new one.
@@ -286,9 +303,10 @@ is what you want when moving to a new chart version. Reserve plain
 `--reuse-values` for a same-version re-run (e.g. rolling a single service's tag
 by hand). The chart's `NOTES.txt` repeats this on every `helm upgrade`.
 
-**`pg_dump` before every upgrade.** The chart re-applies `scripts/database/schema.sql`
-on every `helm upgrade`; `NOTES.txt` reminds you of this on every run. There is
-no backup tooling shipped with the chart.
+**Back up before every upgrade.** The chart re-applies `scripts/database/schema.sql`
+on every `helm upgrade`; `NOTES.txt` reminds you of this on every run. Use
+**Maintenance → Backups → Create backup** in the admin console, or `pg_dump`
+yourself; the console's update takes a backup automatically as its first step.
 
 ### Single-node clusters
 

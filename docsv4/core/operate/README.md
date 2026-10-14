@@ -16,6 +16,7 @@ organization.
 | Stage internal service-mesh mTLS on a production cluster | [Service-mesh mTLS](./security/service-mesh-mtls.md) |
 | Run a production pre-flight | [Production Checklist](./deployment/production-checklist.md) |
 | Operate the platform day-to-day | [Platform Admin Guide](./platform-admin-guide.md) |
+| Back up the platform, see whether a new release is out, or update it | [Maintenance in the admin console](./maintenance.md) |
 | Keep the end-of-life and vulnerability catalogues current (including air-gapped) | [Platform catalogues and their feeds](./catalogs.md) |
 | Monitor and alert | [Monitoring Setup](./monitoring/setup.md) |
 | Work out which legal documents are yours to write | [Legal documents for operators](./legal/README.md) |
@@ -33,6 +34,7 @@ organization.
 
 ### Operations
 - [Platform Admin Guide](./platform-admin-guide.md) — Complete operations reference
+- [Maintenance in the admin console](./maintenance.md) — Backups and restore, update notices, one-click update and rollback
 - [Releases](./releases.md) — Release process, versioning, upgrade path
 - [Startup & Shutdown](./startup-shutdown.md) — Service lifecycle management
 - [Container Runtime Images](./container-runtime-images.md) — Source of truth for all runtime images

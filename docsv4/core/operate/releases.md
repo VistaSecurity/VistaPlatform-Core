@@ -65,6 +65,11 @@ to verify an image with the same identity.
 
 ## Upgrading
 
+The usual way is the admin console: **Maintenance → Backups** to take a backup,
+then **Maintenance → About & Updates** to see what's new and update. See
+[Maintenance in the admin console](./maintenance.md). The manual procedure below
+is for installs managed by Argo CD or Flux and the fallback.
+
 See **`INSTALL.md`**'s "Run it" section for cross-version upgrade mechanics
 (`--reset-then-reuse-values`, schema-migration/seed Jobs, single-node surge
 caveats). The chart's `NOTES.txt` echoes the key upgrade flags on every

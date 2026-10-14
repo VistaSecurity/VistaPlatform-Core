@@ -164,10 +164,6 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 	// Resource tracking middleware
 	trackerConfig := resourcetracking.DefaultConfig()
 	trackerConfig.ServiceName = "auth-service"
-	trackerConfig.TrackerURL = os.Getenv("RESOURCE_TRACKER_URL")
-	if trackerConfig.TrackerURL == "" {
-		trackerConfig.TrackerURL = sharedconfig.PeerURL("resource-tracker-service", sharedconfig.MTLSEnabled())
-	}
 	// mTLS configuration
 	trackerConfig.UseMTLS = cfg.UseMTLS
 	trackerConfig.ClientCertPath = cfg.ClientCertPath
@@ -507,6 +503,12 @@ func SetupRouter(cfg *config.Config, db *sql.DB, bypassDB *sql.DB, redis *redis.
 		// PAT→JWT exchange: HMAC service auth ONLY, never user-callable.
 		authServiceGroup.POST("/internal/api-tokens/exchange",
 			middleware.RequireInternalOnly(), apiTokenHandlers.Exchange)
+		// Resource-metrics ingest (tenant_resource_usage, the billing usage
+		// source): HMAC service auth ONLY. resource_metrics_test.go drives this
+		// route through the real router, so removing RequireInternalOnly here
+		// goes red.
+		authServiceGroup.POST("/internal/resource-metrics",
+			middleware.RequireInternalOnly(), RecordResourceMetrics(newResourceMetricsRepository(db)))
 
 		// Billing and subscription routes. Every route in this group is
 		// read-shaped (check-limits inspects limits without mutating), so the

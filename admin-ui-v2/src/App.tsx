@@ -5,6 +5,7 @@ import { PlatformBrandingEffects } from './app/platform-branding';
 import { RequireAuth } from './app/require-auth';
 import { RequirePlatformPermission } from './app/require-permission';
 import { RequireLicenseEdition, RequirePlatformEdition } from './app/require-edition';
+import { RequireService } from './app/require-service';
 import { SectionSuspense } from './app/section-suspense';
 import { SectionPlaceholder } from './app/section-placeholder';
 import { LoginPage } from './pages/login-page';
@@ -27,6 +28,7 @@ const JobsPage = lazy(() => import('./sections/jobs/jobs-page').then((m) => ({ d
 const SettingsPage = lazy(() => import('./sections/settings/settings-page').then((m) => ({ default: m.SettingsPage })));
 const SecurityPage = lazy(() => import('./sections/security/security-page').then((m) => ({ default: m.SecurityPage })));
 const SupportPage = lazy(() => import('./sections/support/support-page').then((m) => ({ default: m.SupportPage })));
+const MaintenancePage = lazy(() => import('./sections/maintenance/maintenance-page').then((m) => ({ default: m.MaintenancePage })));
 
 // Sections with a real body built from the design kit. Everything else still
 // renders the placeholder (naming the v1 page it supersedes) until built.
@@ -43,6 +45,7 @@ const BUILT: Record<string, React.ComponentType> = {
   jobs: JobsPage,
   settings: SettingsPage,
   security: SecurityPage,
+  maintenance: MaintenancePage,
 };
 
 // Public /login; everything else is gated by RequireAuth and laid out in the
@@ -85,10 +88,15 @@ export default function App() {
               // Third gate: the install's LICENCE edition (Plans & Pricing and
               // Billing only on MSP). Pass-through when `s.license` is
               // undefined.
+              // Fourth gate: an optional backend the chart may leave out
+              // (Maintenance: maintenance-service). Pass-through when
+              // `s.service` is undefined.
               return (
                 <Route key={s.id} path={path} element={
                   <RequirePlatformEdition capability={s.edition}>
-                    <RequireLicenseEdition gate={s.license}>{guarded}</RequireLicenseEdition>
+                    <RequireLicenseEdition gate={s.license}>
+                      <RequireService service={s.service}>{guarded}</RequireService>
+                    </RequireLicenseEdition>
                   </RequirePlatformEdition>
                 } />
               );

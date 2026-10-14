@@ -140,6 +140,18 @@ func interrogationSource(jobID uuid.UUID) identity.Source {
 	}
 }
 
+// interrogationOrigin is the source with the interrogated device as its
+// [identity.Source.Origin]: what the observation store groups a run's
+// sightings by, so the next run of the same device bumps the observations it
+// made rather than adding a row per client per run. The ref keeps the job.
+// A source that already names an origin is left alone.
+func interrogationOrigin(source identity.Source, assetID uuid.UUID) identity.Source {
+	if source.Origin == "" && assetID != uuid.Nil && strings.HasPrefix(source.Ref, "interrogation:") {
+		source.Origin = "device:" + assetID.String()
+	}
+	return source
+}
+
 // managedAssetRow is one row of the assets ⋈ asset_management ⋈
 // asset_credentials join, before the facts and identifiers are folded in.
 type managedAssetRow struct {

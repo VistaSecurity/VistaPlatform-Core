@@ -627,7 +627,7 @@ backends:
     needs: {postgres: true, redis: true, nats: true}
     # compliance-engine validates incoming JWT bearer tokens (jwtSecret) AND is
     # an HMAC client: the resource-tracking middleware signs metric posts to
-    # resource-tracker-service and the audit middleware signs activity logs to
+    # auth-service's ingest and the audit middleware signs activity logs to
     # audit-service, both via INTERNAL_AUTH_SECRET. Without internalAuthSecret
     # those signed calls are rejected with 401.
     #
@@ -703,8 +703,8 @@ backends:
     image:
       digest: ""
     # The admin dashboard aggregates platform metrics by calling these backends
-    # DIRECTLY (HMAC-signed) — there is no in-cluster api-gateway pod. Peer URLs
-    # (monitoring-service, resource-tracker-service) are derived from USE_MTLS in
+    # DIRECTLY (HMAC-signed) — there is no in-cluster api-gateway pod. The peer
+    # URL (monitoring-service) is derived from USE_MTLS in
     # shared/config (PeerServiceURLAuto): http://<svc>:8080 without mTLS,
     # https://<svc>:8443 with it. No explicit *_SERVICE_URL override here — a
     # hardcoded http://:8080 would break these calls once serviceMtls is enabled.
@@ -754,16 +754,6 @@ backends:
     image:
       digest: ""
 
-  resource-tracker-service:
-    needs: {postgres: true, redis: true, nats: true}
-    secrets: {jwtSecret: true, internalAuthSecret: true, encryptionMasterKey: 
-        true, redisUrl: true}
-    resources:
-      requests: {cpu: 100m, memory: 128Mi}
-      limits: {cpu: 300m, memory: 256Mi}
-    image:
-      digest: ""
-
   tenant-health-service:
     needs: {postgres: true, redis: true, nats: true}
     secrets: {jwtSecret: true, internalAuthSecret: true, redisUrl: true}
@@ -772,8 +762,8 @@ backends:
       limits: {cpu: 300m, memory: 256Mi}
     image:
       digest: ""
-    # The four backends tenant-health-service polls every 30 min for health-score
-    # inputs (monitoring-, auth-, inventory-, resource-tracker-service) are reached
+    # The three backends tenant-health-service polls every 30 min for health-score
+    # inputs (monitoring-, auth-, inventory-service) are reached
     # via peer URLs derived from USE_MTLS in shared/config (PeerServiceURLAuto):
     # http://<svc>:8080 without mTLS, https://<svc>:8443 with it. No explicit
     # *_SERVICE_URL override — a hardcoded http://:8080 would break these polls
@@ -863,6 +853,39 @@ backends:
       limits: {cpu: 300m, memory: 256Mi}
     image:
       digest: ""
+
+  # maintenance-service — platform backups, the update check and the one-click
+  # update behind the admin console's Maintenance section (Core). Rendered only
+  # when maintenance.enabled (below): the backend-enabled helper reads that
+  # switch for this entry, so `maintenance.enabled=false` removes the
+  # Deployment, Service, Certificate and routes together with the RBAC and the
+  # backups volume.
+  #
+  # The ONE backend whose pod mounts a Kubernetes ServiceAccount token: the
+  # deployment template renders automountServiceAccountToken true and
+  # serviceAccountName maintenance-service for this name only (not from a
+  # value, so no override can hand a token to another backend). Its Role is in
+  # templates/maintenance/ and scripts/test-chart-maintenance-rbac.mjs pins it.
+  #
+  # redisUrl: the shared JWT middleware's revocation denylist — without it a
+  # revoked platform session keeps working on the surface that can update the
+  # cluster. No encryptionMasterKey: the service stores no credential.
+  #
+  # No image.digest: there is no published image to pin yet. The release
+  # workflow's pin-chart-digests.py pins every backend in this map at release
+  # time, this one included.
+  #
+  # Update strategy: with backups on, this pod mounts the backups volume, so
+  # on a ReadWriteOnce claim the deployment template gives it a no-surge
+  # rolling update (maxSurge 0 / maxUnavailable 1, as admin-service gets for
+  # licence reports) — never Recreate (see the strategy comment in
+  # backend/_deployment.tpl).
+  maintenance-service:
+    needs: {postgres: true, redis: true, nats: true}
+    secrets: {jwtSecret: true, internalAuthSecret: true, redisUrl: true}
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {cpu: 300m, memory: 256Mi}
 
 
   pcap-processor:
@@ -1305,6 +1328,92 @@ pcapUploads:
   size: 10Gi
   accessMode: ReadWriteOnce
 
+# Platform maintenance from the admin console (Maintenance section): backups,
+# the new-release notice and the one-click update, served by the Core
+# maintenance-service backend.
+#
+#   enabled      false removes everything below together with the
+#                maintenance-service backend: its Deployment, its two
+#                ServiceAccounts, Roles and RoleBindings, and the backups volume.
+#                The console hides its Maintenance section when the service is
+#                absent.
+#   singleNode   Tell the service the cluster has one node. It cannot count nodes
+#                itself — nodes are cluster-scoped and the chart grants it no
+#                ClusterRole by design — and an update's pre-flight uses this to
+#                warn about the rolling-upgrade CPU surge on a single node.
+#   updateCheck  How the service looks for a newer release: whether it does
+#                at all, how often (a Go duration, minimum 1m), whether
+#                pre-releases count, and where release notes live. It lists the
+#                tags of the chart source's OCI repository (anonymously, or with
+#                the first image.pullSecrets entry's credentials) and shows a
+#                banner in the admin console when a newer chart version exists.
+#                enabled=false stops the periodic check and refuses a manual one
+#                (an air-gapped install makes no outbound call). notesBaseUrl is
+#                the release-notes page root for sources other than ghcr.io
+#                (whose notes are the public GitHub Release); the version and a
+#                trailing slash are appended.
+#   backups      The volume backups are written to; retention keeps the newest
+#                N. enabled=false renders no volume and the console says backup
+#                storage is not configured.
+#   chartSource  The OCI chart repository updates install from. Empty derives
+#                oci://<image.registry>/<image.repoPrefix>/vistaplatform — the
+#                same registry the images come from, so a mirrored install
+#                updates from its mirror.
+#   updates      The one-click update and rollback. Each runs as a Job (image:
+#                maintenance-service's own, which ships helm and cosign) under
+#                the vistaplatform-updater ServiceAccount: `helm upgrade
+#                --reset-then-reuse-values --wait --timeout <timeout>` from
+#                chartSource, or `helm rollback`. timeout is a whole number of
+#                s, m or h (the Job's deadline is timeout + 10m). Before an
+#                update the chart's signature is verified with cosign against
+#                verification.certificateIdentityRegexp;
+#                skipSignatureVerify=true turns that off for an air-gapped
+#                mirror that re-signs nothing (pre-flight then warns, and the
+#                run records the skip). plainHttp=true pulls the chart over
+#                HTTP, for a mirror without TLS. The registry credential is the
+#                first image.pullSecrets entry.
+#   kubeApiServerCidr
+#                With networkPolicy.egressEnabled, maintenance-service (the one
+#                backend that calls the Kubernetes API) gets an egress rule to
+#                TCP 443 and 6443 at this CIDR. Empty = 0.0.0.0/0 on those two
+#                ports for that pod only. Narrow it to a range holding both the
+#                `kubernetes` Service IP and the API server endpoints.
+#
+# Backups and the ReadWriteOnce constraint: maintenance-service mounts the
+# backups volume read-write, and each backup Job (pg_dump, image
+# schemaMigration.image) mounts the same claim. With the default
+# accessMode ReadWriteOnce both must run on ONE node, so the Job carries a
+# required pod affinity to the maintenance-service pod's node, and the service
+# Deployment rolls with maxSurge 0 / maxUnavailable 1 (the old pod releases the
+# volume before the new one starts). ReadWriteMany lifts both constraints.
+# ReadWriteOncePod cannot work (the Job could never mount the claim) and the
+# chart refuses it.
+#
+# Kubernetes access is namespace-scoped only: no ClusterRole or
+# ClusterRoleBinding is rendered (scripts/test-chart-maintenance-rbac.mjs).
+maintenance:
+  enabled: true
+  singleNode: false
+  updateCheck:
+    enabled: true
+    interval: "24h"
+    includePrereleases: false
+    notesBaseUrl: "https://vistasecurity.io/docs/releases/"
+  backups:
+    enabled: true
+    size: 20Gi
+    retention: 5
+    # Empty = datastores.storageClassName.
+    storageClassName: ""
+    # ReadWriteOnce (default) or ReadWriteMany — see the constraint above.
+    accessMode: ReadWriteOnce
+  chartSource: ""
+  kubeApiServerCidr: ""
+  updates:
+    skipSignatureVerify: false
+    timeout: "30m"
+    plainHttp: false
+
 # Schema migration Job. Runs scripts/database/schema.sql via psql against
 # Postgres on every install and upgrade. The schema is idempotent.
 # Set enabled=false only if you apply schema.sql yourself. The chart then writes
@@ -1429,6 +1538,8 @@ networkPolicy:
   #     private-network dialer list for the same reason (see
   #     clusterInternalCIDRs below).
   #   * audit-service — S3 archival of expired audit logs (when configured)
+  #   * maintenance-service — the update check's HTTPS call to the chart
+  #     registry (maintenance.chartSource)
   #   * compliance-engine / cbom-service — the configured ai.provider endpoint,
   #     for framework authoring and remediation drafts, and for the CBOM
   #     comparison narrative (Enterprise; inventory-service and admin-service,
@@ -1457,6 +1568,10 @@ networkPolicy:
     - audit-service
     - compliance-engine
     - cbom-service
+    # maintenance-service — the update check lists the chart source's OCI tags
+    # (https to ghcr.io / docker.io, or the operator's mirror). Not a customer
+    # destination, but the same "leaves the cluster" egress as the rest.
+    - maintenance-service
 
   # ── Outbound egress carve-out ────────────────────────────────────────────
   # The Internet/outbound rule permits 0.0.0.0/0 MINUS these CIDRs, so a

@@ -30,10 +30,18 @@ type TenantHealth struct {
 // strictly worse than reporting a gap: the number is indistinguishable from a
 // measurement, identical for every tenant, and it feeds an alert.
 const (
-	SourceMonitoring      = "monitoring-service"
-	SourceAuth            = "auth-service"
-	SourceInventory       = "inventory-service"
-	SourceResourceTracker = "resource-tracker-service"
+	SourceMonitoring = "monitoring-service"
+	SourceAuth       = "auth-service"
+	SourceInventory  = "inventory-service"
+
+	// SourceCostMetering is NOT a peer service either. It names the producer
+	// the cost-optimization factor would need — something that prices a
+	// tenant's usage — which does not exist: the figures resource-tracker-service
+	// used to supply were an estimated per-sample price and an invented
+	// "optimization score", and that service is retired. The factor is
+	// always reported here, in unavailable_sources, so the console shows it as
+	// "not measured" rather than silently omitting it.
+	SourceCostMetering = "cost-metering"
 
 	// SourceResourceMetering is NOT a peer service. It names a producer that
 	// does not exist: nothing meters per-tenant CPU and memory, so the
@@ -58,7 +66,7 @@ var SourceFactors = map[string][]string{
 	SourceMonitoring:       {FactorPerformanceMetrics},
 	SourceAuth:             {FactorSecurityPosture},
 	SourceInventory:        {FactorBusinessActivity},
-	SourceResourceTracker:  {FactorCostOptimization},
+	SourceCostMetering:     {FactorCostOptimization},
 	SourceResourceMetering: {FactorResourceEfficiency},
 }
 

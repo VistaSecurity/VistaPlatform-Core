@@ -45,8 +45,7 @@ func measuredMetrics() models.HealthMetrics {
 func TestCalculateHealthScore_AllSourcesUnavailable_IsUnknownNotZeroScore(t *testing.T) {
 	m := measuredMetrics()
 	m.UnavailableSources = []string{
-		models.SourceMonitoring, models.SourceAuth,
-		models.SourceInventory, models.SourceResourceTracker,
+		models.SourceMonitoring, models.SourceAuth, models.SourceInventory,
 	}
 
 	got := NewHealthScorer().CalculateHealthScore(m)
@@ -70,35 +69,39 @@ func TestCalculateHealthScore_AllSourcesUnavailable_IsUnknownNotZeroScore(t *tes
 	if b.DataCompleteness != 0 {
 		t.Errorf("data_completeness = %v, want 0", b.DataCompleteness)
 	}
-	// All four peers, plus the resource-metering producer that never exists.
+	// All three peers, plus the two producers that never exist.
 	if len(b.UnavailableSources) != 5 {
-		t.Errorf("unavailable_sources = %v, want all four peers and %s named", b.UnavailableSources, models.SourceResourceMetering)
+		t.Errorf("unavailable_sources = %v, want all three peers plus %s and %s named",
+			b.UnavailableSources, models.SourceResourceMetering, models.SourceCostMetering)
 	}
 }
 
 func TestCalculateHealthScore_PartialAvailability_RenormalisesAndReportsGap(t *testing.T) {
 	m := measuredMetrics()
-	// resource-tracker-service now feeds ONE factor: cost optimization, 15 of
-	// the 75 points that remain once resource efficiency is dropped.
-	m.UnavailableSources = []string{models.SourceResourceTracker}
+	// monitoring-service feeds ONE factor: performance, 25 of the 60 points
+	// that remain once resource efficiency and cost optimization are dropped.
+	m.UnavailableSources = []string{models.SourceMonitoring}
 
 	hs := NewHealthScorer()
 	got := hs.CalculateHealthScore(m)
 
 	b := got.ScoreBreakdown
 	if b.ResourceEfficiency != nil || b.CostOptimization != nil {
-		t.Fatalf("resource efficiency and resource-tracker's factor must be nil, got %v / %v", b.ResourceEfficiency, b.CostOptimization)
+		t.Fatalf("resource efficiency and cost optimization must be nil, got %v / %v", b.ResourceEfficiency, b.CostOptimization)
 	}
-	if b.PerformanceMetrics == nil || b.SecurityPosture == nil || b.BusinessActivity == nil {
+	if b.PerformanceMetrics != nil {
+		t.Fatalf("performance = %v, want nil — monitoring-service was unreachable", *b.PerformanceMetrics)
+	}
+	if b.SecurityPosture == nil || b.BusinessActivity == nil {
 		t.Fatal("factors from reachable peers must still be scored")
 	}
-	if math.Abs(b.DataCompleteness-60.0/75.0) > 1e-9 {
-		t.Errorf("data_completeness = %v, want 0.80 ((25+20+15)/75)", b.DataCompleteness)
+	if math.Abs(b.DataCompleteness-35.0/60.0) > 1e-9 {
+		t.Errorf("data_completeness = %v, want (20+15)/60", b.DataCompleteness)
 	}
 
 	// Overall must be the weighted average over the MEASURED factors only,
 	// renormalised — not a total that silently counts missing factors as 0.
-	want := (*b.PerformanceMetrics*25 + *b.SecurityPosture*20 + *b.BusinessActivity*15) / 60
+	want := (*b.SecurityPosture*20 + *b.BusinessActivity*15) / 35
 	if math.Abs(got.OverallScore-want) > 1e-9 {
 		t.Errorf("overall_score = %v, want %v (renormalised over measured weight)", got.OverallScore, want)
 	}
@@ -107,37 +110,39 @@ func TestCalculateHealthScore_PartialAvailability_RenormalisesAndReportsGap(t *t
 	}
 }
 
-// Decision 8 (RC-14): resource efficiency is dropped, the other four factors
-// keep their old 25/20/15/15 proportions, and everything measured means
-// completeness 1 — the missing factor is by design, not a gap.
+// Decision 8 (RC-14) dropped resource efficiency; the resource-tracker
+// retirement dropped cost optimization the same way. The three factors
+// left keep their 25/20/15 proportions, and everything measured means
+// completeness 1 — the missing factors are by design, not a gap.
 func TestCalculateHealthScore_EverythingMeasured_UsesReweightedIndex(t *testing.T) {
 	m := measuredMetrics()
 	hs := NewHealthScorer()
 	got := hs.CalculateHealthScore(m)
 
 	b := got.ScoreBreakdown
-	if b.PerformanceMetrics == nil || b.SecurityPosture == nil ||
-		b.BusinessActivity == nil || b.CostOptimization == nil {
+	if b.PerformanceMetrics == nil || b.SecurityPosture == nil || b.BusinessActivity == nil {
 		t.Fatal("no peer was unavailable; every measured factor must be scored")
 	}
 	if b.ResourceEfficiency != nil {
 		t.Fatalf("resource_efficiency = %v, want nil — nothing measures it", *b.ResourceEfficiency)
 	}
-	if b.DataCompleteness != 1 {
-		t.Errorf("data_completeness = %v, want 1 (resource efficiency carries no weight)", b.DataCompleteness)
+	if b.CostOptimization != nil {
+		t.Fatalf("cost_optimization = %v, want nil — nothing prices a tenant's usage", *b.CostOptimization)
 	}
-	if len(b.UnavailableSources) != 1 || b.UnavailableSources[0] != models.SourceResourceMetering {
-		t.Errorf("unavailable_sources = %v, want exactly [%s]", b.UnavailableSources, models.SourceResourceMetering)
+	if b.DataCompleteness != 1 {
+		t.Errorf("data_completeness = %v, want 1 (the unmeasured factors carry no weight)", b.DataCompleteness)
+	}
+	if len(b.UnavailableSources) != 2 || b.UnavailableSources[0] != models.SourceResourceMetering || b.UnavailableSources[1] != models.SourceCostMetering {
+		t.Errorf("unavailable_sources = %v, want exactly [%s %s]", b.UnavailableSources, models.SourceResourceMetering, models.SourceCostMetering)
 	}
 
-	want := (*b.PerformanceMetrics*25 + *b.SecurityPosture*20 +
-		*b.BusinessActivity*15 + *b.CostOptimization*15) / 75
+	want := (*b.PerformanceMetrics*25 + *b.SecurityPosture*20 + *b.BusinessActivity*15) / 60
 	if math.Abs(got.OverallScore-want) > 1e-9 {
-		t.Errorf("overall_score = %v, want %v (25/20/15/15 over 75)", got.OverallScore, want)
+		t.Errorf("overall_score = %v, want %v (25/20/15 over 60)", got.OverallScore, want)
 	}
 
 	w := hs.weights
-	if sum := w.PerformanceMetrics + w.SecurityPosture + w.BusinessActivity + w.CostOptimization; math.Abs(sum-1) > 1e-9 {
+	if sum := w.PerformanceMetrics + w.SecurityPosture + w.BusinessActivity; math.Abs(sum-1) > 1e-9 {
 		t.Errorf("weights sum to %v, want 1", sum)
 	}
 }
@@ -157,11 +162,14 @@ func TestCalculateHealthScore_ResourceInputsDoNotMoveTheIndex(t *testing.T) {
 
 func TestCalculateHealthScore_UnmeasuredFactorsProduceNoRecommendations(t *testing.T) {
 	m := measuredMetrics()
-	// Values that WOULD trip the resource recommendations if the factor were
-	// scored — the point is that an unreachable peer must not produce advice.
+	// Values that WOULD trip the resource and cost recommendations if those
+	// factors were scored — the point is that an unmeasured factor must not
+	// produce advice. Neither factor is ever measured (see
+	// models.SourceResourceMetering / models.SourceCostMetering).
 	m.CPUUtilization = 99
 	m.MemoryUtilization = 99
-	m.UnavailableSources = []string{models.SourceResourceTracker}
+	m.CostPerUser = 1000
+	m.ResourceCost = 100000
 
 	got := NewHealthScorer().CalculateHealthScore(m)
 	for _, rec := range got.Recommendations {

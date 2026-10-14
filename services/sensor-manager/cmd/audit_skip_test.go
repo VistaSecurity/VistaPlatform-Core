@@ -30,7 +30,7 @@ func TestSensorLivenessRoutesAreNotAudited_DataSubmissionsAre(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("AUDIT_LOGGING_ENABLED", "true")
 	t.Setenv("AUDIT_SERVICE_URL", "http://127.0.0.1:1") // never reached: the batch is not flushed in-test
-	t.Setenv("RESOURCE_TRACKER_URL", "http://127.0.0.1:1")
+	t.Setenv("RESOURCE_METRICS_INGEST_URL", "http://127.0.0.1:1/x")
 
 	// A lazy handle that never connects: SensorAuth gets nil handles (the
 	// dev-mode shape it accepts when mTLS is not required), and the handlers

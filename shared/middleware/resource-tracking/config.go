@@ -13,8 +13,12 @@ type Config struct {
 	// ServiceName identifies the service using this middleware
 	ServiceName string
 
-	// TrackerURL is the base URL of the resource-tracker-service
-	TrackerURL string
+	// IngestURL is the full URL the batcher POSTs each tenant's metrics to:
+	// auth-service's HMAC-only resource-metrics ingest. Resolved by
+	// DefaultConfig from RESOURCE_METRICS_INGEST_URL, else from the
+	// auth-service peer URL (http://auth-service:8080 or, under service mTLS,
+	// https://auth-service:8443) plus IngestPath.
+	IngestURL string
 
 	// BatchSize is the number of metrics to batch before sending
 	BatchSize int
@@ -58,7 +62,7 @@ func DefaultConfig() *Config {
 	}
 	return &Config{
 		ServiceName:             "unknown-service",
-		TrackerURL:              sharedconfig.PeerURL("resource-tracker-service", sharedconfig.MTLSEnabled()),
+		IngestURL:               defaultIngestURL(),
 		BatchSize:               5,                // Reduced for testing
 		FlushInterval:           30 * time.Second, // Reduced for testing
 		Enabled:                 true,
@@ -71,4 +75,21 @@ func DefaultConfig() *Config {
 		ClientKeyPath:           "",
 		PlatformCACertPath:      "",
 	}
+}
+
+// IngestPath is the auth-service route that accepts ResourceMetricsRequest
+// bodies (services/auth-service/internal/api/resource_metrics.go).
+const IngestPath = "/api/v1/auth-service/internal/resource-metrics"
+
+// IngestURLEnv overrides the ingest URL in full (scheme, host, port and path).
+const IngestURLEnv = "RESOURCE_METRICS_INGEST_URL"
+
+// defaultIngestURL resolves where metrics are posted. The peer URL follows
+// USE_MTLS exactly as every other service-to-service call does, so a
+// deployment that enables service mTLS needs no per-service override.
+func defaultIngestURL() string {
+	if v := strings.TrimSpace(os.Getenv(IngestURLEnv)); v != "" {
+		return v
+	}
+	return sharedconfig.PeerURL("auth-service", sharedconfig.MTLSEnabled()) + IngestPath
 }

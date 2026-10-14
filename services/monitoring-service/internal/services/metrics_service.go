@@ -5,24 +5,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/monitoring-service/internal/config"
 	"github.com/vistasecurity/vistaplatform/monitoring-service/internal/models"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
-	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 )
 
 type MetricsService struct {
-	config     *config.Config
-	db         *sql.DB
-	bypassDB   *sql.DB
-	httpClient *http.Client
-	gatewayURL string
+	config   *config.Config
+	db       *sql.DB
+	bypassDB *sql.DB
 }
 
 func NewMetricsService(cfg *config.Config) *MetricsService {
@@ -46,19 +40,10 @@ func NewMetricsService(cfg *config.Config) *MetricsService {
 		panic(fmt.Sprintf("Failed to connect to bypass database: %v", err))
 	}
 
-	gatewayURL := os.Getenv("GATEWAY_URL")
-	if gatewayURL == "" {
-		gatewayURL = "http://api-gateway:80" // Default gateway URL
-	}
-
 	return &MetricsService{
 		config:   cfg,
 		db:       db,
 		bypassDB: bypassDB,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-		gatewayURL: gatewayURL,
 	}
 }
 
@@ -706,67 +691,44 @@ func (s *MetricsService) StoreServiceHealthEvent(event *models.ServiceHealthEven
 	return nil
 }
 
-// GetTenantPerformanceSummary returns performance metrics for a specific tenant
+// GetTenantPerformanceSummary returns performance metrics for a specific
+// tenant (polled by tenant-health-service for its performance factor).
+//
+// Throughput is MEASURED: the tenant's metered API calls over the last 24
+// hours, from tenant_resource_usage (written by auth-service's
+// resource-metrics ingest), spread over the day. A read failure is an error,
+// not a default — tenant-health then reports monitoring-service unavailable
+// and scores the factor UNKNOWN.
+//
+// Response time and error rate are NOT measured: nothing records per-request
+// latency or error outcomes per tenant. The values below are the constants
+// the previous heuristic always produced (it derived both from a CPU
+// percentage that is never written), kept here unchanged and named. Making
+// the performance factor report them as unmeasured is tenant-health scoring
+// work, tracked under's remaining checkbox.
 func (s *MetricsService) GetTenantPerformanceSummary(tenantID uuid.UUID) (*models.TenantPerformanceSummary, error) {
 	summary := &models.TenantPerformanceSummary{
-		TenantID:    tenantID,
-		LastUpdated: time.Now(),
-		Uptime:      99.9, // Default optimistic uptime
+		TenantID:        tenantID,
+		LastUpdated:     time.Now(),
+		AvgResponseTime: 150.0, // not measured — see above
+		ErrorRate:       0.005, // not measured — see above
+		Uptime:          99.9,  // overwritten below when health events exist
 	}
 
-	// Try to get resource usage from resource-tracker-service via gateway
-	resourceURL := fmt.Sprintf("%s/api/v1/resource-tracker-service/tenants/%s?period=24h", s.gatewayURL, tenantID.String())
-	req, err := http.NewRequest("GET", resourceURL, nil)
-	if err != nil {
-		// If we can't get resource data, return defaults
-		return summary, nil
+	// RLS-scoped read: tenant_resource_usage carries a tenant_isolation policy.
+	ctx := context.Background()
+	var apiCalls int64
+	if err := shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT COALESCE(SUM(api_calls), 0)
+			FROM tenant_resource_usage
+			WHERE tenant_id = $1 AND "timestamp" >= NOW() - INTERVAL '24 hours'
+		`, tenantID).Scan(&apiCalls)
+	}); err != nil {
+		return nil, fmt.Errorf("failed to read metered API calls: %w", err)
 	}
-
-	serviceauth.SignRequestFromEnv(req)
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		// If resource-tracker is unavailable, return defaults
-		return summary, nil
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusOK {
-		body, err := io.ReadAll(resp.Body)
-		if err == nil {
-			var resourceData struct {
-				TotalAPICalls  int     `json:"total_api_calls"`
-				TotalDBQueries int     `json:"total_db_queries"`
-				AvgCPUPercent  float64 `json:"avg_cpu_percent"`
-				TotalCostUSD   float64 `json:"total_cost_usd"`
-			}
-			if err := json.Unmarshal(body, &resourceData); err == nil {
-				// Estimate throughput from API calls (assuming 24h period)
-				if resourceData.TotalAPICalls > 0 {
-					// Convert to requests per second (24 hours = 86400 seconds)
-					summary.Throughput = float64(resourceData.TotalAPICalls) / 86400.0
-				}
-
-				// Estimate response time based on CPU usage and API calls
-				// Higher CPU or more API calls might indicate higher response times
-				if resourceData.AvgCPUPercent > 0 && resourceData.TotalAPICalls > 0 {
-					// Simple heuristic: response time increases with CPU usage
-					baseResponseTime := 100.0 // Base 100ms
-					cpuFactor := resourceData.AvgCPUPercent / 100.0
-					summary.AvgResponseTime = baseResponseTime + (cpuFactor * 200.0) // Up to 300ms
-				} else {
-					summary.AvgResponseTime = 150.0 // Default estimate
-				}
-
-				// Estimate error rate (low by default, could be enhanced with actual error tracking)
-				// For now, use a small error rate that might increase with high load
-				if resourceData.AvgCPUPercent > 80 {
-					summary.ErrorRate = 0.02 // 2% error rate if CPU is high
-				} else {
-					summary.ErrorRate = 0.005 // 0.5% default error rate
-				}
-			}
-		}
+	if apiCalls > 0 {
+		summary.Throughput = float64(apiCalls) / 86400.0 // requests per second over the 24h window
 	}
 
 	// Get uptime from service health events for this tenant
@@ -774,7 +736,7 @@ func (s *MetricsService) GetTenantPerformanceSummary(tenantID uuid.UUID) (*model
 	// RLS: cross-tenant — runs on the bypass role (Phase 4). Despite the tenantID
 	// argument, this query reads platform-wide service_health_events (a
 	// non-tenant-scoped table with no RLS policy) and does NOT filter by tenant;
-	// the tenantID only feeds the resource-tracker HTTP call and the response.
+	// the tenantID only scopes the metered-usage read above and the response.
 	uptimeQuery := `
 		SELECT 
 			COUNT(*) FILTER (WHERE status = 'healthy') as healthy_count,
@@ -791,25 +753,6 @@ func (s *MetricsService) GetTenantPerformanceSummary(tenantID uuid.UUID) (*model
 	}
 
 	return summary, nil
-}
-
-// RecordDiscoveryEvent records an asset discovery event as a metric for dashboard visibility.
-//
-// RLS: not wrapped — monitoring_events has no tenant_isolation policy (it is not
-// in the RLS policy set in scripts/database/schema.sql), so there is no
-// app.tenant_id context to satisfy. The tenant_id column is written as ordinary
-// data. Left global per the playbook's reference-table rule.
-func (s *MetricsService) RecordDiscoveryEvent(tenantID, assetID uuid.UUID, source string) {
-	query := `
-		INSERT INTO monitoring_events (id, tenant_id, event_type, source, resource_id, created_at)
-		VALUES ($1, $2, 'asset_discovered', $3, $4, $5)
-		ON CONFLICT DO NOTHING
-	`
-	_, err := s.db.Exec(query, uuid.New(), tenantID, source, assetID, time.Now())
-	if err != nil {
-		// Non-critical — log and continue
-		fmt.Printf("[MetricsService] Failed to record discovery event: %v\n", err)
-	}
 }
 
 func (s *MetricsService) Close() error {

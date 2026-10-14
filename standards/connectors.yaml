@@ -387,8 +387,8 @@ connectors:
   # --- escape hatch (platform_integrations) ---------------------------------
   # What actually reads a `custom` row: nothing. device-interrogation-service's
   # POST /integrations accepts the type and stores the row (its config check
-  # for `custom` is "no requirements"), and resource-tracker / health metrics
-  # count platform_integrations rows for the cloud providers only. No collector,
+  # for `custom` is "no requirements"), and the health metrics count
+  # platform_integrations rows for the cloud providers only. No collector,
   # scheduler or delivery path dispatches on it, and no page offers to create
   # one. (inventory-service's own /integrations CRUD writes a different table,
   # `integrations`, with a free-text type; it is unrelated to this key.) So it

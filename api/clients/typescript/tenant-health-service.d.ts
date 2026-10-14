@@ -215,7 +215,7 @@ export interface components {
          * @enum {string}
          */
         TenantHealthStatus: "excellent" | "good" | "fair" | "poor" | "failing" | "unknown" | "critical";
-        /** @description Per-factor scoring, each 0-100 (models.HealthBreakdown). A factor is `null` when it could NOT be measured because the peer service supplying its raw metrics was unreachable — null means "unknown", never zero. Null factors are excluded from `overall_score`, whose remaining weights are renormalised; `data_completeness` says how much of the total factor weight was actually measured and `unavailable_sources` says which peers were missing. `resource_efficiency` is ALWAYS null and carries no weight: nothing meters per-tenant CPU and memory, so the factor was dropped from the index (performance 25, security 20, business 15, cost 15, out of 75) and `unavailable_sources` always lists `resource-metering` to say so. */
+        /** @description Per-factor scoring, each 0-100 (models.HealthBreakdown). A factor is `null` when it could NOT be measured because the peer service supplying its raw metrics was unreachable — null means "unknown", never zero. Null factors are excluded from `overall_score`, whose remaining weights are renormalised; `data_completeness` says how much of the total factor weight was actually measured and `unavailable_sources` says which peers were missing. `resource_efficiency` and `cost_optimization` are ALWAYS null and carry no weight: nothing meters per-tenant CPU and memory, and nothing prices a tenant's usage, so both factors were dropped from the index (performance 25, security 20, business 15, out of 60) and `unavailable_sources` always lists `resource-metering` and `cost-metering` to say so. */
         HealthBreakdown: {
             /** @description Always null — not measured (no per-tenant resource producer exists). */
             resource_efficiency: number | null;
@@ -223,7 +223,7 @@ export interface components {
             security_posture: number | null;
             business_activity: number | null;
             cost_optimization: number | null;
-            /** @description Peer services that could not be reached during collection, plus `resource-metering` — not a service, but the producer the resource-efficiency factor would need, which does not exist. */
+            /** @description Peer services that could not be reached during collection, plus `resource-metering` and `cost-metering` — not services, but the producers the resource-efficiency and cost-optimization factors would need, which do not exist. */
             unavailable_sources?: string[] | null;
             /** @description Fraction of total factor weight actually measured (0-1). */
             data_completeness: number;

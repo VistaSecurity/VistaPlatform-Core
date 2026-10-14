@@ -1,0 +1,61 @@
+{{/*
+maintenance-service's Role — EXACTLY these rules, and namespace-scoped.
+scripts/test-chart-maintenance-rbac.mjs pins the verb list and fails on any
+ClusterRole / ClusterRoleBinding in the rendered chart.
+
+  jobs       create get list watch delete   run and reap the backup / update Jobs
+  pods       get list                        find a Job's pod; read own labels
+  pods/log   get                             a run's step log
+  secrets    get list                        the Helm release Secrets
+                                             (sh.helm.release.v1.<release>.v*)
+
+secrets: Kubernetes RBAC cannot restrict `list` by name prefix, so this grants
+reading every Secret in the namespace. That is already true of every backend
+through its env and volume mounts; what is new is the API path, and the
+platform ADR for the maintenance credential boundary records it.
+
+No nodes: they are cluster-scoped and would need a ClusterRole. The single-node
+flag is a chart value instead (maintenance.singleNode).
+
+Creating Jobs means this account can create a Job that runs as the updater
+ServiceAccount — Kubernetes RBAC cannot prevent that — which is exactly why it
+is held by a dedicated service with three verbs and not by admin-service (D1).
+*/}}
+{{- if include "vistaplatform.maintenanceEnabled" . }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: maintenance-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance-service
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: maintenance-service
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance-service
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: maintenance-service
+subjects:
+  - kind: ServiceAccount
+    name: maintenance-service
+    namespace: {{ .Release.Namespace }}
+{{- end }}

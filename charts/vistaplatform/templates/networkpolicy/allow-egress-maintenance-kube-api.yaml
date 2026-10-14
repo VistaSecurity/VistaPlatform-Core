@@ -1,0 +1,41 @@
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egressEnabled (include "vistaplatform.maintenanceEnabled" .) }}
+{{/* ───────────────────────────────────────────────────────────────────────
+     maintenance-service → the Kubernetes API server. It is the one backend
+     that talks to the API (spec platform-maintenance.md D1: release state,
+     the backup and update Jobs, their pods' logs), so under the egress
+     default-deny it alone gets this rule — with the update / rollback Job
+     (component maintenance-updater), whose `helm` drives the API itself.
+
+     The API server is `kubernetes.default.svc`, a ClusterIP on 443 that the
+     node DNATs to the control plane on 6443. Whether a CNI evaluates egress
+     policy before that translation (Service IP:443) or after it (control-plane
+     address:6443) varies, so both ports are allowed.
+
+     maintenance.kubeApiServerCidr narrows the destination to one range that
+     holds both the `kubernetes` Service IP (`kubectl -n default get svc
+     kubernetes`) and the API server endpoints (`kubectl -n default get
+     endpoints kubernetes`). Empty allows 0.0.0.0/0 on 443 and 6443 for THIS
+     pod only: a NetworkPolicy cannot name a Service, and the control-plane
+     address cannot be known from inside the chart.
+     ─────────────────────────────────────────────────────────────────── */}}
+{{- $m := .Values.maintenance | default dict }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-maintenance-to-kube-api
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance-service
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [maintenance-service, maintenance-updater] }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: {{ $m.kubeApiServerCidr | default "0.0.0.0/0" | quote }}
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 6443 }
+{{- end }}

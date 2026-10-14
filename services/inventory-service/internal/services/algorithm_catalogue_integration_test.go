@@ -27,6 +27,7 @@ package services
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
@@ -39,8 +40,13 @@ import (
 var mustClassify = []string{
 	// Symmetric
 	"AES128", "AES256", "3DES", "DES", "RC4", "ChaCha20", "NULL",
-	// Hashes (SHA-2, SHA-3, legacy)
+	// Kerberos: the RFC 8009 SHA-2 encryption types are what the SHA-1 ones
+	// are told to migrate to, so they must resolve.
+	"AES256-CTS-HMAC-SHA1-96", "AES256-CTS-HMAC-SHA384-192", "AES128-CTS-HMAC-SHA256-128",
+	// Hashes (SHA-2, SHA-3, legacy). The 224-bit and 512/t variants are FIPS
+	// 180-4 / 202 outputs the Rev. 3 transition names individually.
 	"SHA256", "SHA384", "SHA512", "SHA1", "MD5", "SHA3-256", "SHA3-512",
+	"SHA224", "SHA-512/256", "SHA-512/224", "SHA3-224",
 	// Classical signatures. The bare family rows — ECDSA, Ed25519, DSA — are
 	// what a certificate's public_key_algorithm resolves to (crypto/x509
 	// spelling) and what the key producer looks up; without one an EC
@@ -60,6 +66,9 @@ var mustClassify = []string{
 	"ML-DSA-44", "ML-DSA-65", "ML-DSA-87",
 	"SLH-DSA-128s", "SLH-DSA-256f",
 	"X25519MLKEM768", "SecP256r1MLKEM768",
+	// Stateful hash-based signatures (SP 800-208): approved, quantum-safe,
+	// and what a firmware image is signed with.
+	"LMS", "XMSS",
 	// Protocol versions
 	"TLS1.2", "TLS1.3", "SSLv3",
 }
@@ -267,4 +276,175 @@ func queryStrings(t *testing.T, db *sql.DB, query string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// Marking an algorithm obsolete means it grades Critical: the Catalog ->
+// Ratings dialog says so, and algorithm_obsolete_floor.go makes it true on the
+// admin write path. Seed INSERTs bypass that path, and five shipped rows were
+// 'obsolete' at 76-82 — the dialog's promise was false for the rows the
+// product itself ships. The floor is read from the same function the write
+// path uses, so this moves with the band ladder.
+func TestIntegration_AlgorithmCatalogue_ObsoleteRowsGradeCritical(t *testing.T) {
+	db := shippedCatalogue(t)
+
+	floor := ObsoleteRiskFloor()
+	offenders := queryStrings(t, db, fmt.Sprintf(
+		`SELECT code||' ('||risk_score||')' FROM algorithms WHERE deprecation_status='obsolete' AND risk_score < %d ORDER BY code`, floor))
+	if len(offenders) > 0 {
+		t.Errorf("obsolete rows scored below the Critical floor (%d): %v", floor, offenders)
+	}
+}
+
+// Guards for the NIST alignment pass (seed.sql "Algorithm catalogue: NIST
+// alignment pass"). Each one pins a row the review found contradicting the
+// guidance in force, so the next edit to the seed cannot quietly undo it.
+func TestIntegration_AlgorithmCatalogue_NISTAlignmentStaysFixed(t *testing.T) {
+	db := shippedCatalogue(t)
+
+	// 1. Disallowed is not deprecated. 80-bit public keys (SP 800-131A, since
+	//    2013), DSA (FIPS 186-5 withdrew it) and RC4 in Kerberos (RFC 8429)
+	//    sat at 'deprecated' while their siblings of the same strength were
+	//    'obsolete'. One primitive, one verdict.
+	for _, code := range []string{"RSA-1024", "DH-1024", "DH-768", "DH-ECP-192", "DH-RFC5114-1024-160", "DSA", "RC4-HMAC-KRB"} {
+		var status string
+		if err := db.QueryRow(`SELECT deprecation_status FROM algorithms WHERE code=$1`, code).Scan(&status); err != nil {
+			t.Errorf("%s: %v", code, err)
+			continue
+		}
+		if status != DeprecationObsolete {
+			t.Errorf("%s is %q; NIST disallows it, so it must be %q", code, status, DeprecationObsolete)
+		}
+	}
+
+	// 2. A classical public-key algorithm is Shor-breakable: NIST quantum
+	//    category 0, never a positive category. curve25519-sha256 carried the
+	//    3 that belongs to its ML-KEM hybrid.
+	if bad := queryStrings(t, db, `
+		SELECT code||' ('||nist_quantum_security_level||')' FROM algorithms
+		WHERE NOT is_pqc AND primitive IN ('key-agree','signature','pke')
+		  AND COALESCE(nist_quantum_security_level, 0) > 0 ORDER BY code`); len(bad) > 0 {
+		t.Errorf("classical public-key row(s) claiming a positive NIST quantum category: %v", bad)
+	}
+
+	// 3. Every quantum-vulnerable public-key row that is not already
+	//    disallowed carries the IR 8547 (draft) date, so the Catalog page and
+	//    the CBOM export show what is ahead of a 2048-bit RSA key.
+	if bad := queryStrings(t, db, `
+		SELECT code FROM algorithms
+		WHERE NOT is_pqc AND primitive IN ('key-agree','signature','pke')
+		  AND deprecation_status <> 'obsolete' AND deprecation_date IS NULL ORDER BY code`); len(bad) > 0 {
+		t.Errorf("quantum-vulnerable public-key row(s) without a deprecation date: %v", bad)
+	}
+	if bad := queryStrings(t, db, `
+		SELECT code FROM algorithms
+		WHERE NOT is_pqc AND primitive IN ('key-agree','signature','pke')
+		  AND deprecation_status = 'current'
+		  AND (migration_guidance IS NULL OR migration_guidance NOT LIKE '%8547%') ORDER BY code`); len(bad) > 0 {
+		t.Errorf("current quantum-vulnerable public-key row(s) whose guidance does not name IR 8547: %v", bad)
+	}
+
+	// 4. The PQ/T hybrid key exchanges follow one convention, whichever
+	//    protocol names them: the ML-KEM half is standardized and the row
+	//    carries a classical strength.
+	for _, code := range []string{"X25519MLKEM768", "SecP256r1MLKEM768", "SecP384r1MLKEM1024", "mlkem768x25519-sha256", "mlkem768nistp256-sha256"} {
+		var status string
+		var csl sql.NullInt64
+		if err := db.QueryRow(`SELECT pqc_standardization_status, classical_security_level FROM algorithms WHERE code=$1`, code).Scan(&status, &csl); err != nil {
+			t.Errorf("%s: %v", code, err)
+			continue
+		}
+		if status != "standardized" || !csl.Valid {
+			t.Errorf("%s: pqc_standardization_status=%q classical_security_level=%v; hybrids share one convention (standardized, strength set)", code, status, csl)
+		}
+	}
+
+	// 5. The NIST mapping must not claim approval NIST has not given. X25519
+	//    and X448 are not SP 800-56A Rev. 3 schemes (NIST declined to add them
+	//    in July 2025); ChaCha20-Poly1305 is not an approved cipher.
+	for _, code := range []string{"X25519", "X448", "CURVE25519", "curve25519-sha256", "ChaCha20", "TLS_CHACHA20_POLY1305_SHA256", "chacha20-poly1305@openssh.com"} {
+		var nist sql.NullString
+		if err := db.QueryRow(`SELECT compliance_mappings->>'NIST' FROM algorithms WHERE code=$1`, code).Scan(&nist); err != nil {
+			t.Errorf("%s: %v", code, err)
+			continue
+		}
+		if nist.String != "not-approved" {
+			t.Errorf("%s: compliance_mappings.NIST = %q, want not-approved", code, nist.String)
+		}
+	}
+
+	// 6. Triple DES: encryption disallowed after 2023 (SP 800-131A Rev. 2).
+	//    The row stays deprecated by owner decision; the date must say when.
+	for _, code := range []string{"3DES", "3des-cbc", "TLS_RSA_WITH_3DES_EDE_CBC_SHA"} {
+		var date sql.NullString
+		if err := db.QueryRow(`SELECT deprecation_date::text FROM algorithms WHERE code=$1`, code).Scan(&date); err != nil {
+			t.Errorf("%s: %v", code, err)
+			continue
+		}
+		if date.String != "2023-12-31" {
+			t.Errorf("%s: deprecation_date = %q, want 2023-12-31", code, date.String)
+		}
+	}
+
+	// 7. The signature hash does not set the key's strength, and 4096-bit RSA
+	//    and DH share one estimate.
+	for code, want := range map[string]int{"RSA-SHA256": 112, "RSA-SHA512": 112, "RSA-4096": 152, "DH-MODP-4096": 152} {
+		var got sql.NullInt64
+		if err := db.QueryRow(`SELECT classical_security_level FROM algorithms WHERE code=$1`, code).Scan(&got); err != nil {
+			t.Errorf("%s: %v", code, err)
+			continue
+		}
+		if !got.Valid || int(got.Int64) != want {
+			t.Errorf("%s classical security level = %v, want %d", code, got, want)
+		}
+	}
+}
+
+// The seed re-applies on every helm upgrade. Every UPDATE in the NIST
+// alignment pass names the shipped value it replaces, so a row a platform
+// admin has edited in Catalog -> Ratings keeps the admin's value. This drives
+// the real file over edited rows: a predicate widened to "anything but the new
+// value" rewrites the admin's choice on the next upgrade and nothing in the
+// shipped-catalogue guards above would notice, because the shipped rows are
+// unchanged.
+func TestIntegration_AlgorithmCatalogue_ReseedKeepsAdminEdits(t *testing.T) {
+	db := shippedCatalogue(t)
+
+	edits := []struct {
+		code, stmt, probe, want string
+	}{
+		{"ChaCha20",
+			`UPDATE algorithms SET compliance_mappings = compliance_mappings || '{"NIST": "admin: validated module"}' WHERE code = 'ChaCha20'`,
+			`SELECT compliance_mappings->>'NIST' FROM algorithms WHERE code = 'ChaCha20'`, "admin: validated module"},
+		{"hmac-sha1",
+			`UPDATE algorithms SET compliance_mappings = compliance_mappings || '{"FIPS": "admin: CMVP cert"}' WHERE code = 'hmac-sha1'`,
+			`SELECT compliance_mappings->>'FIPS' FROM algorithms WHERE code = 'hmac-sha1'`, "admin: CMVP cert"},
+		// An admin took DSA back out of obsolete and re-scored it.
+		{"DSA",
+			`UPDATE algorithms SET deprecation_status = 'deprecated', risk_score = 60, pre_obsolete_risk_score = NULL, obsolete_risk_floor_at = NULL WHERE code = 'DSA'`,
+			`SELECT deprecation_status || '/' || risk_score FROM algorithms WHERE code = 'DSA'`, "deprecated/60"},
+		{"AES256-CTS-HMAC-SHA1-96",
+			`UPDATE algorithms SET strength = 'strong', risk_score = 12 WHERE code = 'AES256-CTS-HMAC-SHA1-96'`,
+			`SELECT strength || '/' || risk_score FROM algorithms WHERE code = 'AES256-CTS-HMAC-SHA1-96'`, "strong/12"},
+		{"X25519",
+			`UPDATE algorithms SET compliance_mappings = compliance_mappings || '{"NIST": "admin"}' WHERE code = 'X25519'`,
+			`SELECT compliance_mappings->>'NIST' FROM algorithms WHERE code = 'X25519'`, "admin"},
+	}
+	for _, e := range edits {
+		if _, err := db.Exec(e.stmt); err != nil {
+			t.Fatalf("edit %s: %v", e.code, err)
+		}
+	}
+
+	testdb.ForceApplySeed(t, db)
+
+	for _, e := range edits {
+		var got string
+		if err := db.QueryRow(e.probe).Scan(&got); err != nil {
+			t.Errorf("%s: %v", e.code, err)
+			continue
+		}
+		if got != e.want {
+			t.Errorf("%s: re-seed rewrote the admin's edit: got %q, want %q", e.code, got, e.want)
+		}
+	}
 }

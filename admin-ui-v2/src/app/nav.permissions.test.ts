@@ -30,6 +30,8 @@ const ROUTE_GATES: Record<string, string | string[]> = {
   fleet: 'platform.health',
   // compliance-engine /admin/alerts + monitoring-service → platform.health
   system: 'platform.health',
+  // maintenance-service GET /admin/maintenance/status → platform.health
+  maintenance: ['platform.health'],
   // admin-service server.go: /tiers and /billable-items → platform.settings
   plans: 'platform.settings',
   // admin-service /admin/security → platform.security
@@ -131,6 +133,9 @@ describe('seeded roles', () => {
       'fleet',
       'jobs',
       'system', 'system/services', 'system/gateway', 'system/alerts',
+      // Reads are platform.health; its write buttons need platform.maintenance,
+      // which support_agent does not hold, so it sees the pages read-only.
+      'maintenance', 'maintenance/about', 'maintenance/backups',
       'staff', 'staff/staff',
       'security', 'security/activity', 'security/retention',
     ]);

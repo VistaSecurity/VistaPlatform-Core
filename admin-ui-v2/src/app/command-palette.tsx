@@ -6,7 +6,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Search, CornerDownLeft } from 'lucide-react';
 import { SECTIONS, visibleSections } from './nav';
-import { usePlatformPermissions } from '@vistasecurity/primitives/platform-auth';
+import { PLATFORM_PERMISSIONS, usePlatformPermissions } from '@vistasecurity/primitives/platform-auth';
+import { useMaintenanceAvailability } from '../sections/maintenance/maintenance-queries';
 import { Avatar, initialsFromName } from '../components/ui/primitives';
 import { useTenants, planLabel } from '../sections/tenants/queries';
 import { usePlatformEdition } from '../lib/edition';
@@ -20,6 +21,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const { data: tenants } = useTenants();
   const { capabilities, license } = usePlatformEdition();
   const { hasPermission } = usePlatformPermissions();
+  const maintenance = useMaintenanceAvailability(hasPermission(PLATFORM_PERMISSIONS.platform.health));
   const [q, setQ] = useState('');
   const [idx, setIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -33,7 +35,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     // Same gates as the sidebar (permission, edition, licence): the palette is
     // a second door into the same sections, so leaving any gate out would offer
     // an operator sections the rail hides and the route guards refuse.
-    const navHits: Result[] = visibleSections(hasPermission, capabilities, SECTIONS, license)
+    const navHits: Result[] = visibleSections(hasPermission, capabilities, SECTIONS, license, () => maintenance === 'available')
       .filter((s) => !ql || s.label.toLowerCase().includes(ql) || s.title.toLowerCase().includes(ql))
       .map((s) => ({ kind: 'nav', id: s.id, label: s.label, sub: s.subtitle }));
     const tenantHits: Result[] = (tenants ?? [])
@@ -41,7 +43,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       .slice(0, 6)
       .map((t) => ({ kind: 'tenant', id: t.id, label: t.name, sub: `${t.slug} · ${planLabel(t)}`, brand: planLabel(t) === 'Sovereign' }));
     return [...navHits, ...tenantHits];
-  }, [q, tenants, capabilities, license, hasPermission]);
+  }, [q, tenants, capabilities, license, hasPermission, maintenance]);
 
   useEffect(() => { setIdx(0); }, [q]);
 

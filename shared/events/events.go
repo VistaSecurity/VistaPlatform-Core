@@ -244,16 +244,6 @@ func NewPcapJobEvent(tenantID, jobID uuid.UUID, filePath, originalFilename strin
 	}
 }
 
-// --- Metrics Events ---
-
-// MetricsEvent represents a system metrics snapshot published to NATS
-type MetricsEvent struct {
-	EventID   uuid.UUID              `json:"event_id"`
-	Source    string                 `json:"source"`
-	Timestamp time.Time              `json:"timestamp"`
-	Metrics   map[string]interface{} `json:"metrics"`
-}
-
 // --- Inventory Lifecycle Events ---
 
 // LifecycleEnvelope is the standard envelope for inventory lifecycle events.
@@ -420,7 +410,6 @@ const (
 	SubjectDiscoveryQueueReady = "discovery.queue.ready"
 
 	// Metrics subjects
-	SubjectMetricsSystem = "metrics.system"
 
 	// Inventory lifecycle subjects
 	SubjectLifecycleAssetDiscovered     = "inventory.lifecycle.asset.discovered"

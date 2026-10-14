@@ -78,6 +78,21 @@ func TestGenerationIgnoresRepeatedSightingsButIncludesUsefulEvidence(t *testing.
 	if Generation(o) == first {
 		t.Fatal("new interface evidence did not become eligible")
 	}
+	// Two runs of one device: the ref is the run, the origin the device.
+	o.Evidence.Source = identity.Source{Kind: identity.SourceMeasured, Ref: "interrogation:run-1", Origin: "device:d1"}
+	runOne := Generation(o)
+	o.Evidence.Source.Ref = "interrogation:run-2"
+	if Generation(o) != runOne {
+		t.Fatal("a repeat interrogation of the same device became new work")
+	}
+	o.Evidence.Source.Origin = "device:d2"
+	if Generation(o) == runOne {
+		t.Fatal("another device's report was folded into the first device's work")
+	}
+	o.Evidence.Source = identity.Source{Kind: identity.SourceMeasured, Ref: "interrogation:run-1"}
+	if Generation(o) == runOne {
+		t.Fatal("a source with no origin must still be keyed by its ref")
+	}
 }
 
 // A name crossing the tenant-frequency threshold between two sightings, a

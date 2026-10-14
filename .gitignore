@@ -172,11 +172,11 @@ services/*/compliance-engine
 services/*/device-interrogation-service
 services/*/discovery-processor-service
 services/*/inventory-service
+services/*/maintenance-service
 services/*/mcp-service
 services/*/monitoring-service
 services/*/notification-service
 services/*/pcap-processor
-services/*/resource-tracker-service
 services/*/sensor-manager
 services/*/tenant-health-service
 sensor/crypto-sensor

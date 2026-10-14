@@ -11,9 +11,10 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import {
   Shield, Gauge, Building2, Radar, Workflow, Wallet, Activity, ToggleRight,
-  Library, UsersRound, ScrollText, ChevronsUpDown, Search, Bell, LogOut, Settings2, ShieldAlert, FileCheck2, Layers, Megaphone, LifeBuoy, type LucideIcon,
+  Library, UsersRound, ScrollText, ChevronsUpDown, Search, Bell, LogOut, Settings2, ShieldAlert, FileCheck2, Layers, Megaphone, LifeBuoy, Wrench, type LucideIcon,
 } from 'lucide-react';
-import { usePlatformAuth, usePlatformPermissions } from '@vistasecurity/primitives/platform-auth';
+import { PLATFORM_PERMISSIONS, usePlatformAuth, usePlatformPermissions } from '@vistasecurity/primitives/platform-auth';
+import { useMaintenanceAvailability } from '../sections/maintenance/maintenance-queries';
 import { SECTIONS, resolveActive, visibleSections } from './nav';
 import { editionLabel, usePlatformEdition } from '../lib/edition';
 import { usePlatformBranding, BrandLogo } from './platform-branding';
@@ -21,9 +22,10 @@ import { CommandPalette } from './command-palette';
 import { TenantSwitcher, ScopeBar } from './tenant-switcher';
 import { NotificationBell } from './notification-bell';
 import { LicenseCapBanner } from './license-cap-banner';
+import { UpdateBanner } from './update-banner';
 
 const ICONS: Record<string, LucideIcon> = {
-  Gauge, Building2, Radar, Workflow, Wallet, Activity, ToggleRight, Library, UsersRound, ScrollText, Bell, Settings2, ShieldAlert, FileCheck2, Layers, Megaphone, LifeBuoy,
+  Gauge, Building2, Radar, Workflow, Wallet, Activity, ToggleRight, Library, UsersRound, ScrollText, Bell, Settings2, ShieldAlert, FileCheck2, Layers, Megaphone, LifeBuoy, Wrench,
 };
 
 function NavIcon({ name, size = 16.5 }: { name: string; size?: number }) {
@@ -70,7 +72,10 @@ export function AppShell() {
   // RequirePlatformEdition) back both up against deep links.
   // Third gate: the LICENCE edition (Plans & Pricing and Billing & Revenue
   // only on MSP) — the build cannot tell Enterprise from MSP.
-  const visible = visibleSections(hasPermission, capabilities, SECTIONS, license);
+  // Fourth gate: optional backends the chart may leave out (Maintenance). The
+  // probe is skipped for an operator who cannot read the section anyway.
+  const maintenance = useMaintenanceAvailability(hasPermission(PLATFORM_PERMISSIONS.platform.health));
+  const visible = visibleSections(hasPermission, capabilities, SECTIONS, license, () => maintenance === 'available');
   const groups: { label: string | null; items: typeof SECTIONS }[] = [
     { label: null, items: visible.filter((s) => s.group === null) },
     { label: 'Platform', items: visible.filter((s) => s.group === 'Platform') },
@@ -233,6 +238,7 @@ export function AppShell() {
 
         <ScopeBar />
         <LicenseCapBanner />
+        <UpdateBanner />
 
         <main style={{ flex: 1, overflowY: 'auto' }}>
           <Outlet />

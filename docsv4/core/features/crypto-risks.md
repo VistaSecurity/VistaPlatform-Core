@@ -125,8 +125,8 @@ standard 0.0–10.0 scale, ×10):
 
 | Severity | Score | Examples |
 |----------|-------|----------|
-| **Critical** | 90–100 | SSLv2, SSLv3, RC4, DES, MD5 signatures |
-| **High** | 70–89 | TLS 1.0, TLS 1.1, 3DES, SHA-1, RSA-1024 |
+| **Critical** | 90–100 | SSLv2, SSLv3, RC4, DES, MD5 signatures, RSA-1024 and other key sizes NIST disallows |
+| **High** | 70–89 | TLS 1.0, TLS 1.1, 3DES, SHA-1 |
 | **Medium** | 40–69 | Expiring certificates, weak key sizes |
 | **Low** | 1–39 | Minor configuration improvements |
 | **Informational** | 0 | Explicit numeric assessment of zero; qualitative findings and coverage remain separate |

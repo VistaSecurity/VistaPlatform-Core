@@ -39,6 +39,7 @@ import { CatalogPage } from '../sections/catalog/catalog-page';
 import { SettingsPage } from '../sections/settings/settings-page';
 import { StaffPage } from '../sections/staff/staff-page';
 import { SecurityPage } from '../sections/security/security-page';
+import { MaintenancePage } from '../sections/maintenance/maintenance-page';
 import { PUBLIC_PATHS } from './public-routes';
 
 /** The real section components that own a descendant <Routes>, by section id. */
@@ -51,6 +52,7 @@ const SECTION_COMPONENTS: Record<string, () => unknown> = {
   settings: SettingsPage,
   staff: StaffPage,
   security: SecurityPage,
+  maintenance: MaintenancePage,
 };
 
 type RouteDef = { index?: boolean; path?: string; element: ReactElement; children?: unknown };
@@ -274,6 +276,19 @@ describe('admin console route table (react-router v8)', () => {
 
     expect(renderSynthetic('/sec/a')).toBe('a');
     expect(renderSynthetic('/sec/a/b')).toBe('a/b');
+  });
+
+  it('Maintenance mounts at /maintenance/* with About & Updates as its default', () => {
+    // Spec platform-maintenance.md §1 Reachability: left rail → Maintenance →
+    // About & Updates (default) · Backups.
+    expect(leaf('/maintenance')).toBe('maintenance:index');
+    expect(leaf('/maintenance/about')).toBe('maintenance:about');
+    expect(leaf('/maintenance/backups')).toBe('maintenance:backups');
+    // A run's progress page: reached from the Update dialog and the Run history (WP4).
+    expect(leaf('/maintenance/runs/3f2c9a10-0000-4000-8000-000000000000')).toBe('maintenance:runs/:id');
+    expect(leaf('/maintenance/not-a-real-subpage')).toBe('maintenance:*');
+    const ids = SECTIONS.map((s) => s.id);
+    expect(ids.indexOf('maintenance'), 'Maintenance sits right after System Health').toBe(ids.indexOf('system') + 1);
   });
 
   it('an unknown sub-path inside a section hits that section catch-all, not the app one', () => {

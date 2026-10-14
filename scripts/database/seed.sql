@@ -73,6 +73,7 @@ INSERT INTO platform_permissions (name, resource, action, description) VALUES
 ('platform.override',         'platform',           'manage', 'Override permissions in exceptional cases'),
 ('platform.notifications.manage','platform',        'manage', 'Manage platform notification channels, rules, and announcements'),
 ('platform.impersonate',      'platform',           'manage', 'Initiate and audit tenant impersonation (break-glass)'),
+('platform.maintenance',      'platform',           'manage', 'Back up the platform, download and delete backups, and run or roll back platform updates'),
 ('platform.logs.read',        'platform',           'read',   'View platform logs (the .read gate used by the log routes)'),
 ('support.tenants',           'tenants',            'read',   'View tenant data for support'),
 ('support.users',             'users',              'read',   'View user data for support')
@@ -105,7 +106,8 @@ WHERE r.name = 'platform_admin'
     'platform.settings','platform.billing','platform.analytics',
     'platform.health','platform.logs','platform.logs.read','platform.security','platform.audit',
     'platform.audit.manage',
-    'platform.notifications.manage','platform.impersonate'
+    'platform.notifications.manage','platform.impersonate',
+    'platform.maintenance'
   )
 ON CONFLICT (role_id, permission_id) DO NOTHING;
 
@@ -4131,6 +4133,302 @@ INSERT INTO algorithms (code, category, name, description, strength, deprecation
     ARRAY['ML-KEM-1024'], 'Strong classical key agreement; not quantum-resistant. Plan an RFC 9370 additional ML-KEM key exchange.', '{"RFC": "6954"}'::jsonb, true,
     'ECDH', 'key-agree', '1.3.36.3.3.2.8.1.1.13', ARRAY['keygen','key-agree'], 256, 0, NULL, 'brainpoolP512r1', '{"ike_transform_id": 30, "reference": "RFC 6954"}'::jsonb)
 ON CONFLICT (code) DO NOTHING;
+
+
+-- ============================================================================
+-- Algorithm catalogue: NIST alignment pass
+-- ============================================================================
+-- Re-runnable. The catalogue was reviewed row by row against the NIST guidance
+-- in force — SP 800-131A Rev. 2, FIPS 186-5, SP 800-56A Rev. 3, SP 800-52
+-- Rev. 2, SP 800-227 (final) — and against the two drafts that set the next
+-- transition, SP 800-131A Rev. 3 (ipd) and IR 8547 (ipd). Where a draft is the
+-- source the text says "draft": a draft date is a plan, not a rule, and the
+-- row must not claim otherwise.
+--
+-- Every UPDATE names the value it replaces, so a row a platform admin has since
+-- edited in Catalog -> Ratings is left alone, and a second run changes nothing.
+-- The chart re-applies this file on every upgrade, which is how a status change
+-- here reaches an existing install.
+--
+-- Status vocabulary, as the rest of the platform reads it:
+--   deprecated = NIST legacy-use or scheduled for retirement; still scored on
+--                its own merits.
+--   obsolete   = disallowed; grades Critical. algorithm_obsolete_floor.go
+--                raises an obsoleted row's risk_score to the bottom of the
+--                Critical band on the admin write path and remembers the score
+--                it replaced. Seed INSERTs bypass that path, so this block does
+--                the same by hand: GREATEST(risk_score, 90), with the prior
+--                score kept in pre_obsolete_risk_score.
+-- ============================================================================
+
+-- ── Part 1: disallowed, not merely deprecated ──────────────────────────────
+--
+-- 80-bit public-key strength has been DISALLOWED since the end of 2013
+-- (SP 800-131A, all revisions: signature generation and key agreement under
+-- 112 bits). FIPS 186-5 (February 2023) withdrew DSA for signature generation
+-- altogether. RC4 was never NIST-approved and RFC 8429 (2018) deprecates its
+-- Kerberos encryption type. These rows sat at 'deprecated' while their siblings
+-- of the same strength — diffie-hellman-group1-sha1, ssh-dss, RC4, arcfour —
+-- were already 'obsolete', so the same primitive graded two ways depending on
+-- which protocol named it.
+UPDATE algorithms
+   SET deprecation_status       = 'obsolete',
+       pre_obsolete_risk_score  = risk_score,
+       obsolete_risk_floor_at   = now(),
+       risk_score               = GREATEST(risk_score, 90),
+       deprecation_date         = COALESCE(deprecation_date, CASE code
+                                      WHEN 'DSA'          THEN DATE '2023-02-03'   -- FIPS 186-5
+                                      WHEN 'RC4-HMAC-KRB' THEN DATE '2018-10-31'   -- RFC 8429
+                                      ELSE DATE '2013-12-31' END),                  -- SP 800-131A
+       compliance_mappings      = compliance_mappings || CASE code
+                                      WHEN 'DSA'          THEN '{"NIST": "withdrawn", "FIPS": "186-5 withdrew signature generation"}'::jsonb
+                                      WHEN 'RC4-HMAC-KRB' THEN '{"NIST": "not-approved", "FIPS": "non-compliant", "IETF": "RFC 8429 deprecated"}'::jsonb
+                                      ELSE '{"NIST": "disallowed", "FIPS": "non-compliant"}'::jsonb END
+ WHERE code IN ('RSA-1024', 'DH-1024', 'DH-768', 'DH-ECP-192', 'DH-RFC5114-1024-160', 'DSA', 'RC4-HMAC-KRB')
+   AND deprecation_status = 'deprecated'
+   -- ...and still at the shipped score. An admin who took a row back out of
+   -- obsolete (the service restores its remembered score) and then re-scored
+   -- it has made a decision this pass must not undo on the next upgrade.
+   AND risk_score = CASE code
+                        WHEN 'RSA-1024'            THEN 80
+                        WHEN 'DH-1024'             THEN 75
+                        WHEN 'DH-768'              THEN 90
+                        WHEN 'DH-ECP-192'          THEN 75
+                        WHEN 'DH-RFC5114-1024-160' THEN 80
+                        WHEN 'DSA'                 THEN 70
+                        WHEN 'RC4-HMAC-KRB'        THEN 75 END;
+
+-- Rows seeded as 'obsolete' below the Critical floor the Catalog dialog
+-- promises. Same hand-applied floor as above.
+UPDATE algorithms
+   SET pre_obsolete_risk_score = risk_score,
+       obsolete_risk_floor_at  = now(),
+       risk_score              = 90
+ WHERE deprecation_status = 'obsolete'
+   AND risk_score < 90
+   AND code IN ('hmac-md5', 'hmac-md5-96', 'hmac-md5-etm@openssh.com', 'diffie-hellman-group1-sha1', 'ssh-dss');
+
+-- ── Part 2: Triple DES — disallowed for encryption, legacy-use for decryption ─
+--
+-- SP 800-131A Rev. 2 disallows TDEA ENCRYPTION after 2023; decrypting data
+-- already protected with it is legacy-use. The row stays 'deprecated' (owner
+-- decision: 3DES is deprecated, not broken — weak_crypto_detector.go makes the
+-- same call) but the mapping and date now say what NIST says.
+UPDATE algorithms
+   SET compliance_mappings = compliance_mappings || '{"NIST": "disallowed for encryption after 2023; decryption legacy-use", "FIPS": "non-compliant"}'::jsonb,
+       deprecation_date    = COALESCE(deprecation_date, DATE '2023-12-31')
+ WHERE code IN ('3DES', '3des-cbc', 'TLS_RSA_WITH_3DES_EDE_CBC_SHA')
+   AND compliance_mappings->>'NIST' IN ('deprecated', 'disallowed');
+
+-- ── Part 3: mappings that overstated NIST approval ─────────────────────────
+--
+-- X25519 / X448: SP 800-56A Rev. 3 does not list either curve for key
+-- agreement, and NIST's July 2025 proposal to update SP 800-56A explicitly
+-- declined to add them. FIPS 186-5 approves the EdDSA *signature* on the same
+-- curves (Ed25519 / Ed448 stay 'approved'); that approval does not extend to
+-- the key exchange. The strength rating is unchanged — this is about what the
+-- row claims NIST said, not about how good the curve is.
+UPDATE algorithms
+   SET compliance_mappings = compliance_mappings || '{"NIST": "not-approved", "FIPS": "not an SP 800-56A Rev. 3 key-agreement scheme"}'::jsonb,
+       migration_guidance  = COALESCE(migration_guidance || ' ', '')
+                             || 'Not a NIST-approved key-agreement scheme: SP 800-56A Rev. 3 does not list the curve and NIST declined to add X25519/X448 in its July 2025 update proposal. Where FIPS approval is required, negotiate a NIST curve (P-256/P-384) or a hybrid whose ML-KEM component is the approved part.'
+ WHERE code IN ('X25519', 'X448', 'CURVE25519', 'curve25519-sha256', 'curve25519-sha256@libssh.org', 'curve448-sha512')
+   AND compliance_mappings->>'NIST' IN ('approved', 'acceptable');
+
+-- ChaCha20-Poly1305 is not a NIST-approved cipher: absent from the FIPS 140-3
+-- approved list and from SP 800-52 Rev. 2's suite tables. Four rows said four
+-- things ('approved', 'acceptable', nothing). Strength stays 'strong' /
+-- 'recommended' — it is excellent cryptography that NIST has not blessed.
+UPDATE algorithms
+   SET compliance_mappings = compliance_mappings || '{"NIST": "not-approved", "FIPS": "not-approved"}'::jsonb
+ WHERE code IN ('ChaCha20', 'TLS_CHACHA20_POLY1305_SHA256', 'ENCR-CHACHA20-POLY1305-IPSEC', 'chacha20-poly1305@openssh.com')
+   AND compliance_mappings->>'NIST' IN ('approved', 'acceptable');
+
+-- The RFC 5114 2048-bit groups (IKE groups 23/24) ARE SP 800-56A Rev. 3's FB
+-- and FC parameter sets, so 'approved' is correct — but the row rates them
+-- weak/deprecated, and a reader seeing both had to guess which column to
+-- believe. Say why in the same row.
+UPDATE algorithms
+   SET compliance_mappings = compliance_mappings || '{"NIST": "approved (SP 800-56A Rev. 3 FB/FC parameter sets)"}'::jsonb,
+       migration_guidance  = COALESCE(migration_guidance || ' ', '')
+                             || 'Rated weak despite NIST approval of the parameter set: the modulus is not a safe prime and the generation seeds were never published, so a peer that skips the small-subgroup check is exposed, and RFC 8247 says SHOULD NOT for that reason.'
+ WHERE code IN ('DH-RFC5114-2048-224', 'DH-RFC5114-2048-256')
+   AND compliance_mappings->>'NIST' = 'approved';
+
+-- ── Part 4: one treatment of HMAC-SHA-1 ────────────────────────────────────
+--
+-- HMAC with SHA-1 is acceptable today (SP 800-131A Rev. 2: collision
+-- resistance is not what a MAC relies on). The Rev. 3 draft deprecates it and
+-- disallows it after 2030. The SSH rows called it FIPS 'non-compliant' while the
+-- Kerberos rows called it 'approved' — the same primitive, two verdicts. All of
+-- them now say: deprecated, approved until 2030, migrate by then.
+UPDATE algorithms
+   SET compliance_mappings = compliance_mappings || '{"NIST": "deprecated", "FIPS": "approved; disallowed after 2030 (SP 800-131A Rev. 3 draft)"}'::jsonb,
+       deprecation_date    = COALESCE(deprecation_date, DATE '2030-12-31')
+ WHERE code IN ('hmac-sha1', 'hmac-sha1-96', 'hmac-sha1-96-etm@openssh.com', 'hmac-sha1-etm@openssh.com',
+                'DNP3-SA-HMAC-SHA1-10', 'DNP3-SA-HMAC-SHA1-4',
+                'AES128-CTS-HMAC-SHA1-96', 'AES256-CTS-HMAC-SHA1-96')
+   AND compliance_mappings->>'NIST' IN ('deprecated', 'approved')
+   AND COALESCE(compliance_mappings->>'FIPS', '') IN ('', 'non-compliant', 'approved');
+
+-- The Kerberos SHA-1 types were the one place HMAC-SHA-1 still read 'strong':
+-- with NIST deprecating the MAC and a date on the row, 'strong' contradicted
+-- the row's own mapping. 'acceptable' at the low end of the Low band — the
+-- AES-CTS construction is sound and the MAC is not yet disallowed — matches
+-- how the catalogue rates the other things that are fine today and retire
+-- in 2030 (SHA224, DH-ECP-224).
+UPDATE algorithms
+   SET strength   = 'acceptable',
+       risk_score = CASE code WHEN 'AES128-CTS-HMAC-SHA1-96' THEN 30 ELSE 25 END
+ WHERE code IN ('AES128-CTS-HMAC-SHA1-96', 'AES256-CTS-HMAC-SHA1-96')
+   AND strength = 'strong'
+   AND risk_score = CASE code WHEN 'AES128-CTS-HMAC-SHA1-96' THEN 20 ELSE 15 END;
+
+-- The Kerberos SHA-1 encryption types had nothing to point at: the RFC 8009
+-- AES-SHA2 types were not in the catalogue, so the "alternative" for
+-- AES128-CTS-HMAC-SHA1-96 was its own SHA-1 sibling.
+INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score,
+    recommended_alternatives, migration_guidance, compliance_mappings, is_standard,
+    algorithm_family, primitive, mode, crypto_functions, classical_security_level, nist_quantum_security_level, metadata) VALUES
+('AES128-CTS-HMAC-SHA256-128', 'symmetric', 'AES128-CTS-HMAC-SHA256-128', 'Kerberos etype 19 (RFC 8009). AES-128 in CTS mode with HMAC-SHA-256 truncated to 128 bits; the SHA-2 successor to etype 17.', 'strong', 'current', 15,
+    ARRAY['AES256-CTS-HMAC-SHA384-192'], 'Modern Kerberos encryption type; no SHA-1 anywhere in the key derivation or integrity. Prefer AES256-CTS-HMAC-SHA384-192 where every KDC and client supports it.', '{"NIST": "approved", "PCI-DSS": "compliant", "IETF": "RFC 8009"}'::jsonb, true,
+    'AES', 'ae', 'CTS', ARRAY['encrypt', 'decrypt', 'tag'], 128, 1, '{"protocol": "kerberos", "etype": 19, "reference": "RFC 8009"}'::jsonb),
+('AES256-CTS-HMAC-SHA384-192', 'symmetric', 'AES256-CTS-HMAC-SHA384-192', 'Kerberos etype 20 (RFC 8009). AES-256 in CTS mode with HMAC-SHA-384 truncated to 192 bits; the SHA-2 successor to etype 18.', 'strong', 'current', 10,
+    ARRAY[]::text[], 'The strongest standardized Kerberos encryption type. No migration needed.', '{"NIST": "approved", "PCI-DSS": "compliant", "IETF": "RFC 8009"}'::jsonb, true,
+    'AES', 'ae', 'CTS', ARRAY['encrypt', 'decrypt', 'tag'], 256, 5, '{"protocol": "kerberos", "etype": 20, "reference": "RFC 8009"}'::jsonb)
+ON CONFLICT (code) DO NOTHING;
+
+UPDATE algorithms SET recommended_alternatives = ARRAY['AES128-CTS-HMAC-SHA256-128', 'AES256-CTS-HMAC-SHA384-192']
+ WHERE code = 'AES128-CTS-HMAC-SHA1-96' AND NOT (COALESCE(recommended_alternatives, ARRAY[]::text[]) && ARRAY['AES128-CTS-HMAC-SHA256-128']);
+UPDATE algorithms SET recommended_alternatives = ARRAY['AES256-CTS-HMAC-SHA384-192']
+ WHERE code = 'AES256-CTS-HMAC-SHA1-96' AND NOT (COALESCE(recommended_alternatives, ARRAY[]::text[]) && ARRAY['AES256-CTS-HMAC-SHA384-192']);
+UPDATE algorithms SET recommended_alternatives = ARRAY['AES256-CTS-HMAC-SHA384-192', 'AES256-CTS-HMAC-SHA1-96']
+ WHERE code IN ('RC4-HMAC-KRB', 'DES-CBC-MD5-KRB') AND NOT (COALESCE(recommended_alternatives, ARRAY[]::text[]) && ARRAY['AES256-CTS-HMAC-SHA384-192']);
+
+-- SHA-1 itself. Signature GENERATION with SHA-1 has been disallowed since the
+-- end of 2013 (SP 800-131A); every other use is deprecated now and disallowed
+-- after 2030 in the Rev. 3 draft. The signature rows get the date that already
+-- passed; the digest, MAC and key-exchange-hash rows get the one still ahead.
+UPDATE algorithms SET deprecation_date = DATE '2013-12-31'
+ WHERE code IN ('RSA-SHA1', 'ECDSA-SHA1', 'ssh-rsa') AND deprecation_date IS NULL;
+UPDATE algorithms SET deprecation_date = DATE '2030-12-31'
+ WHERE code IN ('SHA1', 'diffie-hellman-group14-sha1', 'diffie-hellman-group-exchange-sha1') AND deprecation_date IS NULL;
+
+-- ── Part 5: the 224-bit hashes retire with SHA-1 ────────────────────────────
+--
+-- SP 800-131A Rev. 3 (draft) retires SHA-224, SHA-512/224 and SHA3-224 after
+-- 2030 alongside SHA-1 (112-bit collision resistance, under the coming 128-bit
+-- floor). SHA-224 was the only one of the three in the catalogue.
+INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score,
+    recommended_alternatives, migration_guidance, compliance_mappings, is_standard,
+    algorithm_family, primitive, oid, crypto_functions, classical_security_level, nist_quantum_security_level, deprecation_date) VALUES
+('SHA-512/256', 'hash', 'SHA-512/256', 'SHA-512 truncated to 256 bits (FIPS 180-4). Same 128-bit collision resistance as SHA-256, with SHA-512''s resistance to length-extension and better speed on 64-bit hardware.', 'strong', 'current', 15,
+    ARRAY[]::text[], 'No migration needed.', '{"NIST": "approved", "FIPS": "180-4"}'::jsonb, true,
+    'SHA-2', 'hash', '2.16.840.1.101.3.4.2.6', ARRAY['digest'], 128, 2, NULL),
+('SHA-512/224', 'hash', 'SHA-512/224', 'SHA-512 truncated to 224 bits (FIPS 180-4). 112-bit collision resistance.', 'acceptable', 'current', 30,
+    ARRAY['SHA-512/256', 'SHA256'], 'Acceptable today; SP 800-131A Rev. 3 (draft) retires the 224-bit hashes after 2030. Move to SHA-512/256 or SHA-256.', '{"NIST": "approved", "FIPS": "180-4"}'::jsonb, true,
+    'SHA-2', 'hash', '2.16.840.1.101.3.4.2.5', ARRAY['digest'], 112, 0, DATE '2030-12-31'),
+('SHA3-224', 'hash', 'SHA3-224', 'SHA-3 with a 224-bit output (FIPS 202). 112-bit collision resistance.', 'acceptable', 'current', 30,
+    ARRAY['SHA3-256'], 'Acceptable today; SP 800-131A Rev. 3 (draft) retires the 224-bit hashes after 2030. Move to SHA3-256.', '{"NIST": "approved", "FIPS": "202"}'::jsonb, true,
+    'SHA-3', 'hash', '2.16.840.1.101.3.4.2.7', ARRAY['digest'], 112, 0, DATE '2030-12-31')
+ON CONFLICT (code) DO NOTHING;
+
+-- The date is the "already reached" marker (see Part 9), so an admin's
+-- deletion of the sentence survives re-seed.
+UPDATE algorithms
+   SET deprecation_date   = DATE '2030-12-31',
+       migration_guidance = COALESCE(migration_guidance || ' ', '') || 'SP 800-131A Rev. 3 (draft) retires the 224-bit hashes after 2030; move to SHA-256.'
+ WHERE code = 'SHA224' AND deprecation_date IS NULL;
+
+-- ── Part 6: NIST-approved stateful hash-based signatures ───────────────────
+--
+-- SP 800-208 (2020) approves LMS/HSS and XMSS/XMSS^MT, the quantum-safe
+-- signatures used for firmware and boot-image signing. A device presenting one
+-- landed in 'unclassified'. These are family rows, and SP 800-208's parameter
+-- sets span n=24 (192-bit hash, category 3) to n=32 (category 5). A family row
+-- rates at the WEAKEST approved set so it never overstates what a device
+-- actually presents; add per-parameter-set rows if a scanner starts naming
+-- them (LMS_SHA256_M32_H10, XMSS-SHA2_10_256, ...).
+INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score,
+    recommended_alternatives, migration_guidance, compliance_mappings, is_standard, is_pqc, pqc_standardization_status,
+    algorithm_family, primitive, oid, crypto_functions, classical_security_level, nist_quantum_security_level, metadata) VALUES
+('LMS', 'signature', 'LMS / HSS', 'Leighton-Micali Signatures and the Hierarchical Signature System built on them (RFC 8554, NIST SP 800-208). Stateful hash-based signatures; quantum-safe. The signer must never reuse a one-time key, so state management is the deployment risk.', 'strong', 'current', 10,
+    ARRAY[]::text[], 'NIST-approved quantum-safe signature (SP 800-208) for firmware and code signing. Keep the signing state in a hardware module and never clone or restore a signer from backup. For general-purpose signing prefer the stateless ML-DSA or SLH-DSA.', '{"NIST": "approved", "FIPS": "SP 800-208", "IETF": "RFC 8554"}'::jsonb, true, true, 'standardized',
+    'LMS', 'signature', '1.2.840.113549.1.9.16.3.17', ARRAY['sign', 'verify'], 192, 3, '{"pqc_family": "LMS", "fips_reference": "SP 800-208", "quantum_resistance": true, "stateful": true, "security_level": 3, "rated_at": "weakest SP 800-208 parameter set (n=24)"}'::jsonb),
+('XMSS', 'signature', 'XMSS / XMSS^MT', 'eXtended Merkle Signature Scheme and its multi-tree variant (RFC 8391, NIST SP 800-208). Stateful hash-based signatures; quantum-safe. The signer must never reuse a one-time key, so state management is the deployment risk.', 'strong', 'current', 10,
+    ARRAY[]::text[], 'NIST-approved quantum-safe signature (SP 800-208) for firmware and code signing. Keep the signing state in a hardware module and never clone or restore a signer from backup. For general-purpose signing prefer the stateless ML-DSA or SLH-DSA.', '{"NIST": "approved", "FIPS": "SP 800-208", "IETF": "RFC 8391"}'::jsonb, true, true, 'standardized',
+    'XMSS', 'signature', NULL, ARRAY['sign', 'verify'], 192, 3, '{"pqc_family": "XMSS", "fips_reference": "SP 800-208", "quantum_resistance": true, "stateful": true, "security_level": 3, "rated_at": "weakest SP 800-208 parameter set (n=24)"}'::jsonb)
+ON CONFLICT (code) DO NOTHING;
+
+-- ── Part 7: numbers two columns disagreed about ────────────────────────────
+--
+-- curve25519-sha256 (SSH) carried NIST quantum category 3. Classical X25519 is
+-- Shor-breakable like every other classical key agreement in this table (all
+-- of which carry 0); the 3 belonged to its ML-KEM hybrid.
+UPDATE algorithms SET nist_quantum_security_level = 0
+ WHERE code = 'curve25519-sha256' AND nist_quantum_security_level = 3;
+
+-- The signature hash does not set an RSA key's strength: RSA-SHA512 claimed 128
+-- (an RSA-3072 figure) while RSA-SHA256 said 112 (RSA-2048, the floor both rows
+-- assume). And 4096-bit IFC and FFC share one estimate (SP 800-56B Rev. 2
+-- App. D): the DH-MODP-4096 and group16 rows say 152, RSA-4096 said 150.
+UPDATE algorithms SET classical_security_level = 112 WHERE code = 'RSA-SHA512' AND classical_security_level = 128;
+UPDATE algorithms SET classical_security_level = 152 WHERE code = 'RSA-4096'   AND classical_security_level = 150;
+
+-- ── Part 8: one convention for the PQ/T hybrid key exchanges ───────────────
+--
+-- The TLS hybrids (X25519MLKEM768, SecP256r1MLKEM768, SecP384r1MLKEM1024) said
+-- 'candidate' with no classical strength; the SSH ones (mlkem768x25519-sha256,
+-- mlkem768nistp256-sha256) said 'standardized' / 192. Same construction. The
+-- position: the ML-KEM half is FIPS 203, the combiner is what SP 800-227 §4.6
+-- (final, September 2025) describes, and the TLS codepoints are RFC 10024 —
+-- so 'standardized' for the PQC status, the ML-KEM half's classical strength,
+-- and a NIST mapping that says "hybrid" rather than claiming the whole thing is
+-- a NIST algorithm.
+UPDATE algorithms
+   SET pqc_standardization_status = 'standardized',
+       classical_security_level   = COALESCE(classical_security_level, CASE WHEN code = 'SecP384r1MLKEM1024' THEN 256 ELSE 192 END),
+       compliance_mappings        = compliance_mappings || '{"NIST": "hybrid: ML-KEM (FIPS 203) combined per SP 800-227 s4.6", "IETF": "RFC 10024"}'::jsonb
+ WHERE code IN ('X25519MLKEM768', 'SecP256r1MLKEM768', 'SecP384r1MLKEM1024')
+   AND pqc_standardization_status = 'candidate';
+UPDATE algorithms
+   SET compliance_mappings = compliance_mappings || '{"NIST": "hybrid: ML-KEM (FIPS 203) combined per SP 800-227 s4.6"}'::jsonb
+ WHERE code IN ('mlkem768x25519-sha256', 'mlkem768nistp256-sha256')
+   AND compliance_mappings->>'NIST' = 'standardized';
+
+-- ── Part 9: the post-quantum transition timeline ───────────────────────────
+--
+-- NIST IR 8547 (draft, November 2024) proposes that every quantum-vulnerable
+-- public-key algorithm — RSA, finite-field and elliptic-curve DH, ECDSA, EdDSA,
+-- DSA, at every key size — is deprecated after 2030 and disallowed after 2035.
+-- SP 800-131A Rev. 3 (draft) folds its own 112-to-128-bit step into the same
+-- 2030 date. No row carried either date and only two mentioned the plan, so the
+-- Catalog page and the CBOM export showed a 2048-bit RSA key as "current" with
+-- nothing ahead of it. Every classical asymmetric row that is not already
+-- disallowed now carries the 2030 date and names the draft. The hybrid rows are
+-- is_pqc and untouched.
+--
+-- The date is the marker that this pass has reached a row: the sentence is
+-- appended only while the date is still NULL, then the date is set. An admin
+-- who deletes the sentence from a row's guidance keeps it deleted on re-seed
+-- (the date remains); one who clears both is indistinguishable from a row the
+-- pass never reached and gets both again — the same limit the PQC paragraph
+-- above lives with. TestIntegration_Seed_PQCRecommendationsAreAddedOnce
+-- (compliance-engine) checks the DHE row for exactly this.
+UPDATE algorithms
+   SET migration_guidance = COALESCE(migration_guidance || ' ', '')
+                            || 'NIST IR 8547 (draft) proposes that quantum-vulnerable public-key algorithms are deprecated after 2030 and disallowed after 2035; plan the move to ML-KEM / ML-DSA (or a PQ/T hybrid) before then.'
+ WHERE ((NOT is_pqc AND primitive IN ('key-agree', 'signature', 'pke'))
+        OR (category = 'cipher_suite' AND code LIKE 'TLS\_ECDHE\_%'))
+   AND deprecation_status <> 'obsolete'
+   AND deprecation_date IS NULL
+   AND (migration_guidance IS NULL OR migration_guidance NOT LIKE '%8547%');
+UPDATE algorithms
+   SET deprecation_date = DATE '2030-12-31'
+ WHERE ((NOT is_pqc AND primitive IN ('key-agree', 'signature', 'pke'))
+        OR (category = 'cipher_suite' AND code LIKE 'TLS\_ECDHE\_%'))
+   AND deprecation_status <> 'obsolete'
+   AND deprecation_date IS NULL;
 
 
 -- =================================================================

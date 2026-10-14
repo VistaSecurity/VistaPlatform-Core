@@ -45,16 +45,12 @@ services/compliance-engine/internal/services/findings_service.go#GetFindingsByCo
   reason: Projects per-severity counts and paginates; comparisons are counts, not
     score thresholds.
   fingerprint: bbbc6b8f4f35f9b8aaa3c70641ef15661bb14e44685ef6e4802fb8bfbe0b300e
-services/resource-tracker-service/internal/service/resource_service.go#generateOptimizationSuggestions:
-  concept: resource_optimization
-  reason: CPU/memory utilization policies choose workflow priority; backend-only
-    index cleanup is deferred.
-  fingerprint: c33cfa50ca1c271831d3554b10f8739aa64d8797292fe3f45f23e49ff0a22ebc
 services/tenant-health-service/internal/scoring/health_scorer.go#generateRecommendations:
   concept: health_recommendation_policy
-  reason: Individual performance/security/usage/cost conditions select workflow
-    priorities, separate from overall health bands.
-  fingerprint: f57ebef889fb5ab9cf4a8cc97c29e99ae10ed14b3cc5d4a5144bd2240dec9aed
+  reason: Individual performance/security/usage conditions select workflow
+    priorities, separate from overall health bands. Reviewed 2026-10-14 when the
+    cost branch was removed with the cost-optimization factor (#1263).
+  fingerprint: 103242481dba7e5d1ee159fa375c17e0db261969ed1296989453584d60939a14
 services/tenant-health-service/internal/service/health_service.go#generateInsights:
   concept: health_insight_policy
   reason: Factor deficits produce advisory messages and workflow priorities, not a

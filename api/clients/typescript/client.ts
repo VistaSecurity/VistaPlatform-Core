@@ -48,11 +48,11 @@ import type {
   components as monitoringServiceComponents,
 } from "./monitoring-service";
 import type {
-  paths as resourceTrackerServicePaths,
-} from "./resource-tracker-service";
-import type {
   paths as tenantHealthServicePaths,
 } from "./tenant-health-service";
+import type {
+  paths as maintenanceServicePaths,
+} from "./maintenance-service";
 
 /** Convenience aliases for the most-used schema types. */
 export type Scope = components["schemas"]["Scope"];
@@ -591,26 +591,6 @@ export function createMonitoringServiceClient(
 }
 
 /**
- * Construct a typed resource-tracker-service client (v1 surface). Covers the
- * platform-admin resource-usage + cost-monitoring reads (tenant resource usage,
- * quotas, AWS cost breakdown, optimization analysis). Spec'd as part of the
- * admin-ui-v2 prep — this service had no contract before. All paths, params and
- * responses are checked against the generated contract types at compile time.
- */
-export function createResourceTrackerServiceClient(
-  opts: CreateClientOptions = {},
-): Client<resourceTrackerServicePaths> {
-  const client = createClient<resourceTrackerServicePaths>({
-    baseUrl: opts.baseUrl ?? "/api/v1/resource-tracker-service",
-    credentials: "include",
-    ...(opts.fetch ? { fetch: opts.fetch } : {}),
-  });
-  client.use(makeCsrfMiddleware(opts.csrfCookie));
-  client.use(makeSessionExpiryMiddleware(opts.fetch));
-  return client;
-}
-
-/**
  * Construct a typed tenant-health-service client (v1 surface). Covers the
  * platform-admin tenant-health reads (per-tenant scoring, trends, metrics,
  * benchmarks, comparison, insights) and on-demand recalculation. Spec'd as part
@@ -623,6 +603,26 @@ export function createTenantHealthServiceClient(
 ): Client<tenantHealthServicePaths> {
   const client = createClient<tenantHealthServicePaths>({
     baseUrl: opts.baseUrl ?? "/api/v1/tenant-health-service",
+    credentials: "include",
+    ...(opts.fetch ? { fetch: opts.fetch } : {}),
+  });
+  client.use(makeCsrfMiddleware(opts.csrfCookie));
+  client.use(makeSessionExpiryMiddleware(opts.fetch));
+  return client;
+}
+
+/**
+ * Construct a typed maintenance-service client (v1 surface): the platform
+ * admin console's Maintenance section — capabilities, release and running
+ * versions, and (in later work packages) backups, the update check and the
+ * one-click update. All paths and responses are checked against the generated
+ * contract types at compile time.
+ */
+export function createMaintenanceServiceClient(
+  opts: CreateClientOptions = {},
+): Client<maintenanceServicePaths> {
+  const client = createClient<maintenanceServicePaths>({
+    baseUrl: opts.baseUrl ?? "/api/v1/maintenance-service",
     credentials: "include",
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });

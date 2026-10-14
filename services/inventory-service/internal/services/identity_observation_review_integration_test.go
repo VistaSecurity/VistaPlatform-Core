@@ -91,6 +91,10 @@ func TestIntegration_ObservationNeeds_SQLMatchesGo(t *testing.T) {
 			`{"identifiers":[{"kind":"ip_address","value":"198.51.100.5","scope":"seg"},{"kind":"hostname","value":"h5","scope":"seg"}],"endpoints":[{"address":"198.51.100.5","port":22,"transport":"tcp"}]}`,
 			// One owned identifier, one unowned → the owner still counts.
 			`{"identifiers":[{"kind":"ip_address","value":"198.51.100.1","scope":"seg"},{"kind":"mac_address","value":"aa:bb:cc:00:00:99"}],"endpoints":[{"address":"198.51.100.1","port":22,"transport":"tcp"}]}`,
+			// MAC only, unowned: no address to place in a network, nothing to confirm.
+			`{"identifiers":[{"kind":"mac_address","value":"aa:bb:cc:00:00:77"}]}`,
+			// MAC only, owned by one active asset → link_existing even with no address.
+			`{"identifiers":[{"kind":"mac_address","value":"aa:bb:cc:00:00:02"}]}`,
 		}
 		now := time.Now().UTC()
 		var (

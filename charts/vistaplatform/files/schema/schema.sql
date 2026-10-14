@@ -445,32 +445,6 @@ END;
 $$;
 
 
--- FUNCTION: cleanup_old_aws_cost_data(integer)
-CREATE OR REPLACE FUNCTION public.cleanup_old_aws_cost_data(retention_days integer DEFAULT 365) RETURNS integer
-    LANGUAGE plpgsql
-    AS $$
-DECLARE
-    deleted_count INTEGER;
-BEGIN
-    -- Delete AWS cost data older than retention_days
-    DELETE FROM aws_cost_data
-    WHERE cost_date < CURRENT_DATE - (retention_days || ' days')::INTERVAL;
-
-
-    GET DIAGNOSTICS deleted_count = ROW_COUNT;
-
-
-    -- Delete old sync job records (keep last 90 days)
-    DELETE FROM aws_cost_sync_jobs
-    WHERE created_at < NOW() - INTERVAL '90 days'
-    AND status IN ('completed', 'failed');
-
-
-    RETURN deleted_count;
-END;
-$$;
-
-
 -- FUNCTION: cleanup_old_resource_usage()
 CREATE OR REPLACE FUNCTION public.cleanup_old_resource_usage() RETURNS void
     LANGUAGE plpgsql
@@ -479,12 +453,6 @@ BEGIN
     -- Delete resource usage data older than 90 days
     DELETE FROM tenant_resource_usage
     WHERE timestamp < NOW() - INTERVAL '90 days';
-
-
-    -- Delete resolved alerts older than 30 days
-    DELETE FROM resource_alerts
-    WHERE is_active = false
-    AND resolved_at < NOW() - INTERVAL '30 days';
 END;
 $$;
 
@@ -1350,22 +1318,6 @@ CREATE TABLE IF NOT EXISTS audit.siem_integrations (
 );
 
 
--- TABLE: resource_alerts
-CREATE TABLE IF NOT EXISTS public.resource_alerts (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid NOT NULL,
-    alert_type character varying(50) NOT NULL,
-    metric character varying(100) NOT NULL,
-    threshold numeric(10,4) NOT NULL,
-    current_value numeric(10,4) NOT NULL,
-    message text NOT NULL,
-    severity character varying(20) NOT NULL,
-    is_active boolean DEFAULT true NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    resolved_at timestamp with time zone
-);
-
-
 -- TABLE: tenants
 CREATE TABLE IF NOT EXISTS public.tenants (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -1394,24 +1346,6 @@ CREATE TABLE IF NOT EXISTS public.tenants (
     CONSTRAINT valid_payment_status CHECK (((payment_status)::text = ANY ((ARRAY['trial'::character varying, 'active'::character varying, 'past_due'::character varying, 'canceled'::character varying, 'incomplete'::character varying, 'suspended'::character varying])::text[]))),
     CONSTRAINT valid_slug CHECK (((slug)::text ~ '^[a-z0-9-]+$'::text))
 );
-
-
--- VIEW: active_resource_alerts
-CREATE OR REPLACE VIEW public.active_resource_alerts AS
- SELECT ra.id,
-    ra.tenant_id,
-    t.name AS tenant_name,
-    ra.alert_type,
-    ra.metric,
-    ra.threshold,
-    ra.current_value,
-    ra.message,
-    ra.severity,
-    ra.created_at
-   FROM (public.resource_alerts ra
-     JOIN public.tenants t ON ((ra.tenant_id = t.id)))
-  WHERE (ra.is_active = true)
-  ORDER BY ra.severity DESC, ra.created_at DESC;
 
 
 -- TABLE: agent_certificates
@@ -1524,88 +1458,6 @@ CREATE TABLE IF NOT EXISTS public.auth_audit_log (
     failure_reason text,
     occurred_at timestamp with time zone DEFAULT now()
 );
-
-
--- TABLE: aws_cost_data
-CREATE TABLE IF NOT EXISTS public.aws_cost_data (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    tenant_id uuid,
-    cost_date date NOT NULL,
-    service_name character varying(100) NOT NULL,
-    amount numeric(12,4) NOT NULL,
-    currency character varying(10) DEFAULT 'USD'::character varying NOT NULL,
-    usage_quantity numeric(15,6),
-    usage_unit character varying(50),
-    usage_type character varying(200),
-    tags jsonb DEFAULT '{}'::jsonb,
-    account_id character varying(20),
-    region character varying(50),
-    synced_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    deleted_at timestamp with time zone
-);
-
-
--- TABLE: aws_cost_sync_jobs
-CREATE TABLE IF NOT EXISTS public.aws_cost_sync_jobs (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    job_type character varying(50) NOT NULL,
-    status character varying(20) NOT NULL,
-    period_start date NOT NULL,
-    period_end date NOT NULL,
-    tenant_id uuid,
-    start_time timestamp with time zone,
-    end_time timestamp with time zone,
-    records_synced integer DEFAULT 0,
-    total_cost numeric(12,4),
-    error_message text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT valid_job_type CHECK (((job_type)::text = ANY ((ARRAY['full_sync'::character varying, 'incremental'::character varying, 'tenant_sync'::character varying])::text[]))),
-    CONSTRAINT valid_status CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'running'::character varying, 'completed'::character varying, 'failed'::character varying])::text[])))
-);
-
-
--- VIEW: aws_daily_cost_summary
-CREATE OR REPLACE VIEW public.aws_daily_cost_summary AS
- SELECT aws_cost_data.cost_date,
-    aws_cost_data.tenant_id,
-    count(DISTINCT aws_cost_data.service_name) AS service_count,
-    sum(aws_cost_data.amount) AS total_cost_usd,
-    sum(aws_cost_data.usage_quantity) AS total_usage_quantity,
-    string_agg(DISTINCT (aws_cost_data.usage_unit)::text, ', '::text) AS usage_units,
-    max(aws_cost_data.synced_at) AS last_synced_at
-   FROM public.aws_cost_data
-  GROUP BY aws_cost_data.cost_date, aws_cost_data.tenant_id;
-
-
--- VIEW: aws_daily_service_cost_summary
-CREATE OR REPLACE VIEW public.aws_daily_service_cost_summary AS
- SELECT aws_cost_data.cost_date,
-    aws_cost_data.service_name,
-    count(DISTINCT aws_cost_data.tenant_id) AS tenant_count,
-    sum(aws_cost_data.amount) AS total_cost_usd,
-    sum(aws_cost_data.usage_quantity) AS total_usage_quantity,
-    string_agg(DISTINCT (aws_cost_data.usage_unit)::text, ', '::text) AS usage_units,
-    max(aws_cost_data.synced_at) AS last_synced_at
-   FROM public.aws_cost_data
-  GROUP BY aws_cost_data.cost_date, aws_cost_data.service_name;
-
-
--- VIEW: aws_tenant_monthly_cost_summary
-CREATE OR REPLACE VIEW public.aws_tenant_monthly_cost_summary AS
- SELECT aws_cost_data.tenant_id,
-    (date_trunc('month'::text, (aws_cost_data.cost_date)::timestamp with time zone))::date AS month,
-    count(DISTINCT aws_cost_data.service_name) AS service_count,
-    sum(aws_cost_data.amount) AS total_cost_usd,
-    avg(aws_cost_data.amount) AS avg_daily_cost_usd,
-    max(aws_cost_data.amount) AS max_daily_cost_usd,
-    min(aws_cost_data.amount) AS min_daily_cost_usd,
-    sum(aws_cost_data.usage_quantity) AS total_usage_quantity
-   FROM public.aws_cost_data
-  WHERE (aws_cost_data.tenant_id IS NOT NULL)
-  GROUP BY aws_cost_data.tenant_id, ((date_trunc('month'::text, (aws_cost_data.cost_date)::timestamp with time zone))::date);
 
 
 -- TABLE: billing_coupon_redemptions
@@ -6904,32 +6756,6 @@ DO $$ BEGIN
 END $$;
 
 
--- CONSTRAINT: aws_cost_data aws_cost_data_pkey
-DO $$ BEGIN
-  IF to_regclass('public.aws_cost_data') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'aws_cost_data_pkey' AND conrelid = to_regclass('public.aws_cost_data')
-     ) THEN
-    ALTER TABLE ONLY public.aws_cost_data
-        ADD CONSTRAINT aws_cost_data_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: aws_cost_sync_jobs aws_cost_sync_jobs_pkey
-DO $$ BEGIN
-  IF to_regclass('public.aws_cost_sync_jobs') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'aws_cost_sync_jobs_pkey' AND conrelid = to_regclass('public.aws_cost_sync_jobs')
-     ) THEN
-    ALTER TABLE ONLY public.aws_cost_sync_jobs
-        ADD CONSTRAINT aws_cost_sync_jobs_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
 -- CONSTRAINT: billing_coupon_redemptions billing_coupon_redemptions_coupon_id_tenant_id_key
 DO $$ BEGIN
   IF to_regclass('public.billing_coupon_redemptions') IS NOT NULL
@@ -8421,19 +8247,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.remediation_plans
         ADD CONSTRAINT remediation_plans_pkey PRIMARY KEY (id);
-  END IF;
-END $$;
-
-
--- CONSTRAINT: resource_alerts resource_alerts_pkey
-DO $$ BEGIN
-  IF to_regclass('public.resource_alerts') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'resource_alerts_pkey' AND conrelid = to_regclass('public.resource_alerts')
-     ) THEN
-    ALTER TABLE ONLY public.resource_alerts
-        ADD CONSTRAINT resource_alerts_pkey PRIMARY KEY (id);
   END IF;
 END $$;
 
@@ -10187,92 +10000,6 @@ CREATE INDEX IF NOT EXISTS idx_auth_audit_occurred_at ON public.auth_audit_log U
 CREATE INDEX IF NOT EXISTS idx_auth_audit_tenant_user ON public.auth_audit_log USING btree (tenant_id, user_id);
 
 
--- INDEX: idx_aws_cost_data_cost_date
-CREATE INDEX IF NOT EXISTS idx_aws_cost_data_cost_date ON public.aws_cost_data USING btree (cost_date);
-
-
--- INDEX: idx_aws_cost_data_service
-CREATE INDEX IF NOT EXISTS idx_aws_cost_data_service ON public.aws_cost_data USING btree (service_name);
-
-
--- INDEX: idx_aws_cost_data_synced_at
-CREATE INDEX IF NOT EXISTS idx_aws_cost_data_synced_at ON public.aws_cost_data USING btree (synced_at);
-
-
--- INDEX: idx_aws_cost_data_tenant_date
-CREATE INDEX IF NOT EXISTS idx_aws_cost_data_tenant_date ON public.aws_cost_data USING btree (tenant_id, cost_date);
-
-
--- INDEX: idx_aws_cost_data_tenant_id
-CREATE INDEX IF NOT EXISTS idx_aws_cost_data_tenant_id ON public.aws_cost_data USING btree (tenant_id);
-
-
--- INDEX: idx_aws_cost_data_unique_v2
--- v2 (B-57): the original idx_aws_cost_data_unique indexed tenant_id directly.
--- Postgres unique indexes treat NULL as distinct from every other value
--- (including another NULL), so the platform-wide sync's tenant_id=NULL rows
--- never collided with the index and StoreCostData's ON CONFLICT arbiter could
--- never match them — every sync attempt re-inserted instead of updating.
--- COALESCE(tenant_id, <sentinel>) collapses NULL onto one concrete value like
--- every other tenant_id, restoring the intended one-row-per-day-per-service
--- upsert. Superseded index dropped in POST-MIGRATIONS below. Kept as a
--- separate name (not a same-name redefinition) because `CREATE ... IF NOT
--- EXISTS` is a no-op by name on an already-migrated database regardless of
--- whether the definition changed.
---
--- MUST be preceded by the de-duplication block below. Collapsing NULL onto a
--- sentinel makes rows that were previously DISTINCT under the old index
--- collide, and duplicate NULL-tenant rows are exactly what the bug produced —
--- so on any database that ran the buggy sync, creating this index without
--- repairing the data first aborts the whole migration under ON_ERROR_STOP=1.
-DO $$
-BEGIN
-    -- Idempotent no-op on a fresh install (the table is empty) and on any
-    -- database already carrying the v2 index (it cannot hold duplicates). Only
-    -- a database that accumulated duplicates under the old index has anything
-    -- to delete. Runs BEFORE the CREATE UNIQUE INDEX below rather than in
-    -- POST-MIGRATIONS because the index creation lives here in the pg_dump
-    -- body, thousands of lines earlier in the file — a repair appended at the
-    -- bottom would run only after the statement it exists to unblock had
-    -- already failed and aborted the run.
-    IF to_regclass('public.aws_cost_data') IS NOT NULL THEN
-        DELETE FROM public.aws_cost_data a
-         USING public.aws_cost_data b
-         WHERE a.deleted_at IS NULL
-           AND b.deleted_at IS NULL
-           AND COALESCE(a.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)
-             = COALESCE(b.tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)
-           AND a.cost_date = b.cost_date
-           AND a.service_name = b.service_name
-           AND COALESCE(a.usage_type, ''::character varying) = COALESCE(b.usage_type, ''::character varying)
-           -- Total order over the group, so exactly one row survives: keep the
-           -- most recently synced, breaking ties on id (the PK, never NULL).
-           -- synced_at is NOT NULL in the current definition but is COALESCEd
-           -- anyway so the comparison stays total on any older shape.
-           AND (COALESCE(a.synced_at, 'epoch'::timestamptz), a.id)
-             < (COALESCE(b.synced_at, 'epoch'::timestamptz), b.id);
-    END IF;
-END $$;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_aws_cost_data_unique_v2 ON public.aws_cost_data USING btree (COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid), cost_date, service_name, COALESCE(usage_type, ''::character varying)) WHERE (deleted_at IS NULL);
-
-
--- INDEX: idx_aws_cost_sync_jobs_created
-CREATE INDEX IF NOT EXISTS idx_aws_cost_sync_jobs_created ON public.aws_cost_sync_jobs USING btree (created_at DESC);
-
-
--- INDEX: idx_aws_cost_sync_jobs_period
-CREATE INDEX IF NOT EXISTS idx_aws_cost_sync_jobs_period ON public.aws_cost_sync_jobs USING btree (period_start, period_end);
-
-
--- INDEX: idx_aws_cost_sync_jobs_status
-CREATE INDEX IF NOT EXISTS idx_aws_cost_sync_jobs_status ON public.aws_cost_sync_jobs USING btree (status);
-
-
--- INDEX: idx_aws_cost_sync_jobs_tenant
-CREATE INDEX IF NOT EXISTS idx_aws_cost_sync_jobs_tenant ON public.aws_cost_sync_jobs USING btree (tenant_id);
-
-
 -- INDEX: idx_billing_customers_tenant
 CREATE INDEX IF NOT EXISTS idx_billing_customers_tenant ON public.billing_customers USING btree (tenant_id);
 
@@ -11368,18 +11095,6 @@ CREATE INDEX IF NOT EXISTS idx_remediation_plans_tenant_status ON public.remedia
 
 -- INDEX: idx_remediation_plans_title_trgm
 CREATE INDEX IF NOT EXISTS idx_remediation_plans_title_trgm ON public.remediation_plans USING gin (title public.gin_trgm_ops);
-
-
--- INDEX: idx_resource_alerts_is_active
-CREATE INDEX IF NOT EXISTS idx_resource_alerts_is_active ON public.resource_alerts USING btree (is_active);
-
-
--- INDEX: idx_resource_alerts_severity
-CREATE INDEX IF NOT EXISTS idx_resource_alerts_severity ON public.resource_alerts USING btree (severity);
-
-
--- INDEX: idx_resource_alerts_tenant_id
-CREATE INDEX IF NOT EXISTS idx_resource_alerts_tenant_id ON public.resource_alerts USING btree (tenant_id);
 
 
 -- INDEX: idx_rule_vulnerability_mappings_finding_type
@@ -13230,32 +12945,6 @@ DO $$ BEGIN
 END $$;
 
 
--- FK CONSTRAINT: aws_cost_data aws_cost_data_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.aws_cost_data') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'aws_cost_data_tenant_id_fkey' AND conrelid = to_regclass('public.aws_cost_data')
-     ) THEN
-    ALTER TABLE ONLY public.aws_cost_data
-        ADD CONSTRAINT aws_cost_data_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: aws_cost_sync_jobs aws_cost_sync_jobs_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.aws_cost_sync_jobs') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'aws_cost_sync_jobs_tenant_id_fkey' AND conrelid = to_regclass('public.aws_cost_sync_jobs')
-     ) THEN
-    ALTER TABLE ONLY public.aws_cost_sync_jobs
-        ADD CONSTRAINT aws_cost_sync_jobs_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE SET NULL;
-  END IF;
-END $$;
-
-
 -- FK CONSTRAINT: billing_coupon_redemptions billing_coupon_redemptions_coupon_id_fkey
 DO $$ BEGIN
   IF to_regclass('public.billing_coupon_redemptions') IS NOT NULL
@@ -14944,19 +14633,6 @@ DO $$ BEGIN
      ) THEN
     ALTER TABLE ONLY public.remediation_plans
         ADD CONSTRAINT remediation_plans_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
-  END IF;
-END $$;
-
-
--- FK CONSTRAINT: resource_alerts resource_alerts_tenant_id_fkey
-DO $$ BEGIN
-  IF to_regclass('public.resource_alerts') IS NOT NULL
-     AND NOT EXISTS (
-       SELECT 1 FROM pg_constraint
-       WHERE conname = 'resource_alerts_tenant_id_fkey' AND conrelid = to_regclass('public.resource_alerts')
-     ) THEN
-    ALTER TABLE ONLY public.resource_alerts
-        ADD CONSTRAINT resource_alerts_tenant_id_fkey FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE;
   END IF;
 END $$;
 
@@ -16873,16 +16549,6 @@ DROP POLICY IF EXISTS auth_audit_log_tenant_isolation ON public.auth_audit_log;
 CREATE POLICY auth_audit_log_tenant_isolation ON public.auth_audit_log
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.aws_cost_data ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS aws_cost_data_tenant_isolation ON public.aws_cost_data;
-CREATE POLICY aws_cost_data_tenant_isolation ON public.aws_cost_data
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.aws_cost_sync_jobs ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS aws_cost_sync_jobs_tenant_isolation ON public.aws_cost_sync_jobs;
-CREATE POLICY aws_cost_sync_jobs_tenant_isolation ON public.aws_cost_sync_jobs
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.billing_coupon_redemptions ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS billing_coupon_redemptions_tenant_isolation ON public.billing_coupon_redemptions;
 CREATE POLICY billing_coupon_redemptions_tenant_isolation ON public.billing_coupon_redemptions
@@ -17142,11 +16808,6 @@ CREATE POLICY posture_daily_snapshots_tenant_isolation ON public.posture_daily_s
 ALTER TABLE public.remediation_plans ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS remediation_plans_tenant_isolation ON public.remediation_plans;
 CREATE POLICY remediation_plans_tenant_isolation ON public.remediation_plans
-  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-ALTER TABLE public.resource_alerts ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS resource_alerts_tenant_isolation ON public.resource_alerts;
-CREATE POLICY resource_alerts_tenant_isolation ON public.resource_alerts
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
 ALTER TABLE public.scopes ENABLE ROW LEVEL SECURITY;
@@ -17507,7 +17168,7 @@ BEGIN
     SELECT unnest(ARRAY[
       'audit.alert_rules','audit.siem_integrations',
       'public.service_identification_rules','public.workflow_configurations',
-      'public.aws_cost_data','public.aws_cost_sync_jobs','public.platform_log_metadata'
+      'public.platform_log_metadata'
     ])
   LOOP
     EXECUTE format('DROP POLICY IF EXISTS %I ON %s',
@@ -17744,6 +17405,22 @@ CREATE TABLE IF NOT EXISTS public.platform_maintenance_windows (
 );
 CREATE INDEX IF NOT EXISTS idx_platform_maintenance_windows_active
     ON public.platform_maintenance_windows (starts_at, ends_at);
+
+-- platform_update_status: the admin console's "is a newer release out?" answer
+-- (platform maintenance, WP2). A single row (id is pinned to 1) that
+-- maintenance-service's update check upserts after listing the chart
+-- registry's OCI tags; the console reads this row, never the registry.
+-- Platform-scoped: no tenant column, no RLS.
+CREATE TABLE IF NOT EXISTS public.platform_update_status (
+    id smallint PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    checked_at timestamptz,
+    source text,
+    current_version text,
+    latest_version text,
+    notes_url text,
+    error text,
+    prereleases_seen jsonb
+);
 
 
 -- =========================================================================
@@ -18048,10 +17725,6 @@ DROP TABLE IF EXISTS public.crypto_code_findings CASCADE;
 -- This block must stay AFTER every CREATE OR REPLACE VIEW / matview
 -- DROP+CREATE above so a re-apply always leaves the flag set.
 -- Idempotent: ALTER VIEW ... SET is a plain reloption write.
-ALTER VIEW public.active_resource_alerts        SET (security_invoker = true);
-ALTER VIEW public.aws_daily_cost_summary        SET (security_invoker = true);
-ALTER VIEW public.aws_daily_service_cost_summary SET (security_invoker = true);
-ALTER VIEW public.aws_tenant_monthly_cost_summary SET (security_invoker = true);
 ALTER VIEW public.current_resource_usage_summary SET (security_invoker = true);
 ALTER VIEW public.health_metrics_aggregated_view SET (security_invoker = true);
 ALTER VIEW public.platform_integrations_summary SET (security_invoker = true);
@@ -18457,23 +18130,6 @@ DROP POLICY IF EXISTS asset_suppressions_tenant_isolation ON public.asset_suppre
 CREATE POLICY asset_suppressions_tenant_isolation ON public.asset_suppressions
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-
-
--- ============================================================================
--- B-57: aws_cost_data unique index superseded by idx_aws_cost_data_unique_v2
--- ============================================================================
--- idx_aws_cost_data_unique_v2 (created earlier in this file, alongside the
--- aws_cost_data table) replaces idx_aws_cost_data_unique. `CREATE UNIQUE INDEX
--- IF NOT EXISTS` matches by name only, so redefining the original name in
--- place would silently keep the old (buggy) index on every database that had
--- already applied a prior version of this file — hence the new name plus this
--- drop, rather than an in-place edit.
---
--- The drop belongs HERE and the de-duplication that unblocks the v2 index
--- belongs UP THERE, next to the CREATE: dropping the old index early would
--- leave the table unprotected if a later statement in the same run failed,
--- while the dedup must precede the CREATE it exists to make succeed.
-DROP INDEX IF EXISTS public.idx_aws_cost_data_unique;
 
 
 
@@ -23372,6 +23028,68 @@ CREATE INDEX IF NOT EXISTS idx_certificates_tenant_subject_dn
     ON public.certificates USING btree (tenant_id, subject_dn);
 
 -- ----------------------------------------------------------------------------
+-- Platform maintenance: runs and backups ( WP3)
+-- ----------------------------------------------------------------------------
+-- maintenance-service's records of what it ran (spec
+-- docsv4/internal/developer/standards/features/platform-maintenance.md §2).
+-- Platform-scoped: no tenant column and no RLS, like the other platform_*
+-- tables; only maintenance-service reads or writes them, behind
+-- platform.health / platform.maintenance.
+--
+-- platform_maintenance_runs is the admin console's source for a backup, update
+-- or rollback; the Kubernetes Job named in k8s_job_name is the executor. The
+-- service settles a `running` row from its Job's status, including on boot, so
+-- a run survives the service's own restart. steps is the per-step status and a
+-- bounded log tail. At most ONE run is `running` at a time:
+-- platform_maintenance_runs_one_running is a unique index over the status of
+-- running rows, so a second concurrent start fails in the database itself
+-- (the API answers 409 run_in_progress) rather than in a check-then-insert race.
+CREATE TABLE IF NOT EXISTS public.platform_maintenance_runs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    kind text NOT NULL,
+    status text DEFAULT 'running'::text NOT NULL,
+    started_by uuid,
+    started_at timestamp with time zone DEFAULT now() NOT NULL,
+    finished_at timestamp with time zone,
+    from_version text,
+    to_version text,
+    k8s_job_name text,
+    steps jsonb DEFAULT '[]'::jsonb NOT NULL,
+    error text,
+    CONSTRAINT platform_maintenance_runs_kind_check CHECK ((kind = ANY (ARRAY['backup'::text, 'update'::text, 'rollback'::text]))),
+    CONSTRAINT platform_maintenance_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS platform_maintenance_runs_one_running
+    ON public.platform_maintenance_runs USING btree (status) WHERE (status = 'running'::text);
+CREATE INDEX IF NOT EXISTS idx_platform_maintenance_runs_started_at
+    ON public.platform_maintenance_runs USING btree (started_at DESC);
+
+-- platform_backups: one row per backup. file_path is relative to the backups
+-- volume (maintenance.backups). manifest is what the bundle's manifest.json
+-- says (versions, schema hash, edition, install id, contents) — never key
+-- material: the Secrets go into the encrypted bundle only. A deleted backup
+-- keeps its row (status deleted, deleted_at) so the run history still names it.
+CREATE TABLE IF NOT EXISTS public.platform_backups (
+    id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
+    run_id uuid REFERENCES public.platform_maintenance_runs(id) ON DELETE SET NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    size_bytes bigint,
+    contents jsonb NOT NULL,
+    encrypted boolean DEFAULT false NOT NULL,
+    manifest jsonb DEFAULT '{}'::jsonb NOT NULL,
+    file_path text,
+    status text DEFAULT 'running'::text NOT NULL,
+    deleted_at timestamp with time zone,
+    CONSTRAINT platform_backups_status_check CHECK ((status = ANY (ARRAY['running'::text, 'ready'::text, 'failed'::text, 'deleted'::text])))
+);
+
+CREATE INDEX IF NOT EXISTS idx_platform_backups_run_id
+    ON public.platform_backups USING btree (run_id);
+CREATE INDEX IF NOT EXISTS idx_platform_backups_status_created
+    ON public.platform_backups USING btree (status, created_at DESC);
+
+-- ----------------------------------------------------------------------------
 -- crypto_risk_judgments: the judged crypto risk of every configuration
 -- ----------------------------------------------------------------------------
 -- The Crypto Risks list, summary tiles and CSV export used to re-judge EVERY
@@ -26043,3 +25761,29 @@ ALTER TABLE public.device_agents
 ALTER TABLE public.sensors
     ADD COLUMN IF NOT EXISTS agent_secret_enc text,
     ADD COLUMN IF NOT EXISTS agent_secret_version integer DEFAULT 0 NOT NULL;
+
+-- ----------------------------------------------------------------------------
+-- AWS Cost Explorer subsystem retired (resource-tracker-service retirement, step 1)
+-- ----------------------------------------------------------------------------
+-- resource-tracker-service's AWS Cost Explorer sync never had a consumer: no UI
+-- read it, no peer called its cost endpoints, and the platform-integration
+-- record it needed had no admin console page. The code is gone; these objects
+-- go with it. Every statement is idempotent so the migration Job can re-run.
+-- Views first (they depend on the table), then the function, then the tables
+-- (their RLS policies and indexes drop with them).
+DROP VIEW IF EXISTS public.aws_daily_cost_summary;
+DROP VIEW IF EXISTS public.aws_daily_service_cost_summary;
+DROP VIEW IF EXISTS public.aws_tenant_monthly_cost_summary;
+DROP FUNCTION IF EXISTS public.cleanup_old_aws_cost_data(integer);
+DROP TABLE IF EXISTS public.aws_cost_data;
+DROP TABLE IF EXISTS public.aws_cost_sync_jobs;
+
+-- ----------------------------------------------------------------------------
+-- resource-tracker-service retired (step 4 of 4)
+-- ----------------------------------------------------------------------------
+-- resource_alerts was written and read only by the retired service's own
+-- threshold checks; nothing surfaced the rows. tenant_resource_usage stays:
+-- auth-service's resource-metrics ingest writes it and billing, the MSP
+-- dashboard, inventory-service and monitoring-service read it.
+DROP VIEW IF EXISTS public.active_resource_alerts;
+DROP TABLE IF EXISTS public.resource_alerts;

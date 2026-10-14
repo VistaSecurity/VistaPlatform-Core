@@ -360,56 +360,6 @@ services:
       - crypto-network
     restart: unless-stopped
 
-  resource-tracker-service:
-    build:
-      context: .
-      dockerfile: ./services/resource-tracker-service/Dockerfile.dev
-      args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
-        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
-    container_name: crypto-resource-tracker-service
-    environment:
-      - PORT=8080
-      - ENV=development
-      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
-      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
-      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
-      - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY:?Set ENCRYPTION_MASTER_KEY in .env}
-      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
-      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
-      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
-      - LOG_LEVEL=debug
-      # mTLS Configuration
-      - USE_MTLS=true
-      - TLS_PORT=8443
-      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
-      - SERVICE_KEY_PATH=/app/certs/server-key.pem
-      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
-      - CLIENT_KEY_PATH=/app/certs/client-key.pem
-      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
-    ports:
-      - "${RESOURCE_TRACKER_HOST_PORT:-8092}:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      db-roles:
-        condition: service_completed_successfully
-        required: true
-      redis:
-        condition: service_healthy
-      nats:
-        condition: service_healthy
-        required: true
-    volumes:
-      - ./service-certs/resource-tracker-service:/app/certs:ro
-      # - ./services/resource-tracker-service:/app
-      # - /app/vendor
-    networks:
-      - crypto-network
-    restart: unless-stopped
-
   mcp-service:
     build:
       context: .
@@ -619,7 +569,6 @@ services:
       - monitoring-service
       - device-interrogation-service
       - audit-service
-      - resource-tracker-service
       - tenant-health-service
     networks:
       - crypto-network
@@ -980,6 +929,56 @@ services:
         condition: service_healthy
     volumes:
       - ./service-certs/discovery-processor-service:/app/certs:ro
+    networks:
+      - crypto-network
+    restart: unless-stopped
+
+  # maintenance-service — platform backups and updates (Core). Compose is
+  # evaluation only: outside Kubernetes the service reports every capability
+  # off (reason not_kubernetes) and the admin console's Maintenance pages say
+  # so. It is here so the console's About & Updates page and the gateway route
+  # work end to end in dev.
+  maintenance-service:
+    build:
+      context: .
+      dockerfile: ./services/maintenance-service/Dockerfile.dev
+      args:
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
+    container_name: crypto-maintenance-service
+    environment:
+      - PORT=8080
+      - ENV=development
+      - CORS_ORIGINS=${DEV_CORS_ORIGINS:-http://localhost:${WEB_UI_HOST_PORT:-3000},http://localhost:${ADMIN_UI_HOST_PORT:-3006}}
+      - DATABASE_URL=postgres://crypto_app:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - BYPASS_DATABASE_URL=postgres://crypto_bypass:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-crypto_inventory}?sslmode=disable
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - INTERNAL_AUTH_SECRET=${INTERNAL_AUTH_SECRET:?Set INTERNAL_AUTH_SECRET in .env}
+      - LICENSE_TOKEN=${LICENSE_TOKEN:-}
+      - NATS_URL=nats://${NATS_USER:-nats_user}:${NATS_PASSWORD}@nats:4222
+      - LOG_LEVEL=debug
+      # mTLS Configuration
+      - USE_MTLS=true
+      - TLS_PORT=8443
+      - SERVICE_CERT_PATH=/app/certs/server-cert.pem
+      - SERVICE_KEY_PATH=/app/certs/server-key.pem
+      - CLIENT_CERT_PATH=/app/certs/client-cert.pem
+      - CLIENT_KEY_PATH=/app/certs/client-key.pem
+      - PLATFORM_CA_CERT_PATH=/app/certs/platform-ca-cert.pem
+    ports:
+      - "${MAINTENANCE_SERVICE_HOST_PORT:-8102}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./service-certs/maintenance-service:/app/certs:ro
     networks:
       - crypto-network
     restart: unless-stopped

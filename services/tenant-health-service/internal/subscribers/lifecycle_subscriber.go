@@ -15,8 +15,8 @@ import (
 
 // defaultRecalcDebounce is how long we wait for a tenant's lifecycle events to
 // settle before running a single coalesced health recalculation. A full recalc
-// fans out to auth-service, monitoring-service, inventory-service and
-// resource-tracker-service, so recalculating once per event (as the original
+// fans out to auth-service, monitoring-service and inventory-service, so
+// recalculating once per event (as the original
 // implementation did) turns a bulk operation — seeding, a large discovery
 // import, a re-enrichment sweep — into a thundering herd that trips
 // auth-service's per-tenant rate limiter (observed: 236 recalcs in one minute

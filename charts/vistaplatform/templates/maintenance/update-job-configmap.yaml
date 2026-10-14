@@ -1,0 +1,175 @@
+{{/*
+The update / rollback Job template (WP4). maintenance-service reads it from
+this ConfigMap (mounted into its pod; no RBAC on ConfigMaps needed), sets
+MAINTENANCE_ACTION and TARGET_VERSION or ROLLBACK_REVISION on the container,
+gives the Job its name — and changes NOTHING else.
+
+Everything else is rendered here, because the Job replaces the service that
+created it: `helm upgrade` rolls maintenance-service's own Deployment, so the
+Job must carry the release, namespace, chart source, timeout and registry
+credential from the moment it is created. The run is then settled by the new
+maintenance-service pod (reconcile-on-start), which runs the smoke step.
+
+  identity   the vistaplatform-updater ServiceAccount (templates/maintenance/
+             rbac-updater.yaml): the one pod that mounts its token.
+  image      maintenance-service's own image — it ships pinned, checksummed
+             helm and cosign (the Dockerfiles' `tools` stage).
+  network    labelled app.kubernetes.io/component: maintenance-updater, which
+             the kube-API egress rule and allow-egress-outbound select, so the
+             Job reaches the API server and the chart registry under the
+             egress default-deny. Deliberately NOT maintenance-service's label:
+             that would put the Job's pod behind the maintenance-service
+             Service and into the backup Job's pod-affinity selector.
+  registry   image.pullSecrets[0], mounted as helm's --registry-config (the
+             same dockerconfigjson format), so credentials never reach the
+             command line or the log.
+  requests   none, like the schema-migration Job: on a single node a rolling
+             upgrade surges CPU requests, and the Job that drives the rollout
+             must not be the pod that cannot schedule.
+
+The Job reports its step with `VISTA_STEP <name> <status>` lines on stdout,
+which maintenance-service's runner parses.
+*/}}
+{{- if include "vistaplatform.maintenanceEnabled" . }}
+{{- $svc := index .Values.backends "maintenance-service" | default dict }}
+{{- $image := $svc.image | default dict }}
+{{- $imageTag := default .Values.image.tag $image.tag }}
+{{- $pullSecret := first (.Values.image.pullSecrets | default list) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vistaplatform.maintenanceUpdateJobConfigMapName" . }}
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance-service
+data:
+  update-job.yaml: |
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      labels:
+        {{- include "vistaplatform.labels" . | nindent 8 }}
+        app.kubernetes.io/component: maintenance-updater
+    spec:
+      # One attempt: a second `helm upgrade` after a failed one is not a
+      # retry the operator asked for. The run offers a rollback instead.
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ include "vistaplatform.maintenanceUpdateDeadlineSeconds" . }}
+      template:
+        metadata:
+          labels:
+            {{- include "vistaplatform.labels" . | nindent 12 }}
+            app.kubernetes.io/component: maintenance-updater
+        spec:
+          restartPolicy: Never
+          serviceAccountName: vistaplatform-updater
+          automountServiceAccountToken: true
+          {{- with include "vistaplatform.pullSecrets" . }}
+          {{- . | nindent 10 }}
+          {{- end }}
+          securityContext:
+            {{- include "vistaplatform.podSecurityContext" . | nindent 12 }}
+          containers:
+            - name: helm
+              image: {{ include "vistaplatform.image" (dict "ctx" . "repo" "maintenance-service" "tag" $imageTag "digest" $image.digest) }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- include "vistaplatform.containerSecurityContext" . | nindent 16 }}
+              resources:
+                limits:
+                  memory: 1Gi
+              env:
+                # Set by maintenance-service for each run.
+                - name: MAINTENANCE_ACTION
+                  value: ""
+                - name: TARGET_VERSION
+                  value: ""
+                - name: ROLLBACK_REVISION
+                  value: ""
+                # Rendered here: the Job outlives the service that creates it.
+                - name: HELM_RELEASE_NAME
+                  value: {{ .Release.Name | quote }}
+                - name: POD_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: CHART_SOURCE
+                  value: {{ include "vistaplatform.maintenanceChartSource" . | quote }}
+                - name: HELM_TIMEOUT
+                  value: {{ include "vistaplatform.maintenanceUpdateTimeout" . | quote }}
+                - name: HELM_PLAIN_HTTP
+                  value: {{ include "vistaplatform.maintenanceUpdatesFlag" (dict "ctx" . "key" "plainHttp") | quote }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  umask 077
+                  # helm writes its cache and config under HOME; the root
+                  # filesystem is read-only, /tmp is an emptyDir.
+                  export HOME=/tmp/home HELM_CACHE_HOME=/tmp/helm/cache HELM_CONFIG_HOME=/tmp/helm/config HELM_DATA_HOME=/tmp/helm/data
+                  mkdir -p "$HOME" "$HELM_CACHE_HOME" "$HELM_CONFIG_HOME" "$HELM_DATA_HOME"
+                  registry=""
+                  if [ -f /etc/vistaplatform/registry/.dockerconfigjson ]; then
+                    registry="--registry-config /etc/vistaplatform/registry/.dockerconfigjson"
+                  fi
+                  plain=""
+                  if [ "${HELM_PLAIN_HTTP:-false}" = "true" ]; then plain="--plain-http"; fi
+                  helm version --short
+                  case "${MAINTENANCE_ACTION:-}" in
+                    upgrade)
+                      case "${TARGET_VERSION:-}" in
+                        ''|*[!0-9A-Za-z.+-]*) echo "TARGET_VERSION is missing or malformed" >&2; echo "VISTA_STEP upgrade failed"; exit 2 ;;
+                      esac
+                      echo "VISTA_STEP upgrade running"
+                      echo "helm upgrade $HELM_RELEASE_NAME $CHART_SOURCE --version $TARGET_VERSION -n $POD_NAMESPACE --reset-then-reuse-values --wait --timeout $HELM_TIMEOUT"
+                      # shellcheck disable=SC2086 # $registry / $plain are flag lists
+                      if helm upgrade "$HELM_RELEASE_NAME" "$CHART_SOURCE" --version "$TARGET_VERSION" \
+                          --namespace "$POD_NAMESPACE" --reset-then-reuse-values \
+                          --wait --timeout "$HELM_TIMEOUT" $registry $plain; then
+                        echo "VISTA_STEP upgrade succeeded"
+                      else
+                        echo "VISTA_STEP upgrade failed"
+                        exit 1
+                      fi
+                      ;;
+                    rollback)
+                      case "${ROLLBACK_REVISION:-}" in
+                        ''|*[!0-9]*) echo "ROLLBACK_REVISION is missing or malformed" >&2; echo "VISTA_STEP rollback failed"; exit 2 ;;
+                      esac
+                      echo "VISTA_STEP rollback running"
+                      echo "helm rollback $HELM_RELEASE_NAME $ROLLBACK_REVISION -n $POD_NAMESPACE --wait --timeout $HELM_TIMEOUT"
+                      if helm rollback "$HELM_RELEASE_NAME" "$ROLLBACK_REVISION" \
+                          --namespace "$POD_NAMESPACE" --wait --timeout "$HELM_TIMEOUT"; then
+                        echo "VISTA_STEP rollback succeeded"
+                      else
+                        echo "VISTA_STEP rollback failed"
+                        exit 1
+                      fi
+                      ;;
+                    *)
+                      echo "MAINTENANCE_ACTION must be upgrade or rollback" >&2
+                      exit 2
+                      ;;
+                  esac
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                {{- if $pullSecret }}
+                - name: registry
+                  mountPath: /etc/vistaplatform/registry
+                  readOnly: true
+                {{- end }}
+          volumes:
+            - name: tmp
+              emptyDir: {}
+            {{- if $pullSecret }}
+            - name: registry
+              secret:
+                secretName: {{ $pullSecret }}
+                optional: true
+                items:
+                  - key: .dockerconfigjson
+                    path: .dockerconfigjson
+            {{- end }}
+{{- end }}

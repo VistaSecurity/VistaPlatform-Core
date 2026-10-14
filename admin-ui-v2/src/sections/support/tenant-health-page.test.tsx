@@ -111,7 +111,7 @@ describe('TenantHealthPage unknown health rendering', () => {
         security_posture: 70,
         business_activity: 66,
         cost_optimization: null,
-        unavailable_sources: ['resource-tracker-service'],
+        unavailable_sources: ['monitoring-service'],
         data_completeness: 0.6,
       },
     });
@@ -128,7 +128,7 @@ describe('TenantHealthPage unknown health rendering', () => {
     expect(html).toContain('Fair');
     expect(html).toContain('80/100');
     expect(html).toContain('Some factors could not be measured');
-    expect(html).toContain('resource-tracker-service');
+    expect(html).toContain('monitoring-service');
     expect(html).toContain('score reflects 60% of the factor weight');
   });
 
@@ -176,7 +176,7 @@ describe('TenantHealthPage unknown health rendering', () => {
         security_posture: 70,
         business_activity: 66,
         cost_optimization: null,
-        unavailable_sources: ['resource-tracker-service', 'resource-metering'],
+        unavailable_sources: ['monitoring-service', 'resource-metering'],
         data_completeness: 0.8,
       },
     });
@@ -190,7 +190,7 @@ describe('TenantHealthPage unknown health rendering', () => {
 
     const cost = html.match(/data-testid="factor-cost_optimization"[\s\S]*?<\/div>/)?.[0] ?? '';
     expect(cost).toContain('Unavailable');
-    expect(html).toContain('these services were unreachable: <span class="mono">resource-tracker-service</span>');
+    expect(html).toContain('these services were unreachable: <span class="mono">monitoring-service</span>');
     expect(html).toContain('score reflects 80% of the factor weight');
   });
 

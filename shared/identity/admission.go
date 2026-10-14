@@ -124,6 +124,9 @@ func AssessAdmission(obs Observation) AdmissionDecision {
 
 // ObservationFingerprint keeps sources separate and folds alternate mDNS name
 // spellings. It is an evidence grouping key, never a device matching key.
+// A source with an Origin groups by it rather than by its per-run Ref
+// ([Source.Origin]), so a repeat run of the same controller lands as another
+// receipt of the observation it made last time, not as another row.
 func ObservationFingerprint(obs Observation) string {
 	keys := map[string]bool{}
 	for _, raw := range obs.Identifiers {
@@ -147,7 +150,7 @@ func ObservationFingerprint(obs Observation) string {
 		ordered = append(ordered, key)
 	}
 	sort.Strings(ordered)
-	b, _ := json.Marshal([]any{obs.TenantID, obs.Source, obs.Network, ordered})
+	b, _ := json.Marshal([]any{obs.TenantID, obs.Source.Grouping(), obs.Network, ordered})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }

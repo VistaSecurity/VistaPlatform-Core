@@ -1,0 +1,97 @@
+{{/*
+vistaplatform-updater's Role: what `helm upgrade` / `helm rollback` of THIS
+release needs, in THIS namespace only — every kind the chart renders, plus the
+Helm release Secrets (Helm's storage).
+
+  core                  services configmaps secrets persistentvolumeclaims
+                        serviceaccounts; pods + pods/log read (see below)
+  apps                  deployments statefulsets; replicasets read (helm's
+                        --wait finds a Deployment's new ReplicaSet to judge it
+                        ready — Helm 3's ready checker lists them)
+  batch                 jobs (schema-migration, seed-data, rls-roles)
+  policy                poddisruptionbudgets (rendered when replicas > 1)
+  networking.k8s.io     networkpolicies
+  rbac                  roles rolebindings (the chart's own, these included)
+  traefik.io            ingressroutes ingressroutetcps middlewares
+                        serverstransports tlsoptions (the edge)
+  cert-manager.io       certificates issuers (mTLS mesh, edge certManager mode)
+
+pods get/list and pods/log get: Kubernetes refuses to let an account create or
+update a Role granting permissions it does not hold itself (RBAC escalation
+prevention), and the release includes maintenance-service's Role, which grants
+those. Without them every upgrade fails on that one object.
+
+The same rule applies to THIS Role: the in-product update runs as the updater,
+so it can only apply an updater Role whose rules the updater already holds. A
+release that ADDS a rule here cannot be installed from the console over a
+release without it — the API server refuses the Role update ("attempting to
+grant RBAC permissions not currently held") and the update fails at its
+upgrade step, offering a rollback. Such a release must say so in its notes and
+be applied once with `helm upgrade` by a cluster admin. (Granting the updater
+`escalate` on roles would lift this, at the price of letting the Job write any
+Role in the namespace; not done.)
+
+scripts/test-chart-maintenance-rbac.mjs asserts that every namespaced kind the
+chart renders is covered here, so a template that adds a new kind cannot ship an
+updater that fails to upgrade it.
+*/}}
+{{- if include "vistaplatform.maintenanceEnabled" . }}
+{{- $rw := list "get" "list" "watch" "create" "update" "patch" "delete" }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vistaplatform-updater
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance-updater
+rules:
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "secrets", "persistentvolumeclaims", "serviceaccounts"]
+    verbs: {{ toJson $rw }}
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: {{ toJson $rw }}
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: {{ toJson $rw }}
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: {{ toJson $rw }}
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: {{ toJson $rw }}
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: {{ toJson $rw }}
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutes", "ingressroutetcps", "middlewares", "serverstransports", "tlsoptions"]
+    verbs: {{ toJson $rw }}
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: {{ toJson $rw }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vistaplatform-updater
+  labels:
+    {{- include "vistaplatform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: maintenance-updater
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vistaplatform-updater
+subjects:
+  - kind: ServiceAccount
+    name: vistaplatform-updater
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -114,18 +114,6 @@ concepts:
     enum_source: health_with_history
     types:
       - string
-  resource_index:
-    unit: index_0_100
-    direction: higher_is_better
-    unknown: Existing backend fallback values registered, cleanup deferred unless a
-      visible dependency proves need.
-    owner: resource-tracker-service
-    range:
-      - 0
-      - 100
-    types:
-      - number
-      - integer
   confidence_fraction:
     unit: fraction
     direction: higher_is_better
@@ -251,17 +239,6 @@ concepts:
     types:
       - number
       - integer
-  operational_severity:
-    unit: ordinal
-    direction: higher_is_worse
-    unknown: Operational severity has its own vocabulary, not finding severity.
-    owner: resource-tracker-service
-    values:
-      - info
-      - warning
-      - critical
-    types:
-      - string
   metadata:
     unit: structure
     direction: not_applicable
@@ -1851,94 +1828,6 @@ bindings:
     schema_exception: Existing notification-service.openapi.yaml contract omits enum
       constraints; preserve current wire compatibility. The severity concept
       declares the intended scale; this audit does not prove runtime validation.
-  resource-tracker-service.openapi.yaml#/components/schemas/ResourceMetricsRequest/properties/cpu_usage_percent:
-    concept: utilization
-    delivery: register_only
-    contract:
-      type: number
-      nullable: false
-      required: false
-    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
-      minimum constraints; preserve current wire compatibility. The utilization
-      concept declares the intended scale; this audit does not prove runtime
-      validation.
-  resource-tracker-service.openapi.yaml#/components/schemas/ResourceAlert/properties/severity:
-    concept: operational_severity
-    delivery: register_only
-    contract:
-      type: string
-      nullable: false
-      required: true
-    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
-      enum constraints; preserve current wire compatibility. The
-      operational_severity concept declares the intended scale; this audit does
-      not prove runtime validation.
-  resource-tracker-service.openapi.yaml#/components/schemas/ResourceUsageResponse/properties/avg_cpu_percent:
-    concept: utilization
-    delivery: register_only
-    contract:
-      type: number
-      nullable: false
-      required: true
-    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
-      minimum constraints; preserve current wire compatibility. The utilization
-      concept declares the intended scale; this audit does not prove runtime
-      validation.
-  resource-tracker-service.openapi.yaml#/components/schemas/ResourceDataPoint/properties/cpu_usage_percent:
-    concept: utilization
-    delivery: register_only
-    contract:
-      type: number
-      nullable: false
-      required: true
-    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
-      minimum constraints; preserve current wire compatibility. The utilization
-      concept declares the intended scale; this audit does not prove runtime
-      validation.
-  resource-tracker-service.openapi.yaml#/components/schemas/TenantResourceSummary/properties/optimization_score:
-    concept: resource_index
-    delivery: register_only
-    contract:
-      type: number
-      nullable: false
-      required: true
-    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
-      minimum/maximum constraints; preserve current wire compatibility. The
-      resource_index concept declares the intended scale; this audit does not
-      prove runtime validation.
-  resource-tracker-service.openapi.yaml#/components/schemas/PlatformStatsBlock/properties/avg_cpu_percent:
-    concept: utilization
-    delivery: register_only
-    contract:
-      type: number
-      nullable: false
-      required: true
-    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
-      minimum constraints; preserve current wire compatibility. The utilization
-      concept declares the intended scale; this audit does not prove runtime
-      validation.
-  resource-tracker-service.openapi.yaml#/components/schemas/TenantResourceHealthSummary/properties/avg_cpu_percent:
-    concept: utilization
-    delivery: register_only
-    contract:
-      type: number
-      nullable: false
-      required: true
-    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
-      minimum constraints; preserve current wire compatibility. The utilization
-      concept declares the intended scale; this audit does not prove runtime
-      validation.
-  resource-tracker-service.openapi.yaml#/components/schemas/TenantResourceHealthSummary/properties/resource_efficiency_score:
-    concept: resource_index
-    delivery: register_only
-    contract:
-      type: number
-      nullable: false
-      required: true
-    schema_exception: Existing resource-tracker-service.openapi.yaml contract omits
-      minimum/maximum constraints; preserve current wire compatibility. The
-      resource_index concept declares the intended scale; this audit does not
-      prove runtime validation.
   sensor-manager.openapi.yaml#/components/schemas/SensorDiscovery/properties/confidence:
     concept: confidence_fraction
     delivery: implement

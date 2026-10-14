@@ -451,23 +451,29 @@ What each **Needs** means:
   none of your assets owns the address or anything else seen with it.
   Confirming says you recognise it; the asset is then created and follows its
   network's approval rules.
-- **Matches an asset** — the address (or another identifier) already belongs
-  to one asset you have, so confirming would only create a second record of the
-  same device. The row says **Link to** that asset's name; linking attaches the
-  observation to it and keeps its approval and history.
+- **Matches an asset** — the address (or another identifier, such as a
+  hardware address) already belongs to one asset you have, so confirming would
+  only create a second record of the same device. The row says **Link to** that
+  asset's name; linking attaches the observation to it and keeps its approval
+  and history. This answer comes first: a row that matches an asset is offered
+  as a link even when its network is not set up or no sensor can reach it,
+  because linking needs neither.
 - **Several match** — its identifiers belong to more than one existing asset (or
   to one that is archived or denied), so the platform cannot tell which it is. There is no one-click action: compare
   those assets (merge them if they are the same device), link the observation
   to the right one yourself, or dismiss it.
 - **Needs a network** — the address is not inside any network you have set up.
   **Add network** opens **Settings → Network Segments**; one segment covering
-  the range resolves every host in it.
+  the range resolves every host in it. (A row with only a hardware address and
+  no network address is not asked for a network — no segment could cover it —
+  and shows as **Likely noise** instead.)
 - **Needs a sensor** — another device advertised this name, or no sensor can
   reach the network it was seen on. **See options** explains: install a sensor
   on that network (from **Sensors & Agents**) and the platform confirms it
   without you, or link it to an asset or dismiss it.
-- **Likely noise** — only a name was seen, nothing answered, or nothing has
-  seen it for 30 days. **Dismiss** is suggested.
+- **Likely noise** — only a name was seen, only a hardware address with no
+  network address, nothing answered, or nothing has seen it for 30 days.
+  **Dismiss** is suggested.
 
 Click a row to open it. On the left is all of its evidence: its identifiers,
 every endpoint, first and last seen with the number of sightings, enrichment

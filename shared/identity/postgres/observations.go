@@ -270,16 +270,20 @@ func (r *Repository) StoreObservation(ctx context.Context, obs identity.Observat
 			return fmt.Errorf("store identity receipt: %w", err)
 		}
 		r.noteFreshReceipt(id, receipt)
+		// source_ref follows the evidence: a source with an Origin groups runs
+		// under one fingerprint, so the ref the row names must be the run the
+		// evidence it holds came from, not the first run that made the row.
 		_, err = tx.ExecContext(ctx, `UPDATE identity_observations o SET
 			first_seen_at=LEAST(first_seen_at,$3), last_seen_at=GREATEST(last_seen_at,$3),
 			evidence=CASE WHEN $3 >= last_seen_at THEN $4::jsonb ELSE evidence END,
+			source_ref=CASE WHEN $3 >= last_seen_at THEN $7 ELSE source_ref END,
 			collector_version=CASE WHEN $3 >= last_seen_at THEN $5 ELSE collector_version END,
 			admission_reasons=CASE WHEN $3 >= last_seen_at THEN $6::text[] ELSE admission_reasons END,
 			occurrence_count=(SELECT count(*) FROM identity_observation_receipts r
 			 WHERE r.tenant_id=o.tenant_id AND r.observation_id=o.id),
 			state=CASE WHEN state='expired' AND $3 > last_seen_at THEN 'unresolved' ELSE state END,
 			updated_at=now() WHERE tenant_id=$1 AND id=$2`, obs.TenantID, id,
-			obs.ObservedAt, string(evidence), obs.Admission.CollectorVersion, pq.Array(decision.Reasons))
+			obs.ObservedAt, string(evidence), obs.Admission.CollectorVersion, pq.Array(decision.Reasons), obs.Source.Ref)
 		return err
 	})
 	return id, err

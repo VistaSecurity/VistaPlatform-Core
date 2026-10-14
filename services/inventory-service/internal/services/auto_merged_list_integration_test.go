@@ -67,12 +67,21 @@ func resolveLikeAnotherService(
 	return res
 }
 
+// observedAt is one instant, taken when the suite starts, for every observation
+// here. It must be RECENT, not a literal date: the observation time becomes the
+// history row's created_at, and ListAutoAccepted only lists the last
+// AutoAcceptedWindowDays. This used to be, which silently aged out of
+// the window on and turned the test red with nothing in the product
+// having changed. It is fixed per run so the model's recency feature still reads
+// "the same moment" for every observation.
+var observedAt = time.Now().UTC().Truncate(time.Second)
+
 func foreignObs(tenant uuid.UUID, ids ...identity.Identifier) identity.Observation {
 	return identity.Observation{
 		TenantID:   tenant.String(),
 		ClassHint:  assetclass.KeyServer,
 		Source:     identity.Source{Kind: identity.SourceMeasured, Ref: "interrogation:auto-merged-list"},
-		ObservedAt: time.Date(2026, 9, 12, 9, 0, 0, 0, time.UTC),
+		ObservedAt: observedAt,
 		Confidence: 1, Identifiers: ids,
 	}
 }

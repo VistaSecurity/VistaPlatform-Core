@@ -36,6 +36,27 @@ features:
     status: available
     edition: core
     docs: operate/deployment/production-checklist
+  - id: platform_backups
+    group: deploy_operate
+    name: Platform backups from the console
+    summary: Back up the platform database from the admin console, optionally with the encryption keys under a passphrase, then download it.
+    status: available
+    edition: core
+    docs: operate/maintenance
+  - id: update_notifications
+    group: deploy_operate
+    name: New-release notices
+    summary: The admin console tells you when a newer Vista Platform release exists and links to its release notes.
+    status: available
+    edition: core
+    docs: operate/maintenance
+  - id: one_click_update
+    group: deploy_operate
+    name: One-click update
+    summary: Update the platform from the admin console with a backup first, a verified chart and a one-click rollback.
+    status: available
+    edition: core
+    docs: operate/maintenance
   - id: sensor_collection
     group: deploy_operate
     name: Network sensors

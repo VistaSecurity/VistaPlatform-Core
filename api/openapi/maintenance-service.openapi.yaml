@@ -1,0 +1,1156 @@
+openapi: 3.1.0
+info:
+  title: Vista Platform — maintenance-service API
+  version: 0.1.0
+  description: |
+    Spec-first contract for maintenance-service (ADR-0001), the Core service
+    behind the admin console's Maintenance section: platform backups, the
+    new-release notice and the one-click update. It is the one backend whose
+    pod holds a Kubernetes credential (a namespace-scoped Role).
+
+    ## Scope of this spec
+
+      - `GET    /admin/maintenance/status`                 — capabilities, release, versions
+      - `GET    /admin/maintenance/updates`                — the last update check's result (WP2)
+      - `POST   /admin/maintenance/updates/check`          — run the update check now (WP2)
+      - `POST   /admin/maintenance/updates/preflight`      — pre-flight a target version (WP4)
+      - `POST   /admin/maintenance/updates`                — start an update run (WP4)
+      - `POST   /admin/maintenance/rollbacks`              — start a rollback run (WP4)
+      - `GET    /admin/maintenance/releases`               — the Helm release history (WP4)
+      - `GET    /admin/maintenance/backups`                — list backups (WP3)
+      - `POST   /admin/maintenance/backups`                — create a backup (WP3)
+      - `GET    /admin/maintenance/backups/{id}/download`  — stream a backup (WP3)
+      - `DELETE /admin/maintenance/backups/{id}`           — delete a backup (WP3)
+      - `GET    /admin/maintenance/runs`                   — run history (WP3)
+      - `GET    /admin/maintenance/runs/{id}`              — one run (WP3)
+
+    ## Runs
+
+    A backup, update or rollback is a **run** (`MaintenanceRun`): a record the
+    console reads, executed by a Kubernetes Job the service creates and follows.
+    At most one run is `running` at a time; starting another answers **409
+    `run_in_progress`**. The service settles a run from its Job's status, also
+    after it restarted, so a run survives the service's own restart.
+
+    ## Auth
+
+    A PLATFORM session is required (the `platform_access_token` cookie or a
+    platform bearer token). A tenant token is refused with 403, and an
+    HMAC-signed service call is not a session here (401). Reads need
+    `platform.health`; every write verb needs `platform.maintenance`
+    (`platform_user_has_permission` — the role name on the token is not
+    consulted).
+servers:
+- url: /api/v1/maintenance-service
+  description: maintenance-service v1, mounted behind the API gateway (admin host only).
+tags:
+- name: maintenance
+  description: Platform backups and updates.
+paths:
+  /admin/maintenance/status:
+    get:
+      operationId: getMaintenanceStatus
+      tags:
+      - maintenance
+      summary: What this install can do, and what it runs
+      description: |
+        `capabilities` says which maintenance operations this install supports
+        and, when updates are not offered, why (`reason`). `versions` is
+        monitoring-service's version aggregate (the body the tenant About page
+        renders), read over a signed service call; it is null when that read
+        failed, and `versions_error` then says so. UI consumer: admin-ui
+        Maintenance → About & Updates.
+      responses:
+        '200':
+          description: The maintenance status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/maintenance/updates/check:
+    post:
+      operationId: checkForUpdates
+      tags:
+      - maintenance
+      summary: Run the update check now
+      description: |
+        Lists the chart registry's tags synchronously (bounded at 20 s) and
+        returns the new row. A registry failure is not an HTTP error: the check
+        ran and its outcome is the row, with `error` set. 409 `check_in_progress`
+        when another check (the scheduler, another replica, another operator)
+        holds the lock; 409 `check_disabled` when the operator turned the check
+        off (`maintenance.updateCheck.enabled=false`). Needs `platform.maintenance`.
+      responses:
+        '200':
+          description: The update status after this check.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateStatus'
+        '409':
+          description: A check is already running, or the check is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateCheckConflict'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/maintenance/updates/preflight:
+    post:
+      operationId: preflightUpdate
+      tags:
+      - maintenance
+      summary: Pre-flight an update to a target version
+      description: |
+        Runs every pre-flight rule for `version` and returns each verdict
+        (`pass` / `warn` / `fail`) in plain language; `ok` is false when any
+        rule failed. Rules, in order: `capabilities` (Helm-managed, not
+        GitOps), `version` (published at the chart source and newer than the
+        running chart), `signature` (`cosign verify` of the chart against
+        `verification.certificateIdentityRegexp`; a warning when
+        `maintenance.updates.skipSignatureVerify` is on), `value_overrides`
+        (image tag / digest pins in the release's user-supplied values, which an
+        update carries forward), `single_node` (the rolling-surge CPU hazard,
+        naming the Deployments that do not Recreate), `schema`
+        (schema_migration_status matches the running chart), `no_run_in_progress`,
+        `recent_backup` (a ready backup from the last 24 hours; otherwise the
+        update takes one first). Never changes anything. Needs
+        `platform.maintenance`. UI consumer: the Update confirmation dialog.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreflightRequest'
+      responses:
+        '200':
+          description: The pre-flight result (a failing rule is still a 200).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreflightResult'
+        '400':
+          description: '`version_required` or `invalid_request`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`updates_unavailable`: not on Kubernetes or no database.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/maintenance/updates:
+    get:
+      operationId: getUpdateStatus
+      tags:
+      - maintenance
+      summary: What the last update check found
+      description: |
+        The single `platform_update_status` row plus two derived fields. The
+        admin console reads this, never the chart registry. Before the first
+        check every row field is null. `update_available` is computed from the
+        stored latest version and the version this pod runs, so it clears the
+        moment an update lands. UI consumers: the app-wide update banner and
+        Maintenance → About & Updates.
+      responses:
+        '200':
+          description: The stored update status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      operationId: startUpdate
+      tags:
+      - maintenance
+      summary: Start an update run
+      description: |
+        Starts an `update` run to `version`: pre-flight (the signature is left
+        to the run's own `verify` step), then the steps `backup` (a
+        database-only backup through the backup machinery — skipped and marked
+        `detail: skipped_by_operator` with `skip_backup`), `verify` (`cosign
+        verify`), `upgrade` (a Job running `helm upgrade --reset-then-reuse-values
+        --wait` as the `vistaplatform-updater` ServiceAccount) and `smoke`
+        (every service reports the new version). The service itself is
+        replaced during `upgrade`; the run is settled by the new pod. 409
+        `run_in_progress` when a run is running; 422 `preflight_failed` (with
+        the pre-flight) when a rule failed; 422 `backup_unavailable` when the
+        install has no backup storage and `skip_backup` is false. Needs
+        `platform.maintenance`. UI consumer: the Update confirmation dialog.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartUpdateRequest'
+      responses:
+        '202':
+          description: The update run started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartRunResponse'
+        '400':
+          description: '`version_required` or `invalid_request`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          $ref: '#/components/responses/RunInProgress'
+        '422':
+          description: '`preflight_failed` (the body carries the pre-flight) or `backup_unavailable`.'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - $ref: '#/components/schemas/PreflightFailed'
+                - $ref: '#/components/schemas/Error'
+        '503':
+          description: '`updates_unavailable`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/maintenance/rollbacks:
+    post:
+      operationId: startRollback
+      tags:
+      - maintenance
+      summary: Start a rollback run
+      description: |
+        Starts a `rollback` run to Helm revision `revision`: a Job running
+        `helm rollback <release> <revision> --wait` as the
+        `vistaplatform-updater` ServiceAccount, then `smoke` against that
+        revision's chart version. The revision must be in the release history,
+        not the current one, and `deployed` or `superseded`
+        (`GET /releases` offers `rollback_candidate`). 409 `run_in_progress`;
+        422 `invalid_revision` or `not_updatable` (GitOps / not Helm-managed).
+        Needs `platform.maintenance`. UI consumer: the run progress page's
+        "Roll back to <previous>" after a failed update.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartRollbackRequest'
+      responses:
+        '202':
+          description: The rollback run started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartRunResponse'
+        '400':
+          description: '`revision_required` or `invalid_request`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          $ref: '#/components/responses/RunInProgress'
+        '422':
+          description: '`invalid_revision` or `not_updatable`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`updates_unavailable`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/maintenance/releases:
+    get:
+      operationId: listHelmReleases
+      tags:
+      - maintenance
+      summary: The Helm release history
+      description: |
+        Every stored revision of this install's Helm release, newest first,
+        decoded from the release Secrets (`sh.helm.release.v1.<release>.v<n>`)
+        — revision, chart and app version, status, when. Values and manifests
+        are never served. `rollback_candidate` is the revision "Roll back to
+        <previous>" offers: the newest earlier revision that ran (`deployed`
+        after a failed upgrade, `superseded` after a successful one); null when
+        there is none. Empty when Helm does not manage the install. Needs
+        `platform.health`. UI consumer: the run progress page.
+      responses:
+        '200':
+          description: The release history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/maintenance/backups:
+    get:
+      operationId: listBackups
+      tags:
+      - maintenance
+      summary: List platform backups
+      description: |
+        Every backup not deleted, newest first — running, ready and failed.
+        `available` is false when this install cannot take a backup (no
+        backup storage, or not on Kubernetes). UI consumer: admin-ui
+        Maintenance → Backups.
+      responses:
+        '200':
+          description: The backups.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      operationId: createBackup
+      tags:
+      - maintenance
+      summary: Create a platform backup
+      description: |
+        Starts a `backup` run: a Job runs `pg_dump -Fc` of the platform
+        database into the backups volume, then the service writes the
+        manifest and packs the bundle — `bundle.tar`, or with
+        `include_secrets` an encrypted `bundle.enc` (AES-256-GCM under an
+        Argon2id key from `passphrase`) that also carries the chart's
+        Secrets. A passphrase of at least 12 characters is required with
+        `include_secrets` and refused without it. The passphrase is held in
+        memory for the run only and never stored. Retention prunes the
+        oldest ready backups after each success. UI consumer: Backups →
+        Create backup.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBackupRequest'
+      responses:
+        '202':
+          description: The backup run started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateBackupResponse'
+        '400':
+          description: '`passphrase_required`, `passphrase_too_short`, `passphrase_without_secrets` or `invalid_request`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/RunInProgress'
+        '503':
+          description: '`backups_unavailable`: no backup storage, or not on Kubernetes.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /admin/maintenance/backups/{id}/download:
+    get:
+      operationId: downloadBackup
+      tags:
+      - maintenance
+      summary: Download a platform backup
+      description: |
+        Streams the bundle with `Content-Length` and a `Content-Disposition`
+        filename `vista-platform-backup-<created>-<version>.tar|.enc`.
+        Recorded in the activity trail as a data export
+        (`maintenance.backup.downloaded`). UI consumer: Backups → Download
+        (an anchor to this route; the session cookie authenticates it).
+      parameters:
+      - $ref: '#/components/parameters/BackupID'
+      responses:
+        '200':
+          description: The bundle.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+          content:
+            application/x-tar:
+              schema:
+                type: string
+                format: binary
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`not_ready`: the backup is running, failed or deleted.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /admin/maintenance/backups/{id}:
+    delete:
+      operationId: deleteBackup
+      tags:
+      - maintenance
+      summary: Delete a platform backup
+      description: Removes the bundle from the backups volume and marks the backup deleted. UI consumer — Backups → Delete.
+      parameters:
+      - $ref: '#/components/parameters/BackupID'
+      responses:
+        '204':
+          description: Deleted (or already deleted).
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`backup_running`: a running backup cannot be deleted.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /admin/maintenance/runs:
+    get:
+      operationId: listMaintenanceRuns
+      tags:
+      - maintenance
+      summary: Maintenance run history
+      description: The newest backup, update and rollback runs first. UI consumer — Maintenance → Backups → Run history and About & Updates → Run history; each row links to the run's progress page.
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+      responses:
+        '200':
+          description: The runs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceRunList'
+        '400':
+          description: '`invalid_limit`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/maintenance/runs/{id}:
+    get:
+      operationId: getMaintenanceRun
+      tags:
+      - maintenance
+      summary: One maintenance run, with its steps and log tail
+      description: UI consumer — the run progress page (`/maintenance/runs/:id` in the admin console), polled while the run is running.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The run.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaintenanceRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  parameters:
+    BackupID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  responses:
+    Unauthorized:
+      description: No platform session.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: A tenant session, or a platform session whose role lacks the permission.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: No such backup or run.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RunInProgress:
+      description: '`run_in_progress`: another maintenance run is running; only one at a time.'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Error:
+      type: object
+      additionalProperties: true
+      required:
+      - error
+      properties:
+        error:
+          type: string
+        required_permission:
+          type: string
+    PreflightRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - version
+      properties:
+        version:
+          type: string
+          description: The chart version to update to (a leading `v` is ignored).
+    PreflightCheck:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      - status
+      - detail
+      properties:
+        name:
+          type: string
+          enum: [capabilities, version, signature, value_overrides, single_node, schema, no_run_in_progress, recent_backup]
+        status:
+          type: string
+          enum: [pass, warn, fail]
+        detail:
+          type: string
+          description: The verdict in plain language, for the dialog.
+    PreflightResult:
+      type: object
+      additionalProperties: false
+      required:
+      - version
+      - current_version
+      - ok
+      - checks
+      properties:
+        version:
+          type: string
+        current_version:
+          type: string
+        ok:
+          type: boolean
+          description: No check failed (warnings allow an update).
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/PreflightCheck'
+    PreflightFailed:
+      type: object
+      additionalProperties: false
+      required:
+      - error
+      - message
+      - preflight
+      properties:
+        error:
+          type: string
+          const: preflight_failed
+        message:
+          type: string
+        preflight:
+          $ref: '#/components/schemas/PreflightResult'
+    StartUpdateRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - version
+      properties:
+        version:
+          type: string
+        skip_backup:
+          type: boolean
+          default: false
+          description: The operator has their own backup ("I have my own backup"); the run's backup step is skipped and recorded as `skipped_by_operator`.
+    StartRollbackRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - revision
+      properties:
+        revision:
+          type: integer
+          minimum: 1
+          description: The Helm revision to roll back to.
+    StartRunResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - run
+      properties:
+        run:
+          $ref: '#/components/schemas/MaintenanceRun'
+        preflight:
+          $ref: '#/components/schemas/PreflightResult'
+    HelmRelease:
+      type: object
+      additionalProperties: false
+      required:
+      - revision
+      - chart_version
+      - app_version
+      - status
+      - updated
+      properties:
+        revision:
+          type: integer
+        chart_version:
+          type: string
+        app_version:
+          type: string
+        status:
+          type: string
+          description: Helm's status (deployed, superseded, failed, pending-upgrade, ...).
+        updated:
+          type: string
+          format: date-time
+        description:
+          type: string
+    ReleaseList:
+      type: object
+      additionalProperties: false
+      required:
+      - releases
+      - rollback_candidate
+      properties:
+        releases:
+          type: array
+          items:
+            $ref: '#/components/schemas/HelmRelease'
+        rollback_candidate:
+          oneOf:
+          - $ref: '#/components/schemas/HelmRelease'
+          - type: 'null'
+    CreateBackupRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        include_secrets:
+          type: boolean
+          default: false
+          description: Also bundle the chart's Secrets (encryption master key, JWT signing key, install identity, generated datastore credentials, and the CBOM artifact signing key Secret cbom-service signs with, chart-managed or cbomSigning.existingSecretName). The bundle is then encrypted under `passphrase`.
+        passphrase:
+          type: string
+          description: Required (at least 12 characters) with include_secrets; refused without it. Never stored.
+    CreateBackupResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - backup
+      - run
+      properties:
+        backup:
+          $ref: '#/components/schemas/Backup'
+        run:
+          $ref: '#/components/schemas/MaintenanceRun'
+    BackupList:
+      type: object
+      additionalProperties: false
+      required:
+      - backups
+      - available
+      - retention
+      properties:
+        backups:
+          type: array
+          items:
+            $ref: '#/components/schemas/Backup'
+        available:
+          type: boolean
+          description: This install can take a backup (backup storage and the cluster API are there).
+        retention:
+          type: integer
+          description: The newest N ready backups are kept (maintenance.backups.retention).
+    Backup:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - run_id
+      - created_at
+      - size_bytes
+      - contents
+      - encrypted
+      - manifest
+      - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        run_id:
+          type: [string, 'null']
+        created_at:
+          type: string
+          format: date-time
+        size_bytes:
+          type: [integer, 'null']
+          description: Size of the bundle; null until it is ready.
+        contents:
+          $ref: '#/components/schemas/BackupContents'
+        encrypted:
+          type: boolean
+        manifest:
+          description: The bundle's manifest.json; null until the backup is ready.
+          oneOf:
+          - $ref: '#/components/schemas/BackupManifest'
+          - type: 'null'
+        status:
+          type: string
+          enum: [running, ready, failed, deleted]
+        deleted_at:
+          type: string
+          format: date-time
+    BackupContents:
+      type: object
+      additionalProperties: false
+      required:
+      - database
+      - secrets
+      properties:
+        database:
+          type: boolean
+        secrets:
+          type: boolean
+        cbom_signing_key:
+          type: boolean
+          description: The CBOM artifact signing key Secret is in the bundle (with secrets, whichever Secret cbom-service signs with, when it was found). Known once the backup is ready.
+    BackupManifest:
+      type: object
+      additionalProperties: false
+      description: manifest.json. Names the Secrets in the bundle; never their contents.
+      required:
+      - format_version
+      - backup_id
+      - created_at
+      - app_version
+      - chart_version
+      - schema
+      - edition
+      - chart_source
+      - release
+      - database
+      - contents
+      - secrets
+      - encrypted
+      - pg_dump_version
+      properties:
+        format_version:
+          type: integer
+          const: 1
+        backup_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        app_version:
+          type: string
+        chart_version:
+          type: string
+        schema:
+          description: The newest schema_migration_status row (schema_hash, app_version, chart_version, applied_at); null when absent.
+          type: [object, 'null']
+          additionalProperties: true
+        edition:
+          type: string
+          enum: [core, commercial, unknown]
+        chart_source:
+          type: string
+        install_id:
+          type: string
+        release:
+          type: object
+          additionalProperties: false
+          required: [name, namespace]
+          properties:
+            name:
+              type: string
+            namespace:
+              type: string
+        database:
+          type: object
+          additionalProperties: false
+          required: [external]
+          properties:
+            external:
+              type: boolean
+            credential_secret:
+              type: string
+            credential_key:
+              type: string
+        contents:
+          $ref: '#/components/schemas/BackupContents'
+        secrets:
+          type: array
+          items:
+            type: string
+        encrypted:
+          type: boolean
+        pg_dump_version:
+          type: string
+    MaintenanceRunList:
+      type: object
+      additionalProperties: false
+      required:
+      - runs
+      properties:
+        runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceRun'
+    MaintenanceRun:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - kind
+      - status
+      - started_by
+      - started_at
+      - finished_at
+      - steps
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          enum: [backup, update, rollback]
+        status:
+          type: string
+          enum: [running, succeeded, failed, cancelled]
+        started_by:
+          type: [string, 'null']
+          description: The platform user who started it.
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: [string, 'null']
+          format: date-time
+        from_version:
+          type: string
+        to_version:
+          type: string
+        k8s_job_name:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaintenanceRunStep'
+        error:
+          type: string
+          description: Why the run failed.
+    MaintenanceRunStep:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      - executor
+      - status
+      properties:
+        name:
+          type: string
+        executor:
+          type: string
+          enum: [job, service]
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed, skipped]
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        log_tail:
+          type: string
+          description: The last lines the step printed (bounded).
+        error:
+          type: string
+        detail:
+          type: string
+          description: How a step ended when the status alone does not say — `skipped_by_operator` (an update's backup, "I have my own backup") or `skipped_by_configuration` (verify, `maintenance.updates.skipSignatureVerify`).
+    MaintenanceStatus:
+      type: object
+      additionalProperties: false
+      required:
+      - service
+      - capabilities
+      - release
+      - single_node
+      - versions
+      properties:
+        service:
+          type: string
+          const: maintenance-service
+        capabilities:
+          $ref: '#/components/schemas/MaintenanceCapabilities'
+        release:
+          $ref: '#/components/schemas/MaintenanceRelease'
+        single_node:
+          type: boolean
+          description: 'maintenance.singleNode from the chart. The service cannot count nodes itself: nodes are cluster-scoped and it holds no ClusterRole.'
+        versions:
+          description: 'monitoring-service GET /version, verbatim; null when it could not be read.'
+          oneOf:
+          - $ref: '#/components/schemas/VersionResponse'
+          - type: 'null'
+        versions_error:
+          type: string
+          description: Why `versions` is null. Absent when it was read.
+    MaintenanceCapabilities:
+      type: object
+      additionalProperties: false
+      required:
+      - helm_managed
+      - gitops
+      - backups
+      - updates
+      - reason
+      properties:
+        helm_managed:
+          type: boolean
+          description: A Helm release Secret (sh.helm.release.v1.<release>.v*) exists in the namespace.
+        gitops:
+          type: boolean
+          description: The release Secret or this pod carries an Argo CD or Flux label.
+        backups:
+          type: boolean
+          description: The chart rendered backup storage (maintenance.backups.enabled) and the cluster API answered.
+        updates:
+          type: boolean
+          description: helm_managed && !gitops.
+        reason:
+          type: string
+          enum: ['', not_kubernetes, not_helm_managed, gitops, cluster_api_unavailable, release_unknown]
+          description: Why updates are not offered; empty when they are.
+    MaintenanceRelease:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      - namespace
+      properties:
+        name:
+          type: string
+          description: HELM_RELEASE_NAME; empty outside Kubernetes.
+        namespace:
+          type: string
+          description: POD_NAMESPACE; empty outside Kubernetes.
+    UpdateStatus:
+      type: object
+      additionalProperties: false
+      required:
+      - checked_at
+      - source
+      - current_version
+      - latest_version
+      - notes_url
+      - error
+      - prereleases_seen
+      - update_available
+      - check_enabled
+      properties:
+        checked_at:
+          type: [string, 'null']
+          format: date-time
+          description: When the last check ran; null before the first.
+        source:
+          type: [string, 'null']
+          description: The chart source checked (oci://registry/repository).
+        current_version:
+          type: [string, 'null']
+          description: The chart version this install ran when the check last ran.
+        latest_version:
+          type: [string, 'null']
+          description: The newest eligible chart version above the running one; null when current. After a failed check it keeps the last good value.
+        notes_url:
+          type: [string, 'null']
+          description: Release notes for `latest_version` (the GitHub Release for ghcr.io, otherwise the docs release page).
+        error:
+          type: [string, 'null']
+          description: Why the last check failed (names the URL and HTTP status); null when it succeeded.
+        prereleases_seen:
+          type: array
+          items:
+            type: string
+          description: Pre-release tags newer than the running version that were passed over because pre-releases are not wanted.
+        update_available:
+          type: boolean
+          description: latest_version is strictly newer than the version this pod runs.
+        check_enabled:
+          type: boolean
+          description: maintenance.updateCheck.enabled; when false the periodic check does not run and a manual check answers 409 check_disabled.
+    UpdateCheckConflict:
+      type: object
+      additionalProperties: false
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          enum: [check_in_progress, check_disabled]
+    # The version aggregate below mirrors monitoring-service's VersionResponse
+    # (api/openapi/monitoring-service.openapi.yaml) — the same body, proxied.
+    VersionResponse:
+      type: object
+      additionalProperties: false
+      required:
+      - self
+      - services
+      - status
+      - summary
+      - aligned
+      properties:
+        self:
+          $ref: '#/components/schemas/VersionInfo'
+        services:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/ServiceVersionRow'
+        status:
+          type: string
+          enum: [aligned, skew, degraded, unknown]
+          description: 'aligned = all reachable peers report one agreed version; skew = ≥2 distinct real versions; degraded = reporters agree but a peer is unreachable; unknown = no real version reported anywhere.'
+        summary:
+          $ref: '#/components/schemas/VersionSummary'
+        aligned:
+          type: boolean
+        skew:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkewEntry'
+    VersionInfo:
+      type: object
+      additionalProperties: true
+      required:
+      - service
+      - chart
+      - app_version
+      properties:
+        service:
+          type: string
+        chart:
+          type: string
+        app_version:
+          type: string
+        image_digest:
+          type: string
+    ServiceVersionRow:
+      type: object
+      additionalProperties: false
+      required:
+      - service
+      - tag
+      - chart
+      - app_version
+      - status
+      properties:
+        service:
+          type: string
+        tag:
+          type: string
+        chart:
+          type: string
+        app_version:
+          type: string
+        image_digest:
+          type: string
+        status:
+          type: string
+          description: healthy / unreachable.
+        error:
+          type: string
+    VersionSummary:
+      type: object
+      additionalProperties: false
+      required:
+      - total
+      - reachable
+      - unreachable
+      - reporting
+      properties:
+        total:
+          type: integer
+        reachable:
+          type: integer
+        unreachable:
+          type: integer
+        reporting:
+          type: integer
+    SkewEntry:
+      type: object
+      additionalProperties: false
+      required:
+      - field
+      - values
+      properties:
+        field:
+          type: string
+        values:
+          type: array
+          items:
+            type: string

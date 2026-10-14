@@ -46,7 +46,6 @@ same way:
 | cluster-sensor-service | 8088 | `services/cluster-sensor-service/Dockerfile.prod` |
 | admin-service | 8089 | `services/admin-service/Dockerfile.prod` |
 | monitoring-service | 8091 | `services/monitoring-service/Dockerfile.prod` |
-| resource-tracker-service | 8092 | `services/resource-tracker-service/Dockerfile.prod` |
 | tenant-health-service | 8093 | `services/tenant-health-service/Dockerfile.prod` |
 | device-interrogation-service | 8095 | `services/device-interrogation-service/Dockerfile.prod` |
 | audit-service | 8096 | `services/audit-service/Dockerfile.prod` |

@@ -4596,7 +4596,7 @@ export interface components {
              * @description Which row of the suggestion table applied. Stable; the UI maps it to words.
              * @enum {string}
              */
-            explanation_code: "dynamic_address_answered" | "owned_by_asset" | "owned_by_several_assets" | "network_not_configured" | "relayed_advertisement" | "no_collector_in_network" | "name_only" | "no_address_or_service" | "not_seen_recently" | "no_suggestion" | "not_awaiting_review";
+            explanation_code: "dynamic_address_answered" | "owned_by_asset" | "owned_by_several_assets" | "network_not_configured" | "relayed_advertisement" | "no_collector_in_network" | "name_only" | "no_address_or_service" | "no_address_to_place" | "not_seen_recently" | "no_suggestion" | "not_awaiting_review";
             /** @description A proposed reason for the decision the row's suggestion leads to — "Confirmed from Observations: …" for ready_to_confirm, "Linked from Observations: …" for link_existing, "Dismissed from Observations: …" otherwise; empty for linked, conflict and dismissed rows. Names, never UUIDs. */
             suggested_reason: string;
             /** @description The identifiers in readable form, the way a person recognises a device first. */
@@ -7196,6 +7196,8 @@ export interface components {
             kind: "measured" | "declared" | "imported" | "inferred";
             ref: string;
             mode?: string;
+            /** @description The stable producer behind a per-run ref, when the ref names a run (`interrogation:<job>` carries `device:<asset>`). Observations group by it in the ref's place, so repeat runs of one device are receipts on one observation. Absent for producers whose ref is already stable. */
+            origin?: string;
         };
         SightedIdentifier: {
             kind: string;

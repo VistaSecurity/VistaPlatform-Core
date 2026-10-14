@@ -78,7 +78,7 @@ func TestIntegration_CalculateHealthPersistsCanonicalStatusAndUnknown(t *testing
 		svc := NewHealthService(repo)
 		metrics := models.HealthMetrics{TenantID: tenant, Timestamp: time.Now(), LastSecurityUpdate: time.Now().Add(-365 * 24 * time.Hour), FeatureUsage: map[string]int{}, CPUUtilization: 100, MemoryUtilization: 100, StorageUtilization: 100, NetworkUtilization: 100, ErrorRate: 1, FailedLogins: 100, SecurityAlerts: 100, ResourceCost: 1000, CostPerUser: 10000}
 		if unknown {
-			metrics.UnavailableSources = []string{models.SourceMonitoring, models.SourceAuth, models.SourceInventory, models.SourceResourceTracker}
+			metrics.UnavailableSources = []string{models.SourceMonitoring, models.SourceAuth, models.SourceInventory}
 		}
 		want := scoring.NewHealthScorer().CalculateHealthScore(metrics)
 		response, err := svc.CalculateTenantHealth(&models.HealthScoreRequest{TenantID: tenant, Metrics: metrics})

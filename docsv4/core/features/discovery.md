@@ -424,11 +424,11 @@ each chip:
 | Needs | What was seen | Suggested |
 |---|---|---|
 | **Ready to confirm** | A device answered at an address on a network that uses DHCP, and no existing asset owns it | **Confirm** |
-| **Matches an asset** | Exactly one existing asset already owns an identifier of the observation, and nothing has confirmed that device at the address recently — a probe of an address a sensor confirmed by MAC within the last day attaches to the asset itself and never reaches this table | **Link to** that asset |
+| **Matches an asset** | Exactly one existing asset already owns an identifier of the observation (decided before every row below, so a matched row is offered as a link even where no sensor reaches it), and nothing has confirmed that device at the address recently — a probe of an address a sensor confirmed by MAC within the last day attaches to the asset itself and never reaches this table | **Link to** that asset |
 | **Several match** | More than one existing asset owns identifiers of it, or the one that does cannot take a link | none: compare the assets, link it yourself, or dismiss |
-| **Needs a network** | The address is not inside any network segment you have set up | **Add network** (Settings → Network Segments) |
+| **Needs a network** | The address is not inside any network segment you have set up (a row with only a hardware address is Likely noise instead: no segment could cover it) | **Add network** (Settings → Network Segments) |
 | **Needs a sensor** | Another device advertised the name, or no sensor reaches that network | **See options**: add a sensor there, link, or dismiss |
-| **Likely noise** | Only a name, no address or service, or nothing seen for 30 days | **Dismiss** |
+| **Likely noise** | Only a name, only a hardware address, no address or service, or nothing seen for 30 days | **Dismiss** |
 
 **All** shows every group, and its **State** control reaches observations that
 are linked, dismissed, expired or in conflict. Rows show the network's and the

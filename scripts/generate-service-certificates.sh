@@ -102,7 +102,6 @@ SERVICES=(
     "sensor-manager"
     "admin-service"
     "monitoring-service"
-    "resource-tracker-service"
     "tenant-health-service"
     "device-interrogation-service"
     "audit-service"
@@ -111,6 +110,7 @@ SERVICES=(
     "cluster-sensor-service"
     "pcap-processor"
     "mcp-service"
+    "maintenance-service"
     "api-gateway"
 )
 

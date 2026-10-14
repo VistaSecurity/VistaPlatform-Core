@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -1179,4 +1180,112 @@ func TestIntegration_SubmitJobResult_PersistsObservationsWithoutCryptoAssets(t *
 	assertCount(t, db, 1, `
 		SELECT count(*) FROM asset_identifiers
 		WHERE tenant_id = $1 AND kind = 'mac_address' AND value = 'a8:bb:cc:dd:ee:07'`, tenant)
+}
+
+// TestIntegration_ObservationSink_RepeatRunBumpsTheObservationItMade: a
+// controller client the platform cannot admit (a MAC and a name, no address,
+// so no network scope) is ONE observation however many times the same
+// controller is interrogated. The source ref is the job, a new id every run;
+// before the device became the source's Origin, every run of the Dream Router
+// re-created every unadmitted client as a fresh row, and the unresolved list
+// grew by the client count per run. A second run is a second receipt on the
+// row the first made, the row names the run its evidence came from, and a
+// DIFFERENT device reporting the same client is still its own row — the
+// fingerprint keeps sources separate, it just stops counting runs as sources.
+func TestIntegration_ObservationSink_RepeatRunBumpsTheObservationItMade(t *testing.T) {
+	db := testdb.Connect(t)
+	tenant := testdb.NewTenant(t, db)
+	ctx := context.Background()
+	svc := NewDeviceServiceWithKey(db, testMasterKey)
+	newController := func() uuid.UUID {
+		hostname := "ctrl-" + uuid.New().String()[:8] + ".corp.example.test"
+		dev, err := svc.CreateDevice(ctx, tenant, models.CreateDeviceRequest{DeviceType: "unifi", Hostname: &hostname})
+		if err != nil {
+			t.Fatalf("CreateDevice: %v", err)
+		}
+		return dev.ID
+	}
+	router, other := newController(), newController()
+	// Enforce admission from here on, as the cluster this was written about
+	// does; without it every peer becomes a pending asset and nothing is ever
+	// retained. The controllers were declared above, before the gate closed.
+	if _, err := db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
+		t.Fatal(err)
+	}
+
+	clientMAC := "78:8c:b5:69:4f:3c"
+	client := di.PeerRef{DisplayName: "HS200", IdentityEvidence: di.PeerIdentityEvidence{ConnectedInterface: true}}
+	if !client.AddIdentifier(di.IdentifierMACAddress, clientMAC) || !client.AddIdentifier(di.IdentifierHostname, "hs200") {
+		t.Fatal("AddIdentifier rejected the client's identifiers")
+	}
+	run := func(device uuid.UUID, at time.Time) uuid.UUID {
+		job := uuid.New()
+		err := NewObservationSink(db).Persist(ctx, tenant, device, interrogationSource(job), InterrogationObservations{
+			ObservedAt: at,
+			Facts:      []di.FactObservation{{Subject: client, Key: facts.KeyHWVendor, Value: "TP-Link", Confidence: di.ConfidenceDerived}},
+		})
+		if err != nil {
+			t.Fatalf("Persist: %v", err)
+		}
+		return job
+	}
+	first := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Microsecond)
+	jobA := run(router, first)
+	jobB := run(router, first.Add(time.Hour))
+
+	type row struct {
+		state, ref, origin string
+		occurrences        int
+	}
+	rows := func() []row {
+		res, err := db.Query(`SELECT state, source_ref, COALESCE(evidence->'source'->>'origin',''), occurrence_count
+			FROM identity_observations WHERE tenant_id = $1
+			AND evidence->'identifiers' @> $2::jsonb ORDER BY first_seen_at`, tenant, `[{"kind":"mac_address","value":"`+clientMAC+`"}]`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = res.Close() }()
+		var out []row
+		for res.Next() {
+			var r row
+			if err := res.Scan(&r.state, &r.ref, &r.origin, &r.occurrences); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, r)
+		}
+		return out
+	}
+
+	got := rows()
+	if len(got) != 1 {
+		var all, assets string
+		_ = db.QueryRow(`SELECT COALESCE(string_agg(state||' '||source_ref||' '||left(evidence::text,400), E'\n'),'') FROM identity_observations WHERE tenant_id=$1`, tenant).Scan(&all)
+		_ = db.QueryRow(`SELECT COALESCE(string_agg(i.kind||'='||i.value||' -> '||a.asset_status||' '||COALESCE(a.hostname,''), E'\n'),'') FROM asset_identifiers i JOIN assets a ON a.id=i.asset_id WHERE i.tenant_id=$1`, tenant).Scan(&assets)
+		t.Fatalf("observations of %s after two runs of one device = %d, want 1: %+v\nALL OBS:\n%s\nASSET IDS:\n%s", clientMAC, len(got), got, all, assets)
+	}
+	if got[0].state != "unresolved" {
+		t.Errorf("state = %q, want unresolved — a MAC and a name with no address has no network scope", got[0].state)
+	}
+	if got[0].occurrences != 2 {
+		t.Errorf("occurrence_count = %d, want 2 — the second run is a second receipt, not a second row", got[0].occurrences)
+	}
+	if got[0].ref != "interrogation:"+jobB.String() {
+		t.Errorf("source_ref = %q, want the run the evidence came from (interrogation:%s), not the first run %s", got[0].ref, jobB, jobA)
+	}
+	if got[0].origin != "device:"+router.String() {
+		t.Errorf("evidence source.origin = %q, want device:%s", got[0].origin, router)
+	}
+
+	// An older run arriving late (a retried delivery) neither moves the row's
+	// evidence back nor loses its receipt.
+	run(router, first.Add(-time.Hour))
+	if got = rows(); len(got) != 1 || got[0].occurrences != 3 || got[0].ref != "interrogation:"+jobB.String() {
+		t.Errorf("after a late older run: %+v, want 1 row, 3 occurrences, source_ref still interrogation:%s", got, jobB)
+	}
+
+	// Another device reporting the same client is other evidence.
+	run(other, first.Add(2*time.Hour))
+	if got = rows(); len(got) != 2 {
+		t.Errorf("observations after a second device reported the client = %d, want 2 — sources stay separate", len(got))
+	}
 }

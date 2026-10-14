@@ -2577,7 +2577,10 @@ paths:
   # cross-user administration in v1. The plaintext token appears exactly once,
   # in the 201 create response. The HMAC-guarded internal exchange endpoint
   # (/internal/api-tokens/exchange) is deliberately NOT in this spec — it is
-  # service-to-service only, never client-facing.
+  # service-to-service only, never client-facing. The same goes for
+  # POST /internal/resource-metrics, the HMAC-only tenant_resource_usage
+  # ingest the metering middleware posts to
+  # (services/auth-service/internal/api/resource_metrics.go).
   # Handlers: services/auth-service/internal/apitokens/handlers.go.
   # ===========================================================================
   /api-tokens:

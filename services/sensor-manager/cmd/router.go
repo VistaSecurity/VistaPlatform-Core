@@ -50,10 +50,6 @@ func setupRouter(cfg *config.Config, handler *handlers.Handler, db, bypassDB *sq
 	// Resource tracking middleware
 	trackerConfig := resourcetracking.DefaultConfig()
 	trackerConfig.ServiceName = "sensor-manager"
-	trackerConfig.TrackerURL = os.Getenv("RESOURCE_TRACKER_URL")
-	if trackerConfig.TrackerURL == "" {
-		trackerConfig.TrackerURL = sharedconfig.PeerURL("resource-tracker-service", sharedconfig.MTLSEnabled())
-	}
 	// mTLS configuration
 	trackerConfig.UseMTLS = cfg.UseMTLS
 	trackerConfig.ClientCertPath = cfg.ClientCertPath

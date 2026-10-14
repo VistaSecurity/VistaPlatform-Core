@@ -204,6 +204,30 @@ type Source struct {
 	Kind SourceKind      `json:"kind"`
 	Ref  string          `json:"ref"`
 	Mode MeasurementMode `json:"mode,omitempty"`
+	// Origin is the stable thing behind a per-run Ref, and what
+	// [ObservationFingerprint] groups by in Ref's place when set. A controller
+	// interrogation's Ref is `interrogation:<job>`, a new id every run, so
+	// every run of the same controller re-created every observation it could
+	// not admit instead of bumping the one it made last time; its Origin is
+	// the interrogated device (`device:<asset>`), which does not change. Ref
+	// stays the run, which is what provenance, the configured-source refresh
+	// and the drift gate read. Empty for producers whose Ref is already stable
+	// (`sensor:<id>`, `cloud:aws`).
+	Origin string `json:"origin,omitempty"`
+}
+
+// Grouping is the source as a grouping key sees it: Origin in Ref's place
+// when there is one, and no Origin field, so a source without one encodes
+// byte-for-byte as it did before the field existed. [ObservationFingerprint]
+// hashes it, which keeps every stored row's fingerprint valid across the
+// upgrade; anything else that must treat two runs of one device as the same
+// evidence (the enrichment generation) hashes it too.
+func (s Source) Grouping() Source {
+	if s.Origin != "" {
+		s.Ref = s.Origin
+		s.Origin = ""
+	}
+	return s
 }
 
 // Producer returns the part of Ref before the first colon: the coarse producer

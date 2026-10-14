@@ -115,3 +115,42 @@ func TestAdmissionTreatsALeaseFreshAddressAsStatic(t *testing.T) {
 		t.Fatalf("a fresh lease on another address established this one: %+v", got)
 	}
 }
+
+// TestObservationFingerprintGroupsByOrigin: a source whose Ref changes every
+// run (`interrogation:<job>`) groups by its Origin (the interrogated device),
+// so a repeat run is another receipt of the same observation rather than a
+// new row per client per run. A source without an Origin fingerprints exactly
+// as before the field existed — pinned to the pre-change digests, because a
+// changed fingerprint would orphan every stored row on upgrade.
+func TestObservationFingerprintGroupsByOrigin(t *testing.T) {
+	base := Observation{TenantID: "11111111-1111-1111-1111-111111111111", Source: Source{Kind: SourceMeasured, Ref: "sensor:a", Mode: ModeActive}, Network: Network{SegmentID: "seg-1", Ownership: "internal"}, ObservedAt: time.Unix(123, 0), Identifiers: []Identifier{{Kind: KindMACAddress, Value: "aa:bb:cc:dd:ee:ff"}, {Kind: KindHostname, Value: "host", Scope: "seg-1"}}}
+	if got := ObservationFingerprint(base); got != "40289542dafad324e36034455c3669fd34b1e74ba4d9783cc109624847083902" {
+		t.Fatalf("sensor fingerprint changed: %s — every stored observation would be orphaned on upgrade", got)
+	}
+	runA := base
+	runA.Source = Source{Kind: SourceMeasured, Ref: "interrogation:4ae89a36-9d88-41b7-a4d8-933c13c79c92", Mode: ModeActive}
+	if got := ObservationFingerprint(runA); got != "f1dbe30db4ebb245ac44f6b613c5c4f329a771c99a5fec67b187e6c23db4f203" {
+		t.Fatalf("origin-less interrogation fingerprint changed: %s", got)
+	}
+	runB := runA
+	runB.Source.Ref = "interrogation:6f0d263e-6e57-4b45-a4b7-010ec3abffae"
+	runB.ObservedAt = runA.ObservedAt.Add(24 * time.Hour)
+	if ObservationFingerprint(runA) == ObservationFingerprint(runB) {
+		t.Fatal("two runs with no origin must still be separate: the ref is all there is")
+	}
+	runA.Source.Origin, runB.Source.Origin = "device:4c6eda4a", "device:4c6eda4a"
+	if ObservationFingerprint(runA) != ObservationFingerprint(runB) {
+		t.Fatal("two runs of the same device must group as one observation")
+	}
+	if ObservationReceiptKey(runA) == ObservationReceiptKey(runB) {
+		t.Fatal("two runs of the same device are two sightings, not a replay")
+	}
+	other := runB
+	other.Source.Origin = "device:ffffffff"
+	if ObservationFingerprint(runA) == ObservationFingerprint(other) {
+		t.Fatal("two devices reporting the same client must stay separate")
+	}
+	if ObservationFingerprint(runA) == ObservationFingerprint(base) {
+		t.Fatal("an origin must not collide with a sensor's ref")
+	}
+}

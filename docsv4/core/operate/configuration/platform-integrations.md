@@ -10,9 +10,8 @@ protects them at rest.
 
 ## Overview
 
-Platform integrations — currently AWS, used by the [Resource Tracker](#resource-tracker-aws-cost-sync)
-cost-sync job — are configured via the admin-service API described below.
-**There is no admin console page for this today.** The `platform_integrations`
+Platform integrations are configured via the admin-service API described
+below. **There is no admin console page for this today.** The `platform_integrations`
 table, the encryption, and the API endpoints are all live; admin-ui-v2 has not
 wired a Settings screen to them, so creating or updating an integration
 currently means calling the API directly (or scripting it once, as part of
@@ -90,20 +89,6 @@ This creates:
 `admin-service` enables integration management only when
 `ENCRYPTION_MASTER_KEY` is set; otherwise it logs a warning at startup and the
 integration endpoints are disabled.
-
-### Resource Tracker (AWS Cost Sync)
-
-The `resource-tracker-service` reuses the same encryption key to decrypt AWS credentials when ingesting real cost data:
-
-```yaml
-resource-tracker-service:
-  environment:
-    - ENCRYPTION_MASTER_KEY=${ENCRYPTION_MASTER_KEY}
-    - AWS_COST_EXPLORER_ENABLED=true
-    - AWS_COST_SYNC_INTERVAL=1h
-```
-
-When enabled, the service automatically loads the most recent active AWS integration, decrypts the stored access keys, and instantiates the AWS Cost Explorer client with those credentials. If no integration or key is available the job is automatically disabled and a warning is logged.
 
 ## Usage
 

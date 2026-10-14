@@ -174,10 +174,6 @@ func main() {
 	// Resource tracking middleware
 	trackerConfig := resourcetracking.DefaultConfig()
 	trackerConfig.ServiceName = "compliance-engine"
-	trackerConfig.TrackerURL = os.Getenv("RESOURCE_TRACKER_URL")
-	if trackerConfig.TrackerURL == "" {
-		trackerConfig.TrackerURL = sharedconfig.PeerURL("resource-tracker-service", sharedconfig.MTLSEnabled())
-	}
 	// mTLS configuration
 	trackerConfig.UseMTLS = cfg.UseMTLS
 	trackerConfig.ClientCertPath = cfg.ClientCertPath

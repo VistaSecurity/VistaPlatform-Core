@@ -97,7 +97,7 @@ func newServiceRouter(t *testing.T, handler gin.HandlerFunc) (*gin.Engine, <-cha
 	trackerCfg := resourcetracking.DefaultConfig()
 	trackerCfg.Enabled = true
 	trackerCfg.ServiceName = "test-service"
-	trackerCfg.TrackerURL = tracker.URL
+	trackerCfg.IngestURL = tracker.URL + resourcetracking.IngestPath
 	trackerCfg.BatchSize = 1 // flush on the first metric
 	trackerCfg.FlushInterval = time.Hour
 	trackerCfg.DisableCircuitBreaker = true
