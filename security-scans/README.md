@@ -3,11 +3,14 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-10-14T09:51:53Z
+- **Generated**: 2026-10-15T09:33:31Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
-## 0 CRITICAL · 2 HIGH (fixable, across 18 scanned images)
+> [!WARNING]
+> **1 of 18 images could not be scanned on this run.** The counts below therefore describe only the images that were: they are not a clean bill of health for the release. Unscanned images are listed at the bottom.
+
+## 0 CRITICAL · 2 HIGH (fixable, across 17 scanned images)
 
 | Image | CRITICAL | HIGH |
 |---|---:|---:|
@@ -25,10 +28,10 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | `monitoring-service` | 0 | 0 ✅ |
 | `notification-service` | 0 | 0 ✅ |
 | `pcap-processor` | 0 | 0 ✅ |
-| `resource-tracker-service` | 0 | 0 ✅ |
 | `sensor-manager` | 0 | 0 ✅ |
 | `tenant-health-service` | 0 | 0 ✅ |
 | `web-ui` | 0 | 1 |
+| `maintenance-service` | ❌ not scanned | ❌ not scanned |
 
 ## Findings
 
@@ -44,6 +47,12 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 |---|---|---|---|---|
 | HIGH | [CVE-2026-78669](https://nvd.nist.gov/vuln/detail/CVE-2026-78669) | `golang.org/x/net` | `v0.59.0` | `0.60.0` |
 
+## Not scanned on this run
+
+Trivy did not produce a usable report for these images. An image that was not scanned is reported as unscanned rather than as clean.
+
+- `ghcr.io/vistasecurity/maintenance-service:latest`
+
 ## How to read this
 
 - **Fixable only.** Findings with no fix available upstream are excluded, because they are not actionable by upgrading. A count of zero here does not mean zero known CVEs.
@@ -58,4 +67,4 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/38545280328).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/38713521597).</sub>
