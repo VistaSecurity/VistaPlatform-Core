@@ -10,9 +10,9 @@ There is **one inventory** — a single dataset — and **lenses** reshape it. A
 
 | Group | Lenses |
 |---|---|
-| **Assets** | All assets · Map · Software |
-| **Cryptography** | Certificates · Keys · Configuration · TLS · SSH · Data Protection · 3rd Party |
-| **Lifecycle** | Stale · Pending (a link across to Discovery → Approvals) |
+| **Assets** | All assets · Map · Software · Networks · VLANs · Clusters · Circuits · Sites · Cloud · Racks · Cabling |
+| **Cryptography** | Certificates · Keys · Configuration · TLS · SSH · Data Protection · 3rd Party · Tunnels |
+| **Lifecycle** | Stale · Changes · Pending (a link across to Discovery → Approvals) |
 
 The active lens is in the page address (`/inventory?lens=…`), so a lens view is bookmarkable and shareable.
 
@@ -20,6 +20,16 @@ Every lens in that table is live. **Map** draws the neighbourhood around one
 asset and **Software** answers "who is running this product, at this version?" —
 both have their own pages ([The Map](./map.md), [SBOM upload](./sbom.md)) because
 neither is a table with different columns.
+**Networks** and **VLANs** are your IP address management: the prefix tree,
+addresses and VLANs ([Networks, VLANs and IP addresses](../inventory/networks.md)).
+**Sites** lists the places your assets are, each opening its site page
+([Sites and locations](../inventory/sites.md)). **Racks** lists every rack with its
+utilisation ([Racks](../inventory/racks.md)); **Cabling** lists every cable with both
+ends ([Cabling](../inventory/cabling.md)); **Circuits** ([Circuits](../inventory/circuits.md)),
+**Clusters** ([Virtualization](../inventory/virtualization.md)) and **Cloud** (assets grouped
+by cloud account) follow the same pattern. **Tunnels**, in the Cryptography group, lists VPN
+tunnels with the IKE and IPsec algorithms each offers ([VPN](../inventory/vpn.md)). **Changes**
+is the change log ([Changes and journal](../inventory/changes-and-journal.md)).
 
 **Pending** is a link, not a second list. Everything awaiting your review — discovered assets, imports, CMDB pulls and merge proposals — lives in one queue at **Discovery → Approvals**, and Inventory points at it rather than keeping a copy.
 
@@ -39,7 +49,7 @@ To browse the taxonomy itself — every class, the attributes it carries, and wh
 
 ### The other filters
 
-Beneath the class tree: **Risk**, **Status**, **Provenance**, **Environment**, **Site**, **Segment**, **Owner**, **Business unit**, **Tag**, and **Findings**. Selections within one filter are combined with *or*; across filters with *and*.
+Beneath the class tree: **Risk**, **Status**, **Provenance**, **Environment**, **Site**, **Prefix**, **Owner**, **Business unit**, **Tag**, and **Findings**. Selections within one filter are combined with *or*; across filters with *and*.
 
 Two of them deserve a note, because both are about the difference between "we looked and found nothing" and "nobody looked":
 
@@ -101,13 +111,24 @@ address (`/inventory/assets/…`), which you can link to, and has tabs:
 
 | Tab | What's on it |
 |---|---|
-| **Overview** | Class and how it was decided; every identifier with its kind, source, confidence and when it was last seen; the class's attributes; ownership and context, including the asset's network segment and, when that network has a recorded gateway, *via* the gateway; status; and risk — with **who assessed it**, or an explicit *Not assessed*. A router or firewall also gets **Networks routed**: every network it is the gateway of, with its address there, VLAN, DHCP, host count and sensor coverage. |
+| **Overview** | Class and how it was decided; every identifier with its kind, source, confidence and when it was last seen; the class's attributes; ownership and context, including the asset's prefix and, when that network has a recorded gateway, *via* the gateway; status; and risk — with **who assessed it**, or an explicit *Not assessed*. A router or firewall also gets **Networks routed**: every network it is the gateway of, with its address there, VLAN, DHCP, host count and sensor coverage. |
 | **Services & Endpoints** | Every network face of the asset: address, port, transport, the identified service and how confidently it was identified, and when it was last seen. |
+| **Interfaces** | The asset's physical and virtual interfaces, addresses and VLAN modes ([Interfaces](../inventory/interfaces.md)). |
+| **Ports** | The faceplate: ports drawn in the device type's order, with **Connect**, the bulk cable editor, **Trace** and the cryptography overlay ([Cabling](../inventory/cabling.md)). |
+| **Hardware** | Device type, modules and module bays, inventory items and virtual chassis ([Device types](../inventory/device-types.md)). |
 | **Relationships** | What this asset is attached to — each edge with its type, its direction, where it came from, and whether it is confirmed or still proposed — plus the impact closure: what else is affected if this goes away. |
 | **Cryptography** | The crypto configurations discovered on the asset. Click one for the full configuration drawer. |
 | **Findings** | Cryptographic findings on this asset, with the configuration each was found on. |
 | **Software** | The products installed on this asset — name, vendor, version, end-of-life state, known vulnerabilities, identifier, source, last seen and status. A product that has been removed is shown muted rather than dropped, because "it was here and is gone" is an answer. |
 | **History** | Two lists. **Class history** first — every class this asset has held, what moved it, and who decided — then the general change log: context edits, merges, approvals, newest first. |
+| **Changes** | The new change log and the **journal**. The change log records each edit made through the newer infrastructure surface — who made it, from where (web UI, API, discovery or sync) and which fields moved, newest first; it starts empty and fills as those edits happen, while earlier edits stay on **History**. The journal is a list of dated notes anyone in your organisation can read — a repair, a move, a decision — each with its author and a kind (info, success, warning, danger). Reading needs the `dcim.read` permission and adding an entry `dcim.manage`. |
+| **Config Context** | The weight-merged JSON of every config context that matches the asset ([Config contexts](../inventory/config-contexts.md)). |
+
+Under the asset's name, the page also shows its **tags**: labels from your
+organisation's shared tag list. People with `dcim.manage` can click **Edit tags**
+to pick tags or create a new one; saving records the change in the change log.
+These tags are separate from the key/value tags shown on **Overview**, which they
+will replace in a later release.
 
 From the cryptography lenses — where the row is a certificate, a key or a
 configuration rather than an asset — clicking through to an asset opens the same
@@ -155,7 +176,7 @@ applied, because those narrow the page in your browser rather than in the query.
 **Scans you start here.** Under the bar, **Scans started here** lists each scan
 with where it runs and its progress, and names **every** asset that was not
 scanned and why — for example, because the sensor that observed it is offline
-and no other sensor of yours covers its network segment.
+and no other sensor of yours covers its prefix.
 Each asset's name links to its page. A row whose scan is running shows
 **Scanning…**; one whose last scan did not reach it shows **Last scan failed**.
 
@@ -273,7 +294,7 @@ the keys?" — for a questionnaire, an audit, or your own peace of mind.
 ### Stale
 
 Assets nothing has observed for more than **30 days**. Each row shows the asset,
-its class, its segment, its status and how many days it has been quiet, with
+its class, its prefix, its status and how many days it has been quiet, with
 per-row **Rescan** and **Archive** actions on the right and a bar above the table
 that acts on the whole page at once. The staleness cut runs across the whole
 inventory, so the count and pagination reflect every stale asset, not just the
@@ -321,7 +342,7 @@ says **not assessed** — which is not the same as safe. See
 
 ## Exporting the current view
 
-The **Export** button in the toolbar downloads exactly what you're looking at — the current lens, with your active filters and search applied — as a CSV. Each lens exports the columns that make sense for it: certificates export issuers and expiry; keys export sizes and fingerprints; configurations export cipher suites and algorithms; Stale exports class, segment, status and last seen. The file is built right in your browser from the rows already on screen, so there's no waiting.
+The **Export** button in the toolbar downloads exactly what you're looking at — the current lens, with your active filters and search applied — as a CSV. Each lens exports the columns that make sense for it: certificates export issuers and expiry; keys export sizes and fingerprints; configurations export cipher suites and algorithms; Stale exports class, network, status and last seen. The file is built right in your browser from the rows already on screen, so there's no waiting.
 
 You will find it on the **Certificates, Keys, Configuration, TLS, SSH, Data
 Protection, 3rd Party** and **Stale** lenses. **Map** has its own export — a
@@ -336,7 +357,7 @@ Two lenses were absorbed by the class facet on All assets, and their bookmarks r
 | Was | Ask for it now |
 |---|---|
 | **Infrastructure** | All assets — it *is* the asset list, with a class facet on top |
-| **Network** | All assets, filtered by **Segment** in the rail (or `segment_id:` in the query) |
+| **Network** | All assets, filtered by **Prefix** in the rail (or `prefix_id:` in the query) |
 
 ## See also
 

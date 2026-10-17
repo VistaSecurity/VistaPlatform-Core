@@ -1,0 +1,43 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "results": {
+    "port1": {
+      "id": "port1",
+      "name": "port1",
+      "link": true,
+      "speed": 1000.0,
+      "duplex": 1
+    },
+    "port2": {
+      "id": "port2",
+      "name": "port2",
+      "link": true,
+      "speed": 1000.0
+    },
+    "port3": {
+      "id": "port3",
+      "name": "port3",
+      "link": false,
+      "speed": 0.0
+    },
+    "agg1": {
+      "id": "agg1",
+      "name": "agg1",
+      "link": true,
+      "speed": 2000.0
+    },
+    "vlan-users": {
+      "id": "vlan-users",
+      "name": "vlan-users",
+      "link": true,
+      "speed": 2000.0
+    },
+    "vlan-guest": {
+      "id": "vlan-guest",
+      "name": "vlan-guest",
+      "link": true,
+      "speed": 2000.0
+    }
+  }
+}

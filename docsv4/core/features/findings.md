@@ -254,7 +254,7 @@ Four things are watched:
 
 | Finding | Raised when |
 |---|---|
-| **First of its class on a segment** | A kind of device turns up on a network segment that has never held one — a printer on a server VLAN, an OT device on a corporate VLAN. |
+| **First of its class on a prefix** | A kind of device turns up on a prefix that has never held one — a printer on a server VLAN, an OT device on a corporate VLAN. |
 | **Started speaking a new protocol** | A host begins using a protocol it was not using before. A newly-appearing plaintext or remote-access protocol is the case worth chasing. |
 | **Listening ports changed** | The set of ports a host answers on moved. Ports **opening** is the signal to chase first, but a port closing unexpectedly can mean a service has failed rather than been removed. |
 | **Certificate from a new issuer** | A host presents a certificate from a CA it has not used before. Either a planned migration, or what an interception looks like. |
@@ -283,8 +283,7 @@ is never reported as "this is new":
   is not information.
 - **An individual asset is only judged where it has its own history.** A host
   first seen last week has no protocol, port or certificate baseline of its own,
-  so the first thing it does is not a *change*. The same goes for a network
-  segment newer than the window.
+  so the first thing it does is not a *change*. The same goes for a prefix newer than the window.
 
 #### Reading one
 

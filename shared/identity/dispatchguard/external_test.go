@@ -287,7 +287,7 @@ func TestAuthorizeManual_NotPersonInitiatedNeverScansPublic(t *testing.T) {
 	for _, target := range []string{"93.184.216.34", "93.184.216.0/28", "www.example.com"} {
 		_, err := s.AuthorizeManual(manual(t, stubResolver{"www.example.com": {"93.184.216.34"}}, target), opts)
 		refused, ok := IsRefusedTargetsError(err)
-		if !ok || !strings.Contains(refused.Targets[0].Reason, "outside the network segments") {
+		if !ok || !strings.Contains(refused.Targets[0].Reason, "outside the prefixes") {
 			t.Errorf("unattended %q with the flag = %v, want refused as outside the registered networks", target, err)
 		}
 	}

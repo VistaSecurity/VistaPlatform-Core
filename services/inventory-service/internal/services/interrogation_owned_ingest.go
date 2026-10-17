@@ -75,6 +75,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // interrogationDiscoveryMethod is the discovery_method device-interrogation-
@@ -214,7 +215,7 @@ func (s *AssetService) isDeviceOwnAddress(ctx context.Context, tenantID, device 
 			SELECT host(primary_address) FROM assets
 			 WHERE tenant_id = $1 AND id = $2 AND primary_address IS NOT NULL
 			UNION ALL
-			SELECT value FROM asset_identifiers
+			SELECT value FROM (`+identifiersql.Addresses+`) ai
 			 WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'ip_address'
 			   AND source_kind = 'measured'`, tenantID, device)
 		if err != nil {

@@ -25,6 +25,7 @@ type stubCIExporter struct {
 	gotAfter  uuid.UUID
 	gotLimit  int
 	gotQuery  services.CIExportAssetQuery
+	gotClass  string
 	queryErr  error
 }
 
@@ -61,6 +62,15 @@ func (s *stubCIExporter) ExportRelationships(_ context.Context, tenant, after uu
 	return []services.CIExportRelationship{{ID: uuid.New(), FromAssetID: uuid.New(), ToAssetID: uuid.New(), Type: "runs_on"}}, nil
 }
 
+func (s *stubCIExporter) ExportDCIM(_ context.Context, tenant uuid.UUID, class string, after uuid.UUID, limit int) ([]services.CIExportDCIMItem, error) {
+	s.gotTenant, s.gotClass, s.gotAfter, s.gotLimit = tenant, class, after, limit
+	return []services.CIExportDCIMItem{
+		{ID: uuid.New(), Category: class, DisplayName: "R101", Fields: map[string]string{"site": "HQ", "u_height": "42", "utilization": "33.33"},
+			Relations: []services.CIExportDCIMRelation{{Type: services.DCIMRelHouses, ToCategory: "infrastructure_asset", ToID: uuid.New()}}},
+		{ID: uuid.New(), Category: class, DisplayName: "R102", Fields: map[string]string{}, Relations: []services.CIExportDCIMRelation{}},
+	}, nil
+}
+
 func ciExportContractEngine(stub *stubCIExporter) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -85,6 +95,7 @@ func TestContract_CIExport_Responses(t *testing.T) {
 		{http.MethodGet, base + "/items?after=" + after.String() + "&limit=2", ``, "CIExportItemsResponse"},
 		{http.MethodPost, base + "/assets", `{"asset_ids":["` + asset.String() + `"],"include":{"fields":true,"fact_keys":["os.name"],"crypto_posture":true,"identifier":{"kind":"cmdb_sys_id","scope":"p"}}}`, "CIExportAssetsResponse"},
 		{http.MethodGet, base + "/relationships?limit=1", ``, "CIExportRelationshipsResponse"},
+		{http.MethodGet, base + "/dcim/rack?limit=2", ``, "CIExportDCIMResponse"},
 	} {
 		w := httptest.NewRecorder()
 		e.ServeHTTP(w, signedSourceCall(tc.method, tc.path, tc.body, tenant))
@@ -114,6 +125,8 @@ func TestContract_CIExport_PagesSayWhetherThereIsMore(t *testing.T) {
 		{"/items?limit=3", false},
 		{"/relationships?limit=1", true},
 		{"/relationships?limit=2", false},
+		{"/dcim/site?limit=2", true},
+		{"/dcim/site?limit=3", false},
 	} {
 		w := httptest.NewRecorder()
 		e.ServeHTTP(w, signedSourceCall(http.MethodGet, "/api/v1/inventory-service/internal/ci-export"+tc.path, "", uuid.New()))
@@ -145,6 +158,9 @@ func TestContract_CIExport_RefusesBadRequests(t *testing.T) {
 		{http.MethodPost, "/assets", `{"asset_ids":[]}`},
 		{http.MethodPost, "/assets", tooMany},
 		{http.MethodPost, "/assets", `{"asset_ids":["` + uuid.NewString() + `"],"include":{"identifier":{"kind":"","scope":"p"}}}`},
+		// An unknown class is refused, never answered with an empty page.
+		{http.MethodGet, "/dcim/device", ""},
+		{http.MethodGet, "/dcim/rack?limit=0", ""},
 	} {
 		w := httptest.NewRecorder()
 		e.ServeHTTP(w, signedSourceCall(tc.method, "/api/v1/inventory-service/internal/ci-export"+tc.path, tc.body, uuid.New()))
@@ -164,5 +180,24 @@ func TestContract_CIExport_RefusesBadRequests(t *testing.T) {
 		`{"asset_ids":["`+uuid.NewString()+`"],"include":{"identifier":{"kind":"serial_number","scope":"p"}}}`, uuid.New()))
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "cannot be exported") {
 		t.Errorf("a refused query = %d %s, want 400 naming why", w.Code, w.Body.String())
+	}
+}
+
+// Every DCIM class the engine asks for reaches the service by name, and the
+// service's own class list is exactly the seven the CMDB engine catalogues.
+func TestContract_CIExport_DCIMClasses(t *testing.T) {
+	want := []string{"site", "rack", "vlan", "prefix", "interface", "ip_address", "circuit"}
+	got := services.DCIMExportClasses()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("DCIMExportClasses() = %v, want %v (push order)", got, want)
+	}
+	stub := &stubCIExporter{}
+	e := ciExportContractEngine(stub)
+	for _, class := range want {
+		w := httptest.NewRecorder()
+		e.ServeHTTP(w, signedSourceCall(http.MethodGet, "/api/v1/inventory-service/internal/ci-export/dcim/"+class, "", uuid.New()))
+		if w.Code != http.StatusOK || stub.gotClass != class {
+			t.Errorf("GET dcim/%s = %d (service saw %q): %s", class, w.Code, stub.gotClass, w.Body.String())
+		}
 	}
 }

@@ -166,7 +166,7 @@ func TestBareIdIsTheRowUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf(`id.any:"…": %v`, err)
 	}
-	if !strings.Contains(got.Where, "FROM asset_identifiers") {
+	if !strings.Contains(got.Where, "asset_identifiers") {
 		t.Errorf(`id.any compiled to %q, want the identifier EXISTS`, got.Where)
 	}
 	if strings.Contains(got.Where, ".kind =") {

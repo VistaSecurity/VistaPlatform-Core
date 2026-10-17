@@ -72,33 +72,6 @@ const AWS_FIELDS: Record<AwsAuthMode, CredField[]> = {
   ],
 };
 
-/**
- * `config.enumerate_compute` — the per-integration switch for compute /
- * network enumeration (BUILD_PLAN 2.4).
- *
- * ABSENT means ON. Every integration written before the setting existed
- * carries no value, and the backend reads a missing key as `true`
- * (cloud_integration_auth.go). Reading it as off here would show a switch in
- * the opposite position to the behaviour.
- */
-export const ENUMERATE_COMPUTE_KEY = 'enumerate_compute';
-
-/** Reads the toggle out of an integration's config map, defaulting to ON. */
-export function readEnumerateCompute(config: unknown): boolean {
-  if (!config || typeof config !== 'object') return true;
-  const v = (config as Record<string, unknown>)[ENUMERATE_COMPUTE_KEY];
-  if (typeof v === 'boolean') return v;
-  // The AWS credential decrypt path stringifies non-string config values, so a
-  // stored `false` can come back as the STRING "false". Reading only the
-  // boolean would treat that as "not set" and silently show the switch on.
-  if (typeof v === 'string') {
-    const s = v.trim().toLowerCase();
-    if (s === 'false' || s === '0') return false;
-    if (s === 'true' || s === '1') return true;
-  }
-  return true;
-}
-
 const PROVIDER_FIELDS: Record<ProviderType, CredField[]> = {
   aws: AWS_FIELDS.access_key,
   azure: [
@@ -144,12 +117,6 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
   const [description, setDescription] = useState('');
   const [isEnabled, setIsEnabled] = useState(true);
   const [cred, setCred] = useState<Record<string, string>>({});
-  // `config.enumerate_compute` — whether a discovery run for this integration
-  // also inventories compute instances, networks and subnets. ABSENT means ON:
-  // every integration written before the setting existed carries no value, and
-  // the capability is the default. See ENUMERATE_COMPUTE_KEY below.
-  const [enumerateCompute, setEnumerateCompute] = useState(true);
-  const [storedEnumerateCompute, setStoredEnumerateCompute] = useState(true);
   const [authMode, setAuthMode] = useState<AwsAuthMode>('access_key');
   // The mode the integration was stored with, so an edit that ONLY flips the
   // mode still sends a config (there are no new credential values to trigger it).
@@ -178,9 +145,6 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
     const mode: AwsAuthMode = str('auth_mode') === 'assume_role' ? 'assume_role' : 'access_key';
     setAuthMode(mode);
     setStoredAuthMode(mode);
-    const enumerate = readEnumerateCompute(cfg);
-    setEnumerateCompute(enumerate);
-    setStoredEnumerateCompute(enumerate);
     setCred({
       ...(str('assume_role_arn') ? { assume_role_arn: str('assume_role_arn') } : {}),
       ...(str('role_session_name') ? { role_session_name: str('role_session_name') } : {}),
@@ -203,7 +167,6 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
     (f) => f.required && !(cred[f.key] ?? '').trim() && !(isEdit && isMasked(f)),
   );
   const modeChanged = isAws && isEdit && authMode !== storedAuthMode;
-  const enumerateChanged = isEdit && enumerateCompute !== storedEnumerateCompute;
   const valid = !!name.trim()
     && missingRequired.length === 0
     && (isEdit || isAws || credEntries.length > 0);
@@ -215,11 +178,6 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
       // auth_mode rides with any AWS config write so the backend never has to
       // infer which credential shape it was handed.
       if (isAws) config.auth_mode = authMode;
-      // Always sent, on create and on any edit that includes a config: the
-      // backend MERGES config, so omitting the key leaves the stored value,
-      // and sending it explicitly is what makes the switch's position and the
-      // stored value the same thing.
-      config[ENUMERATE_COMPUTE_KEY] = enumerateCompute;
 
       if (isEdit) {
         const body: deviceInterrogationComponents['schemas']['UpdateIntegrationRequest'] = {
@@ -229,11 +187,10 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
           environment: environment.trim() || undefined,
           description: description.trim() || undefined,
           is_enabled: isEnabled,
-          // Only send config when the user actually entered new credentials,
-          // switched auth mode, or flipped the enumeration switch — the backend
-          // merges it into the existing decrypted config, so an omitted config
-          // leaves the secrets alone.
-          ...(credEntries.length || modeChanged || enumerateChanged ? { config } : {}),
+          // Only send config when the user actually entered new credentials
+          // or switched auth mode — the backend merges it into the existing
+          // decrypted config, so an omitted config leaves the secrets alone.
+          ...(credEntries.length || modeChanged ? { config } : {}),
         };
         unwrap(await clients.devices.PUT('/integrations/{id}', {
           params: { path: { id: integration!.id } }, body,
@@ -353,44 +310,9 @@ export function CloudIntegrationFormModal({ open, integration, onClose, onSaved 
         Enabled — include this integration in cloud discovery syncs.
       </label>
 
-      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 9, marginTop: 10, cursor: 'pointer', fontSize: 12.5, color: 'var(--app-t1)' }}>
-        <input
-          type="checkbox"
-          checked={enumerateCompute}
-          onChange={(e) => setEnumerateCompute(e.target.checked)}
-          style={{ marginTop: 2 }}
-        />
-        <span>
-          Inventory compute, networks and subnets
-          <span style={{ display: 'block', fontSize: 11, color: 'var(--app-t3)', marginTop: 2 }}>
-            {ENUMERATION_COST_NOTE[providerType]}
-          </span>
-        </span>
-      </label>
     </Modal>
   );
 }
-
-/**
- * What turning enumeration on actually costs, per provider, in the provider's
- * own terms. Stated because the switch is ON by default and a large account
- * pays for every call — an operator deciding whether to leave it on needs the
- * number, not a reassurance.
- */
-const ENUMERATION_COST_NOTE: Record<ProviderType, string> = {
-  aws:
-    'Four extra read-only API calls per selected region per run '
-    + '(DescribeInstances, DescribeVpcs, DescribeSubnets, DescribeSecurityGroups), '
-    + 'each paginated. Needs ec2:Describe* — covered by AmazonEC2ReadOnlyAccess.',
-  azure:
-    'Four extra subscription-wide read-only calls per run (virtual machines, '
-    + 'virtual networks with their subnets, network security groups, network '
-    + 'interfaces), each paginated. Covered by the built-in Reader role.',
-  gcp:
-    'Four extra project-wide read-only calls per run (instances and subnetworks '
-    + 'aggregated across all zones and regions, networks, firewalls), each '
-    + 'paginated. Covered by roles/compute.viewer.',
-};
 
 // ---- Delete (danger confirm) ----------------------------------------------
 
@@ -426,7 +348,7 @@ export function CloudIntegrationDeleteModal({ open, integration, onClose, onDele
       eyebrow="Discovery"
       title="Remove cloud integration"
       description={integration
-        ? `Remove “${integration.integration_name}”? Existing discovered assets are kept, but no further syncs will run from this connection.`
+        ? `Remove “${integration.integration_name}”? Existing discovered assets are kept, but no further syncs will run from this connection. The cloud account asset is kept too: it stops being refreshed and goes stale by your stale-asset policy.`
         : undefined}
       primary={
         <button className="ui-btn" style={{ background: 'var(--danger)', borderColor: 'var(--danger)', color: '#fff' }} disabled={del.isPending} onClick={() => del.mutate()}>
@@ -443,11 +365,10 @@ export function CloudIntegrationDeleteModal({ open, integration, onClose, onDele
 
 type ProviderKey = 'aws' | 'azure' | 'gcp';
 
-// `global: true` marks a resource type the AWS API lists account-wide rather
-// than per region — S3 (ListBuckets) and CloudFront (ListDistributions). The
-// backend calls those without the regions argument at all
-// (cloud_discovery_service.go DiscoverAWSResources), so offering a region
-// filter next to them would promise filtering that cannot happen.
+// `global: true` marks a resource type the provider lists account-wide rather
+// than per region — S3 (ListBuckets) and CloudFront (ListDistributions) on AWS.
+// Shown as a badge so the job's outcome grid reading `global` for it is not a
+// surprise.
 export interface ResourceTypeOption {
   value: string;
   label: string;
@@ -455,8 +376,34 @@ export interface ResourceTypeOption {
   global?: boolean;
 }
 
+/**
+ * The account inventory listings (asset-inventory ADR-0009 D3): compute
+ * instances, networks (recorded as prefixes in Inventory → Networks) and
+ * security groups. They are resource types like every other since DCIM row
+ * 4.6 — the per-integration `enumerate_compute` switch is gone — and they
+ * lead each provider's list because they are the frame the rest hangs on.
+ */
+const ENUMERATION_TYPES: Record<ProviderKey, ResourceTypeOption[]> = {
+  aws: [
+    { value: 'compute_instances', label: 'EC2 instances', description: 'Every instance with its ENIs and private addresses (ec2:DescribeInstances). Terminated instances are never created; one already in inventory is marked stale with the reason.' },
+    { value: 'networks',          label: 'VPCs and their ranges', description: 'Recorded as prefixes in Inventory → Networks (ec2:DescribeVpcs and its child-range listing).' },
+    { value: 'security_groups',   label: 'Security groups', description: 'Each group as an asset, with the instances that are members of it — never the rules (ec2:DescribeSecurityGroups).' },
+  ],
+  azure: [
+    { value: 'compute_instances', label: 'Virtual machines', description: 'Every VM with its network interfaces and private addresses (virtualMachines/read, networkInterfaces/read).' },
+    { value: 'networks',          label: 'Virtual networks', description: 'VNets and their address ranges, recorded as prefixes in Inventory → Networks.' },
+    { value: 'security_groups',   label: 'Network security groups', description: 'Each NSG as an asset, with the VMs that are members of it — never the rules.' },
+  ],
+  gcp: [
+    { value: 'compute_instances', label: 'Compute Engine instances', description: 'Every instance in every zone, with its network interfaces and internal addresses (compute.instances.list).' },
+    { value: 'networks',          label: 'VPC networks', description: 'Networks and their ranges, recorded as prefixes in Inventory → Networks.' },
+    { value: 'security_groups',   label: 'Firewall rules', description: 'Each firewall rule as a security-group asset, with the instances it targets — never the rule content.' },
+  ],
+};
+
 export const RESOURCE_TYPES: Record<ProviderKey, ResourceTypeOption[]> = {
   aws: [
+    ...ENUMERATION_TYPES.aws,
     { value: 'alb',         label: 'Application Load Balancer', description: 'ALBs with TLS listeners — negotiated protocol, cipher suite and the served certificate chain.' },
     { value: 'elb',         label: 'Classic Load Balancer',     description: 'Classic ELBs with SSL listeners.' },
     { value: 'nlb',         label: 'Network Load Balancer',     description: 'NLBs with TLS listeners.' },
@@ -465,63 +412,43 @@ export const RESOURCE_TYPES: Record<ProviderKey, ResourceTypeOption[]> = {
     { value: 'kms',         label: 'KMS keys',                  description: 'Every KMS key — key spec, state, usage, rotation status and period, aliases and multi-Region — including AWS-managed keys (aws/s3, aws/ebs …), each labelled with who manages it.' },
     { value: 's3',          label: 'S3 bucket encryption',      description: 'Default at-rest encryption on every bucket — SSE-S3, SSE-KMS or DSSE-KMS, the KMS key in use, and whether S3 Bucket Keys are on.', global: true },
     { value: 'rds',         label: 'RDS instance encryption',   description: 'Storage encryption on each RDS instance — whether it is on, the KMS key, engine and version, Multi-AZ, and the Performance Insights key.' },
+    { value: 'serverless_functions', label: 'Lambda functions',   description: 'Runtime, handler, memory, execution role and environment variable NAMES — never their values (lambda:ListFunctions).' },
+    { value: 'container_clusters',   label: 'EKS clusters',       description: 'Kubernetes version and endpoint exposure of each cluster (eks:ListClusters, eks:DescribeCluster).' },
+    { value: 'secret_stores',        label: 'Secrets Manager',    description: 'Each secret’s rotation and encryption key — metadata only, never a value (secretsmanager:ListSecrets).' },
+    { value: 'dns_zones',            label: 'Route 53 hosted zones', description: 'Every hosted zone, with the certificates in your inventory that fall under it (route53:ListHostedZones).', global: true },
   ],
   azure: [
+    ...ENUMERATION_TYPES.azure,
     { value: 'application_gateway', label: 'Application Gateway',      description: 'App Gateways with SSL policies' },
     { value: 'load_balancer',       label: 'Load Balancer',            description: 'Azure Load Balancers' },
     { value: 'key_vault',           label: 'Key Vault keys',           description: 'Keys in every Key Vault in the subscription — key type and size, state, and rotation.' },
     { value: 'storage_account',     label: 'Storage account encryption', description: 'At-rest encryption on each storage account — Microsoft-managed or customer-managed key, and the Key Vault key in use.' },
     { value: 'sql_database',        label: 'SQL Database encryption',  description: 'Transparent Data Encryption on each Azure SQL database — on or off, and whether the server protector is service-managed or a Key Vault key.' },
+    { value: 'serverless_functions', label: 'Function Apps',      description: 'Runtime and managed identity of each Function App. Application settings are not read — their values are the app’s secrets.' },
+    { value: 'container_clusters',   label: 'AKS clusters',       description: 'Kubernetes version and API server exposure of each cluster.' },
+    { value: 'secret_stores',        label: 'Key Vault secrets',  description: 'Each secret’s metadata through the management plane — never a value.' },
+    { value: 'dns_zones',            label: 'DNS zones',          description: 'Every Azure DNS zone, with the certificates in your inventory that fall under it.' },
   ],
   gcp: [
+    ...ENUMERATION_TYPES.gcp,
     { value: 'load_balancer', label: 'HTTPS Load Balancer',       description: 'GCP HTTPS load balancers' },
     { value: 'ssl_proxy',     label: 'SSL Proxy',                 description: 'GCP SSL proxy load balancers' },
     { value: 'kms',           label: 'Cloud KMS keys',            description: 'Cloud KMS keys in every location — purpose, algorithm, protection level, state and rotation.' },
     { value: 'storage',       label: 'Cloud Storage encryption',  description: 'Default at-rest encryption on each bucket — Google-managed or a Cloud KMS key.' },
     { value: 'cloudsql',      label: 'Cloud SQL encryption',      description: 'At-rest encryption on each Cloud SQL instance — Google-managed or a customer-managed Cloud KMS key.' },
+    { value: 'serverless_functions', label: 'Cloud Functions',    description: 'Runtime, entry point, service account and environment variable NAMES — never their values.' },
+    { value: 'container_clusters',   label: 'GKE clusters',       description: 'Kubernetes version and endpoint exposure of each cluster.' },
+    { value: 'secret_stores',        label: 'Secret Manager',     description: 'Each secret’s rotation and encryption key — metadata only, never a value.' },
+    { value: 'dns_zones',            label: 'Cloud DNS zones',    description: 'Every managed zone, with the certificates in your inventory that fall under it.' },
   ],
 };
 
-// The AWS commercial partition (aws). Enumerating regions from the account
-// (ec2:DescribeRegions / the account API) is deliberately deferred — that would
-// need an extra IAM grant and a round trip before the modal can render.
-// NOTE: GovCloud (aws-us-gov) and China (aws-cn) are separate partitions with
-// separate credentials and endpoints; they are not selectable here.
-export const AWS_REGIONS = [
-  // North America
-  'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
-  'ca-central-1', 'ca-west-1', 'mx-central-1',
-  // South America
-  'sa-east-1',
-  // Europe
-  'eu-west-1', 'eu-west-2', 'eu-west-3',
-  'eu-central-1', 'eu-central-2',
-  'eu-north-1', 'eu-south-1', 'eu-south-2',
-  // Middle East / Africa
-  'il-central-1', 'me-central-1', 'me-south-1', 'af-south-1',
-  // Asia Pacific
-  'ap-east-1', 'ap-south-1', 'ap-south-2',
-  'ap-northeast-1', 'ap-northeast-2', 'ap-northeast-3',
-  'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3',
-  'ap-southeast-4', 'ap-southeast-5', 'ap-southeast-7',
-];
-
-/**
- * True when the selected resource types actually make a region list meaningful.
- * S3 and CloudFront are listed account-wide, so a run of only those types needs
- * no `regions` at all — sending one would imply a filter the API never applies.
- */
-export function selectionNeedsRegions(provider: ProviderKey, selected: Iterable<string>): boolean {
-  if (provider !== 'aws') return false;
-  const sel = new Set(selected);
-  return RESOURCE_TYPES.aws.some((rt) => sel.has(rt.value) && !rt.global);
-}
-
-/** True when the selection includes at least one account-wide (global) type. */
-export function selectionHasGlobal(provider: ProviderKey, selected: Iterable<string>): boolean {
-  const sel = new Set(selected);
-  return (RESOURCE_TYPES[provider] ?? []).some((rt) => sel.has(rt.value) && rt.global);
-}
+/** Where a run reads, said once in the modal: the account is the scope. */
+export const REGION_SCOPE_NOTE: Record<ProviderKey, string> = {
+  aws: 'Every region enabled for this account is read — the regions are listed from the account (ec2:DescribeRegions), not chosen here. Opt-in regions the account has not enabled are skipped.',
+  azure: 'Every listing is subscription-wide, so every location is read.',
+  gcp: 'Every listing is project-wide (aggregated across zones and regions), so every region is read.',
+};
 
 export function CloudIntegrationDiscoverModal({ open, integration, onClose, onStarted }: {
   open: boolean;
@@ -532,19 +459,13 @@ export function CloudIntegrationDiscoverModal({ open, integration, onClose, onSt
   const qc = useQueryClient();
   const provider = ((integration?.integration_type ?? 'aws').toLowerCase()) as ProviderKey;
   const resourceTypes = RESOURCE_TYPES[provider] ?? RESOURCE_TYPES.aws;
-  const defaultRegion = integration?.region ?? 'us-east-1';
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [regions, setRegions] = useState<Set<string>>(new Set([defaultRegion]));
 
-  const needsRegions = selectionNeedsRegions(provider, selected);
-  const hasGlobal = selectionHasGlobal(provider, selected);
-  const enumerates = readEnumerateCompute(integration?.config);
-
-  // Reset when the target integration changes.
+  // Reset when the target integration changes: everything readable is the
+  // default (ADR-0009 D3) — the operator opts out per type.
   useEffect(() => {
-    setSelected(new Set(resourceTypes.map((r) => r.value))); // pre-select all
-    setRegions(new Set([integration?.region ?? 'us-east-1']));
+    setSelected(new Set(resourceTypes.map((r) => r.value)));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [integration?.id, open]);
 
@@ -554,23 +475,15 @@ export function CloudIntegrationDiscoverModal({ open, integration, onClose, onSt
     setSelected(s);
   };
 
-  const toggleRegion = (v: string) => {
-    const s = new Set(regions);
-    if (s.has(v)) s.delete(v); else s.add(v);
-    setRegions(s);
-  };
-
   const discover = useMutation({
     mutationFn: async (): Promise<deviceInterrogationComponents['schemas']['CloudDiscoverResponse']> => {
       if (!integration) throw new Error('No integration selected');
+      // No `regions`: the run reads every region the account has (AWS lists
+      // them from the account; Azure and GCP listings are account-wide).
       const body: deviceInterrogationComponents['schemas']['CloudDiscoverRequest'] = {
         integration_id: integration.id,
         cloud_provider: provider,
         resource_types: Array.from(selected),
-        // Only send regions when a regional type is in play. For a global-only
-        // run the field is meaningless, and omitting it keeps the request
-        // honest rather than recording a filter that was never applied.
-        ...(needsRegions && regions.size > 0 ? { regions: Array.from(regions) } : {}),
       };
       const data = unwrap(await clients.devices.POST('/cloud/discover', { body }), 'Failed to start discovery', { requireData: true });
       return data;
@@ -582,7 +495,7 @@ export function CloudIntegrationDiscoverModal({ open, integration, onClose, onSt
     },
   });
 
-  const canSubmit = selected.size > 0 && (!needsRegions || regions.size > 0) && !discover.isPending;
+  const canSubmit = selected.size > 0 && !discover.isPending;
   const footerErr = discover.isError ? (discover.error as Error).message : null;
 
   return (
@@ -604,7 +517,6 @@ export function CloudIntegrationDiscoverModal({ open, integration, onClose, onSt
       secondary={<button className="ui-btn" onClick={onClose} disabled={discover.isPending}>Cancel</button>}
       footerNote={footerErr ? <span style={{ color: 'var(--danger-text)' }}>{footerErr}</span> : undefined}
     >
-      {/* Resource types */}
       <div style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
           <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.04em', textTransform: 'uppercase', color: 'var(--app-t3)' }}>
@@ -627,7 +539,7 @@ export function CloudIntegrationDiscoverModal({ open, integration, onClose, onSt
                   {rt.label}
                   {rt.global && (
                     <span
-                      title="Listed account-wide — region selection does not apply to this type"
+                      title="Listed account-wide by one call"
                       style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase', padding: '1px 6px', borderRadius: 20, border: '1px solid var(--app-border)', color: 'var(--app-t3)', flex: 'none' }}
                     >
                       Global
@@ -642,61 +554,10 @@ export function CloudIntegrationDiscoverModal({ open, integration, onClose, onSt
         {selected.size === 0 && (
           <div style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 6 }}>Select at least one resource type.</div>
         )}
-
-        {/* Enumeration is not one of the resource types: it is a per-integration
-            setting, and the run carries it whatever is ticked above. Saying so
-            here is what stops "I deselected everything and it still inventoried
-            my instances" reading as a bug. */}
-        <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 10, lineHeight: 1.5 }}>
-          {enumerates
-            ? 'This run also inventories compute instances, virtual networks and subnets, with their containment. Turn it off in Edit integration.'
-            : 'Compute, network and subnet inventory is off for this integration. Turn it on in Edit integration.'}
+        <div data-testid="region-scope-note" style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 10, lineHeight: 1.5 }}>
+          {REGION_SCOPE_NOTE[provider] ?? REGION_SCOPE_NOTE.aws}
         </div>
       </div>
-
-      {/* Region selection — AWS only, and only meaningful for the regional types.
-          When every selected type is account-wide the picker is disabled rather
-          than hidden, so the reason is visible instead of the control vanishing. */}
-      {provider === 'aws' && (
-        <div style={{ opacity: needsRegions ? 1 : 0.55 }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '.04em', textTransform: 'uppercase', color: 'var(--app-t3)' }}>
-              Regions
-            </div>
-            <button
-              className="ui-btn sm ghost"
-              style={{ fontSize: 11 }}
-              disabled={!needsRegions}
-              onClick={() => setRegions(regions.size === AWS_REGIONS.length ? new Set([defaultRegion]) : new Set(AWS_REGIONS))}
-            >
-              {regions.size === AWS_REGIONS.length ? 'Reset' : 'All regions'}
-            </button>
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--app-t3)', marginBottom: 8 }}>
-            {!needsRegions
-              ? 'The selected resource types are listed account-wide, so no region selection is needed.'
-              : hasGlobal
-                ? 'S3 and CloudFront are listed account-wide; these regions apply to the other selected types.'
-                : 'Each selected region is scanned separately — every region you add costs another pass.'}
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-            {AWS_REGIONS.map((r) => (
-              <button
-                key={r}
-                className={`ui-btn sm${regions.has(r) ? ' accent' : ' ghost'}`}
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
-                disabled={!needsRegions}
-                onClick={() => toggleRegion(r)}
-              >
-                {r}
-              </button>
-            ))}
-          </div>
-          {needsRegions && regions.size === 0 && (
-            <div style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 6 }}>Select at least one region.</div>
-          )}
-        </div>
-      )}
     </Modal>
   );
 }

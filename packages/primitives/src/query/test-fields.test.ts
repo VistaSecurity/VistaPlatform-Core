@@ -44,12 +44,25 @@ const SPEC_FIELDS: Record<string, string[]> = {
     'display_name', 'hostname', 'description',
     'primary_address',
     'environment',
-    'business_unit', 'owner_email', 'support_group', 'site', 'region', 'zone',
+    'business_unit', 'business_unit.id', 'business_unit.parent', 'owner_email', 'support_group', 'site', 'site.id', 'site.group', 'site.region', 'location', 'region', 'zone',
+    'device_type', 'device_type.id', 'device_type.manufacturer', 'device_role', 'device_role.id',
+    'platform', 'platform.id', 'serial', 'asset_tag',
+    'cluster', 'cluster.id', 'cluster.type', 'cluster.group',
+    'circuit', 'circuit.cid', 'circuit.provider',
+    'rack', 'rack.id', 'rack.site', 'rack.role', 'position', 'face',
+    'module_type', 'inventory_item.serial', 'virtual_chassis',
+    'cable.type', 'cable.status', 'cabled_to',
+    'provider', 'account', 'cloud.type',
     'status', 'ownership', 'stale_status', 'identity_status', 'source', 'proposed_by', 'cert_trust',
+    // IPAM, computed from the asset's addresses (QUERY_LANGUAGE §15 D2).
+    'ip.address', 'ip.dns_name', 'ip.status', 'ip.role', 'prefix.prefix', 'prefix.status', 'prefix.network_type',
+    'vlan.vid', 'vlan.name', 'vrf.name',
+    'tunnel', 'tunnel.encapsulation', 'tunnel.ike_version', 'tunnel.pfs_group',
+    'wireless_lan.auth_type', 'wireless_lan.ssid',
     'risk', 'risk_score', 'risk_assessed_by',
     'confidence_score', 'class_confidence',
     'first_seen', 'last_seen', 'last_scanned', 'created_at', 'updated_at',
-    'segment_id', 'location_id', 'id',
+    'prefix_id', 'location_id', 'id',
   ],
   endpoint: [
     'address', 'fqdn', 'port', 'transport', 'protocol', 'service_name',
@@ -83,11 +96,19 @@ const SPEC_FIELDS: Record<string, string[]> = {
   relationship: ['type', 'status', 'source', 'confidence', 'id'],
   observation: [
     'source', 'kind', 'confidence', 'class', 'hostname', 'address',
-    'network.ownership', 'network.type', 'network.segment_id', 'first_seen',
+    'network.ownership', 'network.type', 'first_seen',
+    // §15 (ADR-0009 D5): the account scope term of a cloud auto-approval rule.
+    'cloud.account_id',
+    // §15 (DCIM row 1.4): the observation's prefix, VRF and interface.
+    'network.prefix_id', 'network.vrf_id', 'interface_id',
   ],
   measurement: ['value'],
   identifier: [
     'kind', 'value', 'scope', 'confidence', 'source_kind', 'first_seen', 'last_seen', 'id',
+  ],
+  interface: [
+    'name', 'type', 'mac_address', 'enabled', 'mgmt_only', 'mtu', 'speed_kbps', 'mode', 'status',
+    'operational_status', 'description', 'id',
   ],
 };
 
@@ -95,9 +116,10 @@ describe('the targets of §4.1', () => {
   it('are all present, and nothing else is', () => {
     const names = TARGETS.map((t) => t.name);
     for (const t of SPEC_TARGETS) expect(names, `§4.1 lists ${t}`).toContain(t);
-    // `identifier` is the one extra: §3 lists it as a sub-predicate collection,
-    // so its inner predicate needs a target to resolve against.
-    expect([...names].sort()).toEqual([...SPEC_TARGETS, 'identifier'].sort());
+    // `identifier` and `interface` are the extras: each is a sub-predicate
+    // collection (§3; `interface` by the DCIM amendment §15), so its inner
+    // predicate needs a target to resolve against.
+    expect([...names].sort()).toEqual([...SPEC_TARGETS, 'identifier', 'interface'].sort());
   });
 
   it('mark the two table-less ones as in-memory', () => {
@@ -123,9 +145,12 @@ describe('the targets of §4.1', () => {
 
 describe('the namespaces of §4.2', () => {
   it('resolve only on asset-shaped targets', () => {
-    expect(NAMESPACES_BY_TARGET.asset).toEqual(['attr', 'fact', 'id', 'tag']);
+    expect(NAMESPACES_BY_TARGET.asset).toEqual(['attr', 'fact', 'id', 'tag', 'cf']);
     expect(NAMESPACES_BY_TARGET.observation).toEqual(['attr', 'fact', 'id', 'tag']);
     expect(NAMESPACES_BY_TARGET.measurement).toEqual(['fact']);
+    // §15.5: custom fields live on every DCIM row; of the query targets, the
+    // interface carries them too.
+    expect(NAMESPACES_BY_TARGET.interface).toEqual(['cf']);
     expect(NAMESPACES_BY_TARGET.endpoint).toBeUndefined();
     expect(NAMESPACES_BY_TARGET.certificate).toBeUndefined();
   });

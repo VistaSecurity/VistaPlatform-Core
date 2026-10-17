@@ -54,7 +54,7 @@ func TestIntegration_OpenMergeProposal_StoresTheRuleVerdict(t *testing.T) {
 		}
 		if verdict != "" {
 			p.RuleVerdict = verdict
-			p.RuleEvidence = []string{"serial number SN-VERDICT-1 seen directly", "same segment"}
+			p.RuleEvidence = []string{"serial number SN-VERDICT-1 seen directly", "same prefix"}
 		}
 		return p
 	}

@@ -42,16 +42,20 @@ type mapAssetSpec struct {
 func seedMapAsset(t *testing.T, db *database.DB, tenant uuid.UUID, s mapAssetSpec) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
+	var siteID any
+	if s.site != nil {
+		siteID = testdb.EnsureSite(t, db, tenant, *s.site)
+	}
 	if s.assessedBy == nil {
 		s.assessedBy = []string{}
 	}
 	if _, err := db.Exec(`
 		INSERT INTO assets (id, tenant_id, display_name, hostname, primary_address, class_key, class_path,
-		                    asset_status, site, network_segment_id, risk_score, risk_assessed_by,
+		                    asset_status, site_id, prefix_id, risk_score, risk_assessed_by,
 		                    deleted_at, last_seen_at, first_discovered_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5::inet,'server','hardware.computer.server',$6,$7,$8,$9,$10,
 		        CASE WHEN $11 THEN NOW() ELSE NULL END, NOW(),NOW(),NOW(),NOW())`,
-		id, tenant, s.displayName, s.hostname, s.address, s.status, s.site, s.segment,
+		id, tenant, s.displayName, s.hostname, s.address, s.status, siteID, s.segment,
 		s.risk, pq.Array(s.assessedBy), s.deleted); err != nil {
 		t.Fatalf("insert asset: %v", err)
 	}
@@ -134,18 +138,18 @@ func mapAssetByID(m *NetworkMap) map[uuid.UUID]NetworkMapAsset {
 // Population: monitoring and pending are drawn; archived, denied and deleted
 // are not; another tenant's asset and segment never appear; an inactive
 // segment is not listed. And "unknown is not zero" on the way.
-func TestIntegration_NetworkMap_PopulationIsolationAndSegments(t *testing.T) {
+func TestIntegration_NetworkMap_PopulationIsolationAndPrefixes(t *testing.T) {
 	svc, db, tenant := newTopologyFixture(t)
 	other := newTopologyOtherTenant(t, db)
 	ctx := context.Background()
 
-	core := seedSegment(t, db, tenant, "Core VLAN", "10.0.0.0/16")
-	inactive := seedSegment(t, db, tenant, "Retired VLAN", "10.9.0.0/16")
-	if _, err := db.Exec(`UPDATE network_segments SET is_active = false WHERE id = $1 AND tenant_id = $2`, inactive, tenant); err != nil {
+	core := seedPrefix(t, db, tenant, "Core VLAN", "10.0.0.0/16")
+	inactive := seedPrefix(t, db, tenant, "Retired VLAN", "10.9.0.0/16")
+	if _, err := db.Exec(`UPDATE prefixes SET status = 'archived' WHERE id = $1 AND tenant_id = $2`, inactive, tenant); err != nil {
 		t.Fatal(err)
 	}
-	empty := seedSegment(t, db, tenant, "Empty VLAN", "10.8.0.0/16")
-	seedSegment(t, db, other, "Other tenant VLAN", "10.0.0.0/16")
+	empty := seedPrefix(t, db, tenant, "Empty VLAN", "10.8.0.0/16")
+	seedPrefix(t, db, other, "Other tenant VLAN", "10.0.0.0/16")
 
 	east := "DC-East"
 	monitored := seedMapAsset(t, db, tenant, mapAssetSpec{
@@ -182,7 +186,7 @@ func TestIntegration_NetworkMap_PopulationIsolationAndSegments(t *testing.T) {
 
 	w := by[monitored]
 	if w.DisplayName != "web-01" || w.Address != "10.0.0.5" || w.Site != "DC-East" ||
-		w.SegmentID == nil || *w.SegmentID != core || !w.RiskAssessed || w.RiskScore != 70 {
+		w.PrefixID == nil || *w.PrefixID != core || !w.RiskAssessed || w.RiskScore != 70 {
 		t.Errorf("monitored asset = %+v", w)
 	}
 	p, ok := by[pending]
@@ -190,7 +194,7 @@ func TestIntegration_NetworkMap_PopulationIsolationAndSegments(t *testing.T) {
 		t.Fatal("the pending-approval asset is not on the map (spec D5 draws it)")
 	}
 	if p.AssetStatus != "pending_approval" || p.DisplayName != "10.0.0.6" || p.Address != "10.0.0.6" ||
-		p.SegmentID != nil || p.Site != TopologyUnassignedSite {
+		p.PrefixID != nil || p.Site != TopologyUnassignedSite {
 		t.Errorf("pending asset = %+v", p)
 	}
 	if p.RiskAssessed || p.RiskScore != 0 {
@@ -200,15 +204,14 @@ func TestIntegration_NetworkMap_PopulationIsolationAndSegments(t *testing.T) {
 		t.Errorf("an asset with no crypto must carry [] components; got %#v", p.Crypto.Components)
 	}
 
-	if len(m.Segments) != 2 {
-		t.Fatalf("segments = %+v, want Core VLAN + Empty VLAN only", m.Segments)
+	if len(m.Prefixes) != 2 {
+		t.Fatalf("prefixes = %+v, want 10.0.0.0/16 (Core VLAN) + 10.8.0.0/16 (Empty VLAN) only", m.Prefixes)
 	}
-	if m.Segments[0].SegmentID != core || m.Segments[0].Name != "Core VLAN" ||
-		m.Segments[0].Value != "10.0.0.0/16" || m.Segments[0].SegmentType != "cidr" {
-		t.Errorf("segments[0] = %+v", m.Segments[0])
+	if m.Prefixes[0].PrefixID != core || m.Prefixes[0].Description != "Core VLAN" || m.Prefixes[0].Prefix != "10.0.0.0/16" {
+		t.Errorf("prefixes[0] = %+v", m.Prefixes[0])
 	}
-	if m.Segments[1].SegmentID != empty {
-		t.Errorf("an active segment with no asset in it must still be listed; got %+v", m.Segments[1])
+	if m.Prefixes[1].PrefixID != empty {
+		t.Errorf("a live prefix with no asset in it must still be listed; got %+v", m.Prefixes[1])
 	}
 }
 
@@ -358,7 +361,7 @@ func TestIntegration_NetworkMap_EmptyEstate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Assets == nil || m.Segments == nil || len(m.Assets) != 0 || len(m.Segments) != 0 || m.TotalAssets != 0 || m.Truncated {
+	if m.Assets == nil || m.Prefixes == nil || len(m.Assets) != 0 || len(m.Prefixes) != 0 || m.TotalAssets != 0 || m.Truncated {
 		t.Errorf("empty estate = %+v", m)
 	}
 }

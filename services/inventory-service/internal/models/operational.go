@@ -6,13 +6,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// LocationFindingSummaryRow is one row from mv_location_finding_summary (per location per environment).
-type LocationFindingSummaryRow struct {
-	LocationID        uuid.UUID `json:"location_id" db:"location_id"`
+// SiteFindingSummaryRow is one row from mv_site_finding_summary (per site per environment).
+type SiteFindingSummaryRow struct {
+	SiteID            uuid.UUID `json:"site_id" db:"site_id"`
 	TenantID          uuid.UUID `json:"tenant_id" db:"tenant_id"`
-	LocationName      string    `json:"location_name" db:"location_name"`
-	LocationType      string    `json:"location_type" db:"location_type"`
-	FullPath          *string   `json:"full_path,omitempty" db:"full_path"`
+	SiteName          string    `json:"site_name" db:"site_name"`
+	SiteSlug          string    `json:"site_slug" db:"site_slug"`
 	Environment       string    `json:"environment" db:"environment"`
 	AssetCount        int64     `json:"asset_count" db:"asset_count"`
 	CryptoConfigCount int64     `json:"crypto_config_count" db:"crypto_config_count"`
@@ -44,7 +43,7 @@ type RemediationQueueRow struct {
 	CreatedAt              time.Time  `json:"created_at" db:"created_at"`
 }
 
-// EnvironmentSummary is environment-level stats for a location (from mv or derived).
+// EnvironmentSummary is environment-level stats for a site (from the matview).
 type EnvironmentSummary struct {
 	Environment       string `json:"environment"`
 	AssetCount        int64  `json:"asset_count"`

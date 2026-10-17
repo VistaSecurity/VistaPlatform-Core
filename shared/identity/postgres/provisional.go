@@ -1,6 +1,6 @@
 package postgres
 
-// The SQL half of provisional inventory ( D2/D3): the segment-eligibility
+// The SQL half of provisional inventory ( D2/D3): the scope-eligibility
 // question the engine asks before it invents an asset, the atomic identifier
 // move that lets direct evidence take an address off a guess, and the
 // retirement of a guess a move emptied.
@@ -8,102 +8,29 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"net/netip"
 	"strings"
+
+	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 )
 
 // ProvisionalScope implements [identity.ProvisionalScopeChecker]: may a
-// provisional asset be created against this segment?
-//
-// Three conditions, and each rules out a way the answer to "which VLAN is this
-// on" could be more than one thing:
-//
-//   - the segment is an ACTIVE `cidr` segment of this tenant. An `ip_range`,
-//     `domain` or `cloud_vpc` segment is not a place an address unambiguously
-//     lives, and a deactivated segment is one an operator has said to stop
-//     using;
-//   - no OTHER active cidr segment of the tenant overlaps it. Overlapping
-//     segments mean the operator has drawn two answers over the same space,
-//     and picking one for them is how an asset lands on the wrong VLAN and
-//     duplicates something on the right one;
-//   - it carries no `cloud_network_ref`. A CIDR is not unique in a cloud
-//     account — two VPCs from one Terraform module both get 10.0.0.0/16 — so a
-//     cloud segment cannot be identified from an address alone.
-//
-// The overlap test runs in Go rather than as `value::cidr && $2::cidr`, for the
-// same reason [Repository.ScopeForAddress]'s containment test does: `value` is
-// free text, and ONE malformed row would abort the whole query with a cast
-// error. That would not merely refuse this segment — it would return an error
-// from every Resolve in the tenant, which is a much worse failure than the one
-// it was guarding.
-func (r *Repository) ProvisionalScope(ctx context.Context, tenantID, segmentID string) (bool, string, error) {
-	type seg struct {
-		id         string
-		prefix     netip.Prefix
-		networkRef string
-	}
-	var (
-		target  *seg
-		others  []seg
-		badKind bool
-	)
-	err := r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, `
-			SELECT id::text, segment_type, value, coalesce(cloud_network_ref, '')
-			  FROM public.network_segments
-			 WHERE tenant_id = $1 AND is_active = true`, tenantID)
-		if err != nil {
-			return fmt.Errorf("identity/postgres: read network segments: %w", err)
-		}
-		defer func() { _ = rows.Close() }()
-		for rows.Next() {
-			var id, kind, value, networkRef string
-			if err := rows.Scan(&id, &kind, &value, &networkRef); err != nil {
-				return fmt.Errorf("identity/postgres: scan network segment: %w", err)
-			}
-			if kind != "cidr" {
-				if id == segmentID {
-					// Found, but not a kind an address lives in
-					// unambiguously. Distinguished from "not found" so the
-					// reason can be honest about which question failed.
-					badKind = true
-				}
-				continue
-			}
-			p, perr := netip.ParsePrefix(strings.TrimSpace(value))
-			if perr != nil {
-				// A segment nobody can parse cannot overlap anything either.
-				// Skipping it is the same decision ScopeForAddress makes.
-				continue
-			}
-			s := seg{id: id, prefix: p.Masked(), networkRef: strings.TrimSpace(networkRef)}
-			if id == segmentID {
-				t := s
-				target = &t
-				continue
-			}
-			others = append(others, s)
-		}
-		return rows.Err()
-	})
+// provisional asset be created against this scope? The scope is an IPAM
+// prefix id (DCIM row 1.6 retired the segments); anything else — the tenant
+// default, an id that names no live prefix — is unresolved. The prefix rule
+// is [Repository.provisionalPrefixScope]'s.
+func (r *Repository) ProvisionalScope(ctx context.Context, tenantID, scopeID string) (bool, string, error) {
+	ok, reason, isPrefix, err := r.provisionalPrefixScope(ctx, tenantID, scopeID)
 	if err != nil {
 		return false, "", err
 	}
-	if target == nil || badKind {
+	if !isPrefix {
 		return false, identity.ReasonNetworkScopeUnresolved, nil
 	}
-	if target.networkRef != "" {
-		return false, identity.ReasonOverlappingNetworkScope, nil
-	}
-	for _, other := range others {
-		if other.prefix.Overlaps(target.prefix) {
-			return false, identity.ReasonOverlappingNetworkScope, nil
-		}
-	}
-	return true, "", nil
+	return ok, reason, nil
 }
 
 // ReassignIdentifier implements [identity.IdentifierReassigner]: it moves one
@@ -134,6 +61,21 @@ func (r *Repository) ReassignIdentifier(ctx context.Context, id identity.Identif
 		return err
 	}
 	return r.withTx(ctx, from.TenantID, func(tx *sql.Tx) error {
+		if isAddressKind(id.Kind) {
+			// An address moves by leaving the old owner's interface and being
+			// filed under the new owner's (row 1.4): released, then adopted.
+			n, err := releaseAddress(ctx, tx, from.TenantID, fromID, id)
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return fmt.Errorf("%w: %s=%q is not %s's", identity.ErrIdentifierConflict, id.Kind, id.Value, from.ID)
+			}
+			if _, err := r.fileUnderInterfaces(ctx, tx, to, toID, []identity.Identifier{id}); err != nil {
+				return err
+			}
+			return ClearImportOnlyIfVouched(ctx, tx, to.TenantID, toID)
+		}
 		res, err := tx.ExecContext(ctx, `
 			UPDATE public.asset_identifiers
 			   SET asset_id = $3, updated_at = now()
@@ -150,6 +92,16 @@ func (r *Repository) ReassignIdentifier(ctx context.Context, id identity.Identif
 		}
 		if n != 1 {
 			return fmt.Errorf("%w: %s=%q is not %s's", identity.ErrIdentifierConflict, id.Kind, id.Value, from.ID)
+		}
+		if id.Kind == identity.KindMACAddress {
+			// The MAC leaves the old owner's interfaces too, or the interface
+			// union would keep answering for it.
+			if err := stripInterfaceMAC(ctx, tx, from.TenantID, fromID, id.Value); err != nil {
+				return err
+			}
+			if _, err := r.fileUnderInterfaces(ctx, tx, to, toID, []identity.Identifier{id}); err != nil {
+				return err
+			}
 		}
 		// The moved row may be the independent evidence an import-only
 		// asset lacked (import_only.go).
@@ -205,17 +157,35 @@ func (r *Repository) RetireIdentifier(ctx context.Context, asset identity.AssetR
 		return err
 	}
 	return r.withTx(ctx, asset.TenantID, func(tx *sql.Tx) error {
-		res, err := tx.ExecContext(ctx, `
+		var n int64
+		if isAddressKind(id.Kind) {
+			// Released, not deleted: IPAM keeps the fact that the address was
+			// seen; it just no longer names this asset.
+			released, err := releaseAddress(ctx, tx, asset.TenantID, assetID, id)
+			if err != nil {
+				return err
+			}
+			n = released
+			if n > 1 {
+				n = 1
+			}
+		} else {
+			res, err := tx.ExecContext(ctx, `
 			DELETE FROM public.asset_identifiers
 			 WHERE tenant_id = $1 AND asset_id = $2
 			   AND kind = $3 AND value = $4 AND coalesce(scope, '') = $5`,
-			asset.TenantID, assetID, string(id.Kind), id.Value, id.Scope)
-		if err != nil {
-			return fmt.Errorf("identity/postgres: retire %s=%q from %s: %w", id.Kind, id.Value, asset.ID, err)
-		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
+				asset.TenantID, assetID, string(id.Kind), id.Value, id.Scope)
+			if err != nil {
+				return fmt.Errorf("identity/postgres: retire %s=%q from %s: %w", id.Kind, id.Value, asset.ID, err)
+			}
+			if n, err = res.RowsAffected(); err != nil {
+				return err
+			}
+			if n == 1 && id.Kind == identity.KindMACAddress {
+				if err := stripInterfaceMAC(ctx, tx, asset.TenantID, assetID, id.Value); err != nil {
+					return err
+				}
+			}
 		}
 		if n != 1 {
 			return fmt.Errorf("%w: %s=%q is not %s's", identity.ErrIdentifierConflict, id.Kind, id.Value, asset.ID)
@@ -226,8 +196,8 @@ func (r *Repository) RetireIdentifier(ctx context.Context, asset identity.AssetR
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE public.assets a
 			   SET primary_address = (
-			         SELECT ai.value::inet FROM public.asset_identifiers ai
-			          WHERE ai.tenant_id = a.tenant_id AND ai.asset_id = a.id AND ai.kind = 'ip_address'
+			         SELECT ai.value::inet FROM (`+AddressIdentifiersSQL+`) ai
+			          WHERE ai.tenant_id = a.tenant_id AND ai.asset_id = a.id
 			          ORDER BY ai.last_seen_at DESC NULLS LAST, ai.value
 			          LIMIT 1),
 			       updated_at = now()
@@ -305,4 +275,48 @@ func (r *Repository) DriftMaterial(ctx context.Context, asset identity.AssetRef)
 		return rows.Err()
 	})
 	return out, err
+}
+
+// provisionalPrefixScope is [Repository.ProvisionalScope] for a scope that is
+// an IPAM prefix id. Prefixes nest by design, so "nothing overlaps" would
+// refuse every prefix with a parent; the prefix rule is
+// instead that the scope names exactly one place: an active prefix in the
+// global VRF that is not a container, carries no cloud network ref (a CIDR is
+// not unique across VPCs), and shares its CIDR with no other prefix there.
+// isPrefix is false when the id names no live prefix.
+func (r *Repository) provisionalPrefixScope(ctx context.Context, tenantID, scope string) (ok bool, reason string, isPrefix bool, err error) {
+	if _, perr := uuid.Parse(strings.TrimSpace(scope)); perr != nil {
+		return false, "", false, nil
+	}
+	err = r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
+		var (
+			opStatus, cloudRef string
+			twins              int
+		)
+		e := tx.QueryRowContext(ctx, `
+			SELECT p.operational_status, coalesce(p.cloud_network_ref, ''),
+			       (SELECT count(*) FROM public.prefixes o
+			         WHERE o.tenant_id = p.tenant_id AND o.vrf_id IS NULL AND o.id <> p.id
+			           AND o.prefix = p.prefix AND o.status NOT IN ('rejected', 'archived'))
+			  FROM public.prefixes p
+			 WHERE p.tenant_id = $1 AND p.id = $2::uuid AND p.vrf_id IS NULL
+			   AND p.status NOT IN ('rejected', 'archived')`, tenantID, scope).Scan(&opStatus, &cloudRef, &twins)
+		if errors.Is(e, sql.ErrNoRows) {
+			return nil
+		}
+		if e != nil {
+			return fmt.Errorf("identity/postgres: read prefix scope: %w", e)
+		}
+		isPrefix = true
+		switch {
+		case opStatus == "container":
+			reason = identity.ReasonNetworkScopeUnresolved
+		case strings.TrimSpace(cloudRef) != "" || twins > 0:
+			reason = identity.ReasonOverlappingNetworkScope
+		default:
+			ok = true
+		}
+		return nil
+	})
+	return ok, reason, isPrefix, err
 }

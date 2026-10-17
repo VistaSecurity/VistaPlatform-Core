@@ -26,20 +26,20 @@ const ROUTER = '00000000-0000-4000-8000-000000000001';
 const LONG_NAME = 'core-gateway-building-4-east-wing-primary-ha-member-a';
 
 const quiet = { components: [], pqc: { needs_migration: 0, pqc_ready: 0, symmetric_safe: 0, unclassified: 0 }, certs_expiring_90d: 0 };
-function device(id: string, name: string, segment: string | undefined, address: string): NetworkMapAsset {
+function device(id: string, name: string, prefix: string | undefined, address: string): NetworkMapAsset {
   return {
     asset_id: id, display_name: name, class_key: 'server', address, asset_status: 'monitoring', site: 'Head office',
-    segment_id: segment, risk_score: 0, risk_assessed: false, service_count: 0, crypto_service_count: 0, crypto: quiet,
+    prefix_id: prefix, risk_score: 0, risk_assessed: false, service_count: 0, crypto_service_count: 0, crypto: quiet,
   };
 }
 
 const MAP: NetworkMap = {
-  segments: [
+  prefixes: [
     {
-      segment_id: ROUTED, name: 'Lab v6', value: '2001:db8:10::/64', segment_type: 'cidr',
+      prefix_id: ROUTED, prefix: '2001:db8:10::/64', description: 'Lab v6', vlan_vid: null, vlan_name: null, fhrp_group: null,
       gateway: { asset_id: ROUTER, display_name: LONG_NAME, address: '2001:db8:10::1/128', observed_at: '2026-10-03T00:00:00Z' },
     },
-    { segment_id: UNROUTED, name: 'Guest', value: '198.51.100.0/24', segment_type: 'cidr', gateway: null },
+    { prefix_id: UNROUTED, prefix: '198.51.100.0/24', description: 'Guest', vlan_vid: null, vlan_name: null, gateway: null, fhrp_group: null },
   ],
   assets: [
     device(ROUTER, LONG_NAME, ROUTED, '2001:db8:10::1'),
@@ -115,7 +115,7 @@ function assertGatewayLabels() {
   expect(unrouted.querySelector('[data-testid="network-map-gateway-missing"]')?.textContent).toContain('gateway not recorded');
 
   // A tray that is not a network says nothing about a gateway at all.
-  const loose = trayText('Unsegmented');
+  const loose = trayText('No prefix');
   expect(loose.querySelector('[data-testid="network-map-gateway"], [data-testid="network-map-gateway-missing"]')).toBeNull();
 }
 
@@ -138,7 +138,7 @@ it('labels the network rows the same way in the Circuit layout', async () => {
 
 it('carries each network\'s gateway onto its tray, and none onto a non-network tray', () => {
   const trays = groupSites(MAP, MAP.assets ?? []).flatMap((s) => s.trays);
-  expect(trays.find((t) => t.segmentId === ROUTED)?.gateway?.asset_id).toBe(ROUTER);
-  expect(trays.find((t) => t.segmentId === UNROUTED)?.gateway).toBeNull();
-  expect(trays.find((t) => t.segmentId === null)?.gateway).toBeNull();
+  expect(trays.find((t) => t.prefixId === ROUTED)?.gateway?.asset_id).toBe(ROUTER);
+  expect(trays.find((t) => t.prefixId === UNROUTED)?.gateway).toBeNull();
+  expect(trays.find((t) => t.prefixId === null)?.gateway).toBeNull();
 });

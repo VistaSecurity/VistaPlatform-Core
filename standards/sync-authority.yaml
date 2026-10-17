@@ -1,0 +1,840 @@
+# Sync field authority — THE single source of truth for who wins each synced
+# field (asset-inventory ADR-0010 D7; DCIM SYNC_MODEL §2).
+#
+# Every field a sync peer (NetBox today) exchanges with us has an AUTHORITY:
+#
+#   observed       our collectors win while the last observation is inside the
+#                  object's stale window; a stale value is a conflict, never a
+#                  silent overwrite by the peer.
+#   declared_here  a person in Vista Platform typed it; the peer receives it.
+#                  Changed on BOTH sides since the last sync → a conflict.
+#   peer           the peer is the source of truth; we pull and display.
+#   merge          union of the two sets, pushed and pulled.
+#   newest         the most recent change wins, unless the two changes are
+#                  within `newest_window_seconds` of each other → a conflict.
+#
+# A tenant may override any field per connection (Settings → Integrations →
+# NetBox → Field authority); the override is stored on the connection and
+# never changes these defaults.
+#
+# Generated from this file by `scripts/generate-sync-authority.mjs` (via
+# `make generate`): shared/syncauthority/authority_gen.go. `make audit` runs
+# `--check`, which also fails when a kind is not in standards/vocabulary.yaml
+# or a field is not a column of the kind's table in scripts/database/schema.sql.
+#
+# Per kind:
+#   kind      the vocabulary key (standards/vocabulary.yaml)
+#   netbox    the NetBox REST endpoint (module/object)
+#   identity  the natural identity on the wire, in our column names — the
+#             third matching step after the peer id and our id in the peer
+#             (SYNC_MODEL §1.3). Identity columns are matched, never synced
+#             as fields.
+#   order     dependency order: a kind is planned and applied after every
+#             kind with a lower order, so a reference always has a peer id.
+#   fields    column → authority.
+#   computed  (optional) names in identity or fields that are NOT columns of
+#             the kind's table but part of its API shape: a cable's ends,
+#             which live in cable_terminations. Every other name must be a
+#             column; a computed name must not be one.
+#
+# Scope today: BUILD_PLAN row 1.9 (tenancy, ipam, dcim/interfaces), row 4.5
+# (circuits, virtualisation, vpn, wireless) and row 2.6 (the dcim objects:
+# sites and their trees, racks, the device catalogue, device placement,
+# modules, inventory items, virtual chassis). A `*_present` field is a secret
+# the peer holds: only whether it is set crosses, and it is never pushed.
+# Row 2.6's defaults: NetBox is authoritative for the catalogue and for
+# physical placement; we are for what our collectors measure (serials, module
+# types, part ids); prose fields follow `newest`; a business unit stays
+# `declared_here` as in 1.9.
+# Row 3.5 (ports and cables): NetBox owns the declared cabling — a port's
+# type, label and wiring, a cable's type, colour, label and length. A cable
+# our collectors measured (an LLDP / CDP proposal a person approved, or a
+# declared cable LLDP confirmed) is ours for existence: it is pushed, and its
+# operational status follows `observed` (the connector upgrades `peer` to
+# `observed` on a measured cable). A pending proposal is never pushed.
+
+version: 1
+
+newest_window_seconds: 300
+
+kinds:
+  - kind: business_unit
+    netbox: tenancy/tenants
+    identity: [slug]
+    order: 10
+    fields:
+      name: newest
+      description: newest
+      comments: newest
+
+  - kind: rir
+    netbox: ipam/rirs
+    identity: [slug]
+    order: 20
+    fields:
+      name: peer
+      is_private: peer
+      description: newest
+
+  - kind: prefix_role
+    netbox: ipam/roles
+    identity: [slug]
+    order: 20
+    fields:
+      name: peer
+      weight: peer
+      description: newest
+
+  - kind: vrf
+    netbox: ipam/vrfs
+    identity: [name]
+    order: 30
+    fields:
+      rd: declared_here
+      enforce_unique: declared_here
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: route_target
+    netbox: ipam/route-targets
+    identity: [name]
+    order: 30
+    fields:
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: aggregate
+    netbox: ipam/aggregates
+    identity: [prefix]
+    order: 40
+    fields:
+      rir_id: declared_here
+      business_unit_id: declared_here
+      date_added: peer
+      description: newest
+      comments: newest
+
+  - kind: asn
+    netbox: ipam/asns
+    identity: [asn]
+    order: 40
+    fields:
+      rir_id: declared_here
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: vlan_group
+    netbox: ipam/vlan-groups
+    identity: [slug]
+    order: 50
+    fields:
+      name: newest
+      vid_ranges: declared_here
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: vlan
+    netbox: ipam/vlans
+    identity: [group_id, vid]
+    order: 60
+    fields:
+      name: newest
+      operational_status: declared_here
+      role_id: declared_here
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: prefix
+    netbox: ipam/prefixes
+    identity: [vrf_id, prefix]
+    order: 70
+    fields:
+      operational_status: declared_here
+      role_id: declared_here
+      vlan_id: declared_here
+      business_unit_id: declared_here
+      is_pool: declared_here
+      mark_utilized: declared_here
+      description: newest
+      comments: newest
+
+  - kind: ip_range
+    netbox: ipam/ip-ranges
+    identity: [vrf_id, start_address, end_address]
+    order: 70
+    fields:
+      operational_status: declared_here
+      role_id: declared_here
+      business_unit_id: declared_here
+      mark_utilized: declared_here
+      description: newest
+      comments: newest
+
+  - kind: fhrp_group
+    netbox: ipam/fhrp-groups
+    identity: [protocol, group_id]
+    order: 70
+    fields:
+      name: newest
+      auth_type: declared_here
+      description: newest
+      comments: newest
+
+  - kind: interface
+    netbox: dcim/interfaces
+    identity: [asset_id, name]
+    order: 80
+    fields:
+      label: declared_here
+      type: observed
+      enabled: observed
+      mtu: observed
+      speed_kbps: observed
+      duplex: observed
+      mac_address: observed
+      wwn: observed
+      mode: declared_here
+      mgmt_only: declared_here
+      mark_connected: declared_here
+      untagged_vlan_id: declared_here
+      vrf_id: declared_here
+      description: newest
+
+  - kind: mac_address
+    netbox: dcim/mac-addresses
+    identity: [interface_id, mac]
+    order: 90
+    fields:
+      description: newest
+
+  - kind: ip_address
+    netbox: ipam/ip-addresses
+    identity: [vrf_id, address]
+    order: 90
+    fields:
+      operational_status: declared_here
+      role: declared_here
+      business_unit_id: declared_here
+      dns_name: newest
+      assigned_id: observed
+      description: newest
+      comments: newest
+
+  # --- Row 4.5: circuits ---------------------------------------------------
+
+  - kind: provider
+    netbox: circuits/providers
+    identity: [slug]
+    order: 100
+    fields:
+      name: newest
+      description: newest
+      comments: newest
+
+  - kind: circuit_type
+    netbox: circuits/circuit-types
+    identity: [slug]
+    order: 100
+    fields:
+      name: peer
+      color: peer
+      description: newest
+
+  - kind: provider_account
+    netbox: circuits/provider-accounts
+    identity: [provider_id, account]
+    order: 110
+    fields:
+      name: newest
+      description: newest
+      comments: newest
+
+  - kind: provider_network
+    netbox: circuits/provider-networks
+    identity: [provider_id, name]
+    order: 110
+    fields:
+      service_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: circuit
+    netbox: circuits/circuits
+    identity: [provider_id, cid]
+    order: 120
+    fields:
+      provider_account_id: declared_here
+      type_id: declared_here
+      operational_status: declared_here
+      business_unit_id: declared_here
+      install_date: declared_here
+      termination_date: declared_here
+      commit_rate_kbps: declared_here
+      distance: declared_here
+      distance_unit: declared_here
+      description: newest
+      comments: newest
+
+  - kind: circuit_termination
+    netbox: circuits/circuit-terminations
+    identity: [circuit_id, term_side]
+    order: 130
+    fields:
+      termination_id: declared_here
+      port_speed_kbps: declared_here
+      upstream_speed_kbps: declared_here
+      xconnect_id: declared_here
+      pp_info: declared_here
+      mark_connected: declared_here
+      description: newest
+
+  # --- Row 4.5: virtualisation ----------------------------------------------
+
+  - kind: cluster_type
+    netbox: virtualization/cluster-types
+    identity: [slug]
+    order: 100
+    fields:
+      name: peer
+      description: newest
+
+  - kind: cluster_group
+    netbox: virtualization/cluster-groups
+    identity: [slug]
+    order: 100
+    fields:
+      name: newest
+      description: newest
+
+  - kind: cluster
+    netbox: virtualization/clusters
+    identity: [type_id, name]
+    order: 110
+    fields:
+      group_id: declared_here
+      operational_status: declared_here
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  # --- Row 4.5: vpn ---------------------------------------------------------
+  # Proposals, policies and tunnels are what our collectors measure on the
+  # gateways (row 4.3): their posture fields are `observed`.
+
+  - kind: ike_proposal
+    netbox: vpn/ike-proposals
+    identity: [name]
+    order: 100
+    fields:
+      authentication_method: observed
+      encryption_algorithm: observed
+      authentication_algorithm: observed
+      group: observed
+      sa_lifetime_seconds: observed
+      description: newest
+      comments: newest
+
+  - kind: ipsec_proposal
+    netbox: vpn/ipsec-proposals
+    identity: [name]
+    order: 100
+    fields:
+      encryption_algorithm: observed
+      authentication_algorithm: observed
+      sa_lifetime_seconds: observed
+      sa_lifetime_data_kb: observed
+      description: newest
+      comments: newest
+
+  - kind: tunnel_group
+    netbox: vpn/tunnel-groups
+    identity: [slug]
+    order: 100
+    fields:
+      name: newest
+      description: newest
+
+  - kind: l2vpn
+    netbox: vpn/l2vpns
+    identity: [slug]
+    order: 100
+    fields:
+      name: newest
+      type: declared_here
+      identifier: declared_here
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: ike_policy
+    netbox: vpn/ike-policies
+    identity: [name]
+    order: 110
+    fields:
+      version: observed
+      mode: observed
+      preshared_key_present: observed
+      description: newest
+      comments: newest
+
+  - kind: ipsec_policy
+    netbox: vpn/ipsec-policies
+    identity: [name]
+    order: 110
+    fields:
+      pfs_group: observed
+      description: newest
+      comments: newest
+
+  - kind: ipsec_profile
+    netbox: vpn/ipsec-profiles
+    identity: [name]
+    order: 120
+    fields:
+      mode: observed
+      ike_policy_id: observed
+      ipsec_policy_id: observed
+      description: newest
+      comments: newest
+
+  - kind: tunnel
+    netbox: vpn/tunnels
+    identity: [name]
+    order: 130
+    fields:
+      operational_status: observed
+      group_id: declared_here
+      encapsulation: observed
+      ipsec_profile_id: observed
+      business_unit_id: declared_here
+      tunnel_id: observed
+      description: newest
+      comments: newest
+
+  - kind: tunnel_termination
+    netbox: vpn/tunnel-terminations
+    identity: [termination_id]
+    order: 140
+    fields:
+      tunnel_id: observed
+      role: declared_here
+      outside_ip_id: observed
+
+  - kind: l2vpn_termination
+    netbox: vpn/l2vpn-terminations
+    identity: [assigned_id]
+    order: 140
+    fields:
+      l2vpn_id: declared_here
+
+  # --- Row 4.5: wireless ----------------------------------------------------
+
+  - kind: wireless_lan_group
+    netbox: wireless/wireless-lan-groups
+    identity: [slug]
+    order: 100
+    fields:
+      name: newest
+      parent_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: wireless_lan
+    netbox: wireless/wireless-lans
+    identity: [group_id, ssid]
+    order: 110
+    fields:
+      operational_status: declared_here
+      vlan_id: declared_here
+      business_unit_id: declared_here
+      auth_type: observed
+      auth_cipher: observed
+      auth_psk_present: observed
+      description: newest
+      comments: newest
+
+  - kind: wireless_link
+    netbox: wireless/wireless-links
+    identity: [interface_a_id, interface_b_id]
+    order: 120
+    fields:
+      ssid: observed
+      operational_status: declared_here
+      auth_type: observed
+      auth_cipher: observed
+      auth_psk_present: observed
+      distance: declared_here
+      distance_unit: declared_here
+      description: newest
+      comments: newest
+
+  # --- BUILD_PLAN row 2.6: dcim objects -------------------------------------
+  # Organisation and catalogue roots (no references to anything below).
+
+  - kind: region
+    netbox: dcim/regions
+    identity: [slug]
+    order: 100
+    fields:
+      name: newest
+      parent_id: peer
+      description: newest
+      comments: newest
+
+  - kind: site_group
+    netbox: dcim/site-groups
+    identity: [slug]
+    order: 100
+    fields:
+      name: newest
+      parent_id: peer
+      description: newest
+      comments: newest
+
+  - kind: manufacturer
+    netbox: dcim/manufacturers
+    identity: [slug]
+    order: 100
+    fields:
+      name: peer
+      description: newest
+
+  - kind: rack_role
+    netbox: dcim/rack-roles
+    identity: [slug]
+    order: 100
+    fields:
+      name: peer
+      color: peer
+      description: newest
+
+  - kind: device_role
+    netbox: dcim/device-roles
+    identity: [slug]
+    order: 100
+    fields:
+      name: peer
+      color: peer
+      vm_role: peer
+      parent_id: peer
+      description: newest
+
+  - kind: inventory_item_role
+    netbox: dcim/inventory-item-roles
+    identity: [slug]
+    order: 100
+    fields:
+      name: peer
+      color: peer
+      description: newest
+
+  - kind: site
+    netbox: dcim/sites
+    identity: [slug]
+    order: 110
+    fields:
+      name: newest
+      operational_status: peer
+      region_id: peer
+      group_id: peer
+      facility: peer
+      time_zone: peer
+      physical_address: peer
+      shipping_address: peer
+      latitude: peer
+      longitude: peer
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: platform
+    netbox: dcim/platforms
+    identity: [slug]
+    order: 110
+    fields:
+      name: peer
+      manufacturer_id: peer
+      description: newest
+
+  - kind: location
+    netbox: dcim/locations
+    identity: [site_id, slug]
+    order: 120
+    fields:
+      name: newest
+      parent_id: peer
+      operational_status: peer
+      facility: peer
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: rack_type
+    netbox: dcim/rack-types
+    identity: [manufacturer_id, model]
+    order: 120
+    fields:
+      slug: peer
+      form_factor: peer
+      width: peer
+      u_height: peer
+      starting_unit: peer
+      desc_units: peer
+      outer_width: peer
+      outer_depth: peer
+      outer_unit: peer
+      mounting_depth: peer
+      weight: peer
+      max_weight: peer
+      weight_unit: peer
+      description: newest
+      comments: newest
+
+  # A device type's front and rear images are pull-only (ADR-0010 D7): they are
+  # not fields here, and nothing pushes them.
+  # Identity is the model, as NetBox's own uniqueness: slugs differ between a
+  # NetBox and the devicetype-library seed ("ex4300-48t" / "juniper-ex4300-48t").
+  - kind: device_type
+    netbox: dcim/device-types
+    identity: [manufacturer_id, model]
+    order: 120
+    fields:
+      slug: peer
+      part_number: peer
+      u_height: peer
+      exclude_from_utilization: peer
+      is_full_depth: peer
+      subdevice_role: peer
+      airflow: peer
+      weight: peer
+      weight_unit: peer
+      default_platform_id: peer
+      description: newest
+      comments: newest
+
+  - kind: module_type
+    netbox: dcim/module-types
+    identity: [manufacturer_id, model]
+    order: 120
+    fields:
+      part_number: peer
+      airflow: peer
+      weight: peer
+      weight_unit: peer
+      description: newest
+      comments: newest
+
+  - kind: rack
+    netbox: dcim/racks
+    identity: [site_id, name]
+    order: 130
+    fields:
+      facility_id: peer
+      location_id: peer
+      business_unit_id: declared_here
+      role_id: peer
+      rack_type_id: peer
+      operational_status: peer
+      serial: peer
+      asset_tag: peer
+      form_factor: peer
+      width: peer
+      u_height: peer
+      starting_unit: peer
+      desc_units: peer
+      outer_width: peer
+      outer_depth: peer
+      outer_unit: peer
+      mounting_depth: peer
+      weight: peer
+      max_weight: peer
+      weight_unit: peer
+      airflow: peer
+      description: newest
+      comments: newest
+
+  # Pulled and compared both ways, but never created in NetBox: a NetBox
+  # reservation needs a NetBox user, which no Vista Platform person maps to.
+  - kind: rack_reservation
+    netbox: dcim/rack-reservations
+    identity: [rack_id, units]
+    order: 140
+    fields:
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: virtual_chassis
+    netbox: dcim/virtual-chassis
+    identity: [name]
+    order: 150
+    fields:
+      domain: peer
+      master_asset_id: peer
+      description: newest
+      comments: newest
+
+  # A NetBox Device is an asset (vocabulary). The NetBox import creates the
+  # asset; the sync owns its placement and catalogue fields from then on and
+  # never creates or deletes an asset itself.
+  - kind: asset
+    netbox: dcim/devices
+    identity: [display_name]
+    order: 160
+    fields:
+      site_id: peer
+      location_id: peer
+      rack_id: peer
+      position: peer
+      face: peer
+      device_role_id: peer
+      platform_id: observed
+      device_type_id: peer
+      serial: observed
+      asset_tag: peer
+      virtual_chassis_id: peer
+      vc_position: peer
+      vc_priority: peer
+
+  - kind: module_bay
+    netbox: dcim/module-bays
+    identity: [asset_id, name]
+    order: 170
+    fields:
+      label: peer
+      position: peer
+      description: newest
+
+  - kind: module
+    netbox: dcim/modules
+    identity: [module_bay_id]
+    order: 180
+    fields:
+      module_type_id: observed
+      operational_status: peer
+      serial: observed
+      asset_tag: peer
+      description: newest
+      comments: newest
+
+  - kind: inventory_item
+    netbox: dcim/inventory-items
+    identity: [asset_id, parent_id, name]
+    order: 190
+    fields:
+      label: peer
+      role_id: peer
+      manufacturer_id: observed
+      part_id: observed
+      serial: observed
+      asset_tag: peer
+      discovered: observed
+      description: newest
+
+  # --- Row 3.5: ports and cables (NetBox dcim/*-ports, dcim/power-*, dcim/cables).
+  # A component sits on an asset (identity: the asset and its name, like an
+  # interface); module_id is the module that declared it (row 2.6's modules).
+  - kind: console_port
+    netbox: dcim/console-ports
+    identity: [asset_id, name]
+    order: 200
+    fields:
+      module_id: peer
+      label: peer
+      type: peer
+      speed: peer
+      mark_connected: peer
+      description: newest
+
+  - kind: console_server_port
+    netbox: dcim/console-server-ports
+    identity: [asset_id, name]
+    order: 200
+    fields:
+      module_id: peer
+      label: peer
+      type: peer
+      speed: peer
+      mark_connected: peer
+      description: newest
+
+  - kind: rear_port
+    netbox: dcim/rear-ports
+    identity: [asset_id, name]
+    order: 200
+    fields:
+      module_id: peer
+      label: peer
+      type: peer
+      color: peer
+      positions: peer
+      mark_connected: peer
+      description: newest
+
+  - kind: power_port
+    netbox: dcim/power-ports
+    identity: [asset_id, name]
+    order: 200
+    fields:
+      module_id: peer
+      label: peer
+      type: peer
+      maximum_draw: peer
+      allocated_draw: peer
+      mark_connected: peer
+      description: newest
+
+  # A front port is one position of a rear port on the same asset: after rear
+  # ports, so its rear_port_id always names one.
+  - kind: front_port
+    netbox: dcim/front-ports
+    identity: [asset_id, name]
+    order: 210
+    fields:
+      module_id: peer
+      label: peer
+      type: peer
+      color: peer
+      rear_port_id: peer
+      rear_port_position: peer
+      mark_connected: peer
+      description: newest
+
+  - kind: power_outlet
+    netbox: dcim/power-outlets
+    identity: [asset_id, name]
+    order: 210
+    fields:
+      module_id: peer
+      label: peer
+      type: peer
+      power_port_id: peer
+      feed_leg: peer
+      mark_connected: peer
+      description: newest
+
+  # A cable is identified by its two ends (each a set of terminations), in
+  # either order: NetBox's A may be our B. Its ends are matched, never synced
+  # as fields — a synced cable whose ends differ between the two sides is
+  # reported, not re-terminated. Last in the order: every termination kind
+  # (interfaces, circuit terminations, the ports above) is planned before it.
+  - kind: cable
+    netbox: dcim/cables
+    identity: [a_terminations, b_terminations]
+    computed: [a_terminations, b_terminations]
+    order: 220
+    fields:
+      type: peer
+      operational_status: peer
+      label: peer
+      color: peer
+      length: peer
+      length_unit: peer
+      business_unit_id: declared_here
+      description: newest
+      comments: newest

@@ -34,7 +34,7 @@ func newConsentFixture(t *testing.T) consentFixture {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active) VALUES($1,$2,'Consent network','cidr','192.0.2.0/24','production',true)`, uuid.New(), tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Consent network','192.0.2.0/24'::cidr,'production','declared','active')`, uuid.New(), tenant); err != nil {
 		t.Fatal(err)
 	}
 	devices := NewDeviceServiceWithKey(db, testMasterKey)

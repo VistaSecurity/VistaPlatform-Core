@@ -37,7 +37,7 @@
     "note": "S3: an identifier field reads ROWS, so `!=` must negate the whole EXISTS. Pushing it inside gave \"has SOME identifier that is not X\", which every asset with two identifiers satisfies",
     "canonical": "id.mac != aa:bb:cc:dd:ee:ff",
     "ast": {"cmp":{"f":"id.mac","op":"!=","v":"aa:bb:cc:dd:ee:ff"}},
-    "sql": {"where":"NOT EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (ai1.value = $2))","arg_count":2,"args":["mac_address","aa:bb:cc:dd:ee:ff"]}
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $1::text, host(ipr.address), coalesce(ipr.identity_scope, $2::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $3 AND ipr.status IN ($4, $5, $6, $7) AND ifr.status IN ($4, $5, $6, $7)) ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $8 AND (ai1.value = $9))","arg_count":9,"args":["ip_address","tenant","interface","pending","active","stale","archived","mac_address","aa:bb:cc:dd:ee:ff"]}
   },
   {
     "name": "identifier-equal-stays-a-plain-exists",
@@ -45,7 +45,7 @@
     "note": "S3, other polarity: the positive term stays a plain EXISTS",
     "canonical": "id.mac:aa:bb:cc:dd:ee:ff",
     "ast": {"cmp":{"f":"id.mac","op":":","v":"aa:bb:cc:dd:ee:ff"}},
-    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (lower(ai1.value) = $2))","arg_count":2,"args":["mac_address","aa:bb:cc:dd:ee:ff"]}
+    "sql": {"where":"EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $1::text, host(ipr.address), coalesce(ipr.identity_scope, $2::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $3 AND ipr.status IN ($4, $5, $6, $7) AND ifr.status IN ($4, $5, $6, $7)) ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $8 AND (lower(ai1.value) = $9))","arg_count":9,"args":["ip_address","tenant","interface","pending","active","stale","archived","mac_address","aa:bb:cc:dd:ee:ff"]}
   },
   {
     "name": "tag-not-equal-is-not-exists",
@@ -157,7 +157,7 @@
     "note": "§2: ':' is legal inside a value once the field is consumed",
     "canonical": "id.mac:aa:bb:*",
     "ast": {"cmp":{"f":"id.mac","op":":","v":"aa:bb:*"}},
-    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (ai1.value ILIKE $2))","arg_count":2,"args":["mac_address","aa:bb:%"]}
+    "sql": {"where":"EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $1::text, host(ipr.address), coalesce(ipr.identity_scope, $2::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $3 AND ipr.status IN ($4, $5, $6, $7) AND ifr.status IN ($4, $5, $6, $7)) ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $8 AND (ai1.value ILIKE $9))","arg_count":9,"args":["ip_address","tenant","interface","pending","active","stale","archived","mac_address","aa:bb:%"]}
   },
   {
     "name": "cheatsheet-regex",
@@ -189,7 +189,7 @@
     "note": "§5.4: name, hostname, identifier values, tag keys and values",
     "canonical": "payroll",
     "ast": {"text":"payroll"},
-    "sql": {"where":"(a.display_name ILIKE $1 OR a.hostname ILIKE $1 OR EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.value ILIKE $1) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE tg2.key ILIKE $1 OR tg2.value ILIKE $1))","arg_count":1,"args":["%payroll%"]}
+    "sql": {"where":"(a.display_name ILIKE $1 OR a.hostname ILIKE $1 OR EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $2::text, host(ipr.address), coalesce(ipr.identity_scope, $3::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $4 AND ipr.status IN ($5, $6, $7, $8) AND ifr.status IN ($5, $6, $7, $8)) ai1 WHERE ai1.asset_id = a.id AND ai1.value ILIKE $1) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE tg2.key ILIKE $1 OR tg2.value ILIKE $1))","arg_count":8,"args":["%payroll%","ip_address","tenant","interface","pending","active","stale","archived"]}
   },
   {
     "name": "cheatsheet-tag-key-value",
@@ -213,7 +213,7 @@
     "note": "§3: identifier of one kind",
     "canonical": "id.serial_number:J7K2QX1",
     "ast": {"cmp":{"f":"id.serial_number","op":":","v":"J7K2QX1"}},
-    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (lower(ai1.value) = $2))","arg_count":2,"args":["serial_number","j7k2qx1"]}
+    "sql": {"where":"EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $1::text, host(ipr.address), coalesce(ipr.identity_scope, $2::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $3 AND ipr.status IN ($4, $5, $6, $7) AND ifr.status IN ($4, $5, $6, $7)) ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $8 AND (lower(ai1.value) = $9))","arg_count":9,"args":["ip_address","tenant","interface","pending","active","stale","archived","serial_number","j7k2qx1"]}
   },
   {
     "name": "cheatsheet-identifier-any",
@@ -221,7 +221,7 @@
     "note": "§3 cheat sheet, §13 A1: an identifier of ANY kind is id.any; a bare id is the row's own uuid",
     "canonical": "id.any:aa:bb:cc:dd:ee:ff",
     "ast": {"cmp":{"f":"id.any","op":":","v":"aa:bb:cc:dd:ee:ff"}},
-    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND (lower(ai1.value) = $1))","arg_count":1,"args":["aa:bb:cc:dd:ee:ff"]}
+    "sql": {"where":"EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $1::text, host(ipr.address), coalesce(ipr.identity_scope, $2::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $3 AND ipr.status IN ($4, $5, $6, $7) AND ifr.status IN ($4, $5, $6, $7)) ai1 WHERE ai1.asset_id = a.id AND (lower(ai1.value) = $8))","arg_count":8,"args":["ip_address","tenant","interface","pending","active","stale","archived","aa:bb:cc:dd:ee:ff"]}
   },
   {
     "name": "cheatsheet-identifier-row-uuid",
@@ -245,7 +245,7 @@
     "note": "§13 A1: the nearest legal query",
     "canonical": "id.any:aa:bb:cc:dd:ee:ff",
     "ast": {"cmp":{"f":"id.any","op":":","v":"aa:bb:cc:dd:ee:ff"}},
-    "sql": {"where":"EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND (lower(ai1.value) = $1))","arg_count":1,"args":["aa:bb:cc:dd:ee:ff"]}
+    "sql": {"where":"EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $1::text, host(ipr.address), coalesce(ipr.identity_scope, $2::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $3 AND ipr.status IN ($4, $5, $6, $7) AND ifr.status IN ($4, $5, $6, $7)) ai1 WHERE ai1.asset_id = a.id AND (lower(ai1.value) = $8))","arg_count":8,"args":["ip_address","tenant","interface","pending","active","stale","archived","aa:bb:cc:dd:ee:ff"]}
   },
   {
     "name": "cheatsheet-class-subtree",
@@ -357,7 +357,7 @@
     "note": "§9.1",
     "canonical": "any_rel:(id.any:aa:bb:cc:00:11:22)",
     "ast": {"traverse":{"depth":1,"dir":"any","form":"any","p":{"cmp":{"f":"id.any","op":":","v":"aa:bb:cc:00:11:22"}},"rel":"any_rel"}},
-    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END AS id, 1 AS depth FROM asset_relationships r2 WHERE (r2.from_asset_id = a.id OR r2.to_asset_id = a.id) AND r2.status = $1 AND CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END \u003c\u003e a.id UNION SELECT CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON (r3.from_asset_id = w1.id OR r3.to_asset_id = w1.id) WHERE w1.depth \u003c $2 AND r3.status = $1 AND CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE EXISTS (SELECT 1 FROM asset_identifiers ai5 WHERE ai5.asset_id = a4.id AND (lower(ai5.value) = $3)))","arg_count":3,"args":["active",1,"aa:bb:cc:00:11:22"]}
+    "sql": {"where":"EXISTS (WITH RECURSIVE w1(id, depth) AS (SELECT CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END AS id, 1 AS depth FROM asset_relationships r2 WHERE (r2.from_asset_id = a.id OR r2.to_asset_id = a.id) AND r2.status = $1 AND CASE WHEN r2.from_asset_id = a.id THEN r2.to_asset_id ELSE r2.from_asset_id END \u003c\u003e a.id UNION SELECT CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END, w1.depth + 1 FROM w1 JOIN asset_relationships r3 ON (r3.from_asset_id = w1.id OR r3.to_asset_id = w1.id) WHERE w1.depth \u003c $2 AND r3.status = $1 AND CASE WHEN r3.from_asset_id = w1.id THEN r3.to_asset_id ELSE r3.from_asset_id END \u003c\u003e a.id) SELECT 1 FROM w1 JOIN assets a4 ON a4.id = w1.id WHERE EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $3::text, host(ipr.address), coalesce(ipr.identity_scope, $4::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $5 AND ipr.status IN ($6, $7, $8, $9) AND ifr.status IN ($6, $7, $8, $9)) ai5 WHERE ai5.asset_id = a4.id AND (lower(ai5.value) = $10)))","arg_count":10,"args":["active",1,"ip_address","tenant","interface","pending","active","stale","archived","aa:bb:cc:00:11:22"]}
   },
   {
     "name": "example-02-two-hops-behind",
@@ -528,7 +528,7 @@
     "note": "§9.16",
     "canonical": "id.serial_number:* and not id.cloud_resource_id:*",
     "ast": {"and":[{"cmp":{"f":"id.serial_number","op":":","v":"*"}},{"not":{"cmp":{"f":"id.cloud_resource_id","op":":","v":"*"}}}]},
-    "sql": {"where":"(EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $1 AND (ai1.value IS NOT NULL)) AND NOT (EXISTS (SELECT 1 FROM asset_identifiers ai2 WHERE ai2.asset_id = a.id AND ai2.kind = $2 AND (ai2.value IS NOT NULL))))","arg_count":2,"args":["serial_number","cloud_resource_id"]}
+    "sql": {"where":"(EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $1::text, host(ipr.address), coalesce(ipr.identity_scope, $2::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $3 AND ipr.status IN ($4, $5, $6, $7) AND ifr.status IN ($4, $5, $6, $7)) ai1 WHERE ai1.asset_id = a.id AND ai1.kind = $8 AND (ai1.value IS NOT NULL)) AND NOT (EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $9::text, host(ipr.address), coalesce(ipr.identity_scope, $10::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $11 AND ipr.status IN ($12, $13, $14, $15) AND ifr.status IN ($12, $13, $14, $15)) ai2 WHERE ai2.asset_id = a.id AND ai2.kind = $16 AND (ai2.value IS NOT NULL))))","arg_count":16,"args":["ip_address","tenant","interface","pending","active","stale","archived","serial_number","ip_address","tenant","interface","pending","active","stale","archived","cloud_resource_id"]}
   },
   {
     "name": "example-17-plaintext-management-exposed",
@@ -547,12 +547,12 @@
     "sql": {"where":"((lower((a.environment)::text) = $1) AND NOT ((EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg1(key, value) WHERE (tg1.key ILIKE $2) OR (tg1.value ILIKE $3)) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE (tg2.key ILIKE $4) OR (tg2.value ILIKE $5)))))","arg_count":5,"args":["production","%dev%","%dev%","%test%","%test%"]}
   },
   {
-    "name": "example-19-scope-cardholder-segment",
-    "query": "segment_id=550e8400-e29b-41d4-a716-446655440000 or tag.pci:true",
+    "name": "example-19-scope-cardholder-prefix",
+    "query": "prefix_id=550e8400-e29b-41d4-a716-446655440000 or tag.pci:true",
     "note": "§9.19 with a real uuid in place of the placeholder",
-    "canonical": "segment_id=550e8400-e29b-41d4-a716-446655440000 or tag.pci:true",
-    "ast": {"or":[{"cmp":{"f":"segment_id","op":"=","v":"550e8400-e29b-41d4-a716-446655440000"}},{"cmp":{"f":"tag.pci","op":":","v":"true"}}]},
-    "sql": {"where":"((a.network_segment_id = $1::uuid) OR (lower((a.tags -\u003e\u003e $2)) = $3))","arg_count":3,"args":["550e8400-e29b-41d4-a716-446655440000","pci","true"]}
+    "canonical": "prefix_id=550e8400-e29b-41d4-a716-446655440000 or tag.pci:true",
+    "ast": {"or":[{"cmp":{"f":"prefix_id","op":"=","v":"550e8400-e29b-41d4-a716-446655440000"}},{"cmp":{"f":"tag.pci","op":":","v":"true"}}]},
+    "sql": {"where":"((a.prefix_id = $1::uuid) OR (lower((a.tags -\u003e\u003e $2)) = $3))","arg_count":3,"args":["550e8400-e29b-41d4-a716-446655440000","pci","true"]}
   },
   {
     "name": "example-20-measurement-cert-expiry-days",
@@ -662,13 +662,13 @@
     "sql_errors": [{"code":"untranslatable"}]
   },
   {
-    "name": "compat-rule-segment-present",
-    "query": "exists(network.segment_id)",
+    "name": "compat-rule-prefix-present",
+    "query": "exists(network.prefix_id)",
     "target": "observation",
-    "twin": "compat-rule-segment-present-ok",
-    "note": "§8: require_network_segment_match",
-    "canonical": "exists(network.segment_id)",
-    "ast": {"exists":{"f":"network.segment_id"}},
+    "twin": "compat-rule-prefix-present-ok",
+    "note": "§8: require_network_prefix_match",
+    "canonical": "exists(network.prefix_id)",
+    "ast": {"exists":{"f":"network.prefix_id"}},
     "sql_errors": [{"code":"untranslatable"}]
   },
   {
@@ -958,7 +958,7 @@
     "note": "S7: free text is a substring search over names, identifiers and tags (§5.4) and can never be an instant, so it is never date-canonicalised",
     "canonical": "now-24h",
     "ast": {"text":"now-24h"},
-    "sql": {"where":"(a.display_name ILIKE $1 OR a.hostname ILIKE $1 OR EXISTS (SELECT 1 FROM asset_identifiers ai1 WHERE ai1.asset_id = a.id AND ai1.value ILIKE $1) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE tg2.key ILIKE $1 OR tg2.value ILIKE $1))","arg_count":1,"args":["%now-24h%"]}
+    "sql": {"where":"(a.display_name ILIKE $1 OR a.hostname ILIKE $1 OR EXISTS (SELECT 1 FROM (SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at FROM asset_identifiers UNION ALL SELECT ipr.id, ifr.asset_id, $2::text, host(ipr.address), coalesce(ipr.identity_scope, $3::text), coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind, coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at) FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = $4 AND ipr.status IN ($5, $6, $7, $8) AND ifr.status IN ($5, $6, $7, $8)) ai1 WHERE ai1.asset_id = a.id AND ai1.value ILIKE $1) OR EXISTS (SELECT 1 FROM jsonb_each_text(a.tags) AS tg2(key, value) WHERE tg2.key ILIKE $1 OR tg2.value ILIKE $1))","arg_count":8,"args":["%now-24h%","ip_address","tenant","interface","pending","active","stale","archived"]}
   },
   {
     "name": "canonical-redundant-parens",
@@ -1066,11 +1066,11 @@
   },
   {
     "name": "error-syntax-keyword-as-value-ok",
-    "query": "business_unit:\"and\"",
+    "query": "owner_email:\"and\"",
     "note": "the nearest passing query. The FIELD differs from its twin deliberately: what this pins is that quoting rescues a keyword, and `environment` is a closed set that would reject \"and\" for a second, unrelated reason (§12 A1)",
-    "canonical": "business_unit:\"and\"",
-    "ast": {"cmp":{"f":"business_unit","op":":","v":"and"}},
-    "sql": {"where":"(lower(a.business_unit) = $1)","arg_count":1,"args":["and"]}
+    "canonical": "owner_email:\"and\"",
+    "ast": {"cmp":{"f":"owner_email","op":":","v":"and"}},
+    "sql": {"where":"(lower(a.owner_email) = $1)","arg_count":1,"args":["and"]}
   },
   {
     "name": "error-syntax-range-missing-to-bad",
@@ -1264,19 +1264,19 @@
   },
   {
     "name": "error-type-mismatch-uuid-bad",
-    "query": "segment_id=not-a-uuid",
+    "query": "prefix_id=not-a-uuid",
     "note": "§4.4: uuid",
-    "canonical": "segment_id=not-a-uuid",
-    "ast": {"cmp":{"f":"segment_id","op":"=","v":"not-a-uuid"}},
+    "canonical": "prefix_id=not-a-uuid",
+    "ast": {"cmp":{"f":"prefix_id","op":"=","v":"not-a-uuid"}},
     "errors": [{"code":"type_mismatch"}]
   },
   {
     "name": "error-type-mismatch-uuid-ok",
-    "query": "segment_id=550e8400-e29b-41d4-a716-446655440000",
+    "query": "prefix_id=550e8400-e29b-41d4-a716-446655440000",
     "note": "the nearest passing query",
-    "canonical": "segment_id=550e8400-e29b-41d4-a716-446655440000",
-    "ast": {"cmp":{"f":"segment_id","op":"=","v":"550e8400-e29b-41d4-a716-446655440000"}},
-    "sql": {"where":"(a.network_segment_id = $1::uuid)","arg_count":1,"args":["550e8400-e29b-41d4-a716-446655440000"]}
+    "canonical": "prefix_id=550e8400-e29b-41d4-a716-446655440000",
+    "ast": {"cmp":{"f":"prefix_id","op":"=","v":"550e8400-e29b-41d4-a716-446655440000"}},
+    "sql": {"where":"(a.prefix_id = $1::uuid)","arg_count":1,"args":["550e8400-e29b-41d4-a716-446655440000"]}
   },
   {
     "name": "error-unknown-value-bad",
@@ -1661,12 +1661,12 @@
     "sql": {"where":"((lower((a.class_source_kind)::text) = $1) AND (a.confidence_score \u003e= $2))","arg_count":2,"args":["inferred",1]}
   },
   {
-    "name": "compat-rule-segment-present-ok",
-    "query": "exists(segment_id)",
-    "note": "T2 twin of compat-rule-segment-present: the same presence test on the asset target",
-    "canonical": "exists(segment_id)",
-    "ast": {"exists":{"f":"segment_id"}},
-    "sql": {"where":"(a.network_segment_id IS NOT NULL)","arg_count":0}
+    "name": "compat-rule-prefix-present-ok",
+    "query": "exists(prefix_id)",
+    "note": "T2 twin of compat-rule-prefix-present: the same presence test on the asset target",
+    "canonical": "exists(prefix_id)",
+    "ast": {"exists":{"f":"prefix_id"}},
+    "sql": {"where":"(a.prefix_id IS NOT NULL)","arg_count":0}
   },
   {
     "name": "observation-target-has-no-sql-ok",
@@ -2063,23 +2063,43 @@
     "sql_errors": [{"code":"untranslatable"}]
   },
   {
-    "name": "observation-network-segment-exact",
-    "query": "network.segment_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    "name": "observation-network-prefix-exact",
+    "query": "network.prefix_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
     "target": "observation",
-    "twin": "observation-network-segment-exact-ok",
-    "note": "a rule scoped to ONE segment, by id",
-    "canonical": "network.segment_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
-    "ast": {"cmp":{"f":"network.segment_id","op":"=","v":"0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"}},
+    "twin": "observation-network-prefix-exact-ok",
+    "note": "a rule scoped to ONE prefix, by id",
+    "canonical": "network.prefix_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    "ast": {"cmp":{"f":"network.prefix_id","op":"=","v":"0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"}},
     "sql_errors": [{"code":"untranslatable"}]
   },
   {
-    "name": "observation-no-segment",
-    "query": "not exists(network.segment_id)",
+    "name": "observation-no-prefix",
+    "query": "not exists(network.prefix_id)",
     "target": "observation",
-    "twin": "observation-no-segment-ok",
+    "twin": "observation-no-prefix-ok",
     "note": "the negative: an observation from nowhere the tenant has mapped",
-    "canonical": "not exists(network.segment_id)",
-    "ast": {"not":{"exists":{"f":"network.segment_id"}}},
+    "canonical": "not exists(network.prefix_id)",
+    "ast": {"not":{"exists":{"f":"network.prefix_id"}}},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-cloud-account",
+    "query": "source:cloud and cloud.account_id=\"123456789012\"",
+    "target": "observation",
+    "twin": "observation-cloud-account-ok",
+    "note": "§15 (ADR-0009 D5): the rule a cloud integration's auto-approve setting derives — scoped to ONE account",
+    "canonical": "source:cloud and cloud.account_id=123456789012",
+    "ast": {"and":[{"cmp":{"f":"source","op":":","v":"cloud"}},{"cmp":{"f":"cloud.account_id","op":"=","v":"123456789012"}}]},
+    "sql_errors": [{"code":"untranslatable"}]
+  },
+  {
+    "name": "observation-prefix-scope",
+    "query": "network.prefix_id=550e8400-e29b-41d4-a716-446655440000 and interface_id=550e8400-e29b-41d4-a716-446655440001 and exists(network.vrf_id)",
+    "target": "observation",
+    "twin": "observation-prefix-scope-ok",
+    "note": "§15 (DCIM row 1.4): a rule scoped to the IPAM prefix an observation's address falls in, read before any other rule",
+    "canonical": "network.prefix_id=550e8400-e29b-41d4-a716-446655440000 and interface_id=550e8400-e29b-41d4-a716-446655440001 and exists(network.vrf_id)",
+    "ast": {"and":[{"cmp":{"f":"network.prefix_id","op":"=","v":"550e8400-e29b-41d4-a716-446655440000"}},{"cmp":{"f":"interface_id","op":"=","v":"550e8400-e29b-41d4-a716-446655440001"}},{"exists":{"f":"network.vrf_id"}}]},
     "sql_errors": [{"code":"untranslatable"}]
   },
   {
@@ -2124,12 +2144,12 @@
   },
   {
     "name": "observation-full-rule",
-    "query": "source in (sensor, agent) and class:hardware and network.ownership:internal and confidence \u003e= 0.85 and exists(network.segment_id)",
+    "query": "source in (sensor, agent) and class:hardware and network.ownership:internal and confidence \u003e= 0.85 and exists(network.prefix_id)",
     "target": "observation",
     "twin": "observation-full-rule-ok",
     "note": "a whole auto-approval rule as a tenant would actually write one",
-    "canonical": "source in (sensor, agent) and class:hardware and network.ownership:internal and confidence \u003e= 0.85 and exists(network.segment_id)",
-    "ast": {"and":[{"in":{"f":"source","v":["sensor","agent"]}},{"cmp":{"f":"class","op":":","v":"hardware"}},{"cmp":{"f":"network.ownership","op":":","v":"internal"}},{"cmp":{"f":"confidence","op":"\u003e=","v":"0.85"}},{"exists":{"f":"network.segment_id"}}]},
+    "canonical": "source in (sensor, agent) and class:hardware and network.ownership:internal and confidence \u003e= 0.85 and exists(network.prefix_id)",
+    "ast": {"and":[{"in":{"f":"source","v":["sensor","agent"]}},{"cmp":{"f":"class","op":":","v":"hardware"}},{"cmp":{"f":"network.ownership","op":":","v":"internal"}},{"cmp":{"f":"confidence","op":"\u003e=","v":"0.85"}},{"exists":{"f":"network.prefix_id"}}]},
     "sql_errors": [{"code":"untranslatable"}]
   },
   {
@@ -2273,20 +2293,36 @@
     "sql": {"where":"(lower((a.asset_ownership)::text) = $1)","arg_count":1,"args":["third_party"]}
   },
   {
-    "name": "observation-network-segment-exact-ok",
-    "query": "segment_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
-    "note": "T2 twin of observation-network-segment-exact: the same shape against the asset target, which does have a table",
-    "canonical": "segment_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
-    "ast": {"cmp":{"f":"segment_id","op":"=","v":"0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"}},
-    "sql": {"where":"(a.network_segment_id = $1::uuid)","arg_count":1,"args":["0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"]}
+    "name": "observation-network-prefix-exact-ok",
+    "query": "prefix_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    "note": "T2 twin of observation-network-prefix-exact: the same shape against the asset target, which does have a table",
+    "canonical": "prefix_id=0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    "ast": {"cmp":{"f":"prefix_id","op":"=","v":"0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"}},
+    "sql": {"where":"(a.prefix_id = $1::uuid)","arg_count":1,"args":["0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"]}
   },
   {
-    "name": "observation-no-segment-ok",
-    "query": "not exists(segment_id)",
-    "note": "T2 twin of observation-no-segment: the same shape against the asset target, which does have a table",
-    "canonical": "not exists(segment_id)",
-    "ast": {"not":{"exists":{"f":"segment_id"}}},
-    "sql": {"where":"NOT ((a.network_segment_id IS NOT NULL))","arg_count":0}
+    "name": "observation-prefix-scope-ok",
+    "query": "prefix_id=550e8400-e29b-41d4-a716-446655440000 and exists(location_id)",
+    "note": "T2 twin of observation-prefix-scope: the same shape against the asset target, which does have a table",
+    "canonical": "prefix_id=550e8400-e29b-41d4-a716-446655440000 and exists(location_id)",
+    "ast": {"and":[{"cmp":{"f":"prefix_id","op":"=","v":"550e8400-e29b-41d4-a716-446655440000"}},{"exists":{"f":"location_id"}}]},
+    "sql": {"where":"((a.prefix_id = $1::uuid) AND (a.location_id IS NOT NULL))","arg_count":1,"args":["550e8400-e29b-41d4-a716-446655440000"]}
+  },
+  {
+    "name": "observation-cloud-account-ok",
+    "query": "source:declared and owner_email=\"123456789012\"",
+    "note": "T2 twin of observation-cloud-account: the same shape against the asset target, which does have a table",
+    "canonical": "source:declared and owner_email=123456789012",
+    "ast": {"and":[{"cmp":{"f":"source","op":":","v":"declared"}},{"cmp":{"f":"owner_email","op":"=","v":"123456789012"}}]},
+    "sql": {"where":"((lower((a.class_source_kind)::text) = $1) AND (a.owner_email = $2))","arg_count":2,"args":["declared","123456789012"]}
+  },
+  {
+    "name": "observation-no-prefix-ok",
+    "query": "not exists(prefix_id)",
+    "note": "T2 twin of observation-no-prefix: the same shape against the asset target, which does have a table",
+    "canonical": "not exists(prefix_id)",
+    "ast": {"not":{"exists":{"f":"prefix_id"}}},
+    "sql": {"where":"NOT ((a.prefix_id IS NOT NULL))","arg_count":0}
   },
   {
     "name": "observation-first-seen-recent-ok",
@@ -2322,11 +2358,11 @@
   },
   {
     "name": "observation-full-rule-ok",
-    "query": "source in (measured, imported) and class:hardware and ownership:internal and confidence_score \u003e= 85 and exists(segment_id)",
+    "query": "source in (measured, imported) and class:hardware and ownership:internal and confidence_score \u003e= 85 and exists(prefix_id)",
     "note": "T2 twin of observation-full-rule: the same shape against the asset target, which does have a table",
-    "canonical": "source in (measured, imported) and class:hardware and ownership:internal and confidence_score \u003e= 85 and exists(segment_id)",
-    "ast": {"and":[{"in":{"f":"source","v":["measured","imported"]}},{"cmp":{"f":"class","op":":","v":"hardware"}},{"cmp":{"f":"ownership","op":":","v":"internal"}},{"cmp":{"f":"confidence_score","op":"\u003e=","v":"85"}},{"exists":{"f":"segment_id"}}]},
-    "sql": {"where":"(((lower((a.class_source_kind)::text) = $1) OR (lower((a.class_source_kind)::text) = $2)) AND (a.class_path = $3 OR a.class_path LIKE $4) AND (lower((a.asset_ownership)::text) = $5) AND (a.confidence_score \u003e= $6) AND (a.network_segment_id IS NOT NULL))","arg_count":6,"args":["measured","imported","hardware","hardware.%","internal",85]}
+    "canonical": "source in (measured, imported) and class:hardware and ownership:internal and confidence_score \u003e= 85 and exists(prefix_id)",
+    "ast": {"and":[{"in":{"f":"source","v":["measured","imported"]}},{"cmp":{"f":"class","op":":","v":"hardware"}},{"cmp":{"f":"ownership","op":":","v":"internal"}},{"cmp":{"f":"confidence_score","op":"\u003e=","v":"85"}},{"exists":{"f":"prefix_id"}}]},
+    "sql": {"where":"(((lower((a.class_source_kind)::text) = $1) OR (lower((a.class_source_kind)::text) = $2)) AND (a.class_path = $3 OR a.class_path LIKE $4) AND (lower((a.asset_ownership)::text) = $5) AND (a.confidence_score \u003e= $6) AND (a.prefix_id IS NOT NULL))","arg_count":6,"args":["measured","imported","hardware","hardware.%","internal",85]}
   },
   {
     "name": "observation-asset-field-rejected-ok",
@@ -2343,5 +2379,462 @@
     "canonical": "endpoint:(port:443)",
     "ast": {"sub":{"c":"endpoint","p":{"cmp":{"f":"port","op":":","v":"443"}}}},
     "sql": {"where":"EXISTS (SELECT 1 FROM asset_endpoints e1 WHERE e1.asset_id = a.id AND (e1.port = $1))","arg_count":1,"args":[443]}
+  },
+  {
+    "name": "ipam-ip-address-in-prefix",
+    "query": "ip.address:10.10.0.0/24",
+    "note": "§15 D2 (DCIM row 1.3): an asset with an address in 10.10.0.0/24 — ':' on inet is CIDR containment, row-shaped over the asset's addresses",
+    "canonical": "ip.address:10.10.0.0/24",
+    "ast": {"cmp":{"f":"ip.address","op":":","v":"10.10.0.0/24"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM ip_addresses ip1 WHERE (ip1.id IN (a.primary_ip4_id, a.primary_ip6_id, a.oob_ip_id) OR (ip1.assigned_kind = $1 AND ip1.assigned_id IN (SELECT ifc2.id FROM interfaces ifc2 WHERE ifc2.asset_id = a.id))) AND ip1.status \u003c\u003e $2 AND (ip1.host \u003c\u003c= $3::inet))","arg_count":3,"args":["interface","rejected","10.10.0.0/24"]}
+  },
+  {
+    "name": "ipam-vlan-and-vrf",
+    "query": "vlan.vid=10 and vrf.name:blue",
+    "note": "§15 D2: the VLAN of the longest-match prefix of one of the asset's addresses, and that address's VRF",
+    "canonical": "vlan.vid=10 and vrf.name:blue",
+    "ast": {"and":[{"cmp":{"f":"vlan.vid","op":"=","v":"10"}},{"cmp":{"f":"vrf.name","op":":","v":"blue"}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM ip_addresses ip1 JOIN LATERAL (SELECT p3.* FROM prefixes p3 WHERE COALESCE(p3.vrf_id, $3::uuid) = COALESCE(ip1.vrf_id, $3::uuid) AND p3.prefix \u003e\u003e= ip1.host AND p3.status \u003c\u003e $4 ORDER BY masklen(p3.prefix) DESC LIMIT 1) px4 ON TRUE JOIN vlans vl5 ON vl5.id = px4.vlan_id WHERE (ip1.id IN (a.primary_ip4_id, a.primary_ip6_id, a.oob_ip_id) OR (ip1.assigned_kind = $1 AND ip1.assigned_id IN (SELECT ifc2.id FROM interfaces ifc2 WHERE ifc2.asset_id = a.id))) AND ip1.status \u003c\u003e $2 AND (vl5.vid = $5)) AND EXISTS (SELECT 1 FROM ip_addresses ip6 JOIN vrfs vrf8 ON vrf8.id = ip6.vrf_id WHERE (ip6.id IN (a.primary_ip4_id, a.primary_ip6_id, a.oob_ip_id) OR (ip6.assigned_kind = $6 AND ip6.assigned_id IN (SELECT ifc7.id FROM interfaces ifc7 WHERE ifc7.asset_id = a.id))) AND ip6.status \u003c\u003e $7 AND (lower(vrf8.name) = $8)))","arg_count":8,"args":["interface","rejected","00000000-0000-0000-0000-000000000000","rejected",10,"interface","rejected","blue"]}
+  },
+  {
+    "name": "ipam-prefix-status-ne",
+    "query": "prefix.status != deprecated",
+    "note": "§15 D2: row-shaped, so != negates the whole EXISTS — no address of the asset is in a deprecated prefix",
+    "canonical": "prefix.status != deprecated",
+    "ast": {"cmp":{"f":"prefix.status","op":"!=","v":"deprecated"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM ip_addresses ip1 JOIN LATERAL (SELECT p3.* FROM prefixes p3 WHERE COALESCE(p3.vrf_id, $3::uuid) = COALESCE(ip1.vrf_id, $3::uuid) AND p3.prefix \u003e\u003e= ip1.host AND p3.status \u003c\u003e $4 ORDER BY masklen(p3.prefix) DESC LIMIT 1) px4 ON TRUE WHERE (ip1.id IN (a.primary_ip4_id, a.primary_ip6_id, a.oob_ip_id) OR (ip1.assigned_kind = $1 AND ip1.assigned_id IN (SELECT ifc2.id FROM interfaces ifc2 WHERE ifc2.asset_id = a.id))) AND ip1.status \u003c\u003e $2 AND (px4.operational_status = $5))","arg_count":5,"args":["interface","rejected","00000000-0000-0000-0000-000000000000","rejected","deprecated"]}
+  },
+  {
+    "name": "business-unit-matches-name-or-slug",
+    "query": "business_unit = \"Finance\"",
+    "note": "DCIM 1.1: business_unit is object-valued; a bare reference matches the assigned unit's name OR slug",
+    "canonical": "business_unit=Finance",
+    "ast": {"cmp":{"f":"business_unit","op":"=","v":"Finance"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM business_units bu1 WHERE bu1.id = a.business_unit_id AND ((bu1.name = $1) OR (bu1.slug = $2)))","arg_count":2,"args":["Finance","Finance"]}
+  },
+  {
+    "name": "business-unit-not-equal-is-not-exists",
+    "query": "business_unit != Finance",
+    "note": "DCIM 1.1: the field reads a ROW (the referenced business_units row), so `!=` negates the whole EXISTS - neither name nor slug may be Finance",
+    "canonical": "business_unit != Finance",
+    "ast": {"cmp":{"f":"business_unit","op":"!=","v":"Finance"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM business_units bu1 WHERE bu1.id = a.business_unit_id AND ((bu1.name = $1) OR (bu1.slug = $2)))","arg_count":2,"args":["Finance","Finance"]}
+  },
+  {
+    "name": "business-unit-presence",
+    "query": "exists(business_unit)",
+    "note": "DCIM 1.1: presence is an EXISTS over the referenced unit",
+    "canonical": "exists(business_unit)",
+    "ast": {"exists":{"f":"business_unit"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM business_units bu1 WHERE bu1.id = a.business_unit_id AND ((bu1.name IS NOT NULL) OR (bu1.slug IS NOT NULL)))","arg_count":0}
+  },
+  {
+    "name": "business-unit-id",
+    "query": "business_unit.id = \"3f2c1f0e-7f6b-4a53-9d5e-0a6a1d7f2b11\"",
+    "note": "DCIM 1.1: .id is the business_units row uuid, read from assets.business_unit_id",
+    "canonical": "business_unit.id=3f2c1f0e-7f6b-4a53-9d5e-0a6a1d7f2b11",
+    "ast": {"cmp":{"f":"business_unit.id","op":"=","v":"3f2c1f0e-7f6b-4a53-9d5e-0a6a1d7f2b11"}},
+    "sql": {"where":"(a.business_unit_id = $1::uuid)","arg_count":1,"args":["3f2c1f0e-7f6b-4a53-9d5e-0a6a1d7f2b11"]}
+  },
+  {
+    "name": "business-unit-parent-includes-descendants",
+    "query": "business_unit.parent = Corporate",
+    "note": "DCIM 1.1: .parent matches the named unit and every descendant (recursive over parent_id)",
+    "canonical": "business_unit.parent=Corporate",
+    "ast": {"cmp":{"f":"business_unit.parent","op":"=","v":"Corporate"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE but2(id) AS (SELECT bur1.id FROM business_units bur1 WHERE ((bur1.name = $1) OR (bur1.slug = $2)) UNION SELECT buk3.id FROM business_units buk3 JOIN but2 ON buk3.parent_id = but2.id) SELECT 1 FROM but2 bu4 WHERE bu4.id = a.business_unit_id)","arg_count":2,"args":["Corporate","Corporate"]}
+  },
+  {
+    "name": "business-unit-parent-in",
+    "query": "business_unit.parent in (Corporate, Retail)",
+    "note": "DCIM 1.1: `in` over the hierarchy field is the OR of each subtree",
+    "canonical": "business_unit.parent in (Corporate, Retail)",
+    "ast": {"in":{"f":"business_unit.parent","v":["Corporate","Retail"]}},
+    "sql": {"where":"(EXISTS (WITH RECURSIVE but2(id) AS (SELECT bur1.id FROM business_units bur1 WHERE ((lower(bur1.name) = $1) OR (lower(bur1.slug) = $2)) UNION SELECT buk3.id FROM business_units buk3 JOIN but2 ON buk3.parent_id = but2.id) SELECT 1 FROM but2 bu4 WHERE bu4.id = a.business_unit_id) OR EXISTS (WITH RECURSIVE but6(id) AS (SELECT bur5.id FROM business_units bur5 WHERE ((lower(bur5.name) = $3) OR (lower(bur5.slug) = $4)) UNION SELECT buk7.id FROM business_units buk7 JOIN but6 ON buk7.parent_id = but6.id) SELECT 1 FROM but6 bu8 WHERE bu8.id = a.business_unit_id))","arg_count":4,"args":["corporate","corporate","retail","retail"]}
+  },
+  {
+    "name": "dcim-device-type-matches-model-slug-or-part",
+    "query": "device_type = \"C9300-48P\"",
+    "note": "DCIM 2.2: device_type is object-valued; a bare reference matches the assigned type's model, slug or part number",
+    "canonical": "device_type=C9300-48P",
+    "ast": {"cmp":{"f":"device_type","op":"=","v":"C9300-48P"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM device_types dt1 WHERE dt1.id = a.device_type_id AND ((dt1.model = $1) OR (dt1.slug = $2) OR (dt1.part_number = $3)))","arg_count":3,"args":["C9300-48P","C9300-48P","C9300-48P"]}
+  },
+  {
+    "name": "dcim-device-type-not-equal-is-not-exists",
+    "query": "device_type != C9300-48P",
+    "note": "DCIM 2.2: row-shaped, so != negates the whole EXISTS",
+    "canonical": "device_type != C9300-48P",
+    "ast": {"cmp":{"f":"device_type","op":"!=","v":"C9300-48P"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM device_types dt1 WHERE dt1.id = a.device_type_id AND ((dt1.model = $1) OR (dt1.slug = $2) OR (dt1.part_number = $3)))","arg_count":3,"args":["C9300-48P","C9300-48P","C9300-48P"]}
+  },
+  {
+    "name": "dcim-device-type-manufacturer",
+    "query": "device_type.manufacturer = cisco",
+    "note": "DCIM 2.2: the assigned type's manufacturer by name or slug",
+    "canonical": "device_type.manufacturer=cisco",
+    "ast": {"cmp":{"f":"device_type.manufacturer","op":"=","v":"cisco"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM device_types dt1 JOIN manufacturers mf2 ON mf2.id = dt1.manufacturer_id WHERE dt1.id = a.device_type_id AND ((mf2.name = $1) OR (mf2.slug = $2)))","arg_count":2,"args":["cisco","cisco"]}
+  },
+  {
+    "name": "dcim-device-role",
+    "query": "device_role = switch",
+    "note": "DCIM 2.2: the assigned device role by name or slug",
+    "canonical": "device_role=switch",
+    "ast": {"cmp":{"f":"device_role","op":"=","v":"switch"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM device_roles dr1 WHERE dr1.id = a.device_role_id AND ((dr1.name = $1) OR (dr1.slug = $2)))","arg_count":2,"args":["switch","switch"]}
+  },
+  {
+    "name": "dcim-tunnel-by-name",
+    "query": "tunnel = to-branch",
+    "note": "DCIM 4.3: a tunnel one of the asset's interfaces terminates, by name; row-shaped",
+    "canonical": "tunnel=to-branch",
+    "ast": {"cmp":{"f":"tunnel","op":"=","v":"to-branch"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM tunnel_terminations tt1 JOIN interfaces tif2 ON tif2.id = tt1.termination_id JOIN tunnels tn3 ON tn3.id = tt1.tunnel_id WHERE tif2.asset_id = a.id AND tn3.status \u003c\u003e $1 AND (tn3.name = $2))","arg_count":2,"args":["rejected","to-branch"]}
+  },
+  {
+    "name": "dcim-tunnel-encapsulation-and-ike-version",
+    "query": "tunnel.encapsulation = ipsec-tunnel and tunnel.ike_version = 1",
+    "note": "DCIM 4.3: encapsulation is the tunnels CHECK set; ike_version reads the profile's IKE policy",
+    "canonical": "tunnel.encapsulation=ipsec-tunnel and tunnel.ike_version=1",
+    "ast": {"and":[{"cmp":{"f":"tunnel.encapsulation","op":"=","v":"ipsec-tunnel"}},{"cmp":{"f":"tunnel.ike_version","op":"=","v":"1"}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM tunnel_terminations tt1 JOIN interfaces tif2 ON tif2.id = tt1.termination_id JOIN tunnels tn3 ON tn3.id = tt1.tunnel_id WHERE tif2.asset_id = a.id AND tn3.status \u003c\u003e $1 AND (tn3.encapsulation = $2)) AND EXISTS (SELECT 1 FROM tunnel_terminations tt4 JOIN interfaces tif5 ON tif5.id = tt4.termination_id JOIN tunnels tn6 ON tn6.id = tt4.tunnel_id JOIN ipsec_profiles tpr7 ON tpr7.id = tn6.ipsec_profile_id JOIN ike_policies tik8 ON tik8.id = tpr7.ike_policy_id WHERE tif5.asset_id = a.id AND tn6.status \u003c\u003e $3 AND (tik8.version = $4)))","arg_count":4,"args":["rejected","ipsec-tunnel","rejected",1]}
+  },
+  {
+    "name": "dcim-tunnel-pfs-group",
+    "query": "tunnel.pfs_group \u003c 14",
+    "note": "DCIM 4.3: the phase-2 PFS group through the tunnel's IPsec policy",
+    "canonical": "tunnel.pfs_group \u003c 14",
+    "ast": {"cmp":{"f":"tunnel.pfs_group","op":"\u003c","v":"14"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM tunnel_terminations tt1 JOIN interfaces tif2 ON tif2.id = tt1.termination_id JOIN tunnels tn3 ON tn3.id = tt1.tunnel_id JOIN ipsec_profiles tpr4 ON tpr4.id = tn3.ipsec_profile_id JOIN ipsec_policies tsp5 ON tsp5.id = tpr4.ipsec_policy_id WHERE tif2.asset_id = a.id AND tn3.status \u003c\u003e $1 AND (tsp5.pfs_group \u003c $2))","arg_count":2,"args":["rejected",14]}
+  },
+  {
+    "name": "dcim-wireless-lan-ssid",
+    "query": "wireless_lan.ssid:Guest",
+    "note": "DCIM 4.4: some wireless LAN one of the asset's interfaces serves is Guest, row-shaped over interfaces.wireless_lan_ids",
+    "canonical": "wireless_lan.ssid:Guest",
+    "ast": {"cmp":{"f":"wireless_lan.ssid","op":":","v":"Guest"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM interfaces ifc1 JOIN wireless_lans wl2 ON wl2.id = ANY(ifc1.wireless_lan_ids) WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND wl2.status \u003c\u003e $2 AND (lower(wl2.ssid) = $3))","arg_count":3,"args":["rejected","rejected","guest"]}
+  },
+  {
+    "name": "dcim-wireless-lan-auth-type",
+    "query": "wireless_lan.auth_type in (open, wep)",
+    "note": "DCIM 4.4: the asset serves a wireless LAN with no or broken authentication",
+    "canonical": "wireless_lan.auth_type in (open, wep)",
+    "ast": {"in":{"f":"wireless_lan.auth_type","v":["open","wep"]}},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM interfaces ifc1 JOIN wireless_lans wl2 ON wl2.id = ANY(ifc1.wireless_lan_ids) WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND wl2.status \u003c\u003e $2 AND (lower(wl2.auth_type) = $3)) OR EXISTS (SELECT 1 FROM interfaces ifc3 JOIN wireless_lans wl4 ON wl4.id = ANY(ifc3.wireless_lan_ids) WHERE ifc3.asset_id = a.id AND ifc3.status \u003c\u003e $4 AND wl4.status \u003c\u003e $5 AND (lower(wl4.auth_type) = $6)))","arg_count":6,"args":["rejected","rejected","open","rejected","rejected","wep"]}
+  },
+  {
+    "name": "dcim-platform",
+    "query": "platform = ios-xe",
+    "note": "DCIM 2.2: the assigned platform (OS) by name or slug",
+    "canonical": "platform=ios-xe",
+    "ast": {"cmp":{"f":"platform","op":"=","v":"ios-xe"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM platforms pf1 WHERE pf1.id = a.platform_id AND ((pf1.name = $1) OR (pf1.slug = $2)))","arg_count":2,"args":["ios-xe","ios-xe"]}
+  },
+  {
+    "name": "dcim-device-type-id",
+    "query": "device_type.id = \"3f2c1f0e-7f6b-4a53-9d5e-0a6a1d7f2b11\"",
+    "note": "DCIM 2.2: .id reads assets.device_type_id",
+    "canonical": "device_type.id=3f2c1f0e-7f6b-4a53-9d5e-0a6a1d7f2b11",
+    "ast": {"cmp":{"f":"device_type.id","op":"=","v":"3f2c1f0e-7f6b-4a53-9d5e-0a6a1d7f2b11"}},
+    "sql": {"where":"(a.device_type_id = $1::uuid)","arg_count":1,"args":["3f2c1f0e-7f6b-4a53-9d5e-0a6a1d7f2b11"]}
+  },
+  {
+    "name": "dcim-serial-and-asset-tag",
+    "query": "serial = FOC1234X0YZ or asset_tag = IT-0042",
+    "note": "DCIM 2.2: the promoted asset columns",
+    "canonical": "serial=FOC1234X0YZ or asset_tag=IT-0042",
+    "ast": {"or":[{"cmp":{"f":"serial","op":"=","v":"FOC1234X0YZ"}},{"cmp":{"f":"asset_tag","op":"=","v":"IT-0042"}}]},
+    "sql": {"where":"((a.serial = $1) OR (a.asset_tag = $2))","arg_count":2,"args":["FOC1234X0YZ","IT-0042"]}
+  },
+  {
+    "name": "dcim-circuit-by-cid-or-type",
+    "query": "circuit = mpls",
+    "note": "DCIM 4.1: circuit is object-valued over circuits terminating at the asset's location; a bare reference matches the cid or the circuit type's name or slug",
+    "canonical": "circuit=mpls",
+    "ast": {"cmp":{"f":"circuit","op":"=","v":"mpls"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM circuit_terminations ctm1 JOIN circuits ci2 ON ci2.id = ctm1.circuit_id JOIN circuit_types cty3 ON cty3.id = ci2.type_id WHERE ctm1.termination_kind = $1 AND ctm1.termination_id = a.location_id AND ((ci2.cid = $2) OR (cty3.name = $3) OR (cty3.slug = $4)))","arg_count":4,"args":["location","mpls","mpls","mpls"]}
+  },
+  {
+    "name": "dcim-circuit-not-equal-is-not-exists",
+    "query": "circuit != mpls",
+    "note": "DCIM 4.1: row-shaped, so != negates the whole EXISTS (an asset with no circuit satisfies it)",
+    "canonical": "circuit != mpls",
+    "ast": {"cmp":{"f":"circuit","op":"!=","v":"mpls"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM circuit_terminations ctm1 JOIN circuits ci2 ON ci2.id = ctm1.circuit_id JOIN circuit_types cty3 ON cty3.id = ci2.type_id WHERE ctm1.termination_kind = $1 AND ctm1.termination_id = a.location_id AND ((ci2.cid = $2) OR (cty3.name = $3) OR (cty3.slug = $4)))","arg_count":4,"args":["location","mpls","mpls","mpls"]}
+  },
+  {
+    "name": "dcim-circuit-cid",
+    "query": "circuit.cid = \"CKT-0042\"",
+    "note": "DCIM 4.1: the cid of a circuit terminating at the asset's location",
+    "canonical": "circuit.cid=CKT-0042",
+    "ast": {"cmp":{"f":"circuit.cid","op":"=","v":"CKT-0042"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM circuit_terminations ctm1 JOIN circuits ci2 ON ci2.id = ctm1.circuit_id WHERE ctm1.termination_kind = $1 AND ctm1.termination_id = a.location_id AND (ci2.cid = $2))","arg_count":2,"args":["location","CKT-0042"]}
+  },
+  {
+    "name": "dcim-circuit-provider",
+    "query": "circuit.provider = lumen",
+    "note": "DCIM 4.1: the provider of a circuit terminating at the asset's location, by name or slug",
+    "canonical": "circuit.provider=lumen",
+    "ast": {"cmp":{"f":"circuit.provider","op":"=","v":"lumen"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM circuit_terminations ctm1 JOIN circuits ci2 ON ci2.id = ctm1.circuit_id JOIN providers pv3 ON pv3.id = ci2.provider_id WHERE ctm1.termination_kind = $1 AND ctm1.termination_id = a.location_id AND ((pv3.name = $2) OR (pv3.slug = $3)))","arg_count":3,"args":["location","lumen","lumen"]}
+  },
+  {
+    "name": "cloud-provider-account-type",
+    "query": "provider:aws and account:\"123456789012\" and cloud.type:\"AWS::EC2::Instance\"",
+    "note": "DCIM 4.6 (ADR-0009 D7): the cloud_resource attributes, read as the attr. namespace reads them",
+    "canonical": "provider:aws and account:123456789012 and cloud.type:AWS::EC2::Instance",
+    "ast": {"and":[{"cmp":{"f":"provider","op":":","v":"aws"}},{"cmp":{"f":"account","op":":","v":"123456789012"}},{"cmp":{"f":"cloud.type","op":":","v":"AWS::EC2::Instance"}}]},
+    "sql": {"where":"((lower((a.attributes -\u003e\u003e $1)) = $2) AND (lower((a.attributes -\u003e\u003e $3)) = $4) AND (lower((a.attributes -\u003e\u003e $5)) = $6))","arg_count":6,"args":["provider","aws","account_id","123456789012","provider_type","aws::ec2::instance"]}
+  },
+  {
+    "name": "cloud-region-falls-back-to-provider-region",
+    "query": "region:us-east-1",
+    "note": "DCIM 4.6: region is the location region, or a cloud resource's provider region when it has none",
+    "canonical": "region:us-east-1",
+    "ast": {"cmp":{"f":"region","op":":","v":"us-east-1"}},
+    "sql": {"where":"(lower(COALESCE(NULLIF(a.region, $1), a.attributes -\u003e\u003e $2)) = $3)","arg_count":3,"args":["","region","us-east-1"]}
+  },
+  {
+    "name": "dcim-interface-by-mac",
+    "query": "interface:(mac_address:\"00:11:22:33:44:55\")",
+    "note": "§15 (DCIM row 1.2): an asset with an interface carrying this MAC; macaddr8 folded to the EUI-48 form",
+    "canonical": "interface:(mac_address:00:11:22:33:44:55)",
+    "ast": {"sub":{"c":"interface","p":{"cmp":{"f":"mac_address","op":":","v":"00:11:22:33:44:55"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM interfaces ifc1 WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND (lower((CASE WHEN substr(ifc1.mac_address::text, 10, 5) = $2 THEN (ifc1.mac_address::macaddr)::text ELSE ifc1.mac_address::text END)) = $3))","arg_count":3,"args":["rejected","ff:fe","00:11:22:33:44:55"]}
+  },
+  {
+    "name": "dcim-interface-name-and-mode",
+    "query": "interface:(name = \"GigabitEthernet1/0/24\" and mode:tagged)",
+    "note": "§15: name is case-sensitive under =, mode is the interfaces_mode_check set",
+    "canonical": "interface:(name=GigabitEthernet1/0/24 and mode:tagged)",
+    "ast": {"sub":{"c":"interface","p":{"and":[{"cmp":{"f":"name","op":"=","v":"GigabitEthernet1/0/24"}},{"cmp":{"f":"mode","op":":","v":"tagged"}}]}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM interfaces ifc1 WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND ((ifc1.name = $2) AND (lower((ifc1.mode)::text) = $3)))","arg_count":3,"args":["rejected","GigabitEthernet1/0/24","tagged"]}
+  },
+  {
+    "name": "dcim-interface-exists-disabled",
+    "query": "exists(interface) and not interface:(enabled = true)",
+    "note": "§15: an asset with interfaces, none of them enabled",
+    "canonical": "exists(interface) and not interface:(enabled=true)",
+    "ast": {"and":[{"sub":{"c":"interface"}},{"not":{"sub":{"c":"interface","p":{"cmp":{"f":"enabled","op":"=","v":"true"}}}}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM interfaces ifc1 WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1) AND NOT EXISTS (SELECT 1 FROM interfaces ifc2 WHERE ifc2.asset_id = a.id AND ifc2.status \u003c\u003e $2 AND (ifc2.enabled = $3)))","arg_count":3,"args":["rejected","rejected",true]}
+  },
+  {
+    "name": "dcim-interface-speed-mtu",
+    "query": "interface:(speed_kbps \u003e= 10000000 and mtu \u003e 1500)",
+    "note": "§15: numeric interface fields",
+    "canonical": "interface:(speed_kbps \u003e= 10000000 and mtu \u003e 1500)",
+    "ast": {"sub":{"c":"interface","p":{"and":[{"cmp":{"f":"speed_kbps","op":"\u003e=","v":"10000000"}},{"cmp":{"f":"mtu","op":"\u003e","v":"1500"}}]}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM interfaces ifc1 WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND ((ifc1.speed_kbps \u003e= $2) AND (ifc1.mtu \u003e $3)))","arg_count":3,"args":["rejected",10000000,1500]}
+  },
+  {
+    "name": "dcim-interface-mode-bad",
+    "query": "interface:(mode:trunk)",
+    "note": "§15: trunk is not an 802.1Q mode value",
+    "canonical": "interface:(mode:trunk)",
+    "ast": {"sub":{"c":"interface","p":{"cmp":{"f":"mode","op":":","v":"trunk"}}}},
+    "errors": [{"code":"unknown_value"}]
+  },
+  {
+    "name": "dcim-interface-field-bad",
+    "query": "interface:(ifname:eth0)",
+    "note": "§15: an unknown interface field",
+    "canonical": "interface:(ifname:eth0)",
+    "ast": {"sub":{"c":"interface","p":{"cmp":{"f":"ifname","op":":","v":"eth0"}}}},
+    "errors": [{"code":"unknown_field"}]
+  },
+  {
+    "name": "dcim-interface-back-to-asset",
+    "query": "asset:(hostname:core*) and type:lag",
+    "target": "interface",
+    "note": "§15: the interface target reaches its asset",
+    "canonical": "asset:(hostname:core*) and type:lag",
+    "ast": {"and":[{"sub":{"c":"asset","p":{"cmp":{"f":"hostname","op":":","v":"core*"}}}},{"cmp":{"f":"type","op":":","v":"lag"}}]},
+    "sql": {"where":"(EXISTS (SELECT 1 FROM assets a1 WHERE a1.id = ifc.asset_id AND (a1.hostname ILIKE $1)) AND (lower(ifc.type) = $2))","arg_count":2,"args":["core%","lag"]}
+  },
+  {
+    "name": "dcim-interface-mode-ok",
+    "query": "interface:(mode:access)",
+    "note": "§15: the passing twin of dcim-interface-mode-bad",
+    "canonical": "interface:(mode:access)",
+    "ast": {"sub":{"c":"interface","p":{"cmp":{"f":"mode","op":":","v":"access"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM interfaces ifc1 WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND (lower((ifc1.mode)::text) = $2))","arg_count":2,"args":["rejected","access"]}
+  },
+  {
+    "name": "dcim-interface-field-ok",
+    "query": "interface:(name:eth0)",
+    "note": "§15: the passing twin of dcim-interface-field-bad",
+    "canonical": "interface:(name:eth0)",
+    "ast": {"sub":{"c":"interface","p":{"cmp":{"f":"name","op":":","v":"eth0"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM interfaces ifc1 WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND (lower(ifc1.name) = $2))","arg_count":2,"args":["rejected","eth0"]}
+  },
+  {
+    "name": "site-matches-name-or-slug",
+    "query": "site = \"HQ\"",
+    "note": "DCIM 2.1: site is object-valued; a bare reference matches the asset's site by name OR slug",
+    "canonical": "site=HQ",
+    "ast": {"cmp":{"f":"site","op":"=","v":"HQ"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM sites st1 WHERE st1.id = a.site_id AND ((st1.name = $1) OR (st1.slug = $2)))","arg_count":2,"args":["HQ","HQ"]}
+  },
+  {
+    "name": "site-not-equal-is-not-exists",
+    "query": "site != HQ",
+    "note": "DCIM 2.1: the field reads the referenced sites row, so `!=` negates the whole EXISTS",
+    "canonical": "site != HQ",
+    "ast": {"cmp":{"f":"site","op":"!=","v":"HQ"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM sites st1 WHERE st1.id = a.site_id AND ((st1.name = $1) OR (st1.slug = $2)))","arg_count":2,"args":["HQ","HQ"]}
+  },
+  {
+    "name": "site-presence",
+    "query": "exists(site)",
+    "note": "DCIM 2.1: presence is an EXISTS over the referenced site",
+    "canonical": "exists(site)",
+    "ast": {"exists":{"f":"site"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM sites st1 WHERE st1.id = a.site_id AND ((st1.name IS NOT NULL) OR (st1.slug IS NOT NULL)))","arg_count":0}
+  },
+  {
+    "name": "site-id",
+    "query": "site.id = \"7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b\"",
+    "note": "DCIM 2.1: .id is the sites row uuid, read from assets.site_id",
+    "canonical": "site.id=7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b",
+    "ast": {"cmp":{"f":"site.id","op":"=","v":"7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b"}},
+    "sql": {"where":"(a.site_id = $1::uuid)","arg_count":1,"args":["7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b"]}
+  },
+  {
+    "name": "site-group-includes-descendants",
+    "query": "site.group = Branches",
+    "note": "DCIM 2.1: .group matches the site's group by name/slug and every descendant group",
+    "canonical": "site.group=Branches",
+    "ast": {"cmp":{"f":"site.group","op":"=","v":"Branches"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE sgt2(id) AS (SELECT sgr1.id FROM site_groups sgr1 WHERE ((sgr1.name = $1) OR (sgr1.slug = $2)) UNION SELECT sgk3.id FROM site_groups sgk3 JOIN sgt2 ON sgk3.parent_id = sgt2.id) SELECT 1 FROM sites st4 JOIN sgt2 ON st4.group_id = sgt2.id WHERE st4.id = a.site_id)","arg_count":2,"args":["Branches","Branches"]}
+  },
+  {
+    "name": "site-region-includes-descendants",
+    "query": "site.region = Europe",
+    "note": "DCIM 2.1: .region matches the site's region by name/slug and every descendant region (NetBox's region filter)",
+    "canonical": "site.region=Europe",
+    "ast": {"cmp":{"f":"site.region","op":"=","v":"Europe"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE sgt2(id) AS (SELECT sgr1.id FROM regions sgr1 WHERE ((sgr1.name = $1) OR (sgr1.slug = $2)) UNION SELECT sgk3.id FROM regions sgk3 JOIN sgt2 ON sgk3.parent_id = sgt2.id) SELECT 1 FROM sites st4 JOIN sgt2 ON st4.region_id = sgt2.id WHERE st4.id = a.site_id)","arg_count":2,"args":["Europe","Europe"]}
+  },
+  {
+    "name": "site-region-in",
+    "query": "site.region in (Europe, Americas)",
+    "note": "DCIM 2.1: `in` over the hierarchy field is the OR of each subtree",
+    "canonical": "site.region in (Europe, Americas)",
+    "ast": {"in":{"f":"site.region","v":["Europe","Americas"]}},
+    "sql": {"where":"(EXISTS (WITH RECURSIVE sgt2(id) AS (SELECT sgr1.id FROM regions sgr1 WHERE ((lower(sgr1.name) = $1) OR (lower(sgr1.slug) = $2)) UNION SELECT sgk3.id FROM regions sgk3 JOIN sgt2 ON sgk3.parent_id = sgt2.id) SELECT 1 FROM sites st4 JOIN sgt2 ON st4.region_id = sgt2.id WHERE st4.id = a.site_id) OR EXISTS (WITH RECURSIVE sgt6(id) AS (SELECT sgr5.id FROM regions sgr5 WHERE ((lower(sgr5.name) = $3) OR (lower(sgr5.slug) = $4)) UNION SELECT sgk7.id FROM regions sgk7 JOIN sgt6 ON sgk7.parent_id = sgt6.id) SELECT 1 FROM sites st8 JOIN sgt6 ON st8.region_id = sgt6.id WHERE st8.id = a.site_id))","arg_count":4,"args":["europe","europe","americas","americas"]}
+  },
+  {
+    "name": "location-matches-self-or-ancestor",
+    "query": "location = \"Floor 2\"",
+    "note": "DCIM 2.1: location matches the asset's location or any location above it, by name, slug or name path",
+    "canonical": "location=\"Floor 2\"",
+    "ast": {"cmp":{"f":"location","op":"=","v":"Floor 2"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE lup2(id, parent_id, d) AS (SELECT lo1.id, lo1.parent_id, 0 FROM locations lo1 WHERE lo1.id = a.location_id UNION ALL SELECT lp3.id, lp3.parent_id, lup2.d + 1 FROM locations lp3 JOIN lup2 ON lp3.id = lup2.parent_id WHERE lup2.d \u003c 32) SELECT 1 FROM lup2 JOIN locations lx4 ON lx4.id = lup2.id WHERE ((lx4.name = $1) OR (lx4.slug = $2) OR (public.location_path(lx4.id) = $3)))","arg_count":3,"args":["Floor 2","Floor 2","Floor 2"]}
+  },
+  {
+    "name": "location-matches-path",
+    "query": "location = \"HQ / Floor 2 / Room 201\"",
+    "note": "DCIM 2.1: the name path is site name then the location chain, ' / '-joined (public.location_path)",
+    "canonical": "location=\"HQ / Floor 2 / Room 201\"",
+    "ast": {"cmp":{"f":"location","op":"=","v":"HQ / Floor 2 / Room 201"}},
+    "sql": {"where":"EXISTS (WITH RECURSIVE lup2(id, parent_id, d) AS (SELECT lo1.id, lo1.parent_id, 0 FROM locations lo1 WHERE lo1.id = a.location_id UNION ALL SELECT lp3.id, lp3.parent_id, lup2.d + 1 FROM locations lp3 JOIN lup2 ON lp3.id = lup2.parent_id WHERE lup2.d \u003c 32) SELECT 1 FROM lup2 JOIN locations lx4 ON lx4.id = lup2.id WHERE ((lx4.name = $1) OR (lx4.slug = $2) OR (public.location_path(lx4.id) = $3)))","arg_count":3,"args":["HQ / Floor 2 / Room 201","HQ / Floor 2 / Room 201","HQ / Floor 2 / Room 201"]}
+  },
+  {
+    "name": "dcim-rack-name",
+    "query": "rack = R12",
+    "note": "DCIM 2.3: the asset's rack by name or facility id; row-shaped, so != negates the whole EXISTS",
+    "canonical": "rack=R12",
+    "ast": {"cmp":{"f":"rack","op":"=","v":"R12"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM racks rk1 WHERE rk1.id = a.rack_id AND ((rk1.name = $1) OR (rk1.facility_id = $2)))","arg_count":2,"args":["R12","R12"]}
+  },
+  {
+    "name": "dcim-rack-not-equal",
+    "query": "rack != R12",
+    "note": "DCIM 2.3: an unracked asset satisfies != (no rack is R12)",
+    "canonical": "rack != R12",
+    "ast": {"cmp":{"f":"rack","op":"!=","v":"R12"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM racks rk1 WHERE rk1.id = a.rack_id AND ((rk1.name = $1) OR (rk1.facility_id = $2)))","arg_count":2,"args":["R12","R12"]}
+  },
+  {
+    "name": "dcim-rack-id",
+    "query": "rack.id = \"7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b\"",
+    "note": "DCIM 2.3: .id is assets.rack_id",
+    "canonical": "rack.id=7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b",
+    "ast": {"cmp":{"f":"rack.id","op":"=","v":"7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b"}},
+    "sql": {"where":"(a.rack_id = $1::uuid)","arg_count":1,"args":["7a1c2e3f-4b5d-4e6f-8a9b-0c1d2e3f4a5b"]}
+  },
+  {
+    "name": "dcim-rack-site",
+    "query": "rack.site:ams-1",
+    "note": "DCIM 2.3: the rack's site by name or slug",
+    "canonical": "rack.site:ams-1",
+    "ast": {"cmp":{"f":"rack.site","op":":","v":"ams-1"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM racks rk1 JOIN sites ro2 ON ro2.id = rk1.site_id WHERE rk1.id = a.rack_id AND ((lower(ro2.name) = $1) OR (lower(ro2.slug) = $2)))","arg_count":2,"args":["ams-1","ams-1"]}
+  },
+  {
+    "name": "dcim-rack-role",
+    "query": "rack.role = network",
+    "note": "DCIM 2.3: the rack's rack role by name or slug",
+    "canonical": "rack.role=network",
+    "ast": {"cmp":{"f":"rack.role","op":"=","v":"network"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM racks rk1 JOIN rack_roles ro2 ON ro2.id = rk1.role_id WHERE rk1.id = a.rack_id AND ((ro2.name = $1) OR (ro2.slug = $2)))","arg_count":2,"args":["network","network"]}
+  },
+  {
+    "name": "dcim-rack-position",
+    "query": "position \u003e= 40",
+    "note": "DCIM 2.3: the lowest unit the asset occupies (half-U steps)",
+    "canonical": "position \u003e= 40",
+    "ast": {"cmp":{"f":"position","op":"\u003e=","v":"40"}},
+    "sql": {"where":"(a.position \u003e= $1)","arg_count":1,"args":[40]}
+  },
+  {
+    "name": "dcim-rack-face-ok",
+    "query": "face = rear",
+    "note": "DCIM 2.3: the face of the rack the asset is mounted on",
+    "canonical": "face=rear",
+    "ast": {"cmp":{"f":"face","op":"=","v":"rear"}},
+    "sql": {"where":"((a.face)::text = $1)","arg_count":1,"args":["rear"]}
+  },
+  {
+    "name": "dcim-rack-face-bad",
+    "query": "face = side",
+    "note": "DCIM 2.3: face is a closed set (front, rear)",
+    "canonical": "face=side",
+    "ast": {"cmp":{"f":"face","op":"=","v":"side"}},
+    "errors": [{"code":"unknown_value"}]
+  },
+  {
+    "name": "dcim-module-type",
+    "query": "module_type = C9300-NM-8X",
+    "note": "DCIM 2.4: a module installed in the asset, by its module type's model, part number or slug; row-shaped",
+    "canonical": "module_type=C9300-NM-8X",
+    "ast": {"cmp":{"f":"module_type","op":"=","v":"C9300-NM-8X"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM modules mo1 JOIN module_types mt2 ON mt2.id = mo1.module_type_id WHERE mo1.asset_id = a.id AND mo1.status \u003c\u003e $1 AND ((mt2.model = $2) OR (mt2.part_number = $3) OR (mt2.slug = $4)))","arg_count":4,"args":["rejected","C9300-NM-8X","C9300-NM-8X","C9300-NM-8X"]}
+  },
+  {
+    "name": "dcim-module-type-not-equal",
+    "query": "module_type != C9300-NM-8X",
+    "note": "DCIM 2.4: an asset with no such module satisfies !=",
+    "canonical": "module_type != C9300-NM-8X",
+    "ast": {"cmp":{"f":"module_type","op":"!=","v":"C9300-NM-8X"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM modules mo1 JOIN module_types mt2 ON mt2.id = mo1.module_type_id WHERE mo1.asset_id = a.id AND mo1.status \u003c\u003e $1 AND ((mt2.model = $2) OR (mt2.part_number = $3) OR (mt2.slug = $4)))","arg_count":4,"args":["rejected","C9300-NM-8X","C9300-NM-8X","C9300-NM-8X"]}
+  },
+  {
+    "name": "dcim-inventory-item-serial",
+    "query": "inventory_item.serial = DCB2341G0A1",
+    "note": "DCIM 2.4: the serial of any of the asset's inventory items",
+    "canonical": "inventory_item.serial=DCB2341G0A1",
+    "ast": {"cmp":{"f":"inventory_item.serial","op":"=","v":"DCB2341G0A1"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM inventory_items ii1 WHERE ii1.asset_id = a.id AND ii1.status \u003c\u003e $1 AND (ii1.serial = $2))","arg_count":2,"args":["rejected","DCB2341G0A1"]}
+  },
+  {
+    "name": "dcim-virtual-chassis",
+    "query": "virtual_chassis:core-stack",
+    "note": "DCIM 2.4: the virtual chassis the asset is a member of, by name or domain",
+    "canonical": "virtual_chassis:core-stack",
+    "ast": {"cmp":{"f":"virtual_chassis","op":":","v":"core-stack"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM virtual_chassis vc1 WHERE vc1.id = a.virtual_chassis_id AND ((lower(vc1.name) = $1) OR (lower(vc1.domain) = $2)))","arg_count":2,"args":["core-stack","core-stack"]}
   }
 ]

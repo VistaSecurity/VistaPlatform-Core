@@ -4,13 +4,12 @@ This feature helps you focus on cryptography on your own network while identifyi
 
 ## How 3rd party is determined
 
-- **Network Segments** define "your" network — CIDR blocks, IP ranges, domains and
-  cloud VPCs. You maintain them under **Settings → Infrastructure → Network
-  Segments**; see [Operational context](./operational-context.md).
+- **Prefixes** define "your" network. You maintain them under **Inventory →
+  Networks**; see [Operational context](./operational-context.md).
 - Every discovered asset is classified as:
-  - **Internal** – matches one of your network segments
+  - **Internal** – matches one of your prefixes
   - **3rd party** – does not match (e.g. internet or partner destinations)
-  - **Unknown** – private IP but no matching segment (review recommended)
+  - **Unknown** – private IP but no matching prefix (review recommended)
 
   "Private" here means RFC 1918, IPv6 unique-local (fc00::/7), loopback,
   link-local — and **carrier-grade NAT (100.64.0.0/10)**. Overlay networks such
@@ -19,7 +18,7 @@ This feature helps you focus on cryptography on your own network while identifyi
   connection. Being an internal candidate does **not** make it scannable or
   enrichable: see the carrier-grade NAT note below.
 
-**Important:** define your internal network in **Network Segments** first, or the
+**Important:** define your internal network in **Networks** first, or the
 internal / 3rd-party split is a guess.
 
 ## Finding 3rd party systems and weak crypto
@@ -135,9 +134,9 @@ it presents. We call that *enrichment*.
 
 - **private addresses** — RFC 1918 (10/8, 172.16/12, 192.168/16), IPv6 unique-local
   (fc00::/7), loopback and link-local;
-- addresses inside a **network segment you registered** under **Settings →
-  Infrastructure → Network Segments**, whatever its type, public included.
-  Public segments the platform *learned* from a firewall's or switch's VLAN table do
+- addresses inside a **prefix you declared** under **Inventory →
+  Networks**, whatever its type, public included.
+  Public prefixes the platform *learned* from a firewall's or switch's VLAN table do
   not count: a device reporting its internet-facing network is telling us where it
   is connected, not what you own — unless someone in your organization has
   **claimed** the range as yours (see
@@ -153,18 +152,18 @@ probes them until you register the range.)
 
 > **Tailscale and other CGNAT overlays: register your range.** Tailscale gives
 > every device an address in 100.64.0.0/10. Until you register that space under
-> **Settings → Infrastructure → Network Segments** — either all of
+> **Inventory → Networks** — either all of
 > `100.64.0.0/10` or just your tailnet's range — your sensors treat your own
 > tailnet peers as third parties and **do not read their certificates**. The same
 > applies to any other overlay or provider network that hands out 100.64.0.0/10
 > addresses.
 
-A registered segment must be a range you could plausibly own: an IPv4 segment must
-be **/8 or narrower** and an IPv6 segment **/16 or narrower**. Saving anything wider
+A declared prefix must be a range you could plausibly own: an IPv4 prefix must
+be **/8 or narrower** and an IPv6 prefix **/16 or narrower**. Saving anything wider
 — `0.0.0.0/0` above all — is refused with a message saying so, because registering
 "the whole internet" as yours would amount to switching on the opt-in below without
 saying so. (Ranges wholly inside private space, such as `fd00::/8`, are exempt:
-they are yours already.) A segment that wide saved before this rule existed is
+they are yours already.) A prefix that wide saved before this rule existed is
 kept, but it does not count as yours for enrichment; narrow it to the ranges you
 own.
 
@@ -185,7 +184,7 @@ ranges on a check-in — for example because a scan-exclusion setting is malform
 it tells the sensor so explicitly: no ranges count as yours until it can, and the
 exclusions it could read are added to the ones the sensor already had.
 
-A network segment marked **sensitive** or with **active probes disabled**, and any
+A prefix marked **sensitive** or with **active probes disabled**, and any
 range on your automatic-scan exclusion list, is never enriched — not even with the
 opt-in below.
 
@@ -218,7 +217,7 @@ environment:
 capture:
   # Local third-party opt-in. Default false.
   thirdPartyTLSEnrichment: true          # env: THIRD_PARTY_TLS_ENRICHMENT=true
-  # Public ranges this sensor may treat as yours, like registered segments.
+  # Public ranges this sensor may treat as yours, like declared prefixes.
   ownedNetworks:                         # env: OWNED_NETWORKS=203.0.113.0/24,2001:db8::/32
     - 203.0.113.0/24
 ```
@@ -234,7 +233,7 @@ file for good, stop it and delete `platform-probe-consent.json` from its data
 directory. The record names the sensor it was written for: a data directory reused
 for a sensor enrolled again — into another organization, say — ignores the old
 record rather than inheriting its answers. Local `ownedNetworks` follow the same
-/8 and /16 rule as segments.
+/8 and /16 rule as prefixes.
 
 Consent is never adopted from a sensor. When a sensor first reports the settings
 it is running, the platform normally records them as that sensor's own starting
@@ -283,12 +282,12 @@ internal certs get. That's your vendor-cryptography posture in one view.
 
 - **Sensor discoveries** record both source and destination when your sensors see traffic. The platform stores **source IP** with each discovery so it can show “which internal hosts talk to which destination.”
 - Connections are only shown for discoveries that have been **processed** and have a **source IP** (sensor-reported traffic). A 3rd-party observation with no source address — an active probe of a public address, for example — is not a connection and is not recorded as one; it is counted in the discovery batch's record instead. Cloud-only discoveries may not have source IP.
-- Every discovery is classified once, by the platform's inventory, against your Network Segments — the same answer decides whether it becomes an asset or an external connection, and whether a segment's auto-approval applies.
+- Every discovery is classified once, by the platform's inventory, against your Networks — the same answer decides whether it becomes an asset or an external connection, and whether a prefix's auto-approval applies.
 - Each connection keeps the certificate assessment the probe made: the certificate's validation result, whether it carries Certificate Transparency timestamps, a known-bad issuing CA, and OCSP revocation status. These are the same signals your own certificates are assessed with.
 
 ## Related
 
-- [Operational context](./operational-context.md) – network segments, which define what counts as internal
+- [Operational context](./operational-context.md) – prefixes, which define what counts as internal
 - [Inventory and lenses](./inventory-and-lenses.md) – the 3rd Party lens among the rest
 - [Asset Approval](./asset-approval.md) – review and approve discovered assets (ownership is shown there)
 - [Discovery](./discovery.md) – how assets are discovered

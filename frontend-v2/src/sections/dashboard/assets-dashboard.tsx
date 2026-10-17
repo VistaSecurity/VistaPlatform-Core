@@ -103,7 +103,7 @@ export function AssetsDashboardPage() {
       <DashboardHeader
         icon="database"
         title="Assets"
-        blurb="Your configuration items — what they are, who owns them, where they run, and how complete the record is. Every bar links through to the matching list in Inventory."
+        blurb="Your assets — what they are, who owns them, where they run, and how complete the record is. Every bar links through to the matching list in Inventory."
       />
 
       {/* ---------- HERO: how many, moving which way, how good is the record ---------- */}
@@ -115,7 +115,7 @@ export function AssetsDashboardPage() {
         <div style={{ position: 'relative', display: 'flex', gap: 34, alignItems: 'stretch', flexWrap: 'wrap' }}>
           {/* count + movement */}
           <div style={{ flex: '0 0 320px', minWidth: 280, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-            <div className="eyebrow-app" style={{ marginBottom: 9 }}>Configuration Items</div>
+            <div className="eyebrow-app" style={{ marginBottom: 9 }}>Assets</div>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
               <span className="accent-text" data-testid="assets-total" style={{ fontFamily: 'var(--font-head)', fontWeight: 800, fontSize: 64, lineHeight: 0.9, letterSpacing: '-.03em' }}>
                 {loading ? '…' : facets.isError ? '—' : total.toLocaleString()}

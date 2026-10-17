@@ -27,7 +27,7 @@ const explanations: Record<string, string> = {
   configured_source_refreshed_recently: 'The device that can answer this was re-checked recently. Automatic re-checks of a device run at most once every 6 hours. Interrogating it yourself from Discovery → Devices is not limited.',
   observing_collector_offline: 'The observing collector is offline or its heartbeat is stale. Enrichment will retry when it is available.',
   collector_network_checks_disabled: 'This collector’s profile disables active network checks.',
-  collector_has_no_interface_in_target_network: 'The collector is online, but has no recently reported, enabled interface with an address and network prefix in the target network. Reflected advertisements can describe devices on another subnet. Use a collector attached to that network or review its interface configuration.',
+  collector_has_no_interface_in_target_network: 'The collector is online, but has no recently reported, enabled interface with an address and network prefix in the target network. Reflected advertisements can describe devices on another network. Use a collector attached to that network or review its interface configuration.',
   observing_collector_unreachable: 'The observing collector is unavailable or cannot reach the target network.',
   sensitive_device_requires_review: 'This device is excluded from automatic enrichment and needs review.',
   no_authorized_target: 'No address is eligible under the current network and exclusion policy.',

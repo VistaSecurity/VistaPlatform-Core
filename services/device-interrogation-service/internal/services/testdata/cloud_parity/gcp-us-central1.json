@@ -1,0 +1,25 @@
+{
+  "project": "proj-parity",
+  "networks": [
+    {"id": "100", "name": "prod-vpc", "selfLink": "https://www.googleapis.com/compute/v1/projects/proj-parity/global/networks/prod-vpc", "autoCreateSubnetworks": false}
+  ],
+  "subnetworks": [
+    {"id": "200", "name": "app", "selfLink": "https://www.googleapis.com/compute/v1/projects/proj-parity/regions/us-central1/subnetworks/app",
+     "network": "https://www.googleapis.com/compute/v1/projects/proj-parity/global/networks/prod-vpc",
+     "region": "https://www.googleapis.com/compute/v1/projects/proj-parity/regions/us-central1",
+     "ipCidrRange": "10.40.0.0/20", "gatewayAddress": "10.40.0.1"}
+  ],
+  "instances": [
+    {"id": "300", "name": "app-01", "selfLink": "https://www.googleapis.com/compute/v1/projects/proj-parity/zones/us-central1-a/instances/app-01",
+     "status": "RUNNING", "machineType": "https://www.googleapis.com/compute/v1/projects/proj-parity/zones/us-central1-a/machineTypes/e2-medium",
+     "zone": "https://www.googleapis.com/compute/v1/projects/proj-parity/zones/us-central1-a",
+     "networkInterfaces": [
+       {"name": "nic0", "network": "https://www.googleapis.com/compute/v1/projects/proj-parity/global/networks/prod-vpc",
+        "subnetwork": "https://www.googleapis.com/compute/v1/projects/proj-parity/regions/us-central1/subnetworks/app",
+        "networkIP": "10.40.0.7",
+        "accessConfigs": [{"natIP": "198.51.100.77", "name": "External NAT"}]}
+     ],
+     "metadata": {"items": [{"key": "startup-script", "value": "export DB_PASSWORD=PlantedGcpSecret9921"}]},
+     "labels": {"env": "prod"}}
+  ]
+}

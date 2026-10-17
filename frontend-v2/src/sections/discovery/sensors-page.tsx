@@ -13,14 +13,14 @@ import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManag
 // Discovery → Sensors & Agents. TWO tables, because a sensor and a discovery
 // agent are two different things:
 //
-//   Sensors          — passive libpcap binaries. Sensor · Type · Segment ·
+//   Sensors          — passive libpcap binaries. Sensor · Type · Network ·
 //                      Assets found · Version · Status. From sensor-manager.
 //   Discovery agents — command-driven interrogation binaries. Agent · Host ·
 //                      Profile · Jobs · Version · Status. From
 //                      device-interrogation-service.
 //
 // They used to share one sensor-shaped table, which meant every agent row
-// rendered "—" for Segment and Assets found (neither of which an agent has)
+// rendered "—" for Network and Assets found (neither of which an agent has)
 // while the fields an agent DOES have — its address inventory, its profile, what
 // jobs it has run — had nowhere to go. Merging them cost both kinds their detail
 // to gain a row count nobody needed.
@@ -34,11 +34,11 @@ import { profileLabel, jobsSummary, hostSummary, addressTooltip, isPlatformManag
 //                        interrogation pipeline attributes discoveries to it —
 //                        see isPlatformInterrogationAgent. It is not a sensor
 //                        and used to render in the sensor table above, under
-//                        Type "api" with an empty Segment.
+//                        Type "api" with an empty Network.
 //   enrolled agents     — the downloadable binary an operator installs, from
 //                        device-interrogation-service's `device_agents`.
 //
-// "Assets found" joins GET /sensors/discovery-counts (sensors only); "Segment"
+// "Assets found" joins GET /sensors/discovery-counts (sensors only); "Network"
 // renders the monitored interface subnets a sensor reports. Write surface
 // (register / delete / pending registrations) lives in sensor-modals.tsx.
 
@@ -55,7 +55,7 @@ type AgentTableRow =
 const SENSOR_COLS = [
   { label: 'Sensor', w: '1.4fr' },
   { label: 'Type', w: '1fr' },
-  { label: 'Segment', w: '1fr' },
+  { label: 'Network', w: '1fr' },
   { label: 'Assets found', w: '96px', align: 'right' as const },
   // Wide enough for the scan-engine upgrade notice, which wraps beneath the
   // version rather than running into Status.
@@ -340,7 +340,7 @@ function EnrolledAgentCells({ agent: a, onDelete }: { agent: DeviceAgentRow; onD
       </div>
       {/* The cell shows the primary and a count; the tooltip carries the full
           inventory with prefixes, which is what makes the addresses answer
-          "which segments is this agent on?". */}
+          "which networks is this agent on?". */}
       <div style={{ minWidth: 0 }} title={addressTooltip(a) || undefined}>
         <CellMono v={host.primary} />
         {host.extra && (

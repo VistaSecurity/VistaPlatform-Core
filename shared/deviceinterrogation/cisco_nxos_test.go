@@ -152,11 +152,17 @@ func TestCiscoCollectOps_NXOSStillProducesTheOpsSet(t *testing.T) {
 		}
 	}
 
-	interfaces, ok := factValue(t, result, factNetInterfaces).([]map[string]interface{})
-	if !ok {
-		t.Fatalf("no net.interfaces fact reached the result; facts: %v", factKeys(result))
+	// DCIM row 1.5c: interfaces are objects, not the net.interfaces fact.
+	if hasFact(result, factNetInterfaces) {
+		t.Error("the retired net.interfaces fact is still emitted")
 	}
-	if len(interfaces) != 5 {
-		t.Errorf("NX-OS interfaces = %v, want the five layer-3 interfaces", interfaceNames(interfaces))
+	if result.Network == nil || len(result.Network.Interfaces) != 5 {
+		var names []string
+		if result.Network != nil {
+			for _, ifc := range result.Network.Interfaces {
+				names = append(names, ifc.Name)
+			}
+		}
+		t.Errorf("NX-OS interfaces = %v, want the five layer-3 interfaces", names)
 	}
 }

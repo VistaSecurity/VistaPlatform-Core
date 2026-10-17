@@ -43,7 +43,7 @@ func testEnrichmentCorroboration(t *testing.T, mode string) {
 	}{
 		{`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,network_interfaces,reported_capabilities,reported_dns_interfaces) VALUES($1,$2,'Enrichment collector','linux','test-v1','datacenter_host','active',$3,ARRAY['eth0'],ARRAY['identity_dns_v1'],ARRAY['eth0'])`, []any{sensor, tenant, now}},
 		{`INSERT INTO agent_addresses(sensor_id,interface_name,address,prefix_length) VALUES($1,'eth0','192.168.80.4',24)`, []any{sensor}},
-		{`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Enrichment network','cidr','192.168.80.0/24','production')`, []any{segment, tenant}},
+		{`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Enrichment network','192.168.80.0/24'::cidr,'production','declared','active')`, []any{segment, tenant}},
 		{`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"},"identity_enrichment":{"enabled":true}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, []any{tenant}},
 		{`INSERT INTO tenant_entitlements(tenant_id,item_id,override_value,reason) SELECT $1,id,'{"quantity":10}','enrichment regression' FROM billable_items WHERE key='max_assets'`, []any{tenant}},
 	} {
@@ -137,7 +137,7 @@ func testEnrichmentCorroboration(t *testing.T, mode string) {
 		}
 	}
 	if mode == "new_dhcp_uncertainty" {
-		if _, err := raw.Exec(`UPDATE network_segments SET metadata='{"dynamic":true}' WHERE tenant_id=$1 AND id=$2`, tenant, segment); err != nil {
+		if _, err := raw.Exec(`UPDATE prefixes SET dhcp_managed=true WHERE tenant_id=$1 AND id=$2`, tenant, segment); err != nil {
 			t.Fatal(err)
 		}
 	}

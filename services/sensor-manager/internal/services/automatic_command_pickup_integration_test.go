@@ -26,7 +26,7 @@ func TestIntegration_AutomaticCommandPickupHonorsRestrictionsWithoutIdentityActi
 			case "paused":
 				f.exec(t, `UPDATE tenant_admin_settings SET config='{"identity_admission":{"mode":"paused"}}' WHERE tenant_id=$1`, f.tenant)
 			case "segment_sensitive":
-				f.exec(t, `UPDATE network_segments SET metadata='{"sensitive":true}' WHERE id=$1`, f.segment)
+				f.exec(t, `UPDATE prefixes SET sensitive=true WHERE id=$1`, f.segment)
 			}
 			got, err := f.svc.GetPendingCommands(f.sensor.String())
 			if err != nil || len(got) != 0 {
@@ -34,7 +34,7 @@ func TestIntegration_AutomaticCommandPickupHonorsRestrictionsWithoutIdentityActi
 			}
 			f.pending(t, id)
 			f.exec(t, `UPDATE tenant_admin_settings SET config='{}' WHERE tenant_id=$1`, f.tenant)
-			f.exec(t, `UPDATE network_segments SET metadata='{}' WHERE id=$1`, f.segment)
+			f.exec(t, `UPDATE prefixes SET sensitive=false, active_probes_disabled=false WHERE id=$1`, f.segment)
 			got, err = f.svc.GetPendingCommands(f.sensor.String())
 			if err != nil || len(got) != 1 {
 				t.Fatalf("resumed pickup=%+v err=%v", got, err)

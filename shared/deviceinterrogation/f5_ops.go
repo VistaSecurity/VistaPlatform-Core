@@ -91,13 +91,7 @@ type f5NetInterface struct {
 	Enabled     bool   `json:"enabled"`
 	Disabled    bool   `json:"disabled"`
 	MediaActive string `json:"mediaActive"`
-}
-
-// f5NetVLAN is the `net/vlan` projection.
-type f5NetVLAN struct {
-	Name     string `json:"name"`
-	FullPath string `json:"fullPath"`
-	Tag      int    `json:"tag"`
+	MTU         int    `json:"mtu"`
 }
 
 // f5SelfIP is the `net/self` projection: the device's own address on a VLAN.
@@ -179,25 +173,19 @@ func (c *f5Client) f5CollectOps(ctx context.Context, result *InterrogateResult, 
 		result.addFact(factOSVersion, version, ConfidenceReported)
 	}
 
-	// --- interfaces and VLANs --------------------------------------------
+	// --- interfaces, trunks, VLANs, self IPs, ARP (objects, DCIM row 1.5c) --
+	//
+	// No longer the net.interfaces / net.vlans facts: f5_network.go hands the
+	// platform result.Network, which the identity engine writes.
 	interfaces, err := f5GetCollection[f5NetInterface](ctx, c, "/mgmt/tm/net/interface")
 	if err != nil {
 		result.warn("/mgmt/tm/net/interface", err, "Interfaces not collected")
-	} else if projected := f5Interfaces(interfaces); len(projected) > 0 {
-		result.addFact(factNetInterfaces, projected, ConfidenceReported)
-	}
-
-	vlans, err := f5GetCollection[f5NetVLAN](ctx, c, "/mgmt/tm/net/vlan")
-	if err != nil {
-		result.warn("/mgmt/tm/net/vlan", err, "VLANs not collected")
 	}
 	selfIPs, err := f5GetCollection[f5SelfIP](ctx, c, "/mgmt/tm/net/self")
 	if err != nil {
-		result.warn("/mgmt/tm/net/self", err, "Self IPs not collected; VLANs lack their subnets")
+		result.warn("/mgmt/tm/net/self", err, "Self IPs not collected; VLAN interfaces lack their addresses")
 	}
-	if projected := f5VLANs(vlans, selfIPs); len(projected) > 0 {
-		result.addFact(factNetVlans, projected, ConfidenceReported)
-	}
+	c.f5CollectNetwork(ctx, result, interfaces, selfIPs)
 
 	// --- pool membership → depends_on ------------------------------------
 	pools, err := f5GetCollection[f5Pool](ctx, c, "/mgmt/tm/ltm/pool?expandSubcollections=true")
@@ -262,48 +250,6 @@ func f5FirstNonEmpty(m map[string]string, keys ...string) string {
 	return ""
 }
 
-// f5Interfaces projects `net/interface` onto net.interfaces items.
-//
-// F5 states the administrative state as one of two mutually exclusive booleans
-// — an item carries `enabled: true` OR `disabled: true`, never both and
-// sometimes neither — so an item that states neither gets no admin_state at
-// all rather than a default. `mediaActive` is the operational state AND the
-// negotiated speed in one string: "1000T-FD" is a linked gigabit port, "none"
-// is a port with nothing in it.
-func f5Interfaces(interfaces []f5NetInterface) []map[string]interface{} {
-	out := make([]map[string]interface{}, 0, len(interfaces))
-	for _, iface := range interfaces {
-		name := strings.TrimSpace(iface.Name)
-		if name == "" {
-			continue
-		}
-		entry := map[string]interface{}{"name": name}
-		if mac, err := canonicalMAC(iface.MACAddress); err == nil {
-			entry["mac"] = mac
-		}
-		switch {
-		case iface.Disabled:
-			entry["admin_state"] = "down"
-		case iface.Enabled:
-			entry["admin_state"] = "up"
-		}
-		media := strings.ToLower(strings.TrimSpace(iface.MediaActive))
-		switch media {
-		case "":
-			// Nothing said. "unknown" would be a claim; absence is not.
-		case "none":
-			entry["state"] = "down"
-		default:
-			entry["state"] = "up"
-			if speed := f5MediaSpeed(iface.MediaActive); speed > 0 {
-				entry["speed"] = speed
-			}
-		}
-		out = append(out, entry)
-	}
-	return out
-}
-
 // f5MediaSpeed reads the Mbit/s out of an F5 media string ("1000T-FD" → 1000,
 // "10000SR-FD" → 10000). A string with no leading number ("auto", "none") has
 // no speed in it, and 0 is what the fact schema reads as unknown.
@@ -321,59 +267,6 @@ func f5MediaSpeed(media string) int {
 		return 0
 	}
 	return speed
-}
-
-// f5VLANs projects `net/vlan` and `net/self` onto net.vlans items.
-//
-// A self IP is the device's own address on a VLAN, so it yields two things
-// from one field: the segment (the address masked to its prefix) and the
-// device's address on it. That is the same reading UniFi's `ip_subnet` gets,
-// and it is deliberately the same reading — one fact key must not mean two
-// things depending on which collector wrote it.
-func f5VLANs(vlans []f5NetVLAN, selfIPs []f5SelfIP) []map[string]interface{} {
-	selfByVLAN := map[string]string{}
-	for _, self := range selfIPs {
-		vlan := f5ObjectName(self.VLAN)
-		if vlan == "" || self.Address == "" {
-			continue
-		}
-		if _, seen := selfByVLAN[vlan]; !seen {
-			selfByVLAN[vlan] = self.Address
-		}
-	}
-
-	out := make([]map[string]interface{}, 0, len(vlans))
-	for _, vlan := range vlans {
-		name := strings.TrimSpace(vlan.Name)
-		if name == "" {
-			name = f5ObjectName(vlan.FullPath)
-		}
-		entry := map[string]interface{}{}
-		if name != "" {
-			entry["name"] = name
-		}
-		// An untagged VLAN reports tag 0, which is the absence of a tag rather
-		// than VLAN zero.
-		if vlan.Tag > 0 {
-			entry["id"] = vlan.Tag
-		}
-		if address, ok := selfByVLAN[name]; ok {
-			if prefix, gateway := splitPrefixAndAddress(f5StripRouteDomain(address)); prefix != "" {
-				entry["subnet"] = prefix
-				if gateway != "" {
-					entry["gateway"] = gateway
-				}
-			}
-		}
-		// A VLAN with neither a tag nor a prefix is a name and nothing else.
-		if _, hasID := entry["id"]; !hasID {
-			if _, hasSubnet := entry["subnet"]; !hasSubnet {
-				continue
-			}
-		}
-		out = append(out, entry)
-	}
-	return out
 }
 
 // f5PoolDependencies builds the depends_on edges from each virtual server to

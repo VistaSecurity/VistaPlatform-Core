@@ -231,6 +231,13 @@ func applyMergeFields(ctx context.Context, tx *sqlx.Tx, tenant, survivor uuid.UU
 	if _, err := tx.ExecContext(ctx, `UPDATE assets SET `+strings.Join(assignments, ",")+`,updated_at=now() WHERE tenant_id=$1 AND id=$2`, args...); err != nil {
 		return err
 	}
+	// Site and location are chosen field by field, so they may come from two
+	// different assets; a location outside the chosen site is dropped rather
+	// than stored against the placement rule (DCIM row 2.1).
+	if _, err := tx.ExecContext(ctx, `UPDATE assets SET location_id = NULL WHERE tenant_id=$1 AND id=$2 AND location_id IS NOT NULL
+		AND (site_id IS NULL OR site_id IS DISTINCT FROM (SELECT l.site_id FROM locations l WHERE l.id = assets.location_id))`, tenant, survivor); err != nil {
+		return err
+	}
 	// These are actual observation windows, never the time of this decision.
 	_, err := tx.ExecContext(ctx, `UPDATE assets SET first_discovered_at=(SELECT min(first_discovered_at) FROM assets WHERE tenant_id=$1 AND id=ANY($3)),last_seen_at=(SELECT max(last_seen_at) FROM assets WHERE tenant_id=$1 AND id=ANY($3)) WHERE tenant_id=$1 AND id=$2`, tenant, survivor, pq.Array(append(append([]uuid.UUID{}, preview.SourceAssetIDs...), survivor)))
 	if err != nil {

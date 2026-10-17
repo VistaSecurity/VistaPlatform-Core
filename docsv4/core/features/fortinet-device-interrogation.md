@@ -113,7 +113,7 @@ found, and the device's own identity.
 ### 4. Where it lands
 
 There is no import step and nothing to select. Findings flow into the inventory
-through the normal pipeline: the asset is auto-approved if its network segment
+through the normal pipeline: the asset is auto-approved if its prefix
 says so, and otherwise waits on **Discovery → Approvals**. Assets carry a
 discovery method of `device_interrogation`.
 

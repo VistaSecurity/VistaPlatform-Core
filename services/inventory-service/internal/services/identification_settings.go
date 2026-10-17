@@ -6,7 +6,7 @@ package services
 // decision D1).
 //
 // It lives in `tenant_admin_settings.config` under the `identity` key, beside
-// `discovery_auto_scan` and `network_spaces`, because that is where this
+// `discovery_auto_scan`, because that is where this
 // platform's tenant-admin settings live and a second home for one number would
 // be a second thing to back up, migrate and reason about. The table carries an
 // audit trigger (`log_tenant_admin_settings_change`), so a change to the
@@ -173,7 +173,7 @@ func (s *IdentificationSettingsService) Update(ctx context.Context, tenantID, ac
 	)
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		// Read-modify-write inside ONE transaction. `config` is a single jsonb
-		// document several features share (discovery_auto_scan, network_spaces,
+		// document several features share (discovery_auto_scan,
 		// onboarding_required), so a read outside the transaction and a write
 		// inside it would drop whichever of them changed in between.
 		//

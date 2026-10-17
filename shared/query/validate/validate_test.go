@@ -142,7 +142,7 @@ func TestTypeMismatch(t *testing.T) {
 		"risk_score >= high", // and the other way round
 		"last_seen < soon",
 		"last_seen < now-1mo-15d",
-		"segment_id=not-a-uuid",
+		"prefix_id=not-a-uuid",
 		"primary_address:999.1.1.1",
 		"attr.controller_managed:yes",
 		"attr.cpu_count:abc",
@@ -153,7 +153,7 @@ func TestTypeMismatch(t *testing.T) {
 		"risk_score >= 70",
 		"risk >= high",
 		"last_seen < now-45d",
-		"segment_id=550e8400-e29b-41d4-a716-446655440000",
+		"prefix_id=550e8400-e29b-41d4-a716-446655440000",
 		"primary_address:198.51.100.0/24",
 		"attr.controller_managed:true",
 		"attr.cpu_count:3",

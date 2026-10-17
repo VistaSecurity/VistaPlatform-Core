@@ -17,6 +17,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
@@ -44,25 +45,34 @@ func seedInterrogatedDevice(t *testing.T, db *sql.DB, tenant uuid.UUID, deviceTy
 	return id
 }
 
+// learnedSegment is a global-VRF prefix as the interrogation left it (DCIM
+// row 1.6: learned networks are measured prefixes).
 type learnedSegment struct {
 	Name        string
 	NetworkType string
-	Metadata    map[string]any
+	SourceKind  string
+	SourceRef   string
+	// DHCP is the stated posture; nil when nobody has said.
+	DHCP *bool
 }
 
 func segmentByCIDR(t *testing.T, db *sql.DB, tenant uuid.UUID, cidr string) (learnedSegment, bool) {
 	t.Helper()
 	var seg learnedSegment
-	var raw []byte
-	err := db.QueryRow(`SELECT name, network_type, coalesce(metadata, '{}'::jsonb) FROM network_segments WHERE tenant_id = $1 AND value = $2 AND segment_type = 'cidr'`, tenant, cidr).Scan(&seg.Name, &seg.NetworkType, &raw)
+	var ref sql.NullString
+	var dhcp sql.NullBool
+	err := db.QueryRow(`SELECT coalesce(description, ''), coalesce(network_type, ''), source_kind, source_ref, dhcp_managed
+		FROM prefixes WHERE tenant_id = $1 AND vrf_id IS NULL AND prefix = $2::cidr`, tenant, cidr).Scan(&seg.Name, &seg.NetworkType, &seg.SourceKind, &ref, &dhcp)
 	if err == sql.ErrNoRows {
 		return seg, false
 	}
 	if err != nil {
-		t.Fatalf("read segment %s: %v", cidr, err)
+		t.Fatalf("read prefix %s: %v", cidr, err)
 	}
-	if err := json.Unmarshal(raw, &seg.Metadata); err != nil {
-		t.Fatalf("segment %s metadata: %v", cidr, err)
+	seg.SourceRef = ref.String
+	if dhcp.Valid {
+		v := dhcp.Bool
+		seg.DHCP = &v
 	}
 	return seg, true
 }
@@ -90,11 +100,11 @@ func TestIntegration_VendorNeutralSegments_FortinetVLANsBecomeSegments(t *testin
 	persistVLANs(t, sink, tenant, firewall, fortinetShapedVLANs())
 
 	var n int
-	if err := owner.QueryRow(`SELECT count(*) FROM network_segments WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
+	if err := owner.QueryRow(`SELECT count(*) FROM prefixes WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
-		t.Fatalf("segments = %d, want 2 (the address-less VLAN is not a network)", n)
+		t.Fatalf("prefixes = %d, want 2 (the address-less VLAN is not a network)", n)
 	}
 	for cidr, want := range map[string]learnedSegment{
 		"10.20.30.0/24":   {Name: "port1.100", NetworkType: "private"},
@@ -107,15 +117,11 @@ func TestIntegration_VendorNeutralSegments_FortinetVLANsBecomeSegments(t *testin
 		if got.Name != want.Name || got.NetworkType != want.NetworkType {
 			t.Errorf("%s = %s/%s, want %s/%s", cidr, got.Name, got.NetworkType, want.Name, want.NetworkType)
 		}
-		m := got.Metadata
-		if m["source"] != "interrogation" || m["source_device_type"] != "fortinet" || m["source_asset_id"] != firewall.String() {
-			t.Errorf("%s provenance = %v", cidr, m)
+		if got.SourceKind != "measured" || got.SourceRef != "interrogation:"+firewall.String() {
+			t.Errorf("%s provenance = %s / %s, want measured by the firewall", cidr, got.SourceKind, got.SourceRef)
 		}
-		if m["dhcp"] != "unknown" {
-			t.Errorf("%s dhcp = %v, want unknown", cidr, m["dhcp"])
-		}
-		if _, has := m["dynamic"]; has {
-			t.Errorf("%s recorded a DHCP answer nobody gave: %v", cidr, m)
+		if got.DHCP != nil {
+			t.Errorf("%s recorded a DHCP answer nobody gave: %v", cidr, *got.DHCP)
 		}
 	}
 
@@ -137,7 +143,7 @@ func TestIntegration_VendorNeutralSegments_DeclaredSegmentWins(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
-	if _, err := db.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata) VALUES($1,'Operator DMZ','cidr','198.51.100.0/24','vpn','production',true,'{"operator":"keep"}')`, tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,source_kind,status) VALUES($1,'Operator DMZ','198.51.100.0/24'::cidr,'vpn','production','declared','active')`, tenant); err != nil {
 		t.Fatal(err)
 	}
 	firewall := seedInterrogatedDevice(t, db, tenant, "fortinet", "00:09:0f:00:00:02", "fw-branch")
@@ -147,41 +153,42 @@ func TestIntegration_VendorNeutralSegments_DeclaredSegmentWins(t *testing.T) {
 	if !ok {
 		t.Fatal("declared segment vanished")
 	}
-	if got.Name != "Operator DMZ" || got.NetworkType != "vpn" || got.Metadata["operator"] != "keep" || len(got.Metadata) != 1 {
-		t.Fatalf("declared segment overwritten: %+v", got)
+	if got.Name != "Operator DMZ" || got.NetworkType != "vpn" || got.SourceKind != "declared" || got.SourceRef != "" {
+		t.Fatalf("declared prefix overwritten: %+v", got)
 	}
 }
 
-// (c) A row a previous release labelled `unifi` is still ours: the next
-// interrogation refreshes it and relabels it. An unknown posture from another
-// device does not erase the answer it holds.
-func TestIntegration_VendorNeutralSegments_LegacyUniFiRowsStillRefresh(t *testing.T) {
+// (c) A measured DHCP answer reaches a prefix nobody has stated a posture for
+// — even a person's — and an unknown from another device never erases a
+// stated one (shared/identity/postgres RecordPrefixPosture: the first
+// statement stands).
+func TestIntegration_VendorNeutralSegments_MeasuredPostureFillsOnlySilence(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
-	for _, cidr := range []string{"192.168.10.0/24", "10.20.30.0/24"} {
-		if _, err := db.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata) VALUES($1,$2,'cidr',$2,'private','production',true,'{"source":"unifi","dynamic":true}')`, tenant, cidr); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := db.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,source_kind,status) VALUES($1,'LAN','192.168.10.0/24'::cidr,'private','production','declared','active')`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,dhcp_managed,source_kind,status) VALUES($1,'Core','10.20.30.0/24'::cidr,'private','production',true,'declared','active')`, tenant); err != nil {
+		t.Fatal(err)
 	}
 	sink := NewObservationSink(db)
 
-	// A UniFi controller now reports DHCP off on the first network.
+	// A UniFi controller reports DHCP off on the first network.
 	controller := seedInterrogatedDevice(t, db, tenant, "unifi", "00:1a:2b:3c:4d:01", "controller")
 	persistVLANs(t, sink, tenant, controller, []map[string]any{{"name": "LAN", "subnet": "192.168.10.0/24", "dhcp_enabled": false}})
 	got, _ := segmentByCIDR(t, db, tenant, "192.168.10.0/24")
-	if got.Metadata["source"] != "interrogation" || got.Metadata["dynamic"] != false || got.Metadata["dhcp"] != "disabled" ||
-		got.Metadata["source_device_type"] != "unifi" || got.Metadata["source_asset_id"] != controller.String() {
-		t.Fatalf("legacy unifi row not refreshed: %v", got.Metadata)
+	if got.DHCP == nil || *got.DHCP || got.SourceKind != "declared" || got.Name != "LAN" {
+		t.Fatalf("the measurement did not reach the silent prefix, or rewrote it: %+v", got)
 	}
 
 	// A FortiGate that routes the second network cannot say whether it serves
-	// DHCP. The row keeps the measured answer, and the label that goes with it.
+	// DHCP. The prefix keeps the answer it holds.
 	firewall := seedInterrogatedDevice(t, db, tenant, "fortinet", "00:09:0f:00:00:03", "fw-core")
 	persistVLANs(t, sink, tenant, firewall, fortinetShapedVLANs())
 	got, _ = segmentByCIDR(t, db, tenant, "10.20.30.0/24")
-	if got.Metadata["dynamic"] != true || got.Metadata["source"] != "unifi" || got.Metadata["dhcp"] != nil {
-		t.Fatalf("unknown posture overwrote a measured one: %v", got.Metadata)
+	if got.DHCP == nil || !*got.DHCP {
+		t.Fatalf("an unknown posture overwrote a stated one: %+v", got)
 	}
 }
 
@@ -203,7 +210,7 @@ func TestIntegration_VendorNeutralSegments_LeaseReuseInUnknownDHCPDoesNotJoin(t 
 			di.FactObservation{Key: facts.KeyHWVendor, Value: "Example", Confidence: 1, Subject: peer})
 	}
 	var n int
-	if err := db.QueryRow(`SELECT count(DISTINCT asset_id) FROM asset_identifiers WHERE tenant_id=$1 AND kind='hostname' AND value IN ('client-a','client-b')`, tenant).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT count(DISTINCT asset_id) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='hostname' AND value IN ('client-a','client-b')`, tenant).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
@@ -223,12 +230,12 @@ func TestIntegration_VendorNeutralSegments_LeaseReuseUnderDeclaredSegmentDoesNot
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
 	var segment string
-	if err := db.QueryRow(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active) VALUES($1,'Operator LAN','cidr','10.20.30.0/24','private','production',true) RETURNING id::text`, tenant).Scan(&segment); err != nil {
+	if err := db.QueryRow(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,source_kind,status) VALUES($1,'Operator LAN','10.20.30.0/24'::cidr,'private','production','declared','active') RETURNING id::text`, tenant).Scan(&segment); err != nil {
 		t.Fatal(err)
 	}
-	if res, err := pgidentity.RecordSegmentPosture(context.Background(), db, tenant.String(), segment,
-		pgidentity.PostureOperator, true, pgidentity.PostureEvidence{ObservedAt: time.Now()}); err != nil || !res.Written {
-		t.Fatalf("operator posture: written=%v err=%v", res.Written, err)
+	// The operator says it hands out leases (the IPAM API writes the column).
+	if _, err := db.Exec(`UPDATE prefixes SET dhcp_managed = true WHERE id = $1::uuid`, segment); err != nil {
+		t.Fatal(err)
 	}
 	sink := NewObservationSink(db)
 	firewall := seedInterrogatedDevice(t, db, tenant, "fortinet", "00:09:0f:00:00:0b", "fw-declared")
@@ -240,7 +247,7 @@ func TestIntegration_VendorNeutralSegments_LeaseReuseUnderDeclaredSegmentDoesNot
 			di.FactObservation{Key: facts.KeyHWVendor, Value: "Example", Confidence: 1, Subject: peer})
 	}
 	var n int
-	if err := db.QueryRow(`SELECT count(DISTINCT asset_id) FROM asset_identifiers WHERE tenant_id=$1 AND kind='hostname' AND value IN ('client-a','client-b')`, tenant).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT count(DISTINCT asset_id) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='hostname' AND value IN ('client-a','client-b')`, tenant).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
@@ -270,7 +277,7 @@ func TestIntegration_VendorNeutralSegments_LeaseReuseAcrossRunsDoesNotJoin(t *te
 		}
 	}
 	var n int
-	if err := db.QueryRow(`SELECT count(DISTINCT asset_id) FROM asset_identifiers WHERE tenant_id=$1 AND kind='hostname' AND value IN ('client-a','client-b')`, tenant).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT count(DISTINCT asset_id) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='hostname' AND value IN ('client-a','client-b')`, tenant).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 2 {
@@ -321,8 +328,8 @@ func TestIntegration_VendorNeutralSegments_EnforceAdmissionOnUnknownDHCP(t *test
 		rows, err := owner.Query(`
 			SELECT unnest(o.admission_reasons)
 			FROM identity_observations o
-			JOIN network_segments s ON s.tenant_id = o.tenant_id AND s.id::text = o.network_scope
-			WHERE o.tenant_id = $1 AND s.value = $2`, tenant, cidr)
+			JOIN prefixes s ON s.tenant_id = o.tenant_id AND s.id::text = o.network_scope
+			WHERE o.tenant_id = $1 AND s.prefix = $2::cidr`, tenant, cidr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -344,7 +351,7 @@ func TestIntegration_VendorNeutralSegments_EnforceAdmissionOnUnknownDHCP(t *test
 		t.Fatalf("DHCP-unknown network: admission reasons %v, want dynamic_address_without_device_binding and never direct_scoped_address", unknown)
 	}
 	var n int
-	if err := owner.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address' AND value='10.20.30.77'`, tenant).Scan(&n); err != nil {
+	if err := owner.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='ip_address' AND value='10.20.30.77'`, tenant).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -367,7 +374,7 @@ func TestIntegration_VendorNeutralSegments_LearnedCGNATIsNotAutoScanScope(t *tes
 	if got, ok := segmentByCIDR(t, db, learnedTenant, "100.72.14.0/24"); !ok || got.NetworkType != "public" {
 		t.Fatalf("learned CGNAT segment = %+v (found %v), want network_type public", got, ok)
 	}
-	if _, err := db.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active) VALUES($1,'Our CGNAT estate','cidr','100.72.14.0/24','private','production',true)`, declaredTenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,source_kind,status) VALUES($1,'Our CGNAT estate','100.72.14.0/24'::cidr,'private','production','declared','active')`, declaredTenant); err != nil {
 		t.Fatal(err)
 	}
 
@@ -378,7 +385,7 @@ func TestIntegration_VendorNeutralSegments_LearnedCGNATIsNotAutoScanScope(t *tes
 		wantReason autoscan.Reason
 	}{
 		{learnedTenant, false, autoscan.ReasonCarrierGradeNAT},
-		{declaredTenant, true, autoscan.ReasonSegment},
+		{declaredTenant, true, autoscan.ReasonPrefix},
 	} {
 		prefixes := automaticScopePrefixes(t, db, tc.tenant)
 		if ok, reason := autoscan.Classify(target, prefixes, nil); ok != tc.wantOK || reason != tc.wantReason {
@@ -411,8 +418,8 @@ func TestIntegration_VendorNeutralSegments_LearnedPublicIsNotManualScanScope(t *
 		{"id": 901, "name": "transit", "subnet": "198.18.0.0/30", "gateway": "198.18.0.1"},
 	})
 	for _, stmt := range []string{
-		`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata) VALUES($1,'Legacy learned','cidr','198.18.1.0/24','public','production',true,'{"source":"unifi","dynamic":false}')`,
-		`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata) VALUES($1,'Our public estate','cidr','198.19.0.0/24','public','production',true,'{}')`,
+		`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,dhcp_managed,source_kind,status) VALUES($1,'Inferred','198.18.1.0/24'::cidr,'public','production',false,'inferred','active')`,
+		`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,source_kind,status) VALUES($1,'Our public estate','198.19.0.0/24'::cidr,'public','production','declared','active')`,
 	} {
 		if _, err := db.Exec(stmt, tenant); err != nil {
 			t.Fatal(err)
@@ -428,34 +435,13 @@ func TestIntegration_VendorNeutralSegments_LearnedPublicIsNotManualScanScope(t *
 	}
 	for target, wantAllowed := range map[string]bool{
 		"198.18.0.2":  false, // learned from the firewall's transit VLAN
-		"198.18.1.9":  false, // learned under the legacy label
+		"198.18.1.9":  false, // inferred, not declared
 		"198.19.0.9":  true,  // declared by an operator
 		"10.20.30.40": true,  // private space, always
 	} {
 		if err := scope.Authorize(target); (err == nil) != wantAllowed {
 			t.Errorf("Authorize(%s) = %v, want allowed=%v", target, err, wantAllowed)
 		}
-	}
-}
-
-// (i) The source-device lookup is tenant-scoped in the query itself, not only
-// by RLS: a connection that bypasses RLS (the table owner here) must still not
-// read another tenant's asset. Called with tenant A and an asset that belongs
-// to tenant B, the segment records no device type.
-func TestIntegration_VendorNeutralSegments_DeviceTypeLookupIsTenantScoped(t *testing.T) {
-	db := testdb.Connect(t)
-	testdb.ApplySchemaAndSeed(t, db)
-	tenantA, tenantB := testdb.NewTenant(t, db), testdb.NewTenant(t, db)
-	foreign := seedInterrogatedDevice(t, db, tenantB, "fortinet", "00:09:0f:00:00:09", "fw-other-tenant")
-	if err := NewObservationSink(db).ensureVLANSegments(context.Background(), tenantA, foreign, fortinetShapedVLANs()); err != nil {
-		t.Fatal(err)
-	}
-	got, ok := segmentByCIDR(t, db, tenantA, "10.20.30.0/24")
-	if !ok {
-		t.Fatal("no segment written")
-	}
-	if dt, has := got.Metadata["source_device_type"]; has {
-		t.Fatalf("read tenant B's device type (%v) while writing tenant A's segment", dt)
 	}
 }
 
@@ -477,10 +463,10 @@ func TestIntegration_VendorNeutralSegments_EnrichmentProbeRefusesLearnedPublic(t
 		t.Fatal(err)
 	}
 	var learned, declared string
-	if err := db.QueryRow(`SELECT id::text FROM network_segments WHERE tenant_id=$1 AND value='198.18.0.0/30'`, tenant).Scan(&learned); err != nil {
+	if err := db.QueryRow(`SELECT id::text FROM prefixes WHERE tenant_id=$1 AND prefix='198.18.0.0/30'`, tenant).Scan(&learned); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata) VALUES($1,'Our public estate','cidr','198.19.0.0/24','public','production',true,'{}') RETURNING id::text`, tenant).Scan(&declared); err != nil {
+	if err := db.QueryRow(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,source_kind,status) VALUES($1,'Our public estate','198.19.0.0/24'::cidr,'public','production','declared','active') RETURNING id::text`, tenant).Scan(&declared); err != nil {
 		t.Fatal(err)
 	}
 
@@ -523,9 +509,9 @@ func TestIntegration_VendorNeutralSegments_EnrichmentProbeRefusesLearnedPublic(t
 	if err := probe(declared, "198.19.0.9"); err == nil || strings.Contains(err.Error(), "learned public network") || !strings.Contains(err.Error(), "no longer reachable") {
 		t.Errorf("probe into a declared public segment = %v, want it past the segment check (refused only for the unreachable collector)", err)
 	}
-	// Once a person claims the learned segment ( D8) it is read as
-	// declared here too.
-	if _, err := db.Exec(`UPDATE network_segments SET metadata = metadata || jsonb_build_object($2::text, '{"by":"00000000-0000-0000-0000-000000000001","at":"2026-10-01T12:00:00Z"}'::jsonb) WHERE id = $1::uuid`, learned, dispatchguard.SegmentClaimKey); err != nil {
+	// Once a person claims the learned prefix ( D8: its source set to
+	// declared) it is read as declared here too.
+	if _, err := db.Exec(`UPDATE prefixes SET source_kind = 'declared' WHERE id = $1::uuid`, learned); err != nil {
 		t.Fatal(err)
 	}
 	if err := probe(learned, "198.18.0.1"); err == nil || strings.Contains(err.Error(), "learned public network") || !strings.Contains(err.Error(), "no longer reachable") {
@@ -537,7 +523,7 @@ func TestIntegration_VendorNeutralSegments_EnrichmentProbeRefusesLearnedPublic(t
 // gates do and keeps the ones that grant ownership to an unattended scan.
 func automaticScopePrefixes(t *testing.T, db *sql.DB, tenant uuid.UUID) []netip.Prefix {
 	t.Helper()
-	rows, err := db.Query(`SELECT value, network_type, COALESCE(metadata->>'source','') IN ('interrogation','unifi') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, tenant)
+	rows, err := db.Query(`SELECT prefix::text, COALESCE(network_type,''), source_kind IN ('measured','inferred') FROM prefixes WHERE tenant_id=$1 AND vrf_id IS NULL AND status NOT IN ('rejected','archived')`, tenant)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +535,7 @@ func automaticScopePrefixes(t *testing.T, db *sql.DB, tenant uuid.UUID) []netip.
 		if err := rows.Scan(&value, &networkType, &learned); err != nil {
 			t.Fatal(err)
 		}
-		if p, err := netip.ParsePrefix(value); err == nil && dispatchguard.SegmentGrantsOwnership(networkType, learned, true) {
+		if p, err := netip.ParsePrefix(value); err == nil && dispatchguard.SegmentGrantsOwnership(dispatchguard.PrefixNetworkType(networkType, p), learned, true) {
 			out = append(out, p)
 		}
 	}

@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/signal"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/services/maintenance-service/internal/capabilities"
 	"github.com/vistasecurity/vistaplatform/services/maintenance-service/internal/handlers"
+	"github.com/vistasecurity/vistaplatform/services/maintenance-service/internal/trust"
 	"github.com/vistasecurity/vistaplatform/services/maintenance-service/internal/versions"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
@@ -127,7 +129,19 @@ func main() {
 	if err != nil {
 		log.WithError(err).Warn("maintenance runs: Kubernetes client unavailable; backups are off")
 	}
-	updateSvc := newUpdateService(bgCtx, db, settings.Namespace, log)
+	// An operator-supplied CA for the chart registry (EXTRA_TRUSTED_CA_PATH):
+	// the update check's client, cosign and (through the Job template) helm
+	// all verify a mirror signed by a private CA with it. Unreadable = warn
+	// and run with the public trust store, as without the variable.
+	trustBundle, err := trust.LoadEnv(os.Getenv, "")
+	switch {
+	case err == nil:
+		log.WithField("path", trustBundle.Path).Info("trust: extra CA added to the registry trust store")
+	case errors.Is(err, trust.ErrNotConfigured):
+	default:
+		log.WithError(err).Warn("trust: extra CA not applied; registry calls use the public trust store")
+	}
+	updateSvc := newUpdateService(bgCtx, db, settings.Namespace, trustBundle.Transport(), log)
 	h.SetUpdates(updateSvc)
 	ops := newMaintenanceOps(db, k8sClient, backupsConfigFromEnv(), sharedAuditor{}, upgradeInputs{
 		Detector:   detector,
@@ -136,6 +150,7 @@ func main() {
 		SingleNode: os.Getenv("MAINTENANCE_SINGLE_NODE") == "true",
 		AuditMW:    auditMW,
 		PullSecret: pullSecretReader(settings.Namespace, log),
+		TrustEnv:   trustBundle.Env(),
 	}, log)
 	defer ops.Stop()
 

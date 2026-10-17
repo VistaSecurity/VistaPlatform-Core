@@ -1,20 +1,15 @@
 {
   "vendor": "cisco",
-  "input_sha256": "02953aa503ee3cc4be3b34b40e31e7cc497bad4add11dfef972bdad380d50fff",
+  "input_sha256": "a103c2efbf17be70eb04ac9db6e9cf9b4b2bafce3e50472f0857d2d87fd326ba",
   "inventory": {
     "assets": [
       {
-        "asset": "asset[hostname=ce-router,ip_address=198.51.100.2]",
-        "class_key": "network_device",
-        "status": "monitoring"
-      },
-      {
-        "asset": "asset[hostname=desktop-switch,hostname=hpswitch,ip_address=192.0.2.2,mac_address=94:f1:28:79:55:55]",
+        "asset": "asset[hostname=desktop-switch]",
         "class_key": "switch",
         "status": "monitoring"
       },
       {
-        "asset": "asset[hostname=server,ip_address=203.0.113.2]",
+        "asset": "asset[hostname=hpswitch,mac_address=94:f1:28:79:55:55]",
         "class_key": "unknown_host",
         "status": "monitoring"
       },

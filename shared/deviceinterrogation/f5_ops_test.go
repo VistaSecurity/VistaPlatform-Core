@@ -197,10 +197,14 @@ func TestF5Interrogator_OpsCollectionIsWired(t *testing.T) {
 			t.Errorf("%s = %v (%T), want %v", key, got, got, want)
 		}
 	}
+	// DCIM row 1.5c: interfaces and VLANs are objects, not facts.
 	for _, key := range []string{factNetInterfaces, factNetVlans} {
-		if !hasFact(result, key) {
-			t.Errorf("no %s fact reached the result; facts: %v", key, factKeys(result))
+		if hasFact(result, key) {
+			t.Errorf("the retired %s fact is still emitted", key)
 		}
+	}
+	if result.Network == nil || len(result.Network.Interfaces) == 0 || len(result.Network.VLANs) == 0 {
+		t.Errorf("no network observation reached the result: %+v", result.Network)
 	}
 
 	if result.DeviceIdentity == nil || result.DeviceIdentity.ClassHint != f5ClassHint() {
@@ -347,7 +351,7 @@ func TestF5Hardware_ProjectsLeavesOntoTheAllowlist(t *testing.T) {
 	}
 }
 
-func TestF5Interfaces_ReadsMediaAsStateAndSpeed(t *testing.T) {
+func TestF5Network_ReadsMediaAsStateSpeedAndType(t *testing.T) {
 	srv := newF5OpsTestServer(t)
 	defer srv.Close()
 	c := newF5Client(srv.URL, "admin", "admin", "", true)
@@ -356,53 +360,42 @@ func TestF5Interfaces_ReadsMediaAsStateAndSpeed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("interfaces: %v", err)
 	}
-	interfaces := f5Interfaces(items)
-	// The typed struct is the allowlist: `description` and `lldpAdmin` have
-	// nowhere to be decoded into.
-	assertNoPoison(t, "f5 interfaces", interfaces)
+	n := f5Network(items, nil, nil, nil, nil, nil)
+	assertNetworkCarriesNo(t, n, "MUST-NOT-BE-COLLECTED")
 
-	byName := map[string]map[string]interface{}{}
-	for _, iface := range interfaces {
-		byName[iface["name"].(string)] = iface
+	byName := map[string]netIface{}
+	for _, ifc := range n.Interfaces {
+		byName[ifc.Name] = ifc
 	}
 	if len(byName) != 4 {
-		t.Fatalf("interfaces = %v", interfaceNames(interfaces))
+		t.Fatalf("interfaces = %+v", n.Interfaces)
 	}
-
 	up := byName["1.1"]
-	if up["mac"] != "00:23:e9:aa:bb:01" || up["state"] != "up" || up["admin_state"] != "up" || up["speed"] != 1000 {
+	if up.MAC != "00:23:e9:aa:bb:01" || up.OperStatus != "up" || up.Enabled == nil || !*up.Enabled || up.SpeedKbps != 1_000_000 || up.Type != "1000base-t" {
 		t.Errorf("1.1 projection wrong: %+v", up)
 	}
-	// F5 states the administrative state as one of two mutually exclusive
-	// booleans; `disabled: true` is an administrative down, and "none" media is
-	// an operational one.
+	// `disabled: true` is an administrative down, "none" media an operational
+	// one, and an unlinked port has no speed.
 	down := byName["1.2"]
-	if down["admin_state"] != "down" || down["state"] != "down" {
+	if down.Enabled == nil || *down.Enabled || down.OperStatus != "down" || down.SpeedKbps != 0 {
 		t.Errorf("1.2 projection wrong: %+v", down)
 	}
-	if _, hasSpeed := down["speed"]; hasSpeed {
-		t.Errorf("an unlinked interface was given a speed: %+v", down)
-	}
-	if byName["mgmt"]["speed"] != 100 {
+	if byName["mgmt"].SpeedKbps != 100_000 {
 		t.Errorf("100TX-FD was not read as 100 Mbit/s: %+v", byName["mgmt"])
 	}
-	// "auto" is a link that has never negotiated: it is up, with no speed to
-	// state.
+	// "auto" is a link that has never negotiated: up, with no speed or media.
 	auto := byName["1.3"]
-	if auto["state"] != "up" {
-		t.Errorf("1.3 state = %v, want up", auto["state"])
-	}
-	if _, hasSpeed := auto["speed"]; hasSpeed {
-		t.Errorf("\"auto\" was read as a speed: %+v", auto)
+	if auto.OperStatus != "up" || auto.SpeedKbps != 0 || auto.Type != "" {
+		t.Errorf("1.3 = %+v, want up with no speed and no type", auto)
 	}
 }
 
-func TestF5VLANs_SelfIPGivesTheSegmentAndTheDeviceAddress(t *testing.T) {
+func TestF5Network_SelfIPsSitOnTheirVLANInterface(t *testing.T) {
 	srv := newF5OpsTestServer(t)
 	defer srv.Close()
 	c := newF5Client(srv.URL, "admin", "admin", "", true)
 
-	vlans, err := f5GetCollection[f5NetVLAN](context.Background(), c, "/mgmt/tm/net/vlan")
+	vlans, err := f5GetCollection[f5NetVLANExpanded](context.Background(), c, "/mgmt/tm/net/vlan?expandSubcollections=true")
 	if err != nil {
 		t.Fatalf("vlans: %v", err)
 	}
@@ -410,24 +403,31 @@ func TestF5VLANs_SelfIPGivesTheSegmentAndTheDeviceAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("self IPs: %v", err)
 	}
+	n := f5Network(nil, nil, vlans, selfIPs, nil, nil)
+	assertNetworkCarriesNo(t, n, "MUST-NOT-BE-COLLECTED")
 
-	projected := f5VLANs(vlans, selfIPs)
-	assertNoPoison(t, "f5 vlans", projected)
-
-	byName := map[string]map[string]interface{}{}
-	for _, vlan := range projected {
-		byName[vlan["name"].(string)] = vlan
+	// Only tagged VLANs are VLAN rows; every VLAN is a layer-3 interface.
+	if len(n.VLANs) != 2 {
+		t.Fatalf("VLANs = %+v, want the two with a tag", n.VLANs)
 	}
-	// The untagged VLAN with no self IP is a name and nothing else.
-	if len(byName) != 2 {
-		t.Fatalf("VLANs = %+v, want the two with a tag", projected)
+	var internal *netIface
+	for i := range n.Interfaces {
+		if n.Interfaces[i].Name == "internal" {
+			internal = &n.Interfaces[i]
+		}
 	}
-	internal := byName["internal"]
-	if internal["id"] != 20 || internal["subnet"] != "192.0.2.0/24" || internal["gateway"] != "192.0.2.5" {
-		t.Errorf("internal VLAN projection wrong: %+v", internal)
+	if internal == nil || internal.UntaggedVLAN != 20 || internal.Type != "virtual" ||
+		len(internal.Addresses) != 1 || internal.Addresses[0].Address != "192.0.2.5/24" {
+		t.Fatalf("internal VLAN interface: %+v", internal)
 	}
-	if _, present := byName["unconfigured"]; present {
-		t.Errorf("a VLAN with neither a tag nor a prefix was reported as a segment: %+v", projected)
+	found := false
+	for _, p := range n.Prefixes {
+		if p.Prefix == "192.0.2.0/24" && p.VLAN == 20 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("prefixes = %+v, want 192.0.2.0/24 on VLAN 20", n.Prefixes)
 	}
 }
 
@@ -457,9 +457,14 @@ func TestF5Ops_NeverAsksForKeysRulesOrAccounts(t *testing.T) {
 	}
 	forbidden := []string{
 		"sys/crypto/key", "sys/file/ssl-key", "auth/user", "sys/db",
-		"ltm/rule", "ltm/monitor", "net/route",
+		"ltm/rule", "ltm/monitor",
 	}
 	for _, path := range asked {
+		// `net/route` is the routing table and is never read; `net/route-domain`
+		// (route-domain ids and names, for an address's VRF) is not it.
+		if p := strings.SplitN(path, "?", 2)[0]; strings.HasSuffix(p, "/net/route") || strings.Contains(p, "/net/route/") {
+			t.Errorf("the interrogation called %q, the routing table", path)
+		}
 		for _, fragment := range forbidden {
 			if strings.Contains(path, fragment) {
 				t.Errorf("the interrogation called %q, which returns key material, iRules or accounts", path)

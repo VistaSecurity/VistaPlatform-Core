@@ -67,7 +67,7 @@ func (b *builder) childShape(sc scope, collection string, inner catalog.Target, 
 
 	case "asset/identifier":
 		ai := b.alias("ai")
-		return "asset_identifiers " + ai, ai + ".asset_id = " + self + ".id",
+		return b.identifierRows() + " " + ai, ai + ".asset_id = " + self + ".id",
 			newScope(ai, nil, sc.assetAlias), true
 
 	case "asset/relationship":
@@ -127,7 +127,15 @@ func (b *builder) childShape(sc scope, collection string, inner catalog.Target, 
 			cic + ".crypto_implementation_id = " + self + ".id",
 			newScope(c, nil, sc.assetAlias), true
 
-	case "endpoint/asset", "software_install/asset", "identifier/asset":
+	case "asset/interface":
+		// DCIM BUILD_PLAN row 1.2. A rejected observation is kept only so it
+		// is recognised next time; it is not one of the asset's interfaces.
+		ifc := b.alias("ifc")
+		return "interfaces " + ifc,
+			ifc + ".asset_id = " + self + ".id AND " + ifc + ".status <> " + b.param("rejected"),
+			newScope(ifc, nil, sc.assetAlias), true
+
+	case "endpoint/asset", "software_install/asset", "identifier/asset", "interface/asset":
 		a := b.alias("a")
 		return "assets " + a, a + ".id = " + self + "." + sc.target.AssetIDColumn,
 			newScope(a, nil, a), true
@@ -375,6 +383,18 @@ func (b *builder) overRelation(sc scope, f ast.FieldRef, sp ast.Span, raw bool, 
 // searched for the literal string "match*" and `proposed_by:*` validated and
 // then failed `untranslatable`.
 func (b *builder) derivedOver(sc scope, f ast.FieldRef, sp ast.Span, raw bool, inner func(expr) string) string {
+	if isIPAMDerived(f.Accessor.Derived) {
+		return b.ipamOver(sc, f, sp, inner)
+	}
+	if isTunnelDerived(f.Accessor.Derived) {
+		return b.tunnelOver(sc, f, sp, inner)
+	}
+	if isWirelessDerived(f.Accessor.Derived) {
+		return b.wirelessOver(sc, f, sp, inner)
+	}
+	if isCablingDerived(f.Accessor.Derived) {
+		return b.cablingOver(sc, f, sp, inner)
+	}
 	switch f.Accessor.Derived {
 	case "asset.proposed_by":
 		// Sugar for "a machine proposed this class, and here is which one"
@@ -397,6 +417,224 @@ func (b *builder) derivedOver(sc scope, f ast.FieldRef, sp ast.Span, raw bool, i
 		// `proposed_by:*` mean "has a class_source_ref", which is every row.
 		return "(" + sc.self + ".class_source_kind IN (" + b.param("inferred") + ", " + b.param("rule") + ")" +
 			" AND " + inner(expr{alias: sc.self, sql: sc.self + ".class_source_ref"}) + ")"
+
+	case "interface.mac_address":
+		// macaddr8 renders an EUI-48 as EUI-64 (ff:fe in the middle); fold it
+		// back so `mac_address:"00:11:22:33:44:55"` matches what a person
+		// typed and the API shows. A real EUI-64 keeps its eight octets.
+		m := sc.self + ".mac_address"
+		return inner(expr{alias: sc.self, sql: "(CASE WHEN substr(" + m + "::text, 10, 5) = " + b.param("ff:fe") + " THEN (" + m +
+			"::macaddr)::text ELSE " + m + "::text END)"})
+	case "asset.business_unit":
+		// The unit the asset is assigned to, matched by NAME or SLUG. An EXISTS
+		// over the one referenced row (rowShaped, so `!=` negates the whole
+		// predicate: "not Finance" must mean neither its name nor its slug is
+		// Finance, which two OR-ed `<>` could not say).
+		bu := b.alias("bu")
+		return "EXISTS (SELECT 1 FROM business_units " + bu +
+			" WHERE " + bu + ".id = " + sc.self + ".business_unit_id" +
+			" AND (" + inner(expr{alias: bu, sql: bu + ".name"}) +
+			" OR " + inner(expr{alias: bu, sql: bu + ".slug"}) + "))"
+
+	case "asset.business_unit_parent":
+		// The named unit AND every descendant of it (`in` semantics down the
+		// parent_id tree). UNION, not UNION ALL, so a cycle that slipped past the
+		// service's depth check still terminates.
+		root, tree, kid, bu := b.alias("bur"), b.alias("but"), b.alias("buk"), b.alias("bu")
+		return "EXISTS (WITH RECURSIVE " + tree + "(id) AS (" +
+			"SELECT " + root + ".id FROM business_units " + root +
+			" WHERE (" + inner(expr{alias: root, sql: root + ".name"}) +
+			" OR " + inner(expr{alias: root, sql: root + ".slug"}) + ")" +
+			" UNION SELECT " + kid + ".id FROM business_units " + kid +
+			" JOIN " + tree + " ON " + kid + ".parent_id = " + tree + ".id)" +
+			" SELECT 1 FROM " + tree + " " + bu + " WHERE " + bu + ".id = " + sc.self + ".business_unit_id)"
+
+	case "asset.site":
+		// The site the asset is in, by NAME or SLUG (DCIM row 2.1); row-shaped
+		// like business_unit, so `!=` negates the whole EXISTS.
+		st := b.alias("st")
+		return "EXISTS (SELECT 1 FROM sites " + st +
+			" WHERE " + st + ".id = " + sc.self + ".site_id" +
+			" AND (" + inner(expr{alias: st, sql: st + ".name"}) +
+			" OR " + inner(expr{alias: st, sql: st + ".slug"}) + "))"
+
+	case "asset.site_group", "asset.site_region":
+		// The site's group (or region) named X AND every descendant of it, the
+		// NetBox filter's semantics. UNION, not UNION ALL, so a cycle that
+		// slipped past the service's checks still terminates.
+		table, col := "site_groups", "group_id"
+		if f.Accessor.Derived == "asset.site_region" {
+			table, col = "regions", "region_id"
+		}
+		root, tree, kid, st := b.alias("sgr"), b.alias("sgt"), b.alias("sgk"), b.alias("st")
+		return "EXISTS (WITH RECURSIVE " + tree + "(id) AS (" +
+			"SELECT " + root + ".id FROM " + table + " " + root +
+			" WHERE (" + inner(expr{alias: root, sql: root + ".name"}) +
+			" OR " + inner(expr{alias: root, sql: root + ".slug"}) + ")" +
+			" UNION SELECT " + kid + ".id FROM " + table + " " + kid +
+			" JOIN " + tree + " ON " + kid + ".parent_id = " + tree + ".id)" +
+			" SELECT 1 FROM sites " + st + " JOIN " + tree + " ON " + st + "." + col + " = " + tree + ".id" +
+			" WHERE " + st + ".id = " + sc.self + ".site_id)"
+
+	case "asset.location":
+		// The asset's location OR any location above it, by name, slug or name
+		// path (public.location_path: "HQ / Floor 2"), so `location = "Floor 2"`
+		// finds what is in Room 201 on that floor. Walks up from the asset's
+		// location, bounded like every tree read here.
+		l0, up, lp, lx := b.alias("lo"), b.alias("lup"), b.alias("lp"), b.alias("lx")
+		return "EXISTS (WITH RECURSIVE " + up + "(id, parent_id, d) AS (" +
+			"SELECT " + l0 + ".id, " + l0 + ".parent_id, 0 FROM locations " + l0 + " WHERE " + l0 + ".id = " + sc.self + ".location_id" +
+			" UNION ALL SELECT " + lp + ".id, " + lp + ".parent_id, " + up + ".d + 1 FROM locations " + lp + " JOIN " + up + " ON " + lp + ".id = " + up + ".parent_id WHERE " + up + ".d < 32)" +
+			" SELECT 1 FROM " + up + " JOIN locations " + lx + " ON " + lx + ".id = " + up + ".id" +
+			" WHERE (" + inner(expr{alias: lx, sql: lx + ".name"}) +
+			" OR " + inner(expr{alias: lx, sql: lx + ".slug"}) +
+			" OR " + inner(expr{alias: lx, sql: "public.location_path(" + lx + ".id)"}) + "))"
+
+	case "asset.device_type":
+		// The assigned device type (DCIM row 2.2), by model, slug or part
+		// number. Row-shaped like business_unit: `!=` negates the whole EXISTS.
+		dt := b.alias("dt")
+		return "EXISTS (SELECT 1 FROM device_types " + dt +
+			" WHERE " + dt + ".id = " + sc.self + ".device_type_id" +
+			" AND (" + inner(expr{alias: dt, sql: dt + ".model"}) +
+			" OR " + inner(expr{alias: dt, sql: dt + ".slug"}) +
+			" OR " + inner(expr{alias: dt, sql: dt + ".part_number"}) + "))"
+
+	case "asset.device_type_manufacturer":
+		// The assigned device type's manufacturer, by name or slug.
+		dt, mf := b.alias("dt"), b.alias("mf")
+		return "EXISTS (SELECT 1 FROM device_types " + dt + " JOIN manufacturers " + mf +
+			" ON " + mf + ".id = " + dt + ".manufacturer_id" +
+			" WHERE " + dt + ".id = " + sc.self + ".device_type_id" +
+			" AND (" + inner(expr{alias: mf, sql: mf + ".name"}) +
+			" OR " + inner(expr{alias: mf, sql: mf + ".slug"}) + "))"
+
+	case "asset.device_role":
+		dr := b.alias("dr")
+		return "EXISTS (SELECT 1 FROM device_roles " + dr +
+			" WHERE " + dr + ".id = " + sc.self + ".device_role_id" +
+			" AND (" + inner(expr{alias: dr, sql: dr + ".name"}) +
+			" OR " + inner(expr{alias: dr, sql: dr + ".slug"}) + "))"
+
+	case "asset.platform":
+		pf := b.alias("pf")
+		return "EXISTS (SELECT 1 FROM platforms " + pf +
+			" WHERE " + pf + ".id = " + sc.self + ".platform_id" +
+			" AND (" + inner(expr{alias: pf, sql: pf + ".name"}) +
+			" OR " + inner(expr{alias: pf, sql: pf + ".slug"}) + "))"
+
+	case "asset.cluster", "asset.cluster_type", "asset.cluster_group":
+		// The asset's cluster (DCIM row 4.2): a VM's (assets.cluster_id) or a
+		// host's (cluster_hosts), matched by the cluster's name, its type's
+		// name or slug, or its group's name or slug. Row-shaped like
+		// business_unit: `!=` negates the whole EXISTS.
+		cl, ch := b.alias("cl"), b.alias("ch")
+		member := "(" + cl + ".id = " + sc.self + ".cluster_id OR EXISTS (SELECT 1 FROM cluster_hosts " + ch +
+			" WHERE " + ch + ".cluster_id = " + cl + ".id AND " + ch + ".asset_id = " + sc.self + ".id))"
+		switch f.Accessor.Derived {
+		case "asset.cluster_type":
+			ct := b.alias("ct")
+			return "EXISTS (SELECT 1 FROM clusters " + cl + " JOIN cluster_types " + ct + " ON " + ct + ".id = " + cl + ".type_id" +
+				" WHERE " + member + " AND (" + inner(expr{alias: ct, sql: ct + ".name"}) +
+				" OR " + inner(expr{alias: ct, sql: ct + ".slug"}) + "))"
+		case "asset.cluster_group":
+			cg := b.alias("cg")
+			return "EXISTS (SELECT 1 FROM clusters " + cl + " JOIN cluster_groups " + cg + " ON " + cg + ".id = " + cl + ".group_id" +
+				" WHERE " + member + " AND (" + inner(expr{alias: cg, sql: cg + ".name"}) +
+				" OR " + inner(expr{alias: cg, sql: cg + ".slug"}) + "))"
+		}
+		return "EXISTS (SELECT 1 FROM clusters " + cl + " WHERE " + member +
+			" AND " + inner(expr{alias: cl, sql: cl + ".name"}) + ")"
+	case "asset.circuit", "asset.circuit_provider", "asset.circuit_cid":
+		// Circuits terminating where the asset is (DCIM row 4.1): a circuit
+		// termination on the asset's location. Row-shaped like device_type, so
+		// `!=` negates the whole EXISTS and an asset with no circuit satisfies
+		// it. A bare `circuit` matches the circuit's ID (cid) or its type's name
+		// or slug (`circuit = mpls`); `.cid` the cid alone; `.provider` the
+		// provider's name or slug.
+		ctm, ci := b.alias("ctm"), b.alias("ci")
+		from := "EXISTS (SELECT 1 FROM circuit_terminations " + ctm + " JOIN circuits " + ci +
+			" ON " + ci + ".id = " + ctm + ".circuit_id"
+		where := " WHERE " + ctm + ".termination_kind = " + b.param("location") + " AND " + ctm + ".termination_id = " + sc.self + ".location_id"
+		switch f.Accessor.Derived {
+		case "asset.circuit_provider":
+			pv := b.alias("pv")
+			return from + " JOIN providers " + pv + " ON " + pv + ".id = " + ci + ".provider_id" + where +
+				" AND (" + inner(expr{alias: pv, sql: pv + ".name"}) +
+				" OR " + inner(expr{alias: pv, sql: pv + ".slug"}) + "))"
+		case "asset.circuit_cid":
+			return from + where + " AND " + inner(expr{alias: ci, sql: ci + ".cid"}) + ")"
+		}
+		cty := b.alias("cty")
+		return from + " JOIN circuit_types " + cty + " ON " + cty + ".id = " + ci + ".type_id" + where +
+			" AND (" + inner(expr{alias: ci, sql: ci + ".cid"}) +
+			" OR " + inner(expr{alias: cty, sql: cty + ".name"}) +
+			" OR " + inner(expr{alias: cty, sql: cty + ".slug"}) + "))"
+
+	case "asset.rack":
+		// The rack the asset is in (DCIM row 2.3), by NAME or FACILITY ID;
+		// row-shaped like site, so `!=` negates the whole EXISTS.
+		rk := b.alias("rk")
+		return "EXISTS (SELECT 1 FROM racks " + rk +
+			" WHERE " + rk + ".id = " + sc.self + ".rack_id" +
+			" AND (" + inner(expr{alias: rk, sql: rk + ".name"}) +
+			" OR " + inner(expr{alias: rk, sql: rk + ".facility_id"}) + "))"
+
+	case "asset.module_type":
+		// A module installed in the asset (DCIM row 2.4), by its module
+		// type's model, part number or slug; row-shaped like rack.
+		mo, mt := b.alias("mo"), b.alias("mt")
+		return "EXISTS (SELECT 1 FROM modules " + mo + " JOIN module_types " + mt + " ON " + mt + ".id = " + mo + ".module_type_id" +
+			" WHERE " + mo + ".asset_id = " + sc.self + ".id AND " + mo + ".status <> " + b.param("rejected") +
+			" AND (" + inner(expr{alias: mt, sql: mt + ".model"}) +
+			" OR " + inner(expr{alias: mt, sql: mt + ".part_number"}) +
+			" OR " + inner(expr{alias: mt, sql: mt + ".slug"}) + "))"
+
+	case "asset.inventory_item_serial":
+		// The serial of any of the asset's inventory items (DCIM row 2.4).
+		ii := b.alias("ii")
+		return "EXISTS (SELECT 1 FROM inventory_items " + ii +
+			" WHERE " + ii + ".asset_id = " + sc.self + ".id AND " + ii + ".status <> " + b.param("rejected") +
+			" AND " + inner(expr{alias: ii, sql: ii + ".serial"}) + ")"
+
+	case "asset.virtual_chassis":
+		// The virtual chassis the asset is a member of (DCIM row 2.4), by
+		// name or domain.
+		vc := b.alias("vc")
+		return "EXISTS (SELECT 1 FROM virtual_chassis " + vc +
+			" WHERE " + vc + ".id = " + sc.self + ".virtual_chassis_id" +
+			" AND (" + inner(expr{alias: vc, sql: vc + ".name"}) +
+			" OR " + inner(expr{alias: vc, sql: vc + ".domain"}) + "))"
+
+	case "asset.rack_site", "asset.rack_role":
+		// The asset's rack's site (or rack role), by name or slug.
+		table, col := "sites", "site_id"
+		if f.Accessor.Derived == "asset.rack_role" {
+			table, col = "rack_roles", "role_id"
+		}
+		rk, ob := b.alias("rk"), b.alias("ro")
+		return "EXISTS (SELECT 1 FROM racks " + rk + " JOIN " + table + " " + ob +
+			" ON " + ob + ".id = " + rk + "." + col +
+			" WHERE " + rk + ".id = " + sc.self + ".rack_id" +
+			" AND (" + inner(expr{alias: ob, sql: ob + ".name"}) +
+			" OR " + inner(expr{alias: ob, sql: ob + ".slug"}) + "))"
+
+	case "asset.cloud_provider", "asset.cloud_account", "asset.cloud_type":
+		// The cloud_resource attributes (DCIM row 4.6). The same jsonb read the
+		// `attr.` namespace compiles to, so `provider:aws` and
+		// `attr.provider:aws` are one predicate.
+		key := map[string]string{
+			"asset.cloud_provider": "provider",
+			"asset.cloud_account":  "account_id",
+			"asset.cloud_type":     "provider_type",
+		}[f.Accessor.Derived]
+		return inner(expr{alias: sc.self, sql: "(" + sc.self + ".attributes ->> " + b.param(key) + ")"})
+
+	case "asset.region":
+		// The location region, or a cloud resource's provider region when it
+		// has none — the same expression the `region` facet counts.
+		return inner(expr{alias: sc.self, sql: "COALESCE(NULLIF(" + sc.self + ".region, " + b.param("") + "), " +
+			sc.self + ".attributes ->> " + b.param("region") + ")"})
 
 	case "asset.cert_trust":
 		// The worst trust status of the asset's certificates, the
@@ -444,4 +682,16 @@ func (b *builder) derivedOver(sc scope, f ast.FieldRef, sp ast.Span, raw bool, i
 // crypto.strength is the only one: proposed_by reads columns of the current
 // row, and algorithm.deprecated's value is already an aggregate over the rows
 // rather than a per-row column.
-func derivedRowShaped(derived string) bool { return derived == "crypto.strength" }
+func derivedRowShaped(derived string) bool {
+	switch derived {
+	case "crypto.strength", "asset.business_unit", "asset.business_unit_parent",
+		"asset.site", "asset.site_group", "asset.site_region", "asset.location",
+		"asset.device_type", "asset.device_type_manufacturer", "asset.device_role", "asset.platform",
+		"asset.cluster", "asset.cluster_type", "asset.cluster_group",
+		"asset.circuit", "asset.circuit_provider", "asset.circuit_cid",
+		"asset.rack", "asset.rack_site", "asset.rack_role",
+		"asset.module_type", "asset.inventory_item_serial", "asset.virtual_chassis":
+		return true
+	}
+	return isIPAMDerived(derived) || isTunnelDerived(derived) || isWirelessDerived(derived) || isCablingDerived(derived)
+}

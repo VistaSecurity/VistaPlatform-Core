@@ -10,11 +10,11 @@ package services
 // every existing install: schema-migration exits 0 while the cluster keeps the
 // stale definition. Worse, the file still runs `DROP TABLE IF EXISTS
 // public.network_assets_legacy CASCADE`, which on a pre-partition-conversion
-// cluster took mv_location_finding_summary with it — and the later
+// cluster took the location summary matview (now mv_site_finding_summary) with it — and the later
 // `CREATE OR REPLACE VIEW mv_..._tenant AS SELECT * FROM mv_...` then failed
 // under ON_ERROR_STOP=1, wedging the upgrade entirely.
 //
-// B-18 remnant: mv_location_finding_summary counted findings with
+// B-18 remnant: the location summary matview counted findings with
 // `FILTER (WHERE a.risk_level = 'Critical')` and v_ci_inventory's asset branch
 // selected the stored risk_level column. Nothing writes that column — ingest
 // updates risk_score and never its sibling — so it sits at its schema DEFAULT
@@ -49,10 +49,11 @@ func TestIntegration_Schema_MatviewsRebuildAndBandRiskScore(t *testing.T) {
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
 
-	locationID := uuid.New()
-	mustExec(t, db, `
-		INSERT INTO locations (id, tenant_id, name, location_type, full_path)
-		VALUES ($1,$2,'B-40 HQ','site','/b40-hq')`, locationID, tenant)
+	// DCIM row 2.1: the summary is per SITE. Half the assets also sit in a
+	// location inside it; the site row must count all of them once.
+	siteID, locationID := uuid.New(), uuid.New()
+	mustExec(t, db, `INSERT INTO sites (id, tenant_id, name, slug) VALUES ($1,$2,'B-40 HQ','b40-hq')`, siteID, tenant)
+	mustExec(t, db, `INSERT INTO locations (id, tenant_id, site_id, name, slug) VALUES ($1,$2,$3,'Floor 1','floor-1')`, locationID, tenant, siteID)
 
 	// One asset per band, including 0 = NOT ASSESSED, which must land in none of
 	// the four counters.
@@ -70,13 +71,17 @@ func TestIntegration_Schema_MatviewsRebuildAndBandRiskScore(t *testing.T) {
 		{"b40-none.example.test", "192.0.2.1", 0, "Informational"},
 	}
 	ids := make(map[string]uuid.UUID, len(assets))
-	for _, a := range assets {
+	for i, a := range assets {
 		id := uuid.New()
 		ids[a.host] = id
+		var loc any
+		if i%2 == 0 {
+			loc = locationID
+		}
 		mustExec(t, db, `
-			INSERT INTO assets (id, tenant_id, location_id, hostname, primary_address, environment, class_key, class_path, asset_status, risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, 'production', 'server', 'hardware.computer.server', 'monitoring', $6, NOW(), NOW(), NOW(), NOW())`,
-			id, tenant, locationID, a.host, a.ip, a.score)
+			INSERT INTO assets (id, tenant_id, site_id, location_id, hostname, primary_address, environment, class_key, class_path, asset_status, risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $7, $4, $5, 'production', 'server', 'hardware.computer.server', 'monitoring', $6, NOW(), NOW(), NOW(), NOW())`,
+			id, tenant, siteID, a.host, a.ip, a.score, loc)
 	}
 
 	// Re-apply the schema exactly as the migration Job does. Advisory lock 889 is
@@ -102,14 +107,14 @@ func TestIntegration_Schema_MatviewsRebuildAndBandRiskScore(t *testing.T) {
 
 	// B-40: the matview must have been REBUILT, so it sees rows inserted after it
 	// was last built. Under `CREATE ... IF NOT EXISTS` this query returns no rows
-	// at all — the location simply is not in the stale snapshot.
+	// at all — the site simply is not in the stale snapshot.
 	var assetCount, critical, high, medium, low int
 	err = db.QueryRow(`
 		SELECT asset_count, critical_findings, high_findings, medium_findings, low_findings
-		  FROM mv_location_finding_summary WHERE location_id = $1`, locationID,
+		  FROM mv_site_finding_summary WHERE site_id = $1`, siteID,
 	).Scan(&assetCount, &critical, &high, &medium, &low)
 	if err != nil {
-		t.Fatalf("mv_location_finding_summary has no row for a location created before the re-apply — "+
+		t.Fatalf("mv_site_finding_summary has no row for a site created before the re-apply — "+
 			"the matview kept its stale definition and data (B-40): %v", err)
 	}
 	if assetCount != len(assets) {

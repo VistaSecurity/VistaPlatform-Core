@@ -291,6 +291,8 @@ func (s *DeviceService) CreateDevice(ctx context.Context, tenantID uuid.UUID, re
 		ProbeRead:           req.ProbeRead,
 		ProbeSSHHostKey:     req.ProbeSSHHostKeyFingerprint,
 		ProbeSSHHostKeyType: req.ProbeSSHHostKeyType,
+		DeclaredMAC:         derefStr(req.MACAddress),
+		InterfaceName:       derefStr(req.InterfaceName),
 	})
 	if err != nil {
 		return nil, err

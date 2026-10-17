@@ -87,9 +87,18 @@ generate: node_modules_check scripts-deps generate-k8s-ingress ## Generate share
 	node ./scripts/generate-connectors.mjs
 	node ./scripts/generate-permissions.mjs
 	node ./scripts/generate-asset-classes.mjs
+	node ./scripts/generate-vocabulary.mjs
+	node ./scripts/generate-dcim-types.mjs
+	node ./scripts/generate-sync-authority.mjs
 	node ./scripts/generate-classification-rules.mjs
 	node ./scripts/generate-measurement-types.mjs
 	node ./scripts/generate-edition-matrix.mjs
+	# The device-type seed subset (DCIM row 2.2): the vendored library files in
+	# standards/devicetype-library rendered into seed.sql. Refreshing the vendored
+	# copy from a library checkout is a separate, deliberate step:
+	#   go run ./tools/devicetype-import -library <checkout> -commit <sha>
+	# Guarded like the audit step: the public-tree export removes tools/.
+	@if [ -d tools/devicetype-import ]; then GOTOOLCHAIN=$(GOTOOLCHAIN_PIN) go run ./tools/devicetype-import; fi
 	# The query catalogue's TypeScript mirror. A Go program rather than another
 	# scripts/*.mjs because its input is Go values — the exported AllTargets()
 	# and FirstClassFields() of shared/query/catalog/registrycatalog — not a
@@ -212,7 +221,7 @@ verify-generated: ## Verify generated artifacts exist
 
 # Vista Platform - Makefile
 
-.PHONY: help build-services build-sensor build-frontend build-all test test-unit start stop restart logs clean install-deps
+.PHONY: test-dcim-scale help build-services build-sensor build-frontend build-all test test-unit start stop restart logs clean install-deps
 
 # Default target
 help: ## Show this help message
@@ -862,6 +871,9 @@ test-cluster-sensor-service: ## Test cluster-sensor-service
 test-tenant-health-service: ## Test tenant-health-service
 	@cd services/tenant-health-service && go test -v ./...
 
+test-dcim-scale: ## Run the DCIM scale-fixture tests at DATA_MODEL §12's Scale1 vs an ephemeral Postgres (needs Docker; DCIM_BUDGETS=enforce to fail on a breach)
+	@bash scripts/run-dcim-scale-tests.sh
+
 test: test-unit ## Run unit tests (DB-integration tests: make test-integration-db)
 
 # Database Commands
@@ -996,6 +1008,10 @@ format: ## Format all code
 edition-matrix: scripts-deps ## Regenerate docsv4/core/editions.md from editions.go + seed.sql + standards/editions.yaml
 	node ./scripts/generate-edition-matrix.mjs
 
+vocabulary: scripts-deps ## Audit the vocabulary registry and guard (alias for the runs in 'make audit')
+	node ./scripts/generate-vocabulary.mjs --check
+	node ./scripts/audit-vocabulary.mjs
+
 asset-classes: scripts-deps ## Audit the asset-class registry (alias for the --check run in 'make audit')
 	node ./scripts/generate-asset-classes.mjs --check
 
@@ -1098,6 +1114,17 @@ oui-registry-test: scripts-deps ## Test + mutation-test the OUI registry generat
 classification-rules-test: scripts-deps ## Test + mutation-test the classification-rule generator (non-canonical vendor, retired keys, hand-written oui_vendor...)
 	node --test ./scripts/generate-classification-rules.test.mjs
 
+vocabulary-test: scripts-deps ## Test + mutation-test the vocabulary generator and guard (both polarities, fixture trees)
+	node --test ./scripts/audit-vocabulary.test.mjs
+
+dcim-types-test: scripts-deps ## Test + mutation-test the DCIM type-registry generator (fixture trees) and its Go mirror
+	node --test ./scripts/generate-dcim-types.test.mjs
+	cd shared && GOTOOLCHAIN=go$(GO_WORK_VERSION) go test ./dcim/
+
+sync-authority-test: scripts-deps ## Test the sync field-authority generator (fixture trees, both polarities) and shared/syncauthority's decision
+	node --test ./scripts/generate-sync-authority.test.mjs
+	cd shared && GOTOOLCHAIN=go$(GO_WORK_VERSION) go test ./syncauthority/
+
 changelog-audit-test: ## Mutation-test the CHANGELOG.md duplication guard
 	node ./scripts/audit-changelog.test.mjs
 
@@ -1138,7 +1165,7 @@ lint-workflows:   ## Lint GitHub Actions workflows (context availability, expres
 drift-check:   ## Check for configuration drift
 	@echo "Drift check complete!"
 
-standards-check: rating-contract-test rating-ladder-test generate verify-generated chart-lint changelog-audit-test mcp-tool-docs-test oui-registry-test classification-rules-test lint-workflows  ## Generate, verify and run all standards checks
+standards-check: rating-contract-test rating-ladder-test generate verify-generated chart-lint changelog-audit-test vocabulary-test dcim-types-test sync-authority-test mcp-tool-docs-test oui-registry-test classification-rules-test lint-workflows  ## Generate, verify and run all standards checks
 
 registry-first: generate verify-generated  ## Complete registry-first workflow
 	@echo "✅ Registry-first workflow complete!"

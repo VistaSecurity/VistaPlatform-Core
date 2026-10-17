@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/identityenrichment"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // The Observations review table: what each retained observation NEEDS
@@ -256,7 +257,7 @@ const observationOwnersSQL = `(SELECT DISTINCT ai.asset_id,
     COALESCE(NULLIF(a.display_name,''), NULLIF(a.hostname,''), '') AS name,
     (a.id IS NOT NULL AND a.deleted_at IS NULL AND a.asset_status NOT IN ('archived','denied')) AS linkable
   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(o.evidence->'identifiers') = 'array' THEN o.evidence->'identifiers' ELSE '[]'::jsonb END) x
-  JOIN asset_identifiers ai ON ai.tenant_id = o.tenant_id AND ai.kind = x->>'kind' AND ai.value = x->>'value'
+  JOIN (` + identifiersql.All + `) ai ON ai.tenant_id = o.tenant_id AND ai.kind = x->>'kind' AND ai.value = x->>'value'
    AND coalesce(ai.scope,'') = coalesce(x->>'scope','')
   LEFT JOIN assets a ON a.tenant_id = ai.tenant_id AND a.id = ai.asset_id)`
 

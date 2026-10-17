@@ -458,7 +458,7 @@ func buildAssetContext(asset, implementation map[string]interface{}) assetContex
 	context.AssetStatus = strVal(fromMap(asset, "asset_status"))
 	context.BusinessUnit = firstNonEmpty(
 		strVal(fromMap(implementation, "asset_business_unit")),
-		strVal(fromMap(asset, "business_unit")),
+		businessUnitName(fromMap(asset, "business_unit")),
 	)
 	context.LocationRegion = tagLocationRegion(fromMap(asset, "tags"))
 	context.Tags = flattenTags(fromMap(asset, "tags"))
@@ -1607,6 +1607,15 @@ func uniqueStrings(values []string) []string {
 		unique = append(unique, value)
 	}
 	return unique
+}
+
+// businessUnitName reads the asset's business unit: an object {id, name, slug}
+// since DCIM 1.1, a bare string from an older inventory-service.
+func businessUnitName(v interface{}) string {
+	if m, ok := v.(map[string]interface{}); ok {
+		return strVal(m["name"])
+	}
+	return strVal(v)
 }
 
 func strVal(v interface{}) string {

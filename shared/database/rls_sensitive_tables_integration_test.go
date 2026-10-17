@@ -389,6 +389,10 @@ var defaultDenyParents = map[string]bool{
 	// which enables RLS on each one it makes); TestIntegration_RLS_ActivityLogPartitionsDenyDirectAccess
 	// drives a freshly created one.
 	"audit.activity_logs": true,
+	// The DCIM change record (BUILD_PLAN row 0.3): monthly partitions and a
+	// DEFAULT partition, all RLS-enabled with no policy;
+	// create_object_changes_partition enables RLS on each one it makes.
+	"public.object_changes": true,
 }
 
 // TestIntegration_RLS_EveryTenantTableIsProtected fails when a table carrying a

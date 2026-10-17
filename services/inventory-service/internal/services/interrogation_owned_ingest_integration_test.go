@@ -63,8 +63,7 @@ func newOwnedIngestFixture(t *testing.T) ownedIngestFixture {
 		t.Fatalf("the tenant has no platform interrogation sensor: %v", err)
 	}
 	// A registered segment, so the private-VIP control classifies internal.
-	if _, err := raw.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment)
-		VALUES($1,$2,'DMZ','cidr','192.0.2.0/24','production')`, uuid.New(), tenant); err != nil {
+	if _, err := raw.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'DMZ','192.0.2.0/24'::cidr,'production','declared','active')`, uuid.New(), tenant); err != nil {
 		t.Fatal(err)
 	}
 	job := uuid.New()
@@ -300,15 +299,16 @@ func TestIntegration_InterrogationFindings_DeviceOwnAddressIsTheDevice(t *testin
 	}
 
 	for _, how := range []struct {
-		name string
-		seed string
+		name  string
+		seed  string
+		extra []any
 	}{
-		{"primary address", `UPDATE assets SET primary_address = $3::inet WHERE tenant_id=$1 AND id=$2`},
-		{"measured ip identifier", `INSERT INTO asset_identifiers(tenant_id,asset_id,kind,value,scope,source_kind,source_ref) VALUES($1,$2,'ip_address',$3,'','measured','test')`},
+		{"primary address", `UPDATE assets SET primary_address = $3::inet WHERE tenant_id=$1 AND id=$2`, nil},
+		{"measured address on an interface", testdb.SeedAssetAddressSQL, []any{"", "measured", "test"}},
 	} {
 		t.Run(how.name, func(t *testing.T) {
 			f := newOwnedIngestFixture(t)
-			if _, err := f.raw.Exec(how.seed, f.tenant, f.device, own); err != nil {
+			if _, err := f.raw.Exec(how.seed, append([]any{f.tenant, f.device, own}, how.extra...)...); err != nil {
 				t.Fatalf("seed the device's own address: %v", err)
 			}
 			report, err := f.svc.IngestFindingsReport(f.tenant, []IngestFinding{sshFinding(f, own)}, "pending_approval")
@@ -332,15 +332,16 @@ func TestIntegration_InterrogationFindings_DeviceOwnAddressIsTheDevice(t *testin
 	// ADR-0002 D4 keeps declared and measured apart. The finding does not take
 	// the owned path; what the ordinary path then does with it is its business.
 	for _, how := range []struct {
-		name string
-		seed string
+		name  string
+		seed  string
+		extra []any
 	}{
-		{"declared ip identifier", `INSERT INTO asset_identifiers(tenant_id,asset_id,kind,value,scope,source_kind,source_ref) VALUES($1,$2,'ip_address',$3,'','declared','test')`},
-		{"management url", `INSERT INTO asset_management(tenant_id,asset_id,management_url) VALUES($1,$2,'https://' || $3::text || ':8443')`},
+		{"declared address on an interface", testdb.SeedAssetAddressSQL, []any{"elsewhere", "declared", "test"}},
+		{"management url", `INSERT INTO asset_management(tenant_id,asset_id,management_url) VALUES($1,$2,'https://' || $3::text || ':8443')`, nil},
 	} {
 		t.Run(how.name+" does not make an address the device's own", func(t *testing.T) {
 			f := newOwnedIngestFixture(t)
-			if _, err := f.raw.Exec(how.seed, f.tenant, f.device, own); err != nil {
+			if _, err := f.raw.Exec(how.seed, append([]any{f.tenant, f.device, own}, how.extra...)...); err != nil {
 				t.Fatalf("seed the declared address: %v", err)
 			}
 			if _, err := f.svc.IngestFindingsReport(f.tenant, []IngestFinding{sshFinding(f, own)}, "pending_approval"); err != nil {

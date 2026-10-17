@@ -67,13 +67,13 @@ Azure Load Balancer (Standard and Basic SKUs).
 ## What is enumerated
 
 Alongside the cryptographic resources above, a run **inventories the
-subscription's compute and network estate**: virtual machines, virtual networks,
-their subnets, and NSG membership. This is inventory rather than cryptography —
+subscription's compute and network estate**: virtual machines with their network
+interfaces, virtual networks and their address ranges, and NSG membership. This is inventory rather than cryptography —
 a VM negotiates no protocol and states no at-rest encryption — and it is what
 makes the rest of a run legible.
 
-It is controlled by one switch per integration, **Inventory compute, networks and
-subnets** in Discovery → Cloud → Edit integration. It is **on by default**,
+It is controlled by one switch per integration, **Inventory compute instances and
+their networks** in Discovery → Cloud → Edit integration. It is **on by default**,
 including for integrations created before this feature existed.
 
 ### Exact API calls
@@ -81,15 +81,16 @@ including for integrations created before this feature existed.
 | Call | Scope | Produces |
 |---|---|---|
 | `VirtualMachines.ListAll` | Subscription, paginated | One asset per VM |
-| `VirtualNetworks.ListAll` | Subscription, paginated | One asset per VNet — **and its subnets, which ARM returns inline** |
+| `VirtualNetworks.ListAll` | Subscription, paginated | One prefix per VNet address range, and one per range inside it, **which ARM returns inline** (Inventory → Networks) |
 | `NetworkSecurityGroups.ListAll` | Subscription, paginated | NSG **membership** — never the rules |
-| `NetworkInterfaces.ListAll` | Subscription, paginated | MAC, private addresses, and the VM ↔ subnet link |
+| `NetworkInterfaces.ListAll` | Subscription, paginated | The VM's interfaces: name, MAC, private addresses |
 
-The NIC listing is not optional on Azure: a VM's own payload carries **no
-addressing at all** — it names its NICs by resource id and nothing else — so
-without it a VM is recorded with no address and no subnet.
+The network-interface listing is not optional on Azure: a VM's own payload
+carries **no addressing at all** — it names its network interfaces by resource id
+and nothing else — so without it a VM is recorded with no interface and no
+address.
 
-Subnets cost no call of their own.
+The ranges inside a virtual network cost no call of their own.
 
 **Cost.** Four extra subscription-wide calls per run, each paginated. Azure
 enumeration is not per-region, so the number does not grow with the number of
@@ -109,23 +110,25 @@ All four are covered by the built-in **Reader** role. `virtualNetworks/read` and
 
 ### What lands in the inventory
 
-| Azure resource | Asset class | Identified by |
+| Azure resource | Lands as | Identified by |
 |---|---|---|
-| Virtual machine | Compute instance | its `/subscriptions/…/virtualMachines/<name>` resource id |
-| Virtual network | Virtual network | its `/subscriptions/…/virtualNetworks/<name>` resource id |
-| Subnet | Subnet | its `…/virtualNetworks/<vnet>/subnets/<name>` resource id |
-| Network security group | *not an asset* | recorded as membership on the VM and the subnet |
+| Virtual machine | Compute instance asset | its `/subscriptions/…/virtualMachines/<name>` resource id |
+| Network interface | an interface of the VM (type *Virtual*), named as in Azure | the VM and the interface's name |
+| Virtual network | a prefix per address range, in **Inventory → Networks** | the range, and the VNet's resource id as its cloud network |
+| A range inside the VNet | a prefix inside the VNet's | the range, and the VNet's resource id as its cloud network |
+| Network security group | *not an asset* | recorded as membership on the VM |
 
-Each VM carries its private addresses, its NICs (name, MAC, addresses), its VM
-size, its image reference, its tags, its **`vmId`** (Azure's per-VM UUID, which
-is what the guest reads back through IMDS — the join between a VM seen from
-outside and the same machine reporting from inside), and the `cloud.*` placement
-facts. The relationships **VNet contains subnet** and **subnet contains VM** are
-drawn from the provider's own placement, and a subnet's address prefix becomes a
-network segment.
+A virtual network and its ranges are **not assets**: they are prefixes, each
+naming the VNet it belongs to, and the network a VM is in is the prefix its
+address falls in. Each VM's **Interfaces** tab lists its network interfaces with their MACs
+and private addresses at their range's prefix length. The VM also carries its
+VM size, its image reference, its tags, its **`vmId`** (Azure's per-VM UUID,
+which is what the guest reads back through IMDS — the join between a VM seen
+from outside and the same machine reporting from inside), and the `cloud.*`
+placement facts.
 
-A VM inherits membership of **both** its NIC's NSG and its subnet's NSG, because
-both govern it.
+A VM inherits membership of **both** its network interface's NSG and the NSG of
+the range it sits in, because both govern it.
 
 New assets arrive in **Pending approval**. A re-run matches on the resource id
 and updates.
@@ -135,11 +138,11 @@ and updates.
 A private address is not unique in a subscription, and the inventory is built so that
 it never has to be.
 
-- **Two virtual networks using the same CIDR** are two separate network segments, tagged
-  with the virtual network they belong to. Two VMs at the same private address in two
-  different virtual networks are **two assets**, and neither is affected by the other.
-- **An address reused inside one subnet** — the provider gives a freed address to
-  the next VM created — is genuinely the same segment, and the platform cannot
+- **Two virtual networks using the same address range** are two address spaces. Two VMs
+  at the same private address in two different virtual networks are **two assets**, and
+  neither is affected by the other.
+- **An address reused inside one virtual network** — the provider gives a freed address to
+  the next VM created — is genuinely the same address space, and the platform cannot
   tell from outside whether an address that changed hands means a new machine or
   a rebuilt one. So it does not guess: the new VM is recorded as its own asset
   in Pending approval, and a **review item appears in Approvals** asking whether
@@ -156,7 +159,7 @@ it never has to be.
   the SSH public-key block.
 - **NSG rules.** `properties.securityRules` is not read. Only the group's
   identity is recorded — membership, not policy.
-- **A NIC's public IP.** Public exposure is a posture question answered by
+- **A network interface's public IP.** Public exposure is a posture question answered by
   probing, and the reference points at a separate resource whose payload is not
   read.
 - **Guest operating system.** Azure states an OS **family** on the OS disk
@@ -260,10 +263,10 @@ Import findings as infrastructure assets:
 Imported assets are:
 - Linked to parent device via `device_id`
 - Created with `discovery_method = 'cloud_api'`
-- Set to `pending_approval` status — unless their cloud segment (per
-  subscription/region) has auto-approve enabled **with cloud discoveries among
-  its sources**, which is off on every pre-existing segment. See
-  [Asset Approval](asset-approval.md#which-discoveries-a-segment-auto-approves).
+- Hung off the subscription's **Cloud Account** asset, and set to `monitoring`
+  when the integration's **Auto-approve resources** switch is on (the default),
+  `pending_approval` when it is off — the account decides, not a prefix; see
+  [Asset Approval](asset-approval.md#cloud-resources-are-auto-approved-per-account).
 
 ---
 

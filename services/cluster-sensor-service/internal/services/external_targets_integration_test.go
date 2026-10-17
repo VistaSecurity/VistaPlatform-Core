@@ -335,8 +335,8 @@ func TestIntegration_TooBroadLegacySegmentIsNotOwnership(t *testing.T) {
 	user := f.tenantUser(t)
 	seed := func(name, seg string) {
 		t.Helper()
-		if _, err := f.raw.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,network_type,is_active) VALUES($1,$2,$3,'cidr',$4,'production','public',true)`, uuid.New(), f.tenant, name+" "+seg, seg); err != nil {
-			t.Fatalf("seed segment %s: %v", seg, err)
+		if _, err := f.raw.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,network_type) VALUES($1,$2,$3,$4,'production','public')`, uuid.New(), f.tenant, name+" "+seg, seg); err != nil {
+			t.Fatalf("seed prefix %s: %v", seg, err)
 		}
 	}
 	for _, seg := range []string{"0.0.0.0/0", "92.0.0.0/7", "::/0"} {
@@ -352,7 +352,7 @@ func TestIntegration_TooBroadLegacySegmentIsNotOwnership(t *testing.T) {
 	// manual scope above, so it is exercised directly): a PRIVATE-typed
 	// 0.0.0.0/0 — mislabelled, pre-existing — must not hand the automatic
 	// sweep a public address either.
-	if _, err := f.raw.Exec(`UPDATE network_segments SET network_type='private' WHERE tenant_id=$1 AND value='0.0.0.0/0'`, f.tenant); err != nil {
+	if _, err := f.raw.Exec(`UPDATE prefixes SET network_type='private' WHERE tenant_id=$1 AND prefix='0.0.0.0/0'`, f.tenant); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.raw.Exec(`INSERT INTO assets(id,tenant_id,hostname,primary_address,class_key,class_path,asset_status) VALUES($1,$2,'public-web','93.184.216.34','server','hardware.computer.server','monitoring')`, uuid.New(), f.tenant); err != nil {
@@ -366,7 +366,7 @@ func TestIntegration_TooBroadLegacySegmentIsNotOwnership(t *testing.T) {
 	if err := automatic("93.184.216.34"); !errors.Is(err, dispatchguard.ErrDenied) {
 		t.Fatalf("automatic scan under a private-typed 0.0.0.0/0: err=%v, want ErrDenied", err)
 	}
-	if _, err := f.raw.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,network_type,is_active) VALUES($1,$2,'private /24','cidr','93.184.216.0/24','production','private',true)`, uuid.New(), f.tenant); err != nil {
+	if _, err := f.raw.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,network_type) VALUES($1,$2,'private /24','93.184.216.0/24','production','private')`, uuid.New(), f.tenant); err != nil {
 		t.Fatal(err)
 	}
 	if err := automatic("93.184.216.34"); err != nil {

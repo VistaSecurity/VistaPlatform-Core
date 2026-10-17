@@ -406,8 +406,10 @@ func TestIntegration_CryptoRiskJudgments_SweepIsBounded(t *testing.T) {
 }
 
 // TestIntegration_CryptoRiskJudgments_SchemaReappliesOverJudgedRows: the schema
-// is re-applied on every upgrade; with judged rows present it must keep them and
-// must re-create a missing one as stale.
+// is re-applied on every upgrade; with judged rows present it must keep them.
+// (It used to also re-create a missing row as stale from a backfill INSERT on
+// apply; the 5.0.0 baseline has no backfills, asset-inventory ADR-0010 D11, and
+// every configuration gets its row from the crypto_risk_judgment triggers.)
 func TestIntegration_CryptoRiskJudgments_SchemaReappliesOverJudgedRows(t *testing.T) {
 	f := newJudgmentFixture(t, 30)
 	if _, err := f.svc.ListRisks(f.tenant, CryptoRiskFilters{}); err != nil {
@@ -416,9 +418,6 @@ func TestIntegration_CryptoRiskJudgments_SchemaReappliesOverJudgedRows(t *testin
 	db := f.rawDB()
 	var live, judged int
 	if err := db.QueryRow(`SELECT count(*) FROM crypto_implementations WHERE tenant_id=$1 AND deleted_at IS NULL`, f.tenant).Scan(&live); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`DELETE FROM crypto_risk_judgments WHERE crypto_implementation_id=$1`, f.configs[0]); err != nil {
 		t.Fatal(err)
 	}
 	testdb.ForceApplySchema(t, db)
@@ -432,10 +431,6 @@ func TestIntegration_CryptoRiskJudgments_SchemaReappliesOverJudgedRows(t *testin
 	}
 	if missing != 0 {
 		t.Fatalf("after re-applying the schema %d of %d live configurations have no judgement row", missing, live)
-	}
-	var restored bool
-	if err := db.QueryRow(`SELECT stale FROM crypto_risk_judgments WHERE crypto_implementation_id=$1`, f.configs[0]).Scan(&restored); err != nil {
-		t.Fatalf("the deleted judgement row was not re-created: %v", err)
 	}
 	if judged < live-2 {
 		t.Fatalf("re-applying the schema discarded judged rows: %d fresh of %d", judged, live)

@@ -6,7 +6,7 @@ The map answers three different questions, and it has a view for each.
 |---|---|---|
 | **Network** | *Where is everything, and where is the crypto risk?* | Every device laid out by site and network, each marked by the crypto it serves. Click any device to see its services and their crypto. |
 | **Neighbourhood** | *What is this one thing attached to?* | A graph around one asset, out to three hops, with the impact overlay. |
-| **Topology** | *Where is everything?* | A tree of your whole estate by site, segment and class, with counts and the connections between segments. |
+| **Topology** | *Where is everything?* | A tree of your whole estate by site, prefix and class, with counts and the connections between prefixes. |
 
 The switch between them sits at the top of the page, and the view you are in is in the address bar — so either one is a link you can paste into a ticket.
 
@@ -189,17 +189,17 @@ Topology answers *where is everything*. It is deliberately **not** a graph of ev
 
 ### What it shows
 
-Four numbers across the top: how many configuration items you have, how many sites they are spread across, **how many have no site recorded**, and how many confirmed relationships cross a segment boundary.
+Four numbers across the top: how many configuration items you have, how many sites they are spread across, **how many have no site recorded**, and how many confirmed relationships cross a prefix boundary.
 
 The third of those is the one to read first. It tells you whether the tree below is your estate or a tidy corner of it.
 
 Under them, the tree:
 
 - **Site** — each site you have recorded, and an explicit **Unassigned** node for everything that has none. Sites are read from the asset's own site field, falling back to a `location.site` or `site` tag, so an estate labelled by a CMDB import groups correctly.
-- **Segment** — each [network segment](./operational-context.md) within the site, and an explicit **Unsegmented** node for assets that belong to none. The unsegmented node is drawn in a lighter style, because it is an absence rather than something somebody drew.
-- **Class** — expand a segment and you get one chip per [asset class](./inventory-and-lenses.md) present in it, coloured the same way the neighbourhood colours its nodes, with a count.
+- **Prefix** — each [prefix](./operational-context.md) within the site, and an explicit **No prefix** node for assets that belong to none. The in no prefix node is drawn in a lighter style, because it is an absence rather than something somebody drew.
+- **Class** — expand a prefix and you get one chip per [asset class](./inventory-and-lenses.md) present in it, coloured the same way the neighbourhood colours its nodes, with a count.
 
-**Nothing is left out.** On a fresh inventory most assets have neither a site nor a segment, and a topology that quietly omitted them would draw the curated minority and look complete. If the tree does not add up to the total at the top, the page says so rather than letting you assume it does.
+**Nothing is left out.** On a fresh inventory most assets have neither a site nor a prefix, and a topology that quietly omitted them would draw the curated minority and look complete. If the tree does not add up to the total at the top, the page says so rather than letting you assume it does.
 
 ### Clicking through
 
@@ -207,25 +207,25 @@ Every count is a link into the inventory list, filtered to exactly the rows it c
 
 | Click | What opens |
 |---|---|
-| A segment's count | Every configuration item in that segment |
-| A class chip | Every item of that class in that segment |
+| A prefix's count | Every configuration item in that prefix |
+| A class chip | Every item of that class in that prefix |
 
-The filter arrives as a [query](./query.md) in the address bar, so you can widen or narrow it from there. The unsegmented bucket becomes `not exists(segment_id)` — "no segment recorded", which is a different question from any particular segment.
+The filter arrives as a [query](./query.md) in the address bar, so you can widen or narrow it from there. The No prefix bucket becomes `not exists(prefix_id)` — "no prefix recorded", which is a different question from any particular prefix.
 
-### Between segments
+### Between prefixes
 
-Beside the tree, the connections that cross a segment boundary, aggregated per pair of segments and per kind — observed *connections* and declared *dependencies* are counted separately, because they are different claims.
+Beside the tree, the connections that cross a prefix boundary, aggregated per pair of prefixes and per kind — observed *connections* and declared *dependencies* are counted separately, because they are different claims.
 
 Two things are deliberately not counted here:
 
 - **Pending relationships.** An aggregate is the one place a single unconfirmed observation is invisible, so drawing it would state a guess as fact with nothing on screen to qualify it. Accept it in **Discovery → Approvals** and it appears.
-- **Containment.** A virtual machine and its hypervisor sitting in two segments is one thing described twice, not a connection between those segments.
+- **Containment.** A virtual machine and its hypervisor sitting in two prefixes is one thing described twice, not a connection between those prefixes.
 
-An empty list here means nothing has observed or declared a link between your segments — not that they are isolated.
+An empty list here means nothing has observed or declared a link between your prefixes — not that they are isolated.
 
 ### When it is truncated
 
-Very large estates are capped. Past the cap a banner says how much is shown against how much there is — the real totals, never a quiet shortening. The **cross-segment links** headline is one of those totals: it counts every link your estate has, and says how many of them were drawn when the list beside it is short of that.
+Very large estates are capped. Past the cap a banner says how much is shown against how much there is — the real totals, never a quiet shortening. The **cross-prefix links** headline is one of those totals: it counts every link your estate has, and says how many of them were drawn when the list beside it is short of that.
 
 ### What it does not have
 
@@ -237,5 +237,5 @@ No full-screen mode and no export. The tree is a way into the list rather than a
 - [Inventory & Lenses](./inventory-and-lenses.md) — the list the map is an alternative view of
 - [Query](./query.md) — the language the asset picker speaks
 - [Page-Local Exports](./page-local-exports.md) — the same convenience-not-evidence rule, for lists
-- [Operational Context](./operational-context.md) — the network segments the topology groups by
+- [Operational Context](./operational-context.md) — the prefixes the topology groups by
 - [The Dashboard](./dashboard.md) — the Assets Monitored panel that links here

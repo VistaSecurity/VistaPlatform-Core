@@ -52,6 +52,10 @@ type Cosign struct {
 	// config go; defaults to os.TempDir() — the pod's /tmp emptyDir, the only
 	// writable path under readOnlyRootFilesystem.
 	TempDir string
+	// ExtraEnv is appended to the subprocess environment: the trust bundle's
+	// SSL_CERT_FILE when EXTRA_TRUSTED_CA_PATH is set, so cosign's registry
+	// reads verify a chart mirror signed by a private CA.
+	ExtraEnv []string
 }
 
 // ErrNoIdentity: no identity regexp was rendered, so nothing could be
@@ -89,6 +93,7 @@ func (c Cosign) Verify(ctx context.Context, ref string) error {
 			env = append(env, "DOCKER_CONFIG="+dir)
 		}
 	}
+	env = append(env, c.ExtraEnv...)
 	bin := c.Binary
 	if bin == "" {
 		bin = "cosign"

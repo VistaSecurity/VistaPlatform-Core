@@ -43,6 +43,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/pipelinetest"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -61,9 +62,8 @@ type hop1Run struct {
 	batch    string
 	app      pipelinetest.Appliance
 	scenario pipelinetest.Scenario
-	// segmentIDs maps every segment id of the tenant to its CIDR, read once
-	// the run is over.
-	segmentIDs map[string]string
+	// prefixIDs maps every prefix id of the tenant to its prefix (row 1.5b).
+	prefixIDs map[string]string
 }
 
 // runVendorHop1 drives one scenario through the in-cluster executor.
@@ -75,8 +75,8 @@ func runVendorHop1(t *testing.T, owner *sql.DB, s pipelinetest.Scenario, enforce
 
 	tenant := testdb.NewTenant(t, owner)
 	for _, seg := range s.TenantSegments {
-		if _, err := owner.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active)
-			VALUES($1,$2,$3,'cidr',$4,'production',true)`, uuid.New(), tenant, seg.Name, seg.CIDR); err != nil {
+		if _, err := owner.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status)
+			VALUES($1,$2,$3,$4::cidr,'production','declared','active')`, uuid.New(), tenant, seg.Name, seg.CIDR); err != nil {
 			t.Fatalf("seed tenant segment %s: %v", seg.CIDR, err)
 		}
 	}
@@ -169,20 +169,20 @@ func runVendorHop1(t *testing.T, owner *sql.DB, s pipelinetest.Scenario, enforce
 	if err := owner.QueryRow(`SELECT (parameters->>'discovery_job_id')::uuid FROM device_jobs WHERE id=$1`, job.ID).Scan(&discoveryJob); err != nil {
 		t.Fatalf("the device job recorded no discovery job: %v", err)
 	}
-	segmentIDs := map[string]string{}
-	segRows, err := owner.Query(`SELECT id::text, value FROM network_segments WHERE tenant_id = $1`, tenant)
+	prefixIDs := map[string]string{}
+	pRows, err := owner.Query(`SELECT id::text, prefix::text FROM prefixes WHERE tenant_id = $1`, tenant)
 	if err != nil {
-		t.Fatalf("segment ids: %v", err)
+		t.Fatalf("prefix ids: %v", err)
 	}
-	for segRows.Next() {
+	for pRows.Next() {
 		var id, value string
-		if err := segRows.Scan(&id, &value); err != nil {
-			t.Fatalf("scan segment id: %v", err)
+		if err := pRows.Scan(&id, &value); err != nil {
+			t.Fatalf("scan prefix id: %v", err)
 		}
-		segmentIDs[id] = value
+		prefixIDs[id] = value
 	}
-	_ = segRows.Close()
-	return hop1Run{tenant: tenant, device: dev.ID, job: job.ID, batch: discoveryJob.String(), app: app, scenario: s, segmentIDs: segmentIDs}
+	_ = pRows.Close()
+	return hop1Run{tenant: tenant, device: dev.ID, job: job.ID, batch: discoveryJob.String(), app: app, scenario: s, prefixIDs: prefixIDs}
 }
 
 // normalize replaces everything that differs per run with a placeholder.
@@ -196,8 +196,9 @@ func (r hop1Run) normalize(t *testing.T, v any) any {
 		host + ":" + port, pipelinetest.PlaceholderApplianceIP + ":" + pipelinetest.PlaceholderAppliancePort,
 	}
 	// A network scope is a segment id; name it by the segment's CIDR.
-	for id, cidr := range r.segmentIDs {
-		pairs = append(pairs, id, "segment:"+cidr)
+	// …or a prefix id; name it by the prefix.
+	for id, cidr := range r.prefixIDs {
+		pairs = append(pairs, id, "prefix:"+cidr)
 	}
 	replace := pipelinetest.Replacer(pairs...)
 	return pipelinetest.Walk(pipelinetest.Canonical(t, v), func(key string, val any) any {
@@ -260,7 +261,7 @@ func (r hop1Run) handoff(t *testing.T, owner *sql.DB) pipelinetest.Hop1Handoff {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows: %v", err)
 	}
-	out.LearnedSegments = r.learnedSegments(t, owner)
+	out.LearnedPrefixes = r.learnedSegments(t, owner)
 	out.Assets = r.assetRecords(t, owner)
 
 	var normalized pipelinetest.Hop1Handoff
@@ -307,7 +308,7 @@ func (r hop1Run) assetRecords(t *testing.T, owner *sql.DB) []pipelinetest.AssetR
 
 	out := make([]pipelinetest.AssetRecord, 0, len(all))
 	for _, a := range all {
-		ids, err := owner.Query(`SELECT kind, value, scope, source_kind FROM asset_identifiers
+		ids, err := owner.Query(`SELECT kind, value, scope, source_kind FROM (`+identifiersql.All+`) ai
 			WHERE tenant_id = $1 AND asset_id = $2 ORDER BY kind, value`, r.tenant, a.id)
 		if err != nil {
 			t.Fatalf("identifiers: %v", err)
@@ -336,38 +337,29 @@ func (r hop1Run) assetRecords(t *testing.T, owner *sql.DB) []pipelinetest.AssetR
 	return out
 }
 
-func (r hop1Run) learnedSegments(t *testing.T, owner *sql.DB) []pipelinetest.LearnedSegment {
+func (r hop1Run) learnedSegments(t *testing.T, owner *sql.DB) []pipelinetest.LearnedPrefix {
 	t.Helper()
-	registered := map[string]bool{}
-	for _, s := range r.scenario.TenantSegments {
-		registered[s.CIDR] = true
-	}
-	rows, err := owner.Query(`SELECT value, segment_type, network_type, metadata FROM network_segments
-		WHERE tenant_id = $1 ORDER BY value`, r.tenant)
+	rows, err := owner.Query(`SELECT prefix::text, COALESCE(network_type, ''), dhcp_managed FROM prefixes
+		WHERE tenant_id = $1 AND source_kind = 'measured' ORDER BY prefix`, r.tenant)
 	if err != nil {
-		t.Fatalf("read segments: %v", err)
+		t.Fatalf("read prefixes: %v", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var out []pipelinetest.LearnedSegment
+	out := []pipelinetest.LearnedPrefix{}
 	for rows.Next() {
-		var s pipelinetest.LearnedSegment
-		var meta []byte
-		if err := rows.Scan(&s.Value, &s.SegmentType, &s.NetworkType, &meta); err != nil {
-			t.Fatalf("scan segment: %v", err)
+		var p pipelinetest.LearnedPrefix
+		var dhcp sql.NullBool
+		if err := rows.Scan(&p.Value, &p.NetworkType, &dhcp); err != nil {
+			t.Fatalf("scan prefix: %v", err)
 		}
-		if registered[s.Value] {
-			continue
+		if dhcp.Valid {
+			v := dhcp.Bool
+			p.DHCPManaged = &v
 		}
-		if err := json.Unmarshal(meta, &s.Metadata); err != nil {
-			t.Fatalf("segment metadata: %v", err)
-		}
-		out = append(out, s)
+		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows: %v", err)
-	}
-	if out == nil {
-		out = []pipelinetest.LearnedSegment{}
 	}
 	return out
 }
@@ -507,7 +499,7 @@ func (r hop1Run) assetLabels(t *testing.T, owner *sql.DB) map[string]string {
 	t.Helper()
 	rows, err := owner.Query(`
 		SELECT a.id::text, coalesce(string_agg(i.kind || '=' || i.value, ',' ORDER BY i.kind, i.value), '')
-		FROM assets a LEFT JOIN asset_identifiers i ON i.tenant_id = a.tenant_id AND i.asset_id = a.id
+		FROM assets a LEFT JOIN (`+identifiersql.All+`) i ON i.tenant_id = a.tenant_id AND i.asset_id = a.id
 		WHERE a.tenant_id = $1 GROUP BY a.id`, r.tenant)
 	if err != nil {
 		t.Fatalf("asset labels: %v", err)
@@ -588,9 +580,10 @@ func TestIntegration_VendorPipeline_Hop1_DeviceOutputToSensorDiscoveries(t *test
 			// admission: admission decides which PEERS become assets, never
 			// what the device's own crypto is.
 			if !pipelinetest.Equal(t, handoff.SensorDiscoveries, enforcedHandoff.SensorDiscoveries) ||
-				!pipelinetest.Equal(t, handoff.LearnedSegments, enforcedHandoff.LearnedSegments) {
-				t.Errorf("sensor_discoveries or learned segments differ between admission off and enforced:\n off: %s\n enf: %s",
-					pipelinetest.Marshal(t, handoff.SensorDiscoveries), pipelinetest.Marshal(t, enforcedHandoff.SensorDiscoveries))
+				!pipelinetest.Equal(t, handoff.LearnedPrefixes, enforcedHandoff.LearnedPrefixes) {
+				t.Errorf("sensor_discoveries or learned prefixes differ between admission off and enforced:\n off: %s\n enf: %s\n prefixes off: %s\n prefixes enf: %s",
+					pipelinetest.Marshal(t, handoff.SensorDiscoveries), pipelinetest.Marshal(t, enforcedHandoff.SensorDiscoveries),
+					pipelinetest.Marshal(t, handoff.LearnedPrefixes), pipelinetest.Marshal(t, enforcedHandoff.LearnedPrefixes))
 			}
 
 			observed := map[string]hop1Observed{"admission_off": observedOff, "admission_enforce": observedEnforced}

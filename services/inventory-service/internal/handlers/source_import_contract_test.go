@@ -30,17 +30,17 @@ type stubSourceImporter struct {
 	gotSource    identity.Source
 }
 
-func (s *stubSourceImporter) UpsertSegments(_ context.Context, tenant uuid.UUID, items []services.SourceSegment) ([]services.SourceSegmentResult, error) {
+func (s *stubSourceImporter) UpsertPrefixes(_ context.Context, tenant uuid.UUID, items []services.SourcePrefix) ([]services.SourcePrefixResult, error) {
 	s.gotTenant = tenant
-	out := make([]services.SourceSegmentResult, 0, len(items))
+	out := make([]services.SourcePrefixResult, 0, len(items))
 	for i, it := range items {
 		switch i % 3 {
 		case 0:
-			out = append(out, services.SourceSegmentResult{CIDR: it.CIDR, Outcome: services.SourceSegmentCreated})
+			out = append(out, services.SourcePrefixResult{CIDR: it.CIDR, Outcome: services.SourcePrefixCreated})
 		case 1:
-			out = append(out, services.SourceSegmentResult{CIDR: it.CIDR, Outcome: services.SourceSegmentMatched})
+			out = append(out, services.SourcePrefixResult{CIDR: it.CIDR, Outcome: services.SourcePrefixMatched})
 		default:
-			out = append(out, services.SourceSegmentResult{CIDR: it.CIDR, Outcome: services.SourceSegmentError, Error: "boom"})
+			out = append(out, services.SourcePrefixResult{CIDR: it.CIDR, Outcome: services.SourcePrefixError, Error: "boom"})
 		}
 	}
 	return out, nil
@@ -154,7 +154,7 @@ func TestContract_SourceImport_Responses(t *testing.T) {
 		method, path, body, schema string
 		want                       int
 	}{
-		{http.MethodPost, base + "/segments", `{"segments":[{"cidr":"192.0.2.0/24","source_ref":"a"},{"cidr":"198.51.100.0/24","source_ref":"b"},{"cidr":"203.0.113.0/24","source_ref":"c"}]}`, "SourceSegmentsResponse", http.StatusOK},
+		{http.MethodPost, base + "/prefixes", `{"prefixes":[{"cidr":"192.0.2.0/24","source_ref":"a"},{"cidr":"198.51.100.0/24","source_ref":"b"},{"cidr":"203.0.113.0/24","source_ref":"c"}]}`, "SourcePrefixesResponse", http.StatusOK},
 		{http.MethodPost, base + "/assets/admission", `{"count":3}`, "SourceAdmissionResponse", http.StatusOK},
 		{http.MethodPost, base + "/assets", `{"source":{"kind":"imported","ref":"netbox:x"},"assets":[{"class_key":"switch"},{"class_key":"switch"},{"class_key":"switch"}]}`, "SourceAssetsResponse", http.StatusOK},
 		{http.MethodGet, base + "/asset-classes/switch", ``, "SourceClassExistsResponse", http.StatusOK},
@@ -211,7 +211,7 @@ func TestContract_SourceImport_RefusesBadRequests(t *testing.T) {
 	stub := &stubSourceImporter{}
 	e := sourceContractEngine(stub)
 	var big bytes.Buffer
-	big.WriteString(`{"segments":[`)
+	big.WriteString(`{"prefixes":[`)
 	for i := 0; i <= services.MaxSourceBatch; i++ {
 		if i > 0 {
 			big.WriteString(",")
@@ -223,7 +223,7 @@ func TestContract_SourceImport_RefusesBadRequests(t *testing.T) {
 		{"/assets", `{"source":{"kind":"measured","ref":"sensor:x"},"assets":[{"class_key":"switch"}]}`},
 		{"/assets", `{"source":{"kind":"imported","ref":""},"assets":[{"class_key":"switch"}]}`},
 		{"/assets", `{"source":{"kind":"imported","ref":"netbox:x"},"assets":[]}`},
-		{"/segments", big.String()},
+		{"/prefixes", big.String()},
 		{"/assets/admission", `{"count":-1}`},
 		{"/assets/links", `{"source":{"kind":"declared","ref":"cmdb:p"},"links":[{"asset_id":"` + uuid.NewString() + `","kind":"cmdb_sys_id","value":"v","scope":"p"}]}`},
 		{"/assets/links", `{"source":{"kind":"imported","ref":"cmdb:p"},"links":[]}`},

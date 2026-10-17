@@ -290,7 +290,7 @@ func (b *builder) freeText(t *ast.FreeText, sc scope) string {
 	tag := b.alias("tg")
 	return "(" + a + ".display_name ILIKE " + pattern +
 		" OR " + a + ".hostname ILIKE " + pattern +
-		" OR EXISTS (SELECT 1 FROM asset_identifiers " + ident +
+		" OR EXISTS (SELECT 1 FROM " + b.identifierRows() + " " + ident +
 		" WHERE " + ident + ".asset_id = " + a + ".id AND " + ident + ".value ILIKE " + pattern + ")" +
 		" OR EXISTS (SELECT 1 FROM jsonb_each_text(" + a + ".tags) AS " + tag + "(key, value)" +
 		" WHERE " + tag + ".key ILIKE " + pattern + " OR " + tag + ".value ILIKE " + pattern + "))"
@@ -410,7 +410,7 @@ func (b *builder) overValueMode(sc scope, f ast.FieldRef, sp ast.Span, raw bool,
 			return "FALSE"
 		}
 		al := b.alias("ai")
-		clause := "EXISTS (SELECT 1 FROM asset_identifiers " + al +
+		clause := "EXISTS (SELECT 1 FROM " + b.identifierRows() + " " + al +
 			" WHERE " + al + ".asset_id = " + a + ".id"
 		if f.Accessor.Kind == ast.AccessorIdentifier {
 			clause += " AND " + al + ".kind = " + b.param(f.Accessor.Key)
@@ -921,4 +921,37 @@ func wildcardPattern(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// identifierRows is an asset's identifiers of every kind, as a row source: the
+// `asset_identifiers` rows and, since DCIM row 1.4, the addresses its
+// interfaces hold — `ip_address` identifiers are no longer stored as
+// identifier rows (shared/identity/identifiersql documents the move). So
+// `id.ip_address`, `identifier:(kind:ip_address)` and free text keep matching
+// an asset's addresses.
+//
+// Built here rather than taken from identifiersql.All because the compiler's
+// output carries no literal and no tenant predicate (§7.2; RLS scopes every
+// table): the kind and the default scope are bound parameters, and the join
+// is on the interface id alone, which is a uuid.
+//
+// Same row set as identifiersql.Addresses: an address assigned to an
+// interface, neither of them rejected. A rejected address (or interface) is a
+// person's "this is not the asset's", and a query must not find the asset by
+// it — exactly as the asset page, which reads identifiersql, does not show it.
+func (b *builder) identifierRows() string {
+	kind := b.param("ip_address")
+	defaultScope := b.param("tenant")
+	assigned := b.param("interface")
+	// Every status but `rejected`, spelled as a set (as identifiersql does) so
+	// the clause carries no negated comparison inside the EXISTS.
+	live := "(" + b.param("pending") + ", " + b.param("active") + ", " + b.param("stale") + ", " + b.param("archived") + ")"
+	return "(SELECT id, asset_id, kind, value, scope, confidence, source_kind, first_seen_at, last_seen_at" +
+		" FROM asset_identifiers" +
+		" UNION ALL SELECT ipr.id, ifr.asset_id, " + kind + "::text, host(ipr.address), coalesce(ipr.identity_scope, " + defaultScope + "::text)," +
+		" coalesce(ipr.identity_confidence, 1.00)::numeric(3,2), ipr.source_kind," +
+		" coalesce(ipr.first_seen_at, ipr.created_at), coalesce(ipr.last_seen_at, ipr.updated_at)" +
+		" FROM ip_addresses ipr JOIN interfaces ifr ON ifr.id = ipr.assigned_id" +
+		" WHERE ipr.vrf_id IS NULL AND ipr.assigned_kind = " + assigned +
+		" AND ipr.status IN " + live + " AND ifr.status IN " + live + ")"
 }

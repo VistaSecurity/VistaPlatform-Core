@@ -616,7 +616,7 @@ class Validator {
         break;
       case 'inet':
         if (parseInet(lit.value) === null) {
-          this.add(this.typeMismatch(f, lit, 'an address or a CIDR block'));
+          this.add(this.typeMismatch(f, lit, 'an address or a prefix (CIDR)'));
         }
         break;
       case 'version':

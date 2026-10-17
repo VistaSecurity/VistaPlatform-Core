@@ -131,23 +131,22 @@ func peerAssetFor(o hop1Observed, value string) bool {
 	return false
 }
 
-func learnedSegmentValues(h pipelinetest.Hop1Handoff) []string {
+func learnedPrefixValues(h pipelinetest.Hop1Handoff) []string {
 	out := []string{}
-	for _, s := range h.LearnedSegments {
+	for _, s := range h.LearnedPrefixes {
 		out = append(out, s.Value)
 	}
 	return out
 }
 
-func segmentProvenance(h pipelinetest.Hop1Handoff, cidr string) map[string]any {
-	for _, s := range h.LearnedSegments {
+func prefixPosture(h pipelinetest.Hop1Handoff, cidr string) map[string]any {
+	for _, s := range h.LearnedPrefixes {
 		if s.Value == cidr {
-			return map[string]any{
-				"source":             s.Metadata["source"],
-				"source_device_type": s.Metadata["source_device_type"],
-				"source_asset_id":    s.Metadata["source_asset_id"],
-				"dhcp":               s.Metadata["dhcp"],
+			dhcp := "unknown"
+			if s.DHCPManaged != nil {
+				dhcp = map[bool]string{true: "enabled", false: "disabled"}[*s.DHCPManaged]
 			}
+			return map[string]any{"dhcp": dhcp}
 		}
 	}
 	return nil
@@ -167,7 +166,6 @@ func warningEndpoints(o hop1Observed) []string {
 // the test (see the caller).
 func vendorPipelineHop1Claims(t *testing.T, vendor string, h pipelinetest.Hop1Handoff, off, enforced hop1Observed) []pipelinetest.Expectation {
 	t.Helper()
-	device := pipelinetest.PlaceholderDeviceAssetID
 	appliance := pipelinetest.PlaceholderApplianceIP
 	switch vendor {
 	case "unifi":
@@ -196,11 +194,11 @@ func vendorPipelineHop1Claims(t *testing.T, vendor string, h pipelinetest.Hop1Ha
 			{What: "UniFi management TLS support flags",
 				Got:  []any{metaValue(mgmt, "tls_supports_classical_kex"), metaValue(mgmt, "tls_supports_pqc_hybrid_kex"), metaValue(mgmt, "tls_pqc_hybrid_kex_group")},
 				Want: []any{true, true, "X25519MLKEM768"}},
-			// P-15,: both networks become segments, labelled
+			// P-15,: both networks become prefixes, labelled
 			// with the device that taught them.
-			{What: "UniFi learned segments", Got: learnedSegmentValues(h), Want: []string{"192.0.2.0/24", "198.51.100.0/24"}},
-			{What: "UniFi LAN segment provenance", Got: segmentProvenance(h, "192.0.2.0/24"),
-				Want: map[string]any{"source": "interrogation", "source_device_type": "unifi", "source_asset_id": device, "dhcp": "enabled"}},
+			{What: "UniFi learned prefixes", Got: learnedPrefixValues(h), Want: []string{"192.0.2.0/24", "198.51.100.0/24"}},
+			{What: "UniFi LAN prefix DHCP posture", Got: prefixPosture(h, "192.0.2.0/24"),
+				Want: map[string]any{"dhcp": "enabled"}},
 			{What: "UniFi management plane", Got: []any{deviceFact(off, "mgmt.protocol"), deviceFact(off, "mgmt.plaintext")}, Want: []any{"https", false}},
 			{What: "UniFi collection warnings", Got: warningEndpoints(off), Want: []string{}},
 			// Enforced admission: the adopted devices resolve by their
@@ -209,7 +207,7 @@ func vendorPipelineHop1Claims(t *testing.T, vendor string, h pipelinetest.Hop1Ha
 			{What: "UniFi adopted switch under enforce", Got: first(retainedState(enforced, "788A204BEE41")), Want: "linked"},
 			{What: "UniFi wired client under enforce", Got: first(retainedState(enforced, "4c:6e:0a:87:d4:80")), Want: "linked"},
 			// Q1: a neighbour counts as direct only with an address in a known
-			// segment. This LLDP neighbour reports a MAC and a name and no
+			// prefix. This LLDP neighbour reports a MAC and a name and no
 			// address, so it is correctly held.
 			{What: "UniFi address-less LLDP neighbour under enforce", Got: first(retainedState(enforced, "core-sw-1.corp.example.test")), Want: "unresolved"},
 		}
@@ -264,20 +262,22 @@ func vendorPipelineHop1Claims(t *testing.T, vendor string, h pipelinetest.Hop1Ha
 				Got: emptyIPsec, Want: 0},
 			{What: "Cisco real IPsec SAs are NAT-traversed: UDP 4500 on the device",
 				Got: len(hop1RowsOnPort(h, "IPSec", 4500)), Want: 2},
-			{What: "Cisco VLAN interfaces become segments",
-				Got: len(h.LearnedSegments) > 0, Want: true,
-				KnownGap: "K-02 / W4.2", Current: false},
+			// K-02, fixed by rows 1.5c + 1.6: the VLAN interfaces' networks are
+			// prefixes the identity engine records from the device's sighting.
+			{What: "Cisco VLAN interfaces become prefixes",
+				Got: len(h.LearnedPrefixes) > 0, Want: true},
 			{What: "Cisco identity facts", Got: []any{deviceFact(off, "hw.vendor"), deviceFact(off, "os.name")}, Want: []any{"Cisco Systems", "IOS-XE"}},
 			{What: "Cisco management plane", Got: []any{deviceFact(off, "mgmt.protocol"), deviceFact(off, "mgmt.plaintext")}, Want: []any{"ssh", false}},
 			{What: "Cisco collection warnings", Got: warningEndpoints(off), Want: []string{}},
-			// Q1: CDP/LLDP neighbours whose address is in a registered segment
-			// are directly observed and admitted under enforce.
-			{What: "Cisco CDP neighbour in a known segment under enforce",
-				Got: first(retainedState(enforced, "94:f1:28:79:55:55")), Want: "linked",
-				KnownGap: "P-16 / W4.7", Current: "unresolved"},
-			{What: "Cisco LLDP neighbour in a known segment under enforce",
-				Got: first(retainedState(enforced, "desktop-switch")), Want: "linked",
-				KnownGap: "P-16 / W4.7", Current: "unresolved"},
+			// Q1: CDP/LLDP neighbours whose address is in a registered prefix
+			// are directly observed and admitted under enforce. P-16, fixed by
+			// row 1.6: the device's own sighting records the prefixes it
+			// reports before its addresses are scoped, so the neighbours'
+			// addresses resolve into a prefix under enforced admission.
+			{What: "Cisco CDP neighbour in a known prefix under enforce",
+				Got: first(retainedState(enforced, "94:f1:28:79:55:55")), Want: "linked"},
+			{What: "Cisco LLDP neighbour in a known prefix under enforce",
+				Got: first(retainedState(enforced, "desktop-switch")), Want: "linked"},
 		}
 
 	case "fortinet":
@@ -304,9 +304,11 @@ func vendorPipelineHop1Claims(t *testing.T, vendor string, h pipelinetest.Hop1Ha
 				KnownGap: "C-04 / W3.3", Current: ""},
 			{What: "FortiGate local certificate reaches a row", Got: certRows > 0, Want: true,
 				KnownGap: "P-13 / W2.4", Current: false},
-			{What: "FortiGate learned segments", Got: learnedSegmentValues(h), Want: []string{"198.51.100.0/24"}},
-			{What: "FortiGate segment provenance", Got: segmentProvenance(h, "198.51.100.0/24"),
-				Want: map[string]any{"source": "interrogation", "source_device_type": "fortinet", "source_asset_id": device, "dhcp": "unknown"}},
+			// DCIM rows 1.5c + 1.6: the FortiGate's networks are prefixes,
+			// written by the identity engine from its interfaces (the parity
+			// test in vendor_network_parity_integration_test.go), identically
+			// with admission off and enforced.
+			{What: "FortiGate learned prefixes", Got: learnedPrefixValues(h), Want: []string{"192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/29"}},
 			{What: "FortiGate device class", Got: deviceClass(off), Want: "firewall"},
 			{What: "FortiGate collection warnings", Got: warningEndpoints(off), Want: []string{}},
 		}
@@ -317,13 +319,13 @@ func vendorPipelineHop1Claims(t *testing.T, vendor string, h pipelinetest.Hop1Ha
 			{What: "PAN-OS decryption profile carries its forward-trust CA certificate",
 				Got: decrypt.Metadata["certificates"] != nil, Want: true,
 				KnownGap: "P-13 / W2.4", Current: false},
-			{What: "PAN-OS data-plane interfaces become segments",
-				Got: len(h.LearnedSegments) > 0, Want: true,
-				KnownGap: "K-02 / W4.2", Current: false},
+			// K-02, fixed by rows 1.5c + 1.6 (as Cisco).
+			{What: "PAN-OS data-plane interfaces become prefixes",
+				Got: len(h.LearnedPrefixes) > 0, Want: true},
 			{What: "PAN-OS device class", Got: deviceClass(off), Want: "firewall"},
 			{What: "PAN-OS identity", Got: []any{deviceFact(off, "hw.vendor"), deviceFact(off, "os.name")}, Want: []any{"Palo Alto Networks", "PAN-OS"}},
 			{What: "PAN-OS collection warnings", Got: warningEndpoints(off), Want: []string{}},
-			{What: "PAN-OS LLDP neighbour in a known segment under enforce",
+			{What: "PAN-OS LLDP neighbour in a known prefix under enforce",
 				Got: first(retainedState(enforced, "00:1b:17:00:00:01")), Want: "linked",
 				KnownGap: "P-16 / W4.7", Current: "unresolved"},
 		}
@@ -363,9 +365,9 @@ func vendorPipelineHop1Claims(t *testing.T, vendor string, h pipelinetest.Hop1Ha
 				KnownGap: "P-13 / W2.4", Current: nil},
 			{What: "F5 uptime", Got: hop1HasFact(off, "net.uptime_seconds"), Want: true,
 				KnownGap: "K-08 / W4.6", Current: false},
-			{What: "F5 learned segments", Got: learnedSegmentValues(h), Want: []string{"192.0.2.0/24", "198.51.100.0/24"}},
-			{What: "F5 segment provenance", Got: segmentProvenance(h, "198.51.100.0/24"),
-				Want: map[string]any{"source": "interrogation", "source_device_type": "f5", "source_asset_id": device, "dhcp": "unknown"}},
+			// DCIM rows 1.5c + 1.6: as the FortiGate — the self IPs' networks
+			// are prefixes on the VLAN interfaces.
+			{What: "F5 learned prefixes", Got: learnedPrefixValues(h), Want: []string{"192.0.2.0/24", "198.51.100.0/24"}},
 			// P-17,: the refused endpoint is on the job.
 			{What: "F5 collection warnings", Got: warningEndpoints(off), Want: []string{"/mgmt/tm/ltm/profile/server-ssl permission_denied"}},
 			{What: "F5 device class", Got: deviceClass(off), Want: "load_balancer"},

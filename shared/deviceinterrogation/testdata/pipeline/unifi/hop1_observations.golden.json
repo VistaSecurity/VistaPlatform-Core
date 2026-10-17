@@ -8,21 +8,6 @@
         "value": "Intel"
       },
       {
-        "asset": "asset[hostname=linux-2,ip_address=192.0.2.68,mac_address=4c:6e:0a:87:d4:80]",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "addresses": [
-              "192.0.2.68/32"
-            ],
-            "mac": "4c:6e:0a:87:d4:80",
-            "name": "lan",
-            "vlan": 1
-          }
-        ]
-      },
-      {
         "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
         "key": "hw.firmware_version",
         "source_kind": "measured",
@@ -45,43 +30,6 @@
         "key": "hw.vendor",
         "source_kind": "measured",
         "value": "Ubiquiti Networks"
-      },
-      {
-        "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "mac": "78:8a:20:4b:ee:41",
-            "name": "eth0"
-          },
-          {
-            "admin_state": "up",
-            "name": "Uplink",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "admin_state": "down",
-            "name": "Camera 1",
-            "state": "down",
-            "vlan": 20
-          }
-        ]
-      },
-      {
-        "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
-        "key": "net.neighbors",
-        "source_kind": "measured",
-        "value": [
-          {
-            "local_port": "Uplink",
-            "protocol": "lldp",
-            "remote_mac": "00:1b:17:00:00:01",
-            "remote_name": "core-sw-1.corp.example.test",
-            "remote_port": "Gi1/0/24"
-          }
-        ]
       },
       {
         "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
@@ -115,17 +63,6 @@
       },
       {
         "asset": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "mac": "78:8a:20:4b:ee:52",
-            "name": "eth0"
-          }
-        ]
-      },
-      {
-        "asset": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
         "key": "net.uptime_seconds",
         "source_kind": "measured",
         "value": 7654321
@@ -147,28 +84,6 @@
         "key": "mgmt.protocol",
         "source_kind": "measured",
         "value": "https"
-      },
-      {
-        "asset": "device",
-        "key": "net.vlans",
-        "source_kind": "measured",
-        "value": [
-          {
-            "dhcp_enabled": true,
-            "dhcp_range_configured": true,
-            "gateway": "192.0.2.1",
-            "name": "Default",
-            "subnet": "192.0.2.0/24"
-          },
-          {
-            "dhcp_enabled": false,
-            "dhcp_range_configured": false,
-            "gateway": "198.51.100.1",
-            "id": 20,
-            "name": "IoT",
-            "subnet": "198.51.100.0/24"
-          }
-        ]
       }
     ],
     "edges": [
@@ -184,13 +99,6 @@
         "source_kind": "measured",
         "status": "pending",
         "to": "device",
-        "type": "member_of"
-      },
-      {
-        "from": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
-        "source_kind": "measured",
-        "status": "pending",
-        "to": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
         "type": "member_of"
       },
       {
@@ -232,7 +140,7 @@
             "confidence": 1,
             "kind": "ip_address",
             "pinned": true,
-            "scope": "segment:198.51.100.0/24",
+            "scope": "prefix:198.51.100.0/24",
             "value": "198.51.100.1"
           },
           {
@@ -263,12 +171,14 @@
         "identifiers": [
           {
             "confidence": 1,
+            "interface": "eth0",
             "kind": "ip_address",
-            "scope": "segment:192.0.2.0/24",
+            "scope": "prefix:192.0.2.0/24",
             "value": "192.0.2.11"
           },
           {
             "confidence": 1,
+            "interface": "eth0",
             "kind": "mac_address",
             "value": "78:8a:20:4b:ee:41"
           },
@@ -286,12 +196,14 @@
         "identifiers": [
           {
             "confidence": 1,
+            "interface": "eth0",
             "kind": "ip_address",
-            "scope": "segment:192.0.2.0/24",
+            "scope": "prefix:192.0.2.0/24",
             "value": "192.0.2.12"
           },
           {
             "confidence": 1,
+            "interface": "eth0",
             "kind": "mac_address",
             "value": "78:8a:20:4b:ee:52"
           },
@@ -310,7 +222,7 @@
           {
             "confidence": 1,
             "kind": "ip_address",
-            "scope": "segment:192.0.2.0/24",
+            "scope": "prefix:192.0.2.0/24",
             "value": "192.0.2.68"
           },
           {
@@ -321,7 +233,7 @@
           {
             "confidence": 1,
             "kind": "hostname",
-            "scope": "segment:192.0.2.0/24",
+            "scope": "prefix:192.0.2.0/24",
             "value": "linux-2"
           }
         ],
@@ -336,7 +248,7 @@
             "confidence": 1,
             "kind": "ip_address",
             "pinned": true,
-            "scope": "segment:192.0.2.0/24",
+            "scope": "prefix:192.0.2.0/24",
             "value": "192.0.2.1"
           },
           {
@@ -374,18 +286,6 @@
             "confidence": 1,
             "kind": "fqdn",
             "value": "core-sw-1.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "unresolved"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved,no_device_or_address_binding}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "00:1b:17:00:00:01"
           }
         ],
         "source_kind": "measured",
@@ -434,21 +334,6 @@
         "value": "Intel"
       },
       {
-        "asset": "asset[hostname=linux-2,ip_address=192.0.2.68,mac_address=4c:6e:0a:87:d4:80]",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "addresses": [
-              "192.0.2.68/32"
-            ],
-            "mac": "4c:6e:0a:87:d4:80",
-            "name": "lan",
-            "vlan": 1
-          }
-        ]
-      },
-      {
         "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
         "key": "hw.firmware_version",
         "source_kind": "measured",
@@ -471,43 +356,6 @@
         "key": "hw.vendor",
         "source_kind": "measured",
         "value": "Ubiquiti Networks"
-      },
-      {
-        "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "mac": "78:8a:20:4b:ee:41",
-            "name": "eth0"
-          },
-          {
-            "admin_state": "up",
-            "name": "Uplink",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "admin_state": "down",
-            "name": "Camera 1",
-            "state": "down",
-            "vlan": 20
-          }
-        ]
-      },
-      {
-        "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
-        "key": "net.neighbors",
-        "source_kind": "measured",
-        "value": [
-          {
-            "local_port": "Uplink",
-            "protocol": "lldp",
-            "remote_mac": "00:1b:17:00:00:01",
-            "remote_name": "core-sw-1.corp.example.test",
-            "remote_port": "Gi1/0/24"
-          }
-        ]
       },
       {
         "asset": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
@@ -541,17 +389,6 @@
       },
       {
         "asset": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "mac": "78:8a:20:4b:ee:52",
-            "name": "eth0"
-          }
-        ]
-      },
-      {
-        "asset": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
         "key": "net.uptime_seconds",
         "source_kind": "measured",
         "value": 7654321
@@ -573,28 +410,6 @@
         "key": "mgmt.protocol",
         "source_kind": "measured",
         "value": "https"
-      },
-      {
-        "asset": "device",
-        "key": "net.vlans",
-        "source_kind": "measured",
-        "value": [
-          {
-            "dhcp_enabled": true,
-            "dhcp_range_configured": true,
-            "gateway": "192.0.2.1",
-            "name": "Default",
-            "subnet": "192.0.2.0/24"
-          },
-          {
-            "dhcp_enabled": false,
-            "dhcp_range_configured": false,
-            "gateway": "198.51.100.1",
-            "id": 20,
-            "name": "IoT",
-            "subnet": "198.51.100.0/24"
-          }
-        ]
       }
     ],
     "edges": [
@@ -616,21 +431,7 @@
         "from": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
         "source_kind": "measured",
         "status": "pending",
-        "to": "asset[fqdn=core-sw-1.corp.example.test,mac_address=00:1b:17:00:00:01]",
-        "type": "member_of"
-      },
-      {
-        "from": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
-        "source_kind": "measured",
-        "status": "pending",
         "to": "device",
-        "type": "member_of"
-      },
-      {
-        "from": "asset[ip_address=192.0.2.12,mac_address=78:8a:20:4b:ee:52,serial_number=788A204BEE52]",
-        "source_kind": "measured",
-        "status": "pending",
-        "to": "asset[ip_address=192.0.2.11,mac_address=78:8a:20:4b:ee:41,serial_number=788A204BEE41]",
         "type": "member_of"
       },
       {

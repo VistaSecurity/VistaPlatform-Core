@@ -1,0 +1,76 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "serial": "FGT60F0000003390",
+  "version": "v7.4.4",
+  "results": [
+    {
+      "name": "port1",
+      "ip": "203.0.113.2 255.255.255.248",
+      "macaddr": "00:09:0f:aa:39:01",
+      "status": "up",
+      "vlanid": 0,
+      "type": "physical",
+      "vdom": "root",
+      "mtu-override": "disable",
+      "mtu": 1500,
+      "password": "PlantedFortiSecret-3390",
+      "psksecret": "PlantedFortiSecret-3390"
+    },
+    {
+      "name": "port2",
+      "ip": "0.0.0.0 0.0.0.0",
+      "macaddr": "00:09:0f:aa:39:02",
+      "status": "up",
+      "vlanid": 0,
+      "type": "physical",
+      "vdom": "root"
+    },
+    {
+      "name": "port3",
+      "ip": "0.0.0.0 0.0.0.0",
+      "macaddr": "00:09:0f:aa:39:03",
+      "status": "down",
+      "vlanid": 0,
+      "type": "physical",
+      "vdom": "root"
+    },
+    {
+      "name": "agg1",
+      "ip": "10.40.0.1 255.255.255.0",
+      "macaddr": "00:09:0f:aa:39:a1",
+      "status": "up",
+      "vlanid": 0,
+      "type": "aggregate",
+      "vdom": "root",
+      "member": [
+        {
+          "interface-name": "port2"
+        },
+        {
+          "interface-name": "port3"
+        }
+      ]
+    },
+    {
+      "name": "vlan-users",
+      "ip": "10.40.40.1 255.255.255.0",
+      "status": "up",
+      "vlanid": 40,
+      "type": "vlan",
+      "interface": "agg1",
+      "vdom": "root",
+      "mtu-override": "enable",
+      "mtu": 9000
+    },
+    {
+      "name": "vlan-guest",
+      "ip": "10.40.50.1 255.255.255.0",
+      "status": "up",
+      "vlanid": 50,
+      "type": "vlan",
+      "interface": "agg1",
+      "vdom": "guest"
+    }
+  ]
+}

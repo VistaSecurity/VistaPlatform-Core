@@ -1,6 +1,8 @@
 package services
 
 import (
+	"github.com/google/uuid"
+	"github.com/vistasecurity/vistaplatform/shared/approval"
 	"net/netip"
 	"testing"
 )
@@ -55,28 +57,47 @@ func TestSourceNetworkTypeKeepsCGNATOutOfAutoScan(t *testing.T) {
 	}
 }
 
-// SegmentSet answers every segment question from one read; a nil set (no
-// segment service, or nothing read) matches nothing and still classifies by
-// address class.
-func TestSegmentSetClassifyAndNilSafety(t *testing.T) {
-	var nilSet *SegmentSet
+// PrefixSet answers every prefix question from one read: the LONGEST match,
+// and a nil set (nothing read) matches nothing and still classifies by address
+// class.
+func TestPrefixSetMatchClassifyAndNilSafety(t *testing.T) {
+	var nilSet *PrefixSet
 	str := func(s string) *string { return &s }
-	if nilSet.Match(str("10.0.0.1"), nil) != nil {
-		t.Fatal("a nil set matched a segment")
-	}
-	if got := nilSet.Tags(str("10.0.0.1"), nil); got == nil || len(got) != 0 {
-		t.Fatalf("nil set tags = %v, want an empty map", got)
+	if nilSet.Match(str("10.0.0.1")) != nil {
+		t.Fatal("a nil set matched a prefix")
 	}
 	for addr, want := range map[string]string{
 		"10.0.0.1":    "unknown",
 		"100.64.3.4":  "unknown", // #2374 D1
 		"203.0.113.4": "third_party",
 	} {
-		if got := nilSet.Classify(str(addr), nil); got != want {
+		if got := nilSet.Classify(str(addr)); got != want {
 			t.Errorf("Classify(%s) = %q, want %q", addr, got, want)
 		}
 	}
-	if got := nilSet.Classify(nil, str("host.example")); got != "third_party" {
-		t.Errorf("hostname-only Classify = %q, want third_party", got)
+	if got := nilSet.Classify(nil); got != "third_party" {
+		t.Errorf("address-less Classify = %q, want third_party", got)
+	}
+
+	wide, narrow := uuid.New(), uuid.New()
+	set := &PrefixSet{byID: map[uuid.UUID]*prefixInfo{
+		wide:   {ID: wide, Prefix: netip.MustParsePrefix("10.0.0.0/16"), NetworkType: "private"},
+		narrow: {ID: narrow, Prefix: netip.MustParsePrefix("10.0.1.0/24"), NetworkType: "vpn"},
+	}}
+	set.match = approval.NewPrefixSet([]approval.Prefix{
+		{ID: wide, Prefix: netip.MustParsePrefix("10.0.0.0/16")},
+		{ID: narrow, Prefix: netip.MustParsePrefix("10.0.1.0/24")},
+	})
+	if p := set.Match(str("10.0.1.9")); p == nil || p.ID != narrow {
+		t.Fatalf("10.0.1.9 matched %+v, want the /24 (longest match)", p)
+	}
+	if p := set.Match(str("10.0.2.9")); p == nil || p.ID != wide {
+		t.Fatalf("10.0.2.9 matched %+v, want the /16", p)
+	}
+	if got := set.Classify(str("10.0.1.9")); got != "internal" {
+		t.Errorf("Classify inside a prefix = %q, want internal", got)
+	}
+	if got := classificationType(set.Match(str("10.0.1.9")), str("10.0.1.9")); got != "vpn" {
+		t.Errorf("classificationType = %q, want the prefix's vpn", got)
 	}
 }

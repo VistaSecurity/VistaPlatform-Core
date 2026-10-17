@@ -296,26 +296,10 @@ func TestIntegration_CloudShapedFinding_EnforceAdmission_OnlyThePlatformCollecto
 		value   string // what the observation's evidence names
 		finding func(t *testing.T, raw *sql.DB, tenant uuid.UUID) IngestFinding
 	}{
-		{
-			// A tenant sensor passively saw a name and nothing else. The domain
-			// segment keeps it on the managed-asset path (a name with no address
-			// is otherwise routed to external_connections and never reaches
-			// admission at all), so this is the engine's own answer.
-			name:  "name-only passive sensor observation",
-			value: "shadow-store.corp.example.test",
-			finding: func(t *testing.T, raw *sql.DB, tenant uuid.UUID) IngestFinding {
-				if _, err := raw.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment)
-					VALUES($1,$2,'Corp names','domain','corp.example.test','production')`, uuid.New(), tenant); err != nil {
-					t.Fatalf("register domain segment: %v", err)
-				}
-				host := "shadow-store.corp.example.test"
-				return fromSensor(IngestFinding{
-					Hostname:  &host,
-					AssetType: "server",
-					RawData:   map[string]interface{}{"source": "sensor_discovery"},
-				}, tenantSensor(t, raw, tenant), time.Now())
-			},
-		},
+		// (A name-only passive observation used to be kept on the managed path
+		// by a `domain` segment; domain segments retired with DCIM row 1.6, so
+		// such a name is routed to external_connections and never reaches
+		// admission.)
 		{
 			// The metadata envelope is sensor-controlled: a tenant sensor can
 			// write discovery_method=cloud_api and an ARN into it. That is a

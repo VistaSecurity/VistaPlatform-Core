@@ -3,6 +3,7 @@ import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rb
 import { Icon } from '../../components/ui';
 import { PageWrap, queryNote, relTime } from './kit';
 import { useIntegrations, useJobs } from './queries';
+import { CloudAccountPanel } from './cloud-account-panel';
 import {
   CloudIntegrationFormModal,
   CloudIntegrationDeleteModal,
@@ -70,7 +71,7 @@ export function CloudPage() {
               : list.some((i) => i.status === 'error') ? 'error'
               : list[0]?.status || 'pending';
             const assets = jobs
-              .filter((j) => (j.cloud_provider || '').toUpperCase() === provider)
+              .filter((j) => (j.cloud_provider ?? '').toUpperCase() === provider)
               .reduce((n, j) => n + (j.assets_discovered ?? 0), 0);
             const tested = list.map((i) => i.last_tested_at).filter(Boolean).sort();
             const lastTested = tested[tested.length - 1];
@@ -97,23 +98,28 @@ export function CloudPage() {
                   {lastTested ? `Last tested ${relTime(lastTested)}` : 'Not tested yet'}
                 </div>
 
-                {/* Per-account rows with write actions (gated). */}
-                <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
-                  <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--app-border2)', display: 'grid', gap: 8 }}>
-                    {list.map((i) => (
-                      <div key={i.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {/* Per-account rows: the account, its auto-approve switch and
+                    the last run (everyone who can read the page); the write
+                    actions stay gated on discovery.manage. */}
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--app-border2)', display: 'grid', gap: 12 }}>
+                  {list.map((i) => (
+                    <div key={i.id} style={{ display: 'grid', gap: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: 'var(--app-t2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                           <span style={{ width: 6, height: 6, borderRadius: 50, background: statusTone(i.status), display: 'inline-block', marginRight: 6 }} />
                           {i.integration_name}
                         </span>
-                        <button className="ui-btn sm ghost" title="Run discovery now" onClick={() => setDiscoverTarget(i)}><Icon name="play" size={13} /></button>
-                        <button className="ui-btn sm ghost" title="Test connection" onClick={() => setTestTarget(i)}><Icon name="plug" size={13} /></button>
-                        <button className="ui-btn sm ghost" title="Edit integration" onClick={() => setEditTarget(i)}><Icon name="sliders-horizontal" size={13} /></button>
-                        <button className="ui-btn sm ghost" style={{ color: 'var(--danger-text)' }} title="Remove integration" onClick={() => setDeleteTarget(i)}><Icon name="x" size={13} /></button>
+                        <PermissionGate permission={TENANT_PERMISSIONS.discovery.manage}>
+                          <button className="ui-btn sm ghost" title="Run discovery now" onClick={() => setDiscoverTarget(i)}><Icon name="play" size={13} /></button>
+                          <button className="ui-btn sm ghost" title="Test connection" onClick={() => setTestTarget(i)}><Icon name="plug" size={13} /></button>
+                          <button className="ui-btn sm ghost" title="Edit integration" onClick={() => setEditTarget(i)}><Icon name="sliders-horizontal" size={13} /></button>
+                          <button className="ui-btn sm ghost" style={{ color: 'var(--danger-text)' }} title="Remove integration" onClick={() => setDeleteTarget(i)}><Icon name="x" size={13} /></button>
+                        </PermissionGate>
                       </div>
-                    ))}
-                  </div>
-                </PermissionGate>
+                      <CloudAccountPanel integration={i} jobs={jobs} />
+                    </div>
+                  ))}
+                </div>
               </div>
             );
           })}

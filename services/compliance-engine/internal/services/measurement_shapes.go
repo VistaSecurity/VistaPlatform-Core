@@ -295,14 +295,14 @@ var measurementShapes = map[string]measurementShape{
 			// support_group", and a column holding only whitespace is not an
 			// answer.
 			"owner_present": {SQL: "(COALESCE(NULLIF(btrim(a.owner_email), ''), NULLIF(btrim(a.support_group), '')) IS NOT NULL)", Kind: scanBool},
-			"location_present": {SQL: "(COALESCE(NULLIF(btrim(a.site), ''), NULLIF(btrim(a.region), ''), NULLIF(btrim(a.zone), ''), a.location_id::text) IS NOT NULL)",
+			"location_present": {SQL: "(COALESCE(a.site_id::text, NULLIF(btrim(a.region), ''), NULLIF(btrim(a.zone), ''), a.location_id::text) IS NOT NULL)",
 				Kind: scanBool},
 			"class_key":      {SQL: "a.class_key", Kind: scanTextNN},
 			"last_seen_days": {SQL: "EXTRACT(EPOCH FROM (now() - a.last_seen_at)) / 86400.0", Kind: scanFloat},
 			"last_seen_at":   {SQL: "a.last_seen_at", Kind: scanTime},
 			"owner_email":    {SQL: "a.owner_email", Kind: scanText},
 			"support_group":  {SQL: "a.support_group", Kind: scanText},
-			"site":           {SQL: "a.site", Kind: scanText},
+			"site":           {SQL: "(SELECT st.name FROM sites st WHERE st.id = a.site_id)", Kind: scanText},
 			"region":         {SQL: "a.region", Kind: scanText},
 			"hostname":       {SQL: "a.hostname", Kind: scanText},
 			"display_name":   {SQL: "a.display_name", Kind: scanText},

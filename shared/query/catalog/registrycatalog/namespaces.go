@@ -2,6 +2,7 @@ package registrycatalog
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -294,15 +295,43 @@ func tagField(key string) catalog.FieldInfo {
 	}
 }
 
+// ----------------------------------------------------------- custom fields --
+
+// customFieldKey is a custom field name (shared/dcim/customfields.NamePattern,
+// the schema's CHECK): the only keys `cf.` resolves. Spelled out here rather
+// than imported, because shared/query does not depend on shared/dcim.
+var customFieldKey = regexp.MustCompile(`^[a-z][a-z0-9_]{0,49}$`)
+
+// CustomFieldColumn is the jsonb column `cf.<name>` reads on every target
+// that allows the namespace.
+const CustomFieldColumn = "custom_fields"
+
+// customFieldField is `cf.<name>`: a tenant-defined custom field (QUERY_LANGUAGE
+// §15.5). The definitions are tenant rows, so — like a tag key — any
+// well-formed name resolves and none is enumerated here; the editor offers the
+// tenant's own names from /dcim/custom-fields. Typed keyword: the jsonb
+// accessor yields the stored value's text, so `=`, `:`, `in`, wildcards and
+// `~` compare that text (a number as written, a boolean as true/false), and
+// ordering is refused rather than compared lexically.
+func customFieldField(key string) catalog.FieldInfo {
+	return catalog.FieldInfo{
+		Name: string(ast.NamespaceCF) + "." + key, Type: ast.TypeKeyword,
+		Accessor:    ast.Accessor{Kind: ast.AccessorJSONB, JSONColumn: CustomFieldColumn, Key: key},
+		Description: "custom field " + key,
+	}
+}
+
 // ------------------------------------------------------- per-target access --
 
 // namespacesByTarget says which of the four namespaces resolve on a target
 // (§4.2). Only an asset-shaped row carries class attributes, facts, identifiers
 // and tags; a measurement predicate reads facts and nothing else (§8).
 var namespacesByTarget = map[string][]ast.Namespace{
-	"asset":       {ast.NamespaceAttr, ast.NamespaceFact, ast.NamespaceID, ast.NamespaceTag},
+	"asset":       {ast.NamespaceAttr, ast.NamespaceFact, ast.NamespaceID, ast.NamespaceTag, ast.NamespaceCF},
 	"observation": {ast.NamespaceAttr, ast.NamespaceFact, ast.NamespaceID, ast.NamespaceTag},
 	"measurement": {ast.NamespaceFact},
+	// An interface row carries custom fields and nothing else namespaced.
+	"interface": {ast.NamespaceCF},
 }
 
 func namespaceAllowed(target string, ns ast.Namespace) bool {

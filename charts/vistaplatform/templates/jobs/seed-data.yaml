@@ -89,17 +89,18 @@ metadata:
     helm.sh/hook: pre-install,pre-upgrade
     helm.sh/hook-weight: "-4"
     helm.sh/hook-delete-policy: before-hook-creation
+{{- if .Values.enterprise.contentBundle.enabled }}
 data:
-  seed.sql: |
-{{ .Files.Get "files/schema/seed.sql" | indent 4 }}
-  {{- if .Values.enterprise.contentBundle.enabled }}
   frameworks-regulated.sql: |
 {{ .Files.Get "files/ee/frameworks-regulated.sql" | indent 4 }}
   frameworks-regulated.sql.sig: |
 {{ .Files.Get "files/ee/frameworks-regulated.sql.sig" | indent 4 }}
   edition-public-key.pem: |
 {{ .Files.Get "files/ee/edition-public-key.pem" | indent 4 }}
-  {{- end }}
+{{- else }}
+data: {}
+{{- end }}
+{{- include "vistaplatform.sqlConfigMaps" (dict "root" . "kind" "seed" "component" "seed-data" "hook" true) }}
 ---
 {{- $schemaHash := include "vistaplatform.schemaHash" . }}
 apiVersion: batch/v1
@@ -295,7 +296,8 @@ spec:
               done
               {{- end }}
               echo "Applying seed data..."
-              psql -f /seed/seed.sql
+              {{ include "vistaplatform.sqlUnpackShell" (dict "kind" "seed" "mount" "/seed") }}
+              psql -f "$SQL_FILE"
               {{- if .Values.enterprise.contentBundle.enabled }}
               # Signature already verified by the init container.
               echo "Applying Enterprise content bundle (regulated compliance frameworks)..."
@@ -330,7 +332,8 @@ spec:
               done
               {{- end }}
               echo "Applying seed data..."
-              psql -d "$DATABASE_URL" -f /seed/seed.sql
+              {{ include "vistaplatform.sqlUnpackShell" (dict "kind" "seed" "mount" "/seed") }}
+              psql -d "$DATABASE_URL" -f "$SQL_FILE"
               {{- if .Values.enterprise.contentBundle.enabled }}
               # Signature already verified by the init container.
               echo "Applying Enterprise content bundle (regulated compliance frameworks)..."
@@ -351,8 +354,11 @@ spec:
             {{- end }}
       volumes:
         - name: seed
-          configMap:
-            name: {{ include "vistaplatform.fullname" . }}-seed
+          projected:
+            sources:
+              - configMap:
+                  name: {{ include "vistaplatform.fullname" . }}-seed
+              {{- include "vistaplatform.sqlProjectedSources" (dict "root" . "kind" "seed") | trim | nindent 14 }}
         {{- if and .Values.datastores.postgres.enabled .Values.datastores.postgres.tls.enabled }}
         - name: db-ca
           secret:

@@ -33,41 +33,6 @@
       },
       {
         "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "addresses": [
-              "198.51.100.2/24"
-            ],
-            "mac": "00:1b:17:0a:0b:0d",
-            "name": "ethernet1/1",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "addresses": [
-              "203.0.113.1/24"
-            ],
-            "name": "ethernet1/2.100",
-            "vlan": 100
-          },
-          {
-            "mac": "00:1b:17:0a:0b:0f",
-            "name": "ethernet1/3",
-            "state": "down"
-          },
-          {
-            "addresses": [
-              "192.0.2.5/24"
-            ],
-            "mac": "00:1b:17:0a:0b:0c",
-            "name": "management"
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "net.neighbors",
         "source_kind": "measured",
         "value": [
@@ -82,14 +47,6 @@
             "protocol": "arp",
             "remote_address": "203.0.113.20",
             "remote_mac": "00:1b:17:00:00:22"
-          },
-          {
-            "local_port": "ethernet1/1",
-            "protocol": "lldp",
-            "remote_address": "198.51.100.1",
-            "remote_mac": "00:1b:17:00:00:01",
-            "remote_name": "core-sw-1.example.net",
-            "remote_port": "Gi1/0/24"
           }
         ]
       },
@@ -166,12 +123,86 @@
         "state": "linked"
       },
       {
+        "admission_reasons": "{direct_scoped_interface}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "interface": "Ethernet1/1",
+            "kind": "ip_address",
+            "scope": "prefix:198.51.100.0/24",
+            "value": "198.51.100.2"
+          },
+          {
+            "confidence": 1,
+            "interface": "Ethernet1/2.100",
+            "kind": "ip_address",
+            "scope": "prefix:203.0.113.0/24",
+            "value": "203.0.113.1"
+          },
+          {
+            "confidence": 1,
+            "interface": "management",
+            "kind": "ip_address",
+            "scope": "prefix:192.0.2.0/24",
+            "value": "192.0.2.5"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "pa-edge-01.corp.example.test"
+          },
+          {
+            "confidence": 1,
+            "kind": "serial_number",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "013201001234"
+          },
+          {
+            "confidence": 1,
+            "interface": "Ethernet1/1",
+            "kind": "mac_address",
+            "value": "00:1b:17:0a:0b:0d"
+          },
+          {
+            "confidence": 1,
+            "interface": "Ethernet1/3",
+            "kind": "mac_address",
+            "value": "00:1b:17:0a:0b:0f"
+          },
+          {
+            "confidence": 1,
+            "interface": "management",
+            "kind": "mac_address",
+            "value": "00:1b:17:0a:0b:0c"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
         "admission_reasons": "{insufficient_identity_evidence}",
         "identifiers": [
           {
             "confidence": 1,
             "kind": "ip_address",
-            "scope": "segment:198.51.100.0/24",
+            "scope": "prefix:198.51.100.0/24",
             "value": "198.51.100.1"
           },
           {
@@ -187,99 +218,6 @@
         ],
         "source_kind": "measured",
         "state": "unresolved"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "00:1b:17:0a:0b:0c"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "pa-edge-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "00:1b:17:0a:0b:0d"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "pa-edge-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "00:1b:17:0a:0b:0f"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "pa-edge-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
       }
     ],
     "collection_warnings": [],
@@ -319,41 +257,6 @@
       },
       {
         "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "addresses": [
-              "198.51.100.2/24"
-            ],
-            "mac": "00:1b:17:0a:0b:0d",
-            "name": "ethernet1/1",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "addresses": [
-              "203.0.113.1/24"
-            ],
-            "name": "ethernet1/2.100",
-            "vlan": 100
-          },
-          {
-            "mac": "00:1b:17:0a:0b:0f",
-            "name": "ethernet1/3",
-            "state": "down"
-          },
-          {
-            "addresses": [
-              "192.0.2.5/24"
-            ],
-            "mac": "00:1b:17:0a:0b:0c",
-            "name": "management"
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "net.neighbors",
         "source_kind": "measured",
         "value": [
@@ -368,14 +271,6 @@
             "protocol": "arp",
             "remote_address": "203.0.113.20",
             "remote_mac": "00:1b:17:00:00:22"
-          },
-          {
-            "local_port": "ethernet1/1",
-            "protocol": "lldp",
-            "remote_address": "198.51.100.1",
-            "remote_mac": "00:1b:17:00:00:01",
-            "remote_name": "core-sw-1.example.net",
-            "remote_port": "Gi1/0/24"
           }
         ]
       },

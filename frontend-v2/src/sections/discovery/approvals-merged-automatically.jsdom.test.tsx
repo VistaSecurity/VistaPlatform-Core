@@ -46,7 +46,7 @@ const candidate = (id: string, name: string, score = 0) => ({
 const ruleRow = {
   id: 'rule-row', tenant_id: 't', status: 'merged', source: 'sensor', proposed_at: '2026-09-29T10:00:00Z',
   resolved_at: '2026-09-29T10:01:00Z', merged_into: SURVIVOR, decided_by: 'rule',
-  rule_evidence: ['same MAC 00:00:5e:00:53:01 seen directly by a sensor', 'same network segment'],
+  rule_evidence: ['same MAC 00:00:5e:00:53:01 seen directly by a sensor', 'same prefix'],
   candidates: [candidate(SURVIVOR, 'declared-router'), candidate(ABSORBED, 'discovered-router')],
 };
 const matcherRow = {
@@ -108,7 +108,7 @@ it('a rule row shows the evidence line and a link to the survivor — from merge
   const evidence = [...rule.querySelectorAll('[data-testid="rule-evidence"] li')].map((li) => li.textContent);
   expect(evidence).toEqual([
     'same MAC 00:00:5e:00:53:01 seen directly by a sensor',
-    'same network segment',
+    'same prefix',
   ]);
   expect(rule.querySelector<HTMLAnchorElement>('[data-testid="survivor-link"]')!.getAttribute('href'))
     .toBe(`/inventory/assets/${SURVIVOR}`);

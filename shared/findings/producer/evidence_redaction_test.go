@@ -85,14 +85,14 @@ func TestMarshalEvidence_MasksNamedCredentialsAndPEM(t *testing.T) {
 func TestMarshalEvidence_LeavesEveryProducersOwnEvidenceAlone(t *testing.T) {
 	fixtures := map[string]map[string]any{
 		"drift: new_class_in_segment": {
-			"observation_key":              "segment:1e9/class:printer",
-			"asset_id":                     "11111111-1111-4111-8111-111111111111",
-			"segment_id":                   "22222222-2222-4222-8222-222222222222",
-			"segment_name":                 "Campus VLAN 20",
-			"baseline":                     map[string]any{"classes_in_segment": []any{"server", "workstation"}},
-			"observed":                     map[string]any{"class": "printer", "first_observed_at": "2026-09-01T00:00:00Z"},
-			"assets_in_window":             3,
-			"segment_assets_before_window": 41,
+			"observation_key":             "segment:1e9/class:printer",
+			"asset_id":                    "11111111-1111-4111-8111-111111111111",
+			"prefix_id":                   "22222222-2222-4222-8222-222222222222",
+			"prefix":                      "10.20.0.0/24",
+			"baseline":                    map[string]any{"classes_in_prefix": []any{"server", "workstation"}},
+			"observed":                    map[string]any{"class": "printer", "first_observed_at": "2026-09-01T00:00:00Z"},
+			"assets_in_window":            3,
+			"prefix_assets_before_window": 41,
 		},
 		"drift: new_issuer": {
 			"observation_key":     "issuer:CN=Some CA",

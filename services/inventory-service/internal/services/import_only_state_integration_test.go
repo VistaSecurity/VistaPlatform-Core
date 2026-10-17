@@ -21,8 +21,6 @@ package services
 import (
 	"context"
 	"database/sql"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -141,10 +139,12 @@ func (f *sourceFixture) selected(t *testing.T, tenant uuid.UUID) (map[uuid.UUID]
 	return out, refusals
 }
 
-func (f *sourceFixture) segmentRow(t *testing.T, tenant uuid.UUID, cidr, metadata, sourceKind string) {
+// segmentRow writes a private global-VRF prefix with the given provenance:
+// declared (a person's), measured (learned from a device), imported (a
+// connection's).
+func (f *sourceFixture) segmentRow(t *testing.T, tenant uuid.UUID, cidr, sourceKind, sourceRef string) {
 	t.Helper()
-	if _, err := f.db.Exec(`INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment, is_active, metadata, source_kind)
-		VALUES ($1, $2, 'cidr', $2, 'private', 'production', true, $3::jsonb, NULLIF($4, ''))`, tenant, cidr, metadata, sourceKind); err != nil {
+	if _, err := f.db.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,source_kind,source_ref,status) VALUES($1,$2::text,$2::text::cidr,'private','production',$3,NULLIF($4,''),'active')`, tenant, cidr, sourceKind, sourceRef); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -277,10 +277,11 @@ func TestIntegration_ImportOnly_CheckpointsAndDeclaredSegments(t *testing.T) {
 	conn := identity.Source{Kind: identity.SourceImported, Ref: "cmdb:" + uuid.NewString()}
 	raw := f.db.DB.DB
 
-	f.segmentRow(t, tenant, "10.72.1.0/24", `{}`, "")
-	f.segmentRow(t, tenant, "10.72.2.0/24", `{"source":"interrogation"}`, "")
-	f.segmentRow(t, tenant, "10.72.3.0/24", `{}`, "imported")
-	f.segmentRow(t, tenant, "10.72.4.0/24", `{"source":"interrogation","claimed":{"by":"`+uuid.NewString()+`"}}`, "")
+	f.segmentRow(t, tenant, "10.72.1.0/24", "declared", "")
+	f.segmentRow(t, tenant, "10.72.2.0/24", "measured", "interrogation:"+uuid.NewString())
+	f.segmentRow(t, tenant, "10.72.3.0/24", "imported", "netbox:"+uuid.NewString())
+	// A learned prefix a person claimed: its source set to declared.
+	f.segmentRow(t, tenant, "10.72.4.0/24", "declared", "interrogation:"+uuid.NewString())
 
 	undeclared := f.importAsset(t, tenant, conn, "IO-CP-0", "10.72.0.5")
 	inDeclared := f.importAsset(t, tenant, conn, "IO-CP-1", "10.72.1.5")
@@ -457,32 +458,15 @@ func derivedImportedWithoutConsentSQL(a string) string {
 )`)
 }
 
-// backfillStatement is the one-time UPDATE of the POST-MIGRATIONS block
-// "assets.import_only_sources", read out of the schema file so the test runs
-// the text an upgrade runs.
-func backfillStatement(t *testing.T) string {
-	t.Helper()
-	body, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "scripts", "database", "schema.sql"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := string(body)
-	start := strings.Index(s, "    UPDATE public.assets a SET import_only_sources = c.refs")
-	if start < 0 {
-		t.Fatal("the import_only_sources backfill is missing from schema.sql")
-	}
-	end := strings.Index(s[start:], ";")
-	return s[start : start+end]
-}
-
 // The stored rule returns the old derived rule's verdict for every asset of a
 // populated tenant built through the real write paths, under every consent
-// state; and the upgrade backfill, run over the same tenant with the stored
-// state wiped, reconstructs it. (The declared-segment narrowing is applied by
-// the callers, not by the predicate, so it is not part of this comparison;
-// TestIntegration_ImportOnly_CheckpointsAndDeclaredSegments covers it.)
+// state. (The declared-segment narrowing is applied by the callers, not by the
+// predicate, so it is not part of this comparison;
+// TestIntegration_ImportOnly_CheckpointsAndDeclaredSegments covers it. The
+// half that ran the 4.x upgrade backfill over a wiped tenant retired with the
+// migration block, asset-inventory ADR-0010 D11.)
 //
-// MUTATION (goes red): any clause of the backfill's evidence check dropped;
+// MUTATION (goes red): a write path that stops maintaining import_only_sources;
 // the consent join reading only the creating connection.
 func TestIntegration_ImportOnly_StoredRuleMatchesTheDerivedRule(t *testing.T) {
 	f := newSourceFixture(t)
@@ -587,13 +571,4 @@ func TestIntegration_ImportOnly_StoredRuleMatchesTheDerivedRule(t *testing.T) {
 		}
 	}
 	states("")
-
-	// The upgrade backfill, over the same tenant with the state wiped.
-	if _, err := f.db.Exec(`UPDATE assets SET import_only_sources = NULL WHERE tenant_id = $1`, tenant); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.db.Exec(backfillStatement(t)+` AND a.tenant_id = $1`, tenant); err != nil {
-		t.Fatal(err)
-	}
-	states("after backfill, ")
 }

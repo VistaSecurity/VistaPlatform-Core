@@ -9,10 +9,11 @@ import "strings"
 // catalogue is consulted. A Catalog re-exports the relationship list so a
 // production catalogue can still be asked for it.
 
-// Collections are the sub-predicate names (§3 `collection`).
+// Collections are the sub-predicate names (§3 `collection`). `interface` is
+// the DCIM amendment (§15, BUILD_PLAN row 1.2).
 var Collections = []string{
 	"endpoint", "software", "finding", "cert", "crypto",
-	"identifier", "relationship", "asset",
+	"identifier", "relationship", "asset", "interface",
 }
 
 // IsCollection reports whether s names a sub-predicate collection,

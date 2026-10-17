@@ -58,31 +58,6 @@ type panSystemInfo struct {
 	Uptime         string `xml:"uptime"`
 }
 
-// panIfnetEntry is one entry of the `<ifnet>` half of `show interface all`:
-// the layer-3 view, which has the addresses and the 802.1Q tag.
-type panIfnetEntry struct {
-	Name string `xml:"name"`
-	IP   string `xml:"ip"`
-	Tag  string `xml:"tag"`
-}
-
-type panIfnetBlock struct {
-	Entries []panIfnetEntry `xml:"entry"`
-}
-
-// panHWEntry is one entry of the `<hw>` half: the physical view, which has the
-// MAC, the link state and the negotiated speed.
-type panHWEntry struct {
-	Name  string `xml:"name"`
-	MAC   string `xml:"mac"`
-	State string `xml:"state"`
-	Speed string `xml:"speed"`
-}
-
-type panHWBlock struct {
-	Entries []panHWEntry `xml:"entry"`
-}
-
 // panARPEntry is one entry of `show arp all`.
 type panARPEntry struct {
 	IP        string `xml:"ip"`
@@ -289,86 +264,6 @@ func panParseUptime(uptime string) (int, bool) {
 	return total, true
 }
 
-// panInterfaces builds the net.interfaces value from a `show interface all`
-// response plus the management interface from system info.
-//
-// The management interface is included because it is an interface — PAN-OS
-// reports it separately from the data plane, and an inventory that lists a
-// firewall's interfaces without the one it is managed on is missing the one an
-// operator most wants to see.
-func panInterfaces(body string, info panSystemInfo) ([]map[string]interface{}, error) {
-	var out []map[string]interface{}
-	byName := map[string]int{}
-
-	upsert := func(name string) map[string]interface{} {
-		key := strings.ToLower(name)
-		if i, ok := byName[key]; ok {
-			return out[i]
-		}
-		entry := map[string]interface{}{"name": name}
-		byName[key] = len(out)
-		out = append(out, entry)
-		return entry
-	}
-
-	if body != "" {
-		ifnets, err := panFindElements[panIfnetBlock](body, "ifnet")
-		if err != nil {
-			return nil, err
-		}
-		for _, block := range ifnets {
-			for _, iface := range block.Entries {
-				if iface.Name == "" {
-					continue
-				}
-				entry := upsert(iface.Name)
-				if addr := panNormalizeCIDR(iface.IP); addr != "" {
-					entry["addresses"] = []interface{}{addr}
-				}
-				// PAN-OS reports an untagged subinterface as tag 0; 0 is not a
-				// VLAN, it is the absence of one.
-				if tag, err := strconv.Atoi(strings.TrimSpace(iface.Tag)); err == nil && tag > 0 {
-					entry["vlan"] = tag
-				}
-			}
-		}
-
-		hw, err := panFindElements[panHWBlock](body, "hw")
-		if err != nil {
-			return nil, err
-		}
-		for _, block := range hw {
-			for _, iface := range block.Entries {
-				if iface.Name == "" {
-					continue
-				}
-				entry := upsert(iface.Name)
-				if mac, err := canonicalMAC(iface.MAC); err == nil {
-					entry["mac"] = mac
-				}
-				entry["state"] = panLinkState(iface.State)
-				// "speed" is "10000", or "auto"/"unknown" on an interface that
-				// has never linked. Only a number is a speed.
-				if speed, err := strconv.Atoi(strings.TrimSpace(iface.Speed)); err == nil && speed > 0 {
-					entry["speed"] = speed
-				}
-			}
-		}
-	}
-
-	if info.IPAddress != "" || info.MACAddress != "" {
-		entry := upsert("management")
-		if addr := panManagementCIDR(info); addr != "" {
-			entry["addresses"] = []interface{}{addr}
-		}
-		if mac, err := canonicalMAC(info.MACAddress); err == nil {
-			entry["mac"] = mac
-		}
-	}
-
-	return out, nil
-}
-
 // panLinkState maps PAN-OS's link state onto the fact vocabulary. An
 // unrecognised state becomes "unknown" rather than "down": a state we cannot
 // read is not an interface that is off.
@@ -464,6 +359,12 @@ func panLLDPObservations(body string) ([]map[string]interface{}, []RelationshipO
 			}
 			if local != "" {
 				entry["local_port"] = local
+			}
+			if desc := strings.TrimSpace(n.PortDescription); desc != "" {
+				entry["remote_port_description"] = desc
+			}
+			if entry["remote_mac"] == nil && strings.TrimSpace(n.ChassisID) != "" {
+				entry["remote_chassis_id"] = strings.TrimSpace(n.ChassisID)
 			}
 			if entry["remote_mac"] == nil && entry["remote_name"] == nil {
 				continue

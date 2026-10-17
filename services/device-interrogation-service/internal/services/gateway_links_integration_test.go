@@ -20,7 +20,7 @@ import (
 
 func (f *gatewayFixture) links(t *testing.T) map[string]string {
 	t.Helper()
-	rows, err := f.db.Query(`SELECT value, gateway_asset_id::text FROM network_segments WHERE tenant_id=$1 AND gateway_asset_id IS NOT NULL`, f.tenant)
+	rows, err := f.db.Query(`SELECT prefix::text, gateway_asset_id::text FROM prefixes WHERE tenant_id=$1 AND gateway_asset_id IS NOT NULL`, f.tenant)
 	if err != nil {
 		t.Fatal(err)
 	}

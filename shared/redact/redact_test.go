@@ -314,7 +314,13 @@ func TestMustNotRedact_LoadBearingEntries(t *testing.T) {
 	// them. They are kept deliberately — they state the intent, and they are
 	// the guard rail for the day someone adds a fragment like "key" or widens
 	// the suffix rule. This test is what would notice that day.
-	want := map[string]bool{"public_key": true}
+	//
+	// DCIM row 4.4 adds two on purpose: psk_present and auth_psk_present are
+	// the booleans that say a wireless LAN has a pre-shared key, and the
+	// "psk" fragment would otherwise redact them. Whole names only. Row 4.3's
+	// "preshared_key_present" (an IKE policy) is load-bearing for the same
+	// reason, through the "preshared" fragment.
+	want := map[string]bool{"public_key": true, "psk_present": true, "auth_psk_present": true, "preshared_key_present": true}
 
 	for name := range want {
 		if !loadBearing[name] {

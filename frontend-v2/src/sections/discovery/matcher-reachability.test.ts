@@ -19,7 +19,8 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { SETTINGS_NAV } from '../settings/nav';
+import { visibleSettingsNav } from '../settings/nav';
+import { defaultFeatures } from '@vistasecurity/primitives/features';
 import { AUTO_MERGED_CAPTION } from './auto-merged-section';
 
 const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
@@ -29,16 +30,16 @@ const settingsPage = read('../settings/settings-page.tsx');
 const identificationPage = read('../settings/pages-classes.tsx');
 
 describe('the auto-accept threshold is reachable', () => {
-  const item = SETTINGS_NAV
+  const item = visibleSettingsNav(defaultFeatures)
     .flatMap((s) => s.items.map((i) => ({ ...i, section: s.section })))
     .find((i) => i.key === 'identification-rules');
 
-  it('has a nav entry under Policies, marked built', () => {
+  it('has a nav entry under Discovery & Reconciliation, marked built', () => {
     // The negative polarity of the same fact: an entry left `built: false`
     // renders the "arrives in a later release" placeholder over a live
     // endpoint, which is worse than either shipping it or not.
     expect(item).toBeDefined();
-    expect(item?.section).toBe('Policies');
+    expect(item?.section).toBe('Discovery & Reconciliation');
     expect(item?.built).toBe(true);
   });
 

@@ -71,6 +71,13 @@ same wording as an ATTRIBUTION.md file inside it.
   record. See https://github.com/google/osv.dev.
 - endoflife.date. A community-maintained dataset, mirrored under its published
   API terms. See https://endoflife.date/docs/api.
+- NetBox community device-type library
+  (https://github.com/netbox-community/devicetype-library), dedicated to the
+  public domain under CC0-1.0 (CC0 1.0 Universal). The device-type seed subset
+  (`standards/devicetype-library/`, rendered into the seed data) is copied from
+  it at commit 37f5f02c27eedf60767594174598daec5b9e2bee. CC0 asks for no
+  attribution; we give it anyway, and a type a tenant imports from the library
+  records the library path it came from.
 
 
 THIRD-PARTY TEST FIXTURES
@@ -90,6 +97,20 @@ git-tracked, so it is part of what this repository publishes.
   and copied into `shared/deviceinterrogation/testdata/real/`. See the
   `PROVENANCE.md` file in each vendor subdirectory there for the exact source
   commit, original path and per-file notes.
+
+
+THIRD-PARTY CHOICE LISTS
+------------------------
+
+The interface, port, power-port and cable type lists, the wireless channel list
+and the cable termination compatibility matrix (`standards/interface-types.yaml`,
+`standards/cable-types.yaml`, `standards/netbox-choices.v4.3.5.json` and the code
+generated from them) are taken from NetBox v4.3.5 (netbox/dcim/choices.py,
+netbox/dcim/constants.py and netbox/wireless/choices.py),
+https://github.com/netbox-community/netbox, licensed Apache License 2.0,
+Copyright NetBox Labs and contributors. Only the keys and labels of those lists,
+which are facts about networking standards and connector families, were extracted;
+no NetBox code is included.
 
 
 Cryptographic notice

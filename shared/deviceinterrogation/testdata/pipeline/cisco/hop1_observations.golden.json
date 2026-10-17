@@ -39,133 +39,9 @@
       },
       {
         "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "admin_state": "up",
-            "mac": "74:ad:ab:cd:dc:ba",
-            "name": "TenGigabitEthernet0/1",
-            "speed": 10000,
-            "state": "down"
-          },
-          {
-            "addresses": [
-              "192.0.2.2/30"
-            ],
-            "admin_state": "down",
-            "mac": "c4:f7:d5:14:69:00",
-            "name": "GigabitEthernet0/0/0",
-            "speed": 1000,
-            "state": "down"
-          },
-          {
-            "admin_state": "up",
-            "mac": "4c:77:ab:cd:12:12",
-            "name": "TenGigabitEthernet0/0/13",
-            "speed": 10000,
-            "state": "down"
-          },
-          {
-            "admin_state": "up",
-            "name": "Ethernet0/0",
-            "state": "up"
-          },
-          {
-            "addresses": [
-              "192.0.2.2"
-            ],
-            "admin_state": "up",
-            "name": "Ethernet0/0.11",
-            "state": "up"
-          },
-          {
-            "admin_state": "up",
-            "name": "Ethernet0/0.100",
-            "state": "down"
-          },
-          {
-            "addresses": [
-              "198.51.100.2"
-            ],
-            "admin_state": "up",
-            "name": "Ethernet0/1",
-            "state": "up"
-          },
-          {
-            "admin_state": "down",
-            "name": "Ethernet0/2",
-            "state": "down"
-          },
-          {
-            "admin_state": "down",
-            "name": "Ethernet0/3",
-            "state": "down"
-          },
-          {
-            "addresses": [
-              "203.0.113.2"
-            ],
-            "admin_state": "up",
-            "name": "Loopback0",
-            "state": "up"
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "net.neighbors",
         "source_kind": "measured",
         "value": [
-          {
-            "local_port": "GigabitEthernet1/0/16",
-            "protocol": "cdp",
-            "remote_address": "192.0.2.2",
-            "remote_name": "desktop-switch",
-            "remote_port": "GigabitEthernet0/1"
-          },
-          {
-            "local_port": "GigabitEthernet1/0/22",
-            "protocol": "cdp",
-            "remote_address": "198.51.100.2",
-            "remote_name": "ce-router",
-            "remote_port": "GigabitEthernet0/0"
-          },
-          {
-            "local_port": "GigabitEthernet1/0/19",
-            "protocol": "cdp",
-            "remote_address": "203.0.113.2",
-            "remote_name": "server",
-            "remote_port": "eth0"
-          },
-          {
-            "local_port": "GigabitEthernet0/3",
-            "protocol": "cdp",
-            "remote_name": "vIOS-L2-1",
-            "remote_port": "GigabitEthernet0/3"
-          },
-          {
-            "local_port": "Gi1/0/2",
-            "protocol": "lldp",
-            "remote_mac": "7c:25:86:c9:aa:aa",
-            "remote_port": "502"
-          },
-          {
-            "local_port": "Gi1/0/1",
-            "protocol": "lldp",
-            "remote_address": "192.0.2.2",
-            "remote_mac": "94:f1:28:79:55:55",
-            "remote_name": "HpSwitch",
-            "remote_port": "94f1.2879.5555"
-          },
-          {
-            "local_port": "Gi1/0/9",
-            "protocol": "lldp",
-            "remote_address": "198.51.100.5",
-            "remote_mac": "44:48:c1:c4:dd:dd",
-            "remote_name": "44:48:c1:c4:dd:dd",
-            "remote_port": "4448.c1c4.dddd"
-          },
           {
             "local_port": "Ethernet0/0",
             "protocol": "arp",
@@ -217,29 +93,6 @@
       },
       {
         "asset": "device",
-        "key": "net.vlans",
-        "source_kind": "measured",
-        "value": [
-          {
-            "id": 1,
-            "name": "default"
-          },
-          {
-            "id": 10,
-            "name": "Management"
-          },
-          {
-            "id": 50,
-            "name": "VLan50"
-          },
-          {
-            "id": 60,
-            "name": "VLan60"
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "os.name",
         "source_kind": "measured",
         "value": "IOS-XE"
@@ -251,21 +104,8 @@
         "value": "16.09.03"
       }
     ],
-    "edges": [
-      {
-        "from": "device",
-        "source_kind": "measured",
-        "status": "pending",
-        "to": "asset[hostname=desktop-switch,ip_address=192.0.2.2]",
-        "type": "connects_to"
-      }
-    ],
+    "edges": [],
     "assets": [
-      {
-        "asset": "asset[hostname=desktop-switch,ip_address=192.0.2.2]",
-        "class_key": "switch",
-        "status": "pending_approval"
-      },
       {
         "asset": "device",
         "class_key": "network_device",
@@ -305,23 +145,97 @@
         "state": "linked"
       },
       {
-        "admission_reasons": "{insufficient_identity_evidence}",
+        "admission_reasons": "{direct_scoped_interface}",
         "identifiers": [
           {
             "confidence": 1,
             "kind": "ip_address",
-            "scope": "segment:192.0.2.0/25",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "interface": "GigabitEthernet0/0/0",
+            "kind": "ip_address",
+            "scope": "prefix:192.0.2.0/30",
+            "value": "192.0.2.2"
+          },
+          {
+            "confidence": 1,
+            "interface": "Ethernet0/1",
+            "kind": "ip_address",
+            "scope": "tenant",
+            "value": "198.51.100.2"
+          },
+          {
+            "confidence": 1,
+            "interface": "Loopback0",
+            "kind": "ip_address",
+            "scope": "tenant",
+            "value": "203.0.113.2"
+          },
+          {
+            "confidence": 1,
+            "kind": "fqdn",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "core-rtr-01.corp.example.test"
+          },
+          {
+            "confidence": 1,
+            "kind": "serial_number",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "REDACTEDSN5"
+          },
+          {
+            "confidence": 1,
+            "interface": "TenGigabitEthernet0/1",
+            "kind": "mac_address",
+            "value": "74:ad:ab:cd:dc:ba"
+          },
+          {
+            "confidence": 1,
+            "interface": "GigabitEthernet0/0/0",
+            "kind": "mac_address",
+            "value": "c4:f7:d5:14:69:00"
+          },
+          {
+            "confidence": 1,
+            "interface": "TenGigabitEthernet0/0/13",
+            "kind": "mac_address",
+            "value": "4c:77:ab:cd:12:12"
+          }
+        ],
+        "source_kind": "measured",
+        "state": "linked"
+      },
+      {
+        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "identifiers": [
+          {
+            "confidence": 1,
+            "kind": "ip_address",
+            "scope": "prefix:192.0.2.0/30",
             "value": "192.0.2.2"
           },
           {
             "confidence": 1,
             "kind": "hostname",
-            "scope": "segment:192.0.2.0/25",
+            "scope": "prefix:192.0.2.0/30",
             "value": "desktop-switch"
           }
         ],
         "source_kind": "measured",
-        "state": "unresolved"
+        "state": "linked"
       },
       {
         "admission_reasons": "{insufficient_identity_evidence}",
@@ -329,7 +243,7 @@
           {
             "confidence": 1,
             "kind": "ip_address",
-            "scope": "segment:192.0.2.0/25",
+            "scope": "prefix:192.0.2.0/30",
             "value": "192.0.2.2"
           },
           {
@@ -340,12 +254,12 @@
           {
             "confidence": 1,
             "kind": "hostname",
-            "scope": "segment:192.0.2.0/25",
+            "scope": "prefix:192.0.2.0/30",
             "value": "hpswitch"
           }
         ],
         "source_kind": "measured",
-        "state": "unresolved"
+        "state": "linked"
       },
       {
         "admission_reasons": "{network_scope_unresolved,no_device_or_address_binding}",
@@ -366,99 +280,6 @@
             "confidence": 1,
             "kind": "ip_address",
             "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "4c:77:ab:cd:12:12"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "core-rtr-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "74:ad:ab:cd:dc:ba"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "core-rtr-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "c4:f7:d5:14:69:00"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "core-rtr-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
             "value": "198.51.100.2"
           },
           {
@@ -469,7 +290,7 @@
           }
         ],
         "source_kind": "measured",
-        "state": "unresolved"
+        "state": "linked"
       },
       {
         "admission_reasons": "{network_scope_unresolved}",
@@ -507,7 +328,7 @@
           }
         ],
         "source_kind": "measured",
-        "state": "unresolved"
+        "state": "linked"
       },
       {
         "admission_reasons": "{no_device_or_address_binding,network_scope_unresolved}",
@@ -566,133 +387,9 @@
       },
       {
         "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "admin_state": "up",
-            "mac": "74:ad:ab:cd:dc:ba",
-            "name": "TenGigabitEthernet0/1",
-            "speed": 10000,
-            "state": "down"
-          },
-          {
-            "addresses": [
-              "192.0.2.2/30"
-            ],
-            "admin_state": "down",
-            "mac": "c4:f7:d5:14:69:00",
-            "name": "GigabitEthernet0/0/0",
-            "speed": 1000,
-            "state": "down"
-          },
-          {
-            "admin_state": "up",
-            "mac": "4c:77:ab:cd:12:12",
-            "name": "TenGigabitEthernet0/0/13",
-            "speed": 10000,
-            "state": "down"
-          },
-          {
-            "admin_state": "up",
-            "name": "Ethernet0/0",
-            "state": "up"
-          },
-          {
-            "addresses": [
-              "192.0.2.2"
-            ],
-            "admin_state": "up",
-            "name": "Ethernet0/0.11",
-            "state": "up"
-          },
-          {
-            "admin_state": "up",
-            "name": "Ethernet0/0.100",
-            "state": "down"
-          },
-          {
-            "addresses": [
-              "198.51.100.2"
-            ],
-            "admin_state": "up",
-            "name": "Ethernet0/1",
-            "state": "up"
-          },
-          {
-            "admin_state": "down",
-            "name": "Ethernet0/2",
-            "state": "down"
-          },
-          {
-            "admin_state": "down",
-            "name": "Ethernet0/3",
-            "state": "down"
-          },
-          {
-            "addresses": [
-              "203.0.113.2"
-            ],
-            "admin_state": "up",
-            "name": "Loopback0",
-            "state": "up"
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "net.neighbors",
         "source_kind": "measured",
         "value": [
-          {
-            "local_port": "GigabitEthernet1/0/16",
-            "protocol": "cdp",
-            "remote_address": "192.0.2.2",
-            "remote_name": "desktop-switch",
-            "remote_port": "GigabitEthernet0/1"
-          },
-          {
-            "local_port": "GigabitEthernet1/0/22",
-            "protocol": "cdp",
-            "remote_address": "198.51.100.2",
-            "remote_name": "ce-router",
-            "remote_port": "GigabitEthernet0/0"
-          },
-          {
-            "local_port": "GigabitEthernet1/0/19",
-            "protocol": "cdp",
-            "remote_address": "203.0.113.2",
-            "remote_name": "server",
-            "remote_port": "eth0"
-          },
-          {
-            "local_port": "GigabitEthernet0/3",
-            "protocol": "cdp",
-            "remote_name": "vIOS-L2-1",
-            "remote_port": "GigabitEthernet0/3"
-          },
-          {
-            "local_port": "Gi1/0/2",
-            "protocol": "lldp",
-            "remote_mac": "7c:25:86:c9:aa:aa",
-            "remote_port": "502"
-          },
-          {
-            "local_port": "Gi1/0/1",
-            "protocol": "lldp",
-            "remote_address": "192.0.2.2",
-            "remote_mac": "94:f1:28:79:55:55",
-            "remote_name": "HpSwitch",
-            "remote_port": "94f1.2879.5555"
-          },
-          {
-            "local_port": "Gi1/0/9",
-            "protocol": "lldp",
-            "remote_address": "198.51.100.5",
-            "remote_mac": "44:48:c1:c4:dd:dd",
-            "remote_name": "44:48:c1:c4:dd:dd",
-            "remote_port": "4448.c1c4.dddd"
-          },
           {
             "local_port": "Ethernet0/0",
             "protocol": "arp",
@@ -744,29 +441,6 @@
       },
       {
         "asset": "device",
-        "key": "net.vlans",
-        "source_kind": "measured",
-        "value": [
-          {
-            "id": 1,
-            "name": "default"
-          },
-          {
-            "id": 10,
-            "name": "Management"
-          },
-          {
-            "id": 50,
-            "name": "VLan50"
-          },
-          {
-            "id": 60,
-            "name": "VLan60"
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "os.name",
         "source_kind": "measured",
         "value": "IOS-XE"
@@ -783,21 +457,14 @@
         "from": "device",
         "source_kind": "measured",
         "status": "pending",
-        "to": "asset[hostname=ce-router,ip_address=198.51.100.2]",
+        "to": "asset[hostname=desktop-switch]",
         "type": "connects_to"
       },
       {
         "from": "device",
         "source_kind": "measured",
         "status": "pending",
-        "to": "asset[hostname=desktop-switch,hostname=hpswitch,ip_address=192.0.2.2,mac_address=94:f1:28:79:55:55]",
-        "type": "connects_to"
-      },
-      {
-        "from": "device",
-        "source_kind": "measured",
-        "status": "pending",
-        "to": "asset[hostname=server,ip_address=203.0.113.2]",
+        "to": "asset[hostname=hpswitch,mac_address=94:f1:28:79:55:55]",
         "type": "connects_to"
       },
       {
@@ -824,17 +491,12 @@
     ],
     "assets": [
       {
-        "asset": "asset[hostname=ce-router,ip_address=198.51.100.2]",
-        "class_key": "network_device",
-        "status": "pending_approval"
-      },
-      {
-        "asset": "asset[hostname=desktop-switch,hostname=hpswitch,ip_address=192.0.2.2,mac_address=94:f1:28:79:55:55]",
+        "asset": "asset[hostname=desktop-switch]",
         "class_key": "switch",
         "status": "pending_approval"
       },
       {
-        "asset": "asset[hostname=server,ip_address=203.0.113.2]",
+        "asset": "asset[hostname=hpswitch,mac_address=94:f1:28:79:55:55]",
         "class_key": "unknown_host",
         "status": "pending_approval"
       },

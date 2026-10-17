@@ -1,0 +1,37 @@
+{
+  "routes": [
+    {
+      "method": "POST",
+      "query_equals": {
+        "type": "keygen"
+      },
+      "content_type": "application/xml",
+      "body_file": "keygen.xml"
+    },
+    {
+      "query_contains": {
+        "cmd": "<system>"
+      },
+      "content_type": "application/xml",
+      "body_file": "system_info.xml"
+    },
+    {
+      "query_contains": {
+        "cmd": "<interface>"
+      },
+      "content_type": "application/xml",
+      "body_file": "interfaces.xml"
+    },
+    {
+      "query_contains": {
+        "cmd": "<arp>"
+      },
+      "content_type": "application/xml",
+      "body_file": "arp.xml"
+    }
+  ],
+  "default": {
+    "content_type": "application/xml",
+    "body_file": "empty.xml"
+  }
+}

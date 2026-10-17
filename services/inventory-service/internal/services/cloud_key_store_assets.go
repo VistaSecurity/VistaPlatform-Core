@@ -267,56 +267,27 @@ func kmsKeyStoreFinding(r CloudKeyRecord, sensorID uuid.UUID, observedAt time.Ti
 	return f
 }
 
-// kmsKeyStoreClassification is the network classification discovery-processor
-// computed for the old row: a key with a provider and region classified into
-// that region's cloud segment (classify-asset's cloud branch, which is
-// FindOrCreateCloudSegment); one without fell to the address branch, whose
-// unspecified placeholder the processor then kept on the managed path as
-// unknown/private (shouldKeepCloudPlaceholderManaged).
+// kmsKeyStoreClassification is the network classification of a cloud key
+// store: a key with a provider and region is the tenant's cloud resource —
+// `internal`, type `cloud`, decided per account by an account-level rule
+// (ADR-0009 D5) since a prefix never decides a cloud resource. One without
+// falls to its placeholder address, which is not a connection to anybody and
+// stays on the managed path as unknown/private (the processor's
+// shouldKeepCloudPlaceholderManaged).
 func (s *AssetService) kmsKeyStoreClassification(tenantID uuid.UUID, f IngestFinding) (*approval.Classification, error) {
 	provider, _ := f.RawData["cloud_provider"].(string)
 	region, _ := f.RawData["cloud_region"].(string)
-	if s.networkSegmentService != nil && provider != "" && region != "" {
-		seg, err := s.networkSegmentService.FindOrCreateCloudSegment(tenantID, provider, region, "", "production")
-		if err != nil {
-			return nil, fmt.Errorf("classify key store: %w", err)
-		}
-		if seg != nil {
-			c := &approval.Classification{Ownership: "internal", Type: seg.NetworkType}
-			if c.Type == "" {
-				c.Type = "private"
-			}
-			id, name := seg.ID, seg.Name
-			c.SegmentID, c.SegmentName = &id, &name
-			return c, nil
-		}
+	if provider != "" && region != "" {
+		return &approval.Classification{Ownership: "internal", Type: "cloud"}, nil
 	}
-
-	c := &approval.Classification{Ownership: "third_party", Type: NetworkTypeForAddress(kmsPlaceholderAddress)}
-	if s.networkSegmentService != nil {
-		seg, err := s.networkSegmentService.GetSegmentForIP(tenantID, f.IPAddress, f.Hostname)
-		if err != nil {
-			return nil, fmt.Errorf("classify key store: %w", err)
-		}
-		ownership, err := s.networkSegmentService.ClassifyAsset(tenantID, f.IPAddress, f.Hostname, nil)
-		if err != nil {
-			return nil, fmt.Errorf("classify key store: %w", err)
-		}
-		if ownership == "internal" {
-			c.Ownership = "internal"
-		}
-		if seg != nil {
-			id, name := seg.ID, seg.Name
-			c.SegmentID, c.SegmentName = &id, &name
-			if seg.NetworkType != "" {
-				c.Type = seg.NetworkType
-			}
-		}
+	c := &approval.Classification{Ownership: "unknown", Type: "private"}
+	set, err := s.prefixSetIn(nil, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("classify key store: %w", err)
 	}
-	if c.Ownership == "third_party" {
-		// A placeholder address is not a connection to anybody: the
-		// processor kept such a cloud row managed.
-		c.Ownership, c.Type = "unknown", "private"
+	if p := set.Match(f.IPAddress); p != nil {
+		id := p.ID
+		c.Ownership, c.Type, c.PrefixID = "internal", classificationType(p, f.IPAddress), &id
 	}
 	return c, nil
 }
@@ -384,6 +355,7 @@ func (s *AssetService) RecordCloudKeyStores(tenantID uuid.UUID, records []CloudK
 	}
 
 	observedAt := time.Now().UTC()
+	accounts := s.newCloudAccountResolver(tenantID)
 	byStatus := map[string][]IngestFinding{}
 	var firstErr error
 	for _, r := range records {
@@ -406,6 +378,8 @@ func (s *AssetService) RecordCloudKeyStores(tenantID uuid.UUID, records []CloudK
 		if err != nil {
 			return 0, err
 		}
+		// The key's account, for an account-level rule (ADR-0009 D5).
+		_, in.CloudAccountID = accounts.account(f)
 		status := "pending_approval"
 		if ok, _, evalErr := evaluator.EvaluateAutoApprovalWithRules(rules, in, c); evalErr == nil && ok {
 			status = "monitoring"

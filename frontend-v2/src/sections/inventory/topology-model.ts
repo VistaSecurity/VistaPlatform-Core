@@ -5,7 +5,7 @@
 // question must NOT be answered with a force graph:
 //
 //	"not a force graph of thousands of nodes, which is unreadable everywhere it
-//	 is tried. A hierarchical view by site → segment → class with counts …
+//	 is tried. A hierarchical view by site → prefix → class with counts …
 //	 The topology view needs no graph library; it is a tree with counts and can
 //	 be built with the existing components."
 //
@@ -20,9 +20,37 @@ import { quoteValue } from './facet-query';
 
 export type TopologyPayload = inventoryComponents['schemas']['AssetTopology'];
 export type TopologySite = inventoryComponents['schemas']['AssetTopologySite'];
-export type TopologySegment = inventoryComponents['schemas']['AssetTopologySegment'];
+export type TopologyPrefix = inventoryComponents['schemas']['AssetTopologyPrefix'];
 export type TopologyClass = inventoryComponents['schemas']['AssetTopologyClass'];
 export type TopologyEdge = inventoryComponents['schemas']['AssetTopologyEdge'];
+export type TopologyCloudAccount = inventoryComponents['schemas']['AssetTopologyCloudAccount'];
+export type TopologyCloudRegion = inventoryComponents['schemas']['AssetTopologyCloudRegion'];
+/** Physical cable runs between two prefixes, aggregated (DCIM row 3.6). */
+export type TopologyCablePaths = inventoryComponents['schemas']['AssetTopologyCablePaths'];
+
+/** "4 cable runs · 1 proposed". */
+export function cablePathsSummary(c: TopologyCablePaths): string {
+  const runs = `${c.count.toLocaleString()} cable run${c.count === 1 ? '' : 's'}`;
+  return c.pending_count > 0 ? `${runs} · ${c.pending_count.toLocaleString()} proposed` : runs;
+}
+
+/**
+ * The scope of one region of one cloud account in the topology's cloud
+ * hierarchy (asset-inventory ADR-0009 D7): every drill-through under it ANDs
+ * this in, so a "No prefix" count under a region opens that region's
+ * prefix-less resources — not every prefix-less asset in the estate.
+ */
+export function cloudRegionScope(account: { account_id: string }, region: { region: string }): string {
+  const parts = ['class:cloud_resource', `account:${quoteValue(account.account_id)}`];
+  // `No region` is the server's label for an absence, not a region.
+  parts.push(region.region === 'No region' ? 'not exists(attr.region)' : `region:${quoteValue(region.region)}`);
+  return parts.join(' and ');
+}
+
+/** `/inventory?lens=cloud&query=…` — a cloud region's resources. */
+export function cloudLensHref(query: string): string {
+  return `/inventory?lens=cloud&query=${encodeURIComponent(query)}`;
+}
 
 /** The map views, as they appear in the URL (`?view=`). */
 export const MAP_VIEWS = ['network', 'neighbourhood', 'topology'] as const;
@@ -46,27 +74,28 @@ export function readMapView(raw: string | null, hasFocus = false): MapView {
 }
 
 /**
- * A stable key for one segment inside one site, for the expansion state.
+ * A stable key for one prefix inside one site, for the expansion state.
  *
- * Keyed on the segment's ID, with a marker for the unsegmented bucket — NOT on
- * its name. A tenant may legitimately name a segment "Unsegmented", and keying
- * on the name would make expanding one expand the other.
+ * Keyed on the prefix's ID, with a marker for the no-prefix bucket — NOT on
+ * its name: the bucket's name is a label, and the same CIDR can be a prefix in
+ * two cloud networks (DCIM row 1.6), so keying on the name would make
+ * expanding one expand the other.
  */
-export function segmentKey(site: string, segment: { segment_id?: string | null }): string {
+export function prefixKey(site: string, prefix: { prefix_id?: string | null }): string {
   // `::` as the separator, and the bucket spelled `~none~`: a site name cannot
   // collide with a uuid, but writing the join explicitly keeps the key readable
   // in a debugger, which a control character would not be.
-  return `${site}::${segment.segment_id ?? '~none~'}`;
+  return `${site}::${prefix.prefix_id ?? '~none~'}`;
 }
 
 /**
- * The unsegmented bucket, as a predicate.
+ * The no-prefix bucket, as a predicate.
  *
- * `not exists(segment_id)`, because the language has no null literal (§1) —
+ * `not exists(prefix_id)`, because the language has no null literal (§1) —
  * absence is spelled with `exists`, which is what keeps SQL's `= NULL` trap off
  * the surface.
  */
-export const UNSEGMENTED_QUERY = 'not exists(segment_id)';
+export const NO_PREFIX_QUERY = 'not exists(prefix_id)';
 
 /**
  * The query that selects exactly the assets a class node counted.
@@ -84,8 +113,8 @@ export const UNSEGMENTED_QUERY = 'not exists(segment_id)';
  *     while switches and routers sit beneath it, so on a real estate a chip
  *     reading 4,167 opened a list of 12,500 under the subtree form. Same
  *     question, two answers, and the list is the one people believe.
- *   - the unsegmented bucket is `not exists(segment_id)`, not
- *     `segment_id:null` — the language has NO null literal, deliberately
+ *   - the no-prefix bucket is `not exists(prefix_id)`, not
+ *     `prefix_id:null` — the language has NO null literal, deliberately
  *     (§1): absence is `exists(field)` / `not exists(field)`, which removes
  *     SQL's `= NULL` trap from the surface entirely.
  *
@@ -98,20 +127,20 @@ export const UNSEGMENTED_QUERY = 'not exists(segment_id)';
  * everything else.
  */
 export function classDrillThroughQuery(
-  segment: { segment_id?: string | null },
+  prefix: { prefix_id?: string | null },
   cls: { class_key: string },
 ): string {
-  const scope = segment.segment_id
-    ? `segment_id:${quoteValue(segment.segment_id)}`
-    : UNSEGMENTED_QUERY;
+  const scope = prefix.prefix_id
+    ? `prefix_id:${quoteValue(prefix.prefix_id)}`
+    : NO_PREFIX_QUERY;
   return `${scope} and class=${quoteValue(cls.class_key)}`;
 }
 
-/** The query for a whole segment, for the "N assets" link on the segment row. */
-export function segmentDrillThroughQuery(segment: { segment_id?: string | null }): string {
-  return segment.segment_id
-    ? `segment_id:${quoteValue(segment.segment_id)}`
-    : UNSEGMENTED_QUERY;
+/** The query for a whole prefix, for the "N assets" link on the prefix row. */
+export function prefixDrillThroughQuery(prefix: { prefix_id?: string | null }): string {
+  return prefix.prefix_id
+    ? `prefix_id:${quoteValue(prefix.prefix_id)}`
+    : NO_PREFIX_QUERY;
 }
 
 /** `/inventory?lens=assets&query=…` — where every drill-through lands. */
@@ -129,7 +158,7 @@ export function topologyAssetsHref(query: string): string {
 export function topologyTruncationNotice(t: TopologyPayload | undefined): string | null {
   if (!t?.truncated) return null;
   const shown = (t.sites ?? []).reduce(
-    (n, s) => n + (s.segments ?? []).reduce((m, g) => m + (g.classes ?? []).length, 0), 0);
+    (n, s) => n + (s.prefixes ?? []).reduce((m, g) => m + (g.classes ?? []).length, 0), 0);
   const edges = (t.edges ?? []).length;
   const parts: string[] = [];
   if (t.total_nodes > shown) parts.push(`${shown.toLocaleString()} of ${t.total_nodes.toLocaleString()} groups`);
@@ -139,14 +168,14 @@ export function topologyTruncationNotice(t: TopologyPayload | undefined): string
 }
 
 /**
- * The cross-segment-link headline: the number, and whether it is the whole
+ * The cross-prefix-link headline: the number, and whether it is the whole
  * answer.
  *
  * It reads `total_edges` — what the SERVER counted — not `edges.length`, which
  * is how many survived the cap. Those are the same number only until an estate
  * is big enough to truncate, and at that point the headline was quietly
  * reporting the size of the PICTURE as the size of the ESTATE: a tenant with
- * 900 cross-segment links and a cap of 200 read "200 cross-segment links" in
+ * 900 cross-prefix links and a cap of 200 read "200 cross-prefix links" in
  * 24-point type, which is a wrong answer to the question the number asks.
  *
  * `truncated` is carried out with it rather than left to the notice below,
@@ -166,7 +195,7 @@ export function topologyEdgeHeadline(t: TopologyPayload | undefined): {
   const drawn = (t?.edges ?? []).length;
   return {
     count,
-    label: count === 1 ? 'cross-segment link' : 'cross-segment links',
+    label: count === 1 ? 'cross-prefix link' : 'cross-prefix links',
     partial: !!t?.truncated && count > drawn,
   };
 }

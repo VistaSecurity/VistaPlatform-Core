@@ -33,8 +33,7 @@ zero rows.
 land with `asset_status = 'pending_approval'`, and their certificates and
 crypto configurations are deliberately **deferred** — held with the pending
 asset — until it is approved in **Discovery → Approvals**. Only approval
-materializes them into the inventory tables. Auto-approval is per network
-segment and is **off by default**.
+materializes them into the inventory tables. Auto-approval is per prefix and is **off by default**.
 
 Confirm it in one query:
 
@@ -91,25 +90,31 @@ and a link to the queue.
 
 Two independent gates decide this, and both are off until someone turns them on.
 
-**1. The segment's own toggle, and which sources it covers.** Auto-approval is a
-property of a network segment (**Settings → Infrastructure**), and a segment
-that auto-approves sensor discoveries does not thereby auto-approve cloud ones:
+**1. The right switch for the source.** Sensor discoveries are auto-approved by
+a prefix's **Auto-approve** setting (**Inventory → Networks**, open the prefix). Cloud resources are
+not — they are auto-approved by their **account**: the "Auto-approve resources"
+switch on the integration under **Discovery → Cloud** (on by default).
 
 ```sql
-SELECT name,
-       value,
-       network_type,
-       auto_approve_discoveries,
-       metadata -> 'auto_approve_sources' AS sources
-FROM network_segments
-WHERE tenant_id = '<tenant>' AND is_active
-ORDER BY name;
+-- Sensor discoveries: the prefix setting, and the rule it generates.
+SELECT prefix, description, network_type, auto_approve_discoveries, auto_approve_sources
+FROM prefixes
+WHERE tenant_id = '<tenant>' AND vrf_id IS NULL AND status NOT IN ('rejected', 'archived')
+ORDER BY prefix;
+
+-- Cloud resources: the account switch, and the account each integration names.
+SELECT integration_name, integration_type, account_id, auto_approve_resources
+FROM platform_integrations
+WHERE tenant_id = '<tenant>' AND deleted_at IS NULL
+ORDER BY integration_name;
 ```
 
-`auto_approve_discoveries = false` is the default for every segment.
-A `NULL` in `sources` means **sensor-only** — the default that every segment
-created before the setting existed still carries. That is the usual answer when
-cloud resources queue on a segment whose toggle is on.
+`auto_approve_discoveries = false` is the default for every prefix. For cloud,
+the usual answer when resources still queue is an **empty `account_id`**: an AWS
+integration learns its account on the first successful **Test connection**, and
+until then there is no account for a rule to be about. A resource whose own ARN
+names a different account than the integration's is approved only by that
+account's switch.
 
 **2. The tenant's auto-approval rules, which are queries now.** A rule is a
 query-language string over the `observation` target, not a JSON object
@@ -168,7 +173,7 @@ is producing observations that identify differently each time.
 
 To see why the engine thinks a particular asset is ambiguous, read its
 identifiers — the scope is usually the answer, because a hostname or an IP
-identifies only within its network segment:
+identifies only within its prefix:
 
 ```sql
 SELECT kind, value, scope, source_kind, source_ref, last_seen_at
@@ -203,11 +208,12 @@ Cloud discoveries go through the **same** pipeline as sensor discoveries:
    processes the batches (a 60-second poll catches anything it was not woken
    for).
 4. A cloud discovery is classified by its `cloud_provider`/`cloud_region` — the
-   per-region cloud segment — not by its address. Most cloud resources have no
+   per-region cloud prefix — not by its address. Most cloud resources have no
    address at all, and an asset with no endpoint is a real answer rather than a
    gap: a bucket or a key store has nothing listening on a port.
-5. Assets land `pending_approval` and appear in Discovery → Approvals, unless
-   that cloud segment auto-approves **with cloud among its sources**.
+5. Assets land `monitoring` when their account's "Auto-approve resources"
+   switch is on (the default), and `pending_approval` in Discovery → Approvals
+   when it is off. Either way they hang off the account's Cloud Account asset.
 
 Check that the discoveries arrived at all:
 

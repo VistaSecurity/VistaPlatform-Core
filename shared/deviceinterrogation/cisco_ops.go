@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/vistasecurity/vistaplatform/shared/classify"
+	"github.com/vistasecurity/vistaplatform/shared/dcim/ifnames"
 )
 
 // Cisco ops facts and observed topology (asset-inventory ADR-0004 D1 item 4).
@@ -102,8 +103,10 @@ func ciscoCollectOps(ctx context.Context, result *InterrogateResult, run ciscoRu
 	result.addFact(factHWVendor, ciscoVendor, ConfidenceDerived)
 
 	chassis := ciscoChassis{}
+	var inventory []ciscoInventoryEntry
 	if out, ok := ciscoRun(ctx, result, run, "show inventory", "Chassis model and serial not collected"); ok {
 		chassis = ciscoParseInventory(out)
+		inventory = ciscoParseInventoryEntries(out)
 	}
 
 	model := chassis.PID
@@ -138,23 +141,21 @@ func ciscoCollectOps(ctx context.Context, result *InterrogateResult, run ciscoRu
 		}
 	}
 
-	// --- interfaces -------------------------------------------------------
-	var interfaces []map[string]interface{}
+	// --- interfaces and VLANs (objects, DCIM row 1.5c) ---------------------
+	//
+	// No longer the net.interfaces / net.vlans facts: they are read here and
+	// handed to the platform as result.Network (cisco_network.go), which the
+	// identity engine writes as interfaces, IP addresses, prefixes and VLANs.
+	network := ciscoNetworkInputs{}
 	if out, ok := ciscoRun(ctx, result, run, "show interfaces", "Interface state and speed not collected"); ok {
-		interfaces = ciscoParseInterfaces(out)
+		network.interfaces = out
+		network.merged = ciscoParseInterfaces(out)
 	}
 	if out, ok := ciscoRun(ctx, result, run, ciscoBriefCommand(osName), "Interface addresses not collected"); ok {
-		interfaces = ciscoMergeBriefInterfaces(interfaces, ciscoParseIPInterfaceBrief(out))
+		network.merged = ciscoMergeBriefInterfaces(network.merged, ciscoParseIPInterfaceBrief(out))
 	}
-	if len(interfaces) > 0 {
-		result.addFact(factNetInterfaces, ciscoBound(result, "show interfaces", "Interface table", interfaces), ConfidenceReported)
-	}
-
-	// --- VLANs ------------------------------------------------------------
 	if out, ok := ciscoRun(ctx, result, run, "show vlan brief", "VLANs not collected"); ok {
-		if vlans := ciscoParseVlanBrief(out); len(vlans) > 0 {
-			result.addFact(factNetVlans, ciscoBound(result, "show vlan brief", "VLAN table", vlans), ConfidenceReported)
-		}
+		network.vlanBrief = out
 	}
 
 	// --- neighbours and edges --------------------------------------------
@@ -185,11 +186,33 @@ func ciscoCollectOps(ctx context.Context, result *InterrogateResult, run ciscoRu
 
 	arpCommand := ciscoARPCommand(osName)
 	if out, ok := ciscoRun(ctx, result, run, arpCommand, "ARP neighbours not collected"); ok {
-		neighbors = append(neighbors, ciscoParseARP(out)...)
+		arp := ciscoParseARP(out)
+		neighbors = append(neighbors, arp...)
+		network.arp = arp
 	}
+	ciscoCollectNetwork(ctx, result, run, network)
 
-	if len(neighbors) > 0 {
-		result.addFact(factNetNeighbors, ciscoBound(result, arpCommand, "Neighbour table", neighbors), ConfidenceReported)
+	// --- hardware (DCIM row 2.4) --------------------------------------------
+	//
+	// `show inventory`'s other entries are the device's parts; a stack's
+	// members are asked of `show switch` (priority, active member) only when
+	// the inventory lists more than one, so a router is never sent it.
+	showSwitch := ""
+	if len(ciscoStackMembers(inventory)) > 1 {
+		if out, ok := ciscoRun(ctx, result, run, "show switch", "Stack member priority and role not collected"); ok {
+			showSwitch = out
+		}
+	}
+	items, vc := ciscoHardware(inventory, chassis, showSwitch)
+	result.setHardware(items, nil, vc, ifnames.VendorCisco, "show inventory")
+
+	// CDP and LLDP rows are cable ends (DCIM row 3.3): they ride the network
+	// observation and become proposed cables, parked terminations or drift
+	// findings on the platform. Only the ARP rows stay the net.neighbors fact.
+	cableEnds, arpOnly := neighborItemsAsNeighbors(neighbors)
+	result.addNeighbors(cableEnds, ifnames.VendorCisco, "show lldp neighbors detail")
+	if len(arpOnly) > 0 {
+		result.addFact(factNetNeighbors, ciscoBound(result, arpCommand, "Neighbour table", arpOnly), ConfidenceReported)
 	}
 
 	// --- management plane -------------------------------------------------
@@ -1012,6 +1035,11 @@ func ciscoParseCDPNeighbors(output string) ([]map[string]interface{}, []Relation
 		if local != "" {
 			entry["local_port"] = local
 		}
+		// NX-OS appends the serial to the device id ("N9K-1(FDO123)"); the
+		// system name is what precedes it.
+		if i := strings.IndexByte(deviceID, '('); i > 0 && strings.HasSuffix(deviceID, ")") {
+			entry["remote_name"] = strings.TrimSpace(deviceID[:i])
+		}
 		neighbors = append(neighbors, entry)
 
 		peer := peerRef(deviceID, ciscoPeerClassHint(platform, capabilities))
@@ -1119,6 +1147,12 @@ func ciscoParseLLDPNeighbors(output string) ([]map[string]interface{}, []Relatio
 		}
 		if local != "" {
 			entry["local_port"] = local
+		}
+		if portDesc != "" {
+			entry["remote_port_description"] = portDesc
+		}
+		if _, err := canonicalMAC(chassis); err != nil && chassis != "" {
+			entry["remote_chassis_id"] = chassis
 		}
 		// A chassis id that is an address rather than a MAC is still the
 		// neighbour's address; the management address wins when both are given.

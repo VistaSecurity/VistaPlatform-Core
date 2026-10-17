@@ -126,9 +126,15 @@ func (s *Store) Scope(ctx context.Context, tenant uuid.UUID, o Observation, now 
 		out.ObserverSensorID, _ = uuid.Parse(parts[len(parts)-1])
 	}
 	err = database.WithTenantTx(ctx, s.DB, tenant, func(tx *sqlx.Tx) error {
-		var cidr, metadata string
-		err := tx.QueryRowContext(ctx, `SELECT value,COALESCE(metadata,'{}')::text FROM network_segments
-   WHERE tenant_id=$1 AND id=$2 AND is_active AND segment_type='cidr'`, tenant, segment).Scan(&cidr, &metadata)
+		// The scope is an IPAM prefix (DCIM row 1.6): a live global-VRF one.
+		var cidr, opStatus, cloudRef string
+		var blocked bool
+		var twins int
+		err := tx.QueryRowContext(ctx, `SELECT p.prefix::text, p.operational_status, COALESCE(p.cloud_network_ref,''),
+   p.sensitive OR p.active_probes_disabled,
+   (SELECT count(*) FROM prefixes o WHERE o.tenant_id=p.tenant_id AND o.vrf_id IS NULL AND o.id<>p.id AND o.prefix=p.prefix AND o.status NOT IN ('rejected','archived'))
+   FROM prefixes p WHERE p.tenant_id=$1 AND p.id=$2 AND p.vrf_id IS NULL AND p.status NOT IN ('rejected','archived')`,
+			tenant, segment).Scan(&cidr, &opStatus, &cloudRef, &blocked, &twins)
 		if errors.Is(err, sql.ErrNoRows) {
 			out.SegmentID = uuid.Nil
 			return nil
@@ -168,27 +174,16 @@ func (s *Store) Scope(ctx context.Context, tenant uuid.UUID, o Observation, now 
 		}
 
 		// The current network probe intake resolves scopes by address. Until a
-		// trusted job scope is carried through that intake, ambiguous/overlapping
-		// spaces must remain blocked, including cloud/private-CIDR overlaps.
-		var ambiguous bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM network_segments WHERE tenant_id=$1 AND id<>$2 AND is_active
-   AND CASE WHEN segment_type='cidr' THEN value::cidr && $3::cidr ELSE false END)
-   OR EXISTS(SELECT 1 FROM network_segments WHERE tenant_id=$1 AND id=$2 AND COALESCE(cloud_network_ref,'')<>'')`, tenant, segment, cidr).Scan(&ambiguous); err != nil {
-			return err
-		}
-		if ambiguous {
+		// trusted job scope is carried through that intake, a scope that does
+		// not name exactly one place stays blocked: a container, a CIDR two
+		// prefixes share, or a cloud network's subnet (the rule the dispatch
+		// guard applies).
+		if opStatus == "container" || twins > 0 || strings.TrimSpace(cloudRef) != "" {
 			out.BlockReason = "overlapping_network_scope_requires_source_resolution"
 			return nil
 		}
 
-		var restrictions struct {
-			Sensitive            bool `json:"sensitive"`
-			ActiveProbesDisabled bool `json:"active_probes_disabled"`
-		}
-		if err := json.Unmarshal([]byte(metadata), &restrictions); err != nil {
-			return err
-		}
-		out.Sensitive = restrictions.Sensitive || restrictions.ActiveProbesDisabled
+		out.Sensitive = blocked
 		if o.AssetID != nil {
 			var class string
 			if err := tx.QueryRowContext(ctx, `SELECT class_key FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, *o.AssetID).Scan(&class); err != nil {

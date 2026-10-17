@@ -342,7 +342,7 @@ export function IdentifierEditor({ rows, onChange }: {
 }
 
 /**
- * Pin a measured address. A segment flagged DHCP stops its addresses
+ * Pin a measured address. A prefix flagged DHCP stops its addresses
  * deciding which asset a sighting belongs to — today's lease is tomorrow's
  * other device — and that includes a router's own static LAN address. Pinning
  * declares this one address static on this asset, so a scan of it still
@@ -357,7 +357,7 @@ export function AddressPinToggle({ row, onChange }: { row: IdentifierDraft; onCh
     return (
       <span
         data-testid="identifier-pin-static"
-        title="Pinned: matches this asset even inside a network segment flagged DHCP."
+        title="Pinned: matches this asset even inside a prefix flagged DHCP."
         style={{ flex: 'none', fontSize: 10.5, fontWeight: 600, color: 'var(--app-t2)' }}
       >
         static
@@ -368,7 +368,7 @@ export function AddressPinToggle({ row, onChange }: { row: IdentifierDraft; onCh
   return (
     <label
       style={{ flex: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 10.5, color: 'var(--app-t2)', cursor: 'pointer' }}
-      title="Declare this address static on this asset. A pinned address still matches this asset inside a network segment flagged DHCP."
+      title="Declare this address static on this asset. A pinned address still matches this asset inside a prefix flagged DHCP."
     >
       <input
         type="checkbox"

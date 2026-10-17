@@ -30,7 +30,7 @@ func FoldProtocol(protocol string) string {
 // reverse) is a build failure, not a silent drift.
 var canonicalProtocols = []string{
 	"TLS", "SSH", "IPSec", "VPN", "Database", "API", "SMB", "Kerberos",
-	"QUIC", "PPTP",
+	"QUIC", "PPTP", "IKE",
 	"Modbus", "DNP3", "MMS", "ICCP", "IEC62351", "OPC_UA",
 	"EtherNet_IP", "BACnet", "BACnet_SC", "HART_IP", "S7",
 }

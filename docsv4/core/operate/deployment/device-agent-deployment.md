@@ -476,7 +476,7 @@ is changed, and no command takes an argument from outside the agent.
 | Kernel | `uname -r` |
 | Host and domain names | `uname -n`, `hostname -f` |
 | Hardware vendor, model, serial, UUID, BIOS | `/sys/class/dmi/id/{sys_vendor,product_name,product_serial,product_uuid,bios_version}` |
-| Interfaces and addresses | `ip -j addr` |
+| Interfaces and addresses | `ip -d -j addr` (`-d` adds each link's kind and VLAN id) |
 | Installed packages | `dpkg-query -W -f=…`, or `rpm -qa --queryformat=…`, or `apk info -v` |
 | Listening sockets and UDP bindings | `ss -ltnup`, falling back to `/proc/net/{tcp,tcp6,udp,udp6}` |
 | Outbound peers (opt-in) | `ss -tnup`, falling back to `/proc/net/{tcp,tcp6,udp,udp6}` |

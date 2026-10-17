@@ -118,7 +118,7 @@ becomes four things on one asset:
   deliberately ignored: they are regenerated per boot or per container start, so
   minting identity from one produces a brand-new asset every time the machine
   restarts. Each real interface address is an identity too, filed under the
-  network segment that address belongs to (a machine with two interfaces on
+  prefix that address belongs to (a machine with two interfaces on
   two networks is known on both). An address the operating system reports as
   **statically configured** is pinned: it keeps identifying this host even on
   a network flagged DHCP, so a later scan of that address updates this asset.
@@ -137,7 +137,7 @@ becomes four things on one asset:
 
 When outbound collection is enabled, connections use the platform's existing
 network ownership rules. Public peers appear under external connections;
-private peers in registered network spaces become inventory assets and follow
+private peers in registered prefixes become inventory assets and follow
 that space's auto-approval setting; private peers outside registered spaces
 wait in Approvals. The reporting host is recorded as the source asset. Local
 ephemeral ports are discarded before deduplication, so reconnecting does not
@@ -170,7 +170,7 @@ took administrative access to the machine and your registration key, and that
 is the decision the queue would otherwise be asking you for. The host's history
 shows the approval as made by the agent, not by a user. A **remote** collection
 is a discovery like any other: the asset lands in **Discovery → Approvals**
-unless a network-segment rule auto-approves it. Its measured operating system
+unless its prefix auto-approves sensor discoveries. Its measured operating system
 can match a curated
 classification rule (for example, Windows client to `computer` or Windows
 Server to `server`); when no rule matches it remains `unknown_host`.
@@ -186,7 +186,7 @@ Server to `server`); when no rule matches it remains `unknown_host`.
   Approvals alongside everything else. See
   [Asset Approval](./asset-approval.md).
 
-If a remotely collected host's address falls inside a network segment you have
+If a remotely collected host's address falls inside a prefix you have
 set to auto-approve, the asset skips the queue like any other discovery. A host
 you have **denied** is left denied even when an agent is later installed on it;
 approve it from the queue if you have changed your mind.

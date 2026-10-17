@@ -1,10 +1,11 @@
-// Package approval evaluates a tenant's segment auto-approval rules.
+// Package approval evaluates a tenant's auto-approval rules.
 //
-// Auto-approval has exactly one gate: the discovered asset is on a user-defined
-// network segment with auto-approve enabled. The rules in
-// discovery_auto_approval_rules are generated from those segments by
-// inventory-service's ManageAutoApprovalRules; this package only reads and
-// evaluates them.
+// The generated rules gate on the prefix: a discovered asset whose address is
+// in a prefix with `auto_approve_discoveries` set (longest match within the
+// VRF, DATA_MODEL §5). The rules in discovery_auto_approval_rules are generated
+// from those prefixes by inventory-service (prefix_approval_rules.go) and from
+// cloud integrations per account (cloud_account.go); this package only reads
+// and evaluates them.
 //
 // It lives in shared/ because every ingestion path — the discovery pipeline,
 // manual asset create, CMDB pull — must reach the same decision. Two
@@ -66,24 +67,28 @@ type Rule struct {
 	compiledOK bool
 }
 
-// Classification represents the network space/segment classification result.
+// Classification represents the network classification result.
 //
 // Ownership has three values:
-//   - "internal"    — IP belongs to a known tenant network segment
-//   - "third_party" — IP is a public internet address outside any registered segment
-//   - "unknown"     — IP is private by address class or carrier-grade NAT
-//     (addrscope.IsTenantAddressable) but not in any registered segment (may
-//     be an unregistered internal subnet or overlay)
+//   - "internal"    — the address is in one of the tenant's prefixes
+//   - "third_party" — a public internet address outside every prefix
+//   - "unknown"     — private by address class or carrier-grade NAT
+//     (addrscope.IsTenantAddressable) but in no prefix (may be an
+//     unregistered internal network or overlay)
 //
 // Only "third_party" discoveries are routed to the external connections path.
 // "unknown" private addresses still go through the managed asset pipeline.
 type Classification struct {
-	Ownership   string     // "internal", "third_party", "unknown"
-	Type        string     // "private", "public"
-	SpaceID     *uuid.UUID // legacy
-	SpaceName   *string    // legacy
-	SegmentID   *uuid.UUID
-	SegmentName *string
+	Ownership string // "internal", "third_party", "unknown"
+	Type      string // "private", "public"
+
+	// PrefixID and VRFID are the IPAM prefix the observation's address falls
+	// in — the longest match within its VRF (DCIM row 1.4, ADR-0010 D3) — and
+	// that VRF, nil for none or the global table. A rule scoped to the prefix
+	// (`network.prefix_id = …`) is read BEFORE any other rule; see
+	// [Service.EvaluateAutoApprovalWithRules].
+	PrefixID *uuid.UUID
+	VRFID    *uuid.UUID
 }
 
 // Discovery is the projection of a discovered thing that rule evaluation reads
@@ -127,6 +132,17 @@ type Discovery struct {
 	ClassPath string
 	// FirstSeen is when the observation was made.
 	FirstSeen time.Time
+
+	// CloudAccountID is the cloud account (AWS account, Azure subscription,
+	// GCP project) a cloud provider's listing placed the resource in — the
+	// scope term of an account-level rule (ADR-0009 D5). Empty is ABSENT: a
+	// resource whose account nobody could state is not approved by any
+	// account's rule.
+	CloudAccountID string
+
+	// InterfaceID is the interface the observation names (DCIM row 1.4), nil
+	// when it names none — which is every passive sighting.
+	InterfaceID *uuid.UUID
 }
 
 // WithConfidence returns d with its confidence set. It exists so a caller that
@@ -203,11 +219,24 @@ func (s observationSource) Field(ref ast.FieldRef) (any, bool) {
 			return nil, false
 		}
 		return s.c.Type, true
-	case "network_segment_id":
-		if s.c == nil || s.c.SegmentID == nil {
+	case "network_prefix_id":
+		if s.c == nil || s.c.PrefixID == nil {
 			return nil, false
 		}
-		return s.c.SegmentID.String(), true
+		return s.c.PrefixID.String(), true
+	case "network_vrf_id":
+		if s.c == nil || s.c.VRFID == nil {
+			return nil, false
+		}
+		return s.c.VRFID.String(), true
+	case "interface_id":
+		if s.d.InterfaceID == nil {
+			return nil, false
+		}
+		return s.d.InterfaceID.String(), true
+	case "cloud_account_id":
+		v := strings.TrimSpace(s.d.CloudAccountID)
+		return v, v != ""
 	case "first_seen_at":
 		if s.d.FirstSeen.IsZero() {
 			return nil, false

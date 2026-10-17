@@ -50,6 +50,7 @@ func (*CiscoInterrogator) Interrogate(ctx context.Context, device DeviceInfo, cr
 	}
 
 	result.DeviceIdentity = ciscoDeviceIdentity(result.DeviceInfo, device.DeviceType, client.chassisPID)
+	result.setNetworkManagementAddress(device)
 	return result, nil
 }
 
@@ -381,11 +382,14 @@ type ciscoCryptoConfig struct {
 // stdout line — so a device that refused `show crypto ipsec sa` to a
 // restricted account reported "no IPsec" and nobody could tell the difference.
 func (c *ciscoSSHClient) getCryptoConfigs(ctx context.Context, result *InterrogateResult, run ciscoRunner) []ciscoCryptoConfig {
-	var configs []ciscoCryptoConfig
+	var configs, maps []ciscoCryptoConfig
 
 	if output, ok := ciscoRun(ctx, result, run, "show crypto map", "Crypto maps not collected"); ok {
-		configs = append(configs, c.parseCryptoMap(output)...)
+		maps = c.parseCryptoMap(output)
+		configs = append(configs, maps...)
 	}
+	// The same entries as tunnel objects (DCIM row 4.3, cisco_tunnels.go).
+	c.collectCiscoTunnels(ctx, result, run, maps)
 	// IPsec SAs before the ISAKMP SAs: the local endpoints they name are how
 	// an IOS ISAKMP row's peer is told apart from its local side.
 	if output, ok := ciscoRun(ctx, result, run, "show crypto ipsec sa", "IPsec security associations not collected"); ok {

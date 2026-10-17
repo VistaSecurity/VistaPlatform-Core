@@ -57,7 +57,7 @@ func (r IdentityDNSRequest) Validate() error {
 	}
 	prefix, err := netip.ParsePrefix(r.SegmentCIDR)
 	if err != nil || prefix.Bits() == 0 {
-		return fmt.Errorf("DNS request requires a bounded network segment")
+		return fmt.Errorf("DNS request requires a bounded prefix")
 	}
 	if r.TimeoutMS < 1 || r.TimeoutMS > 2000 || r.MaxAddresses < 1 || r.MaxAddresses > 8 {
 		return fmt.Errorf("DNS lookup exceeds time or response limits")

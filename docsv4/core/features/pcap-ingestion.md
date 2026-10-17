@@ -71,10 +71,10 @@ Not extracted from PCAP today: ALPN, JA3/JA4 fingerprints, SSH key exchange / en
 ## Where the discoveries go
 
 Discoveries from a capture are treated as **sensor** discoveries by the approval
-rules, so a network segment you have set to auto-approve admits them
+rules, so a prefix you have set to auto-approve admits them
 automatically; everything else waits in **Discovery → Approvals** like any other
 discovery. (This was not always true — captures used to pile up in Approvals on
-segments that should have admitted them.)
+networks that should have admitted them.)
 
 **Confidence is graded, not flat.** A host announcement from a replayed capture
 scores exactly what the same announcement scores from a live sensor: how

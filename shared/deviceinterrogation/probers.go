@@ -106,6 +106,15 @@ func (s *SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, c
 		return nil, fmt.Errorf("SNMP interrogation failed: no response from %s (community, firewall, or no agent)", target)
 	}
 
+	// An agent that echoes its configuration into sysDescr (or contact, or
+	// location) hands us the community string we just authenticated with. We
+	// know exactly what it is, so it is removed from everything read from the
+	// device before anything is stored: sysDescr becomes os.version and asset
+	// metadata, and a credential must not be persisted there (row 1.5d).
+	for k, v := range sysInfo {
+		sysInfo[k] = snmpScrubCommunity(v, community)
+	}
+
 	deviceInfo := make(map[string]interface{})
 	for k, v := range sysInfo {
 		deviceInfo[k] = v
@@ -135,6 +144,8 @@ func (s *SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, c
 	// ordinary, and each walk that finds nothing simply emits nothing.
 	chassis := snmpCollectOps(ctx, conn, community, result, timeout)
 	snmpEmitVendorHint(result, chassis, sysInfo[snmpOIDSysObjectID])
+	// Interfaces, addresses, VLANs and the ARP cache (DCIM row 1.5d).
+	result.Network = snmpCollectNetwork(ctx, result, conn, community, timeout, sysInfo[snmpOIDSysObjectID], host)
 
 	// sysName is whatever the operator configured on the agent ("Server Room
 	// Switch #1") — not guaranteed to be a DNS name. It is already preserved
@@ -150,6 +161,16 @@ func (s *SNMPInterrogator) Interrogate(ctx context.Context, device DeviceInfo, c
 	result.Assets = append(result.Assets, asset)
 
 	return result, nil
+}
+
+// snmpScrubCommunity removes the community string from a value read from the
+// device. The conventional default ("public") is not a secret and is left, so
+// a banner that merely uses the word is not mangled.
+func snmpScrubCommunity(value, community string) string {
+	if len(community) < 4 || community == "public" || community == "private" {
+		return value
+	}
+	return strings.ReplaceAll(value, community, "[redacted]")
 }
 
 // snmpSystemScalars reads the MIB-II system group, keyed by OID.

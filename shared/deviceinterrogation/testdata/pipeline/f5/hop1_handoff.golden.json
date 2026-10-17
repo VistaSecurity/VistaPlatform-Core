@@ -22,13 +22,13 @@
         {
           "kind": "ip_address",
           "value": "192.0.2.5",
-          "scope": "segment:192.0.2.0/24",
+          "scope": "prefix:192.0.2.0/24",
           "source_kind": "measured"
         },
         {
           "kind": "ip_address",
           "value": "198.51.100.5",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         },
         {
@@ -60,13 +60,13 @@
         {
           "kind": "hostname",
           "value": "vs_legacy_443",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         },
         {
           "kind": "ip_address",
           "value": "198.51.100.11",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         }
       ]
@@ -80,13 +80,13 @@
         {
           "kind": "hostname",
           "value": "vs_web_443",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         },
         {
           "kind": "ip_address",
           "value": "198.51.100.10",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         }
       ]
@@ -100,7 +100,7 @@
         {
           "kind": "ip_address",
           "value": "198.51.100.20",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         }
       ]
@@ -114,7 +114,7 @@
         {
           "kind": "ip_address",
           "value": "198.51.100.21",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         }
       ]
@@ -197,28 +197,16 @@
       }
     }
   ],
-  "learned_segments": [
+  "learned_prefixes": [
     {
       "value": "192.0.2.0/24",
-      "segment_type": "cidr",
-      "network_type": "public",
-      "metadata": {
-        "dhcp": "unknown",
-        "source": "interrogation",
-        "source_asset_id": "{{DEVICE_ASSET_ID}}",
-        "source_device_type": "f5"
-      }
+      "network_type": "",
+      "dhcp_managed": null
     },
     {
       "value": "198.51.100.0/24",
-      "segment_type": "cidr",
-      "network_type": "public",
-      "metadata": {
-        "dhcp": "unknown",
-        "source": "interrogation",
-        "source_asset_id": "{{DEVICE_ASSET_ID}}",
-        "source_device_type": "f5"
-      }
+      "network_type": "",
+      "dhcp_managed": null
     }
   ]
 }

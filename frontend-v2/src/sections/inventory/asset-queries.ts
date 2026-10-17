@@ -17,7 +17,6 @@ export type AssetClassChange = inventoryComponents['schemas']['AssetClassChange'
 export type AssetEndpoint = inventoryComponents['schemas']['AssetEndpoint'];
 export type AssetIdentifier = inventoryComponents['schemas']['AssetIdentifier'];
 export type AssetFacetBucket = inventoryComponents['schemas']['AssetFacetBucket'];
-export type SavedView = inventoryComponents['schemas']['SavedView'];
 export type MergeProposal = inventoryComponents['schemas']['MergeProposal'];
 export type MergeCandidate = inventoryComponents['schemas']['MergeCandidate'];
 export type MergeScoreFactor = inventoryComponents['schemas']['MergeScoreFactor'];
@@ -429,50 +428,6 @@ export function bucketMap(buckets: AssetFacetBucket[] | undefined): Record<strin
   const out: Record<string, number> = {};
   for (const b of buckets ?? []) out[b.value] = b.count;
   return out;
-}
-
-// ------------------------------------------------------------- saved views --
-
-/** The caller's own views plus every view shared with the tenant. */
-export function useSavedViews(target = 'asset', enabled = true) {
-  return useQuery({
-    queryKey: ['inventory', 'saved-views', target],
-    enabled,
-    queryFn: async (): Promise<SavedView[]> => {
-      const { data, error } = await clients.inventory.GET('/saved-views', {
-        params: { query: { target } },
-      });
-      if (error || !data) throw new Error(errorMessage(error) ?? 'Failed to load saved views');
-      return data.saved_views;
-    },
-  });
-}
-
-export function useCreateSavedView() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (input: { name: string; query: string; is_shared?: boolean }): Promise<SavedView> => {
-      const data = unwrap(await clients.inventory.POST('/saved-views', {
-        body: { name: input.name, query: input.query, target: 'asset', is_shared: input.is_shared ?? false },
-      }), 'Failed to save the view', { requireData: true });
-      return data.saved_view;
-    },
-    onSuccess: (v) => toast.success(`Saved view “${v.name}”`),
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to save the view'),
-    onSettled: () => { void qc.invalidateQueries({ queryKey: ['inventory', 'saved-views'] }); },
-  });
-}
-
-export function useDeleteSavedView() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (id: string) => {
-      unwrap(await clients.inventory.DELETE('/saved-views/{id}', { params: { path: { id } } }), 'Failed to delete the view');
-    },
-    onSuccess: () => toast.success('View deleted'),
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to delete the view'),
-    onSettled: () => { void qc.invalidateQueries({ queryKey: ['inventory', 'saved-views'] }); },
-  });
 }
 
 // -------------------------------------------------------- merge proposals --

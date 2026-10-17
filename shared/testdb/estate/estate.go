@@ -528,11 +528,11 @@ func (e *Estate) asset(t *testing.T, db *sql.DB, spec assetSpec) uuid.UUID {
 		ownerEmail = spec.owner
 	}
 	if spec.site != "" {
-		site = spec.site
+		site = testdb.EnsureSite(t, db, e.Tenant, spec.site)
 	}
 	execute(t, db, `INSERT INTO assets
 	    (id, tenant_id, hostname, display_name, class_key, class_path, asset_status,
-	     owner_email, site, first_discovered_at, last_seen_at)
+	     owner_email, site_id, first_discovered_at, last_seen_at)
 	    VALUES ($1, $2, $3, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		id, e.Tenant, spec.hostname, spec.class, spec.path, spec.status,
 		ownerEmail, site, spec.firstSeen, spec.lastSeen)

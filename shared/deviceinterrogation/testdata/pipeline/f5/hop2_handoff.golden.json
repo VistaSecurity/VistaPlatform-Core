@@ -1,6 +1,6 @@
 {
   "vendor": "f5",
-  "input_sha256": "4236bdf82f399dcdbd66c52bb34cb8b4047136b1ba35475b1b5aa47444f247e3",
+  "input_sha256": "593d53b5b1f9b6c0957f2e55fbd5b0c65405d5eae1fb1fd36bc7ff5616ce41a6",
   "imports": [
     {
       "findings": [
@@ -123,28 +123,16 @@
     }
   ],
   "process_error": "",
-  "learned_segments": [
+  "learned_prefixes": [
     {
       "value": "192.0.2.0/24",
-      "segment_type": "cidr",
-      "network_type": "public",
-      "metadata": {
-        "dhcp": "unknown",
-        "source": "interrogation",
-        "source_asset_id": "{{DEVICE_ASSET_ID}}",
-        "source_device_type": "f5"
-      }
+      "network_type": "",
+      "dhcp_managed": null
     },
     {
       "value": "198.51.100.0/24",
-      "segment_type": "cidr",
-      "network_type": "public",
-      "metadata": {
-        "dhcp": "unknown",
-        "source": "interrogation",
-        "source_asset_id": "{{DEVICE_ASSET_ID}}",
-        "source_device_type": "f5"
-      }
+      "network_type": "",
+      "dhcp_managed": null
     }
   ],
   "assets": [
@@ -169,13 +157,13 @@
         {
           "kind": "ip_address",
           "value": "192.0.2.5",
-          "scope": "segment:192.0.2.0/24",
+          "scope": "prefix:192.0.2.0/24",
           "source_kind": "measured"
         },
         {
           "kind": "ip_address",
           "value": "198.51.100.5",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         },
         {
@@ -207,13 +195,13 @@
         {
           "kind": "hostname",
           "value": "vs_legacy_443",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         },
         {
           "kind": "ip_address",
           "value": "198.51.100.11",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         }
       ]
@@ -227,13 +215,13 @@
         {
           "kind": "hostname",
           "value": "vs_web_443",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         },
         {
           "kind": "ip_address",
           "value": "198.51.100.10",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         }
       ]
@@ -247,7 +235,7 @@
         {
           "kind": "ip_address",
           "value": "198.51.100.20",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         }
       ]
@@ -261,7 +249,7 @@
         {
           "kind": "ip_address",
           "value": "198.51.100.21",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         }
       ]

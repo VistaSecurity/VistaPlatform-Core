@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SEGMENTS_SETTINGS_PATH, describeNotScanned, notScannedHeadline, notScannedTotal,
+  NETWORKS_PATH, describeNotScanned, notScannedHeadline, notScannedTotal,
 } from './auto-scan-not-scanned';
 
 describe('describeNotScanned', () => {
@@ -23,8 +23,8 @@ describe('describeNotScanned', () => {
     // Scanning them yourself is Inventory's Scan now.
     expect(row.detail).toContain('scan them yourself from Inventory');
     expect(row.detail).not.toContain('does not describe');
-    // Registering a segment does not help: consent is per connection.
-    expect(row.registerSegmentsHref).toBeUndefined();
+    // Declaring a prefix does not help: consent is per connection.
+    expect(row.registerPrefixesHref).toBeUndefined();
   });
 
   it('names the no-eligible-collector skip and points at installing a sensor', () => {
@@ -32,7 +32,7 @@ describe('describeNotScanned', () => {
     expect(row.label).toBe('No sensor on the network');
     expect(row.detail).toContain('Install a sensor');
     expect(row.detail).not.toContain('does not describe');
-    expect(row.registerSegmentsHref).toBeUndefined();
+    expect(row.registerPrefixesHref).toBeUndefined();
   });
 
   it('names carrier-grade NAT by its range and the networks that use it', () => {
@@ -45,7 +45,7 @@ describe('describeNotScanned', () => {
     expect(row.detail).toMatch(/ZeroTier/);
   });
 
-  it('offers the register-the-segment action ONLY where a segment would help', () => {
+  it('offers the add-the-prefix action ONLY where a prefix would help', () => {
     const rows = describeNotScanned([
       { reason: 'public', count: 1 },
       { reason: 'carrier_grade_nat', count: 1 },
@@ -57,15 +57,15 @@ describe('describeNotScanned', () => {
       { reason: 'zoned', count: 1 },
       { reason: 'unparseable', count: 1 },
     ]);
-    const actionable = rows.filter((r) => r.registerSegmentsHref).map((r) => r.reason).sort();
+    const actionable = rows.filter((r) => r.registerPrefixesHref).map((r) => r.reason).sort();
     expect(actionable).toEqual(['carrier_grade_nat', 'public']);
-    for (const r of rows.filter((r) => r.registerSegmentsHref)) {
-      expect(r.registerSegmentsHref).toBe(SEGMENTS_SETTINGS_PATH);
+    for (const r of rows.filter((r) => r.registerPrefixesHref)) {
+      expect(r.registerPrefixesHref).toBe(NETWORKS_PATH);
     }
     // The platform's own addresses can never be brought into scope by a
-    // segment — exclusions are checked before segments on purpose — so a
+    // prefix — exclusions are checked before prefixes on purpose — so a
     // link there would promise something the sweep refuses to do.
-    expect(rows.find((r) => r.reason === 'excluded')?.registerSegmentsHref).toBeUndefined();
+    expect(rows.find((r) => r.reason === 'excluded')?.registerPrefixesHref).toBeUndefined();
   });
 
   it('puts the actionable rows first, then larger counts', () => {
@@ -94,7 +94,7 @@ describe('describeNotScanned', () => {
     const [row] = describeNotScanned([{ reason: 'satellite_uplink', count: 4 }]);
     expect(row.label).toBe('Satellite uplink');
     expect(row.count).toBe(4);
-    expect(row.registerSegmentsHref).toBeUndefined();
+    expect(row.registerPrefixesHref).toBeUndefined();
   });
 
   it('tolerates an absent list', () => {

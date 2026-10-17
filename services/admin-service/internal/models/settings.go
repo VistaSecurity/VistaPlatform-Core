@@ -20,7 +20,7 @@ type TenantAdminSettings struct {
 // handler owns inside the shared tenant_admin_settings.config jsonb document.
 //
 // It is deliberately NOT the whole document: discovery_auto_scan, drift,
-// identity, ai and network_spaces are other services' keys in the same blob and
+// identity and ai are other services' keys in the same blob and
 // are never named here, so they can never be serialised (and therefore never
 // clobbered) by a settings save.
 //

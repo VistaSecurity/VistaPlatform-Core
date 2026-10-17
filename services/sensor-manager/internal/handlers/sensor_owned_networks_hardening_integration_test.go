@@ -24,11 +24,13 @@ import (
 
 func seedSegment(t *testing.T, exec func(string, ...any) error, tenant uuid.UUID, value, networkType, metadata string) {
 	t.Helper()
-	if err := exec(`INSERT INTO public.network_segments
-		(tenant_id, name, segment_type, value, network_type, environment, is_active, metadata)
-		VALUES ($1, $2, 'cidr', $3, $4, 'production', true, $5::jsonb)`,
-		tenant, "seg-"+value, value, networkType, metadata); err != nil {
-		t.Fatalf("seeding segment %s: %v", value, err)
+	if err := exec(`INSERT INTO public.prefixes
+		(tenant_id, description, prefix, network_type, environment, status, source_kind, sensitive, active_probes_disabled)
+		VALUES ($1, $2, $3, $4, 'production', 'active',
+		CASE WHEN $5::jsonb->>'source' IN ('interrogation', 'unifi') THEN 'measured' ELSE 'declared' END,
+			coalesce(($5::jsonb->>'sensitive')::boolean, false), coalesce(($5::jsonb->>'active_probes_disabled')::boolean, false))`,
+		tenant, "prefix-"+value, value, networkType, metadata); err != nil {
+		t.Fatalf("seeding prefix %s: %v", value, err)
 	}
 }
 

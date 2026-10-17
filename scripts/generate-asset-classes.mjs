@@ -10,7 +10,7 @@
 // generated from one file from the start.
 //
 // Outputs:
-//   scripts/database/seed.sql                            (1 generated region)
+//   scripts/database/seed.sql                            (2 generated regions: classes, device roles)
 //   scripts/database/seed-asset-classes.sql              (whole file)
 //   shared/assetclass/classes_gen.go                     (whole file)
 //   shared/assetclass/attribute_schemas_gen.json         (whole file)
@@ -209,6 +209,41 @@ function load() {
     }
   }
 
+  // Provider type → class (asset-inventory ADR-0009 D2): the ONE mapping,
+  // keyed on the provider's own type strings, with the collectors' spellings
+  // as aliases. Only cloud_resource classes may carry it; every type string
+  // and every alias names exactly one class.
+  const PROVIDERS = new Set(['aws', 'azure', 'gcp']);
+  const cloudTypes = [];
+  const genericAliases = [];
+  const spelled = new Map();
+  const claim = (spelling, owner) => {
+    const k = String(spelling).trim().toLowerCase();
+    if (!k) fail(`${owner}: empty provider-type spelling`);
+    if (spelled.has(k)) fail(`provider-type spelling "${spelling}" claimed by ${spelled.get(k)} and ${owner}`);
+    spelled.set(k, owner);
+  };
+  for (const c of classes) {
+    const pts = c.provider_types ?? [];
+    const gen = c.resource_type_aliases ?? [];
+    if ((pts.length || gen.length) && !pathOf.get(c.key).startsWith('cloud_resource.')) {
+      fail(`${c.key}: provider_types / resource_type_aliases belong to cloud_resource classes only`);
+    }
+    if (!Array.isArray(pts) || !Array.isArray(gen)) fail(`${c.key}: provider_types and resource_type_aliases must be lists`);
+    for (const pt of pts) {
+      if (!pt || typeof pt.type !== 'string' || !pt.type.trim()) fail(`${c.key}: provider_types entry needs a type`);
+      if (!PROVIDERS.has(pt.provider)) fail(`${c.key}: ${pt.type}: provider must be one of ${[...PROVIDERS].join(', ')}`);
+      claim(pt.type, c.key);
+      const aliases = pt.aliases ?? [];
+      for (const a of aliases) claim(a, c.key);
+      cloudTypes.push({ type: pt.type, provider: pt.provider, cls: c.key, aliases: aliases.map(String) });
+    }
+    for (const a of gen) {
+      claim(a, c.key);
+      genericAliases.push({ alias: String(a), cls: c.key });
+    }
+  }
+
   const rows = classes.map((c) => ({
     key: c.key,
     parent: c.parent ?? '',
@@ -223,7 +258,67 @@ function load() {
     schema: effective.get(c.key),
   }));
 
-  return { reg, rows, identifierKinds, cyclonedxTypes, legacyTypes };
+  return { reg, rows, identifierKinds, cyclonedxTypes, legacyTypes, cloudTypes, genericAliases };
+}
+
+// The provider-type mapping for Go (asset-inventory ADR-0009 D2).
+function emitCloudTypesGo(cloudTypes, genericAliases) {
+  const entries = cloudTypes.map((t) =>
+    `\t{Type: ${goStr(t.type)}, Provider: ${goStr(t.provider)}, Class: Key${goName(t.cls)}, Aliases: ${goStrSlice(t.aliases)}},`,
+  ).join('\n');
+  const gw = Math.max(0, ...genericAliases.map((g) => goStr(g.alias).length)) + 1;
+  const generic = genericAliases
+    .map((g) => `\t${goStr(g.alias)}:${' '.repeat(gw - goStr(g.alias).length)}Key${goName(g.cls)},`)
+    .join('\n');
+  return `// ${HEADER_LINES.join('\n// ')}
+
+package assetclass
+
+// CloudProviderType is one provider resource type and the class it is: the
+// provider's own type string (AWS::EC2::Instance,
+// Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance), and
+// the spellings the collectors use for it (asset-inventory ADR-0009 D2).
+type CloudProviderType struct {
+	Type     string
+	Provider string
+	Class    Key
+	Aliases  []string
+}
+
+// cloudProviderTypes is every provider type the registry maps, in registry
+// order.
+var cloudProviderTypes = []CloudProviderType{
+${entries}
+}
+
+// cloudGenericAliases are provider-neutral resource-type spellings
+// ("bucket", "function") and the class each names.
+var cloudGenericAliases = map[string]Key{
+${generic}
+}
+`;
+}
+
+// The provider-type mapping for TypeScript: the Cloud lens cloud.type
+// labels.
+function emitCloudTypesTS(cloudTypes) {
+  const entries = cloudTypes.map((t) =>
+    `  { type: ${tsStr(t.type)}, provider: ${tsStr(t.provider)}, classKey: ${tsStr(t.cls)} },`,
+  ).join('\n');
+  return `// ${HEADER_LINES.join('\n// ')}
+//
+// Provider resource type → asset class (asset-inventory ADR-0009 D2).
+
+export interface CloudProviderType {
+  type: string;
+  provider: 'aws' | 'azure' | 'gcp';
+  classKey: string;
+}
+
+export const CLOUD_PROVIDER_TYPES: readonly CloudProviderType[] = [
+${entries}
+];
+`;
 }
 
 function validateSchema(c, attrTypes) {
@@ -365,6 +460,49 @@ ON CONFLICT (key) WHERE tenant_id IS NULL DO UPDATE SET
     cmdb_ci_type          = EXCLUDED.cmdb_ci_type,
     cyclonedx_type        = EXCLUDED.cyclonedx_type,
     is_fixed              = true;`;
+}
+
+// One platform device role per hardware / virtual LEAF class (DCIM row 2.2,
+// DATA_MODEL §2 and §10): NetBox's Device Role is the closest thing it has to
+// our class, so a NetBox role maps to a class and back by slug (the class key
+// with `_` → `-`) and source_ref `asset-class:<key>`. vm_role is set where the
+// class can be a virtual machine's role (the virtual branch and `server`).
+const ROLE_COLORS = {
+  'hardware.computer': '2196f3',
+  'hardware.network_device': '4caf50',
+  'hardware.ot_device': 'ff9800',
+  virtual: '9c27b0',
+};
+
+export function deviceRoleRows(rows) {
+  const parents = new Set(rows.map((r) => r.parent).filter(Boolean));
+  return rows
+    .filter((r) => !parents.has(r.key) && (r.path.startsWith('hardware.') || r.path.startsWith('virtual.')))
+    .map((r) => {
+      const branch = Object.keys(ROLE_COLORS).find((b) => r.path.startsWith(`${b}.`));
+      return {
+        key: r.key,
+        name: r.label,
+        slug: r.key.replace(/_/g, '-'),
+        color: branch ? ROLE_COLORS[branch] : '607d8b',
+        vmRole: r.path.startsWith('virtual.') || r.key === 'server',
+        description: `Asset class ${r.path}`,
+      };
+    });
+}
+
+function emitDeviceRoles(rows) {
+  const values = deviceRoleRows(rows).map((d) =>
+    `    (NULL, ${sqlStr(d.name)}, ${sqlStr(d.slug)}, ${sqlStr(d.color)}, ${d.vmRole}, ${sqlStr(d.description)}, ${sqlStr(`asset-class:${d.key}`)})`);
+  return `INSERT INTO public.device_roles (tenant_id, name, slug, color, vm_role, description, source_ref) VALUES
+${values.join(',\n')}
+ON CONFLICT ((COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)), slug) DO UPDATE SET
+    name        = EXCLUDED.name,
+    color       = EXCLUDED.color,
+    vm_role     = EXCLUDED.vm_role,
+    description = EXCLUDED.description,
+    source_ref  = EXCLUDED.source_ref,
+    updated_at  = now();`;
 }
 
 function emitSQL(rows) {
@@ -802,7 +940,7 @@ function spliceRegion(src, marker, body, commentPrefix) {
 
 async function main() {
   const checkOnly = process.argv.includes('--check');
-  const { reg, rows, identifierKinds, cyclonedxTypes, legacyTypes } = load();
+  const { reg, rows, identifierKinds, cyclonedxTypes, legacyTypes, cloudTypes, genericAliases } = load();
   const iconStatus = checkIcons(rows);
 
   const specPath = path.join(root, 'api', 'openapi', 'inventory-service.openapi.yaml');
@@ -823,13 +961,16 @@ async function main() {
     emitClassUpsert(rows),
     '--',
   );
+  const seedWithRoles = spliceRegion(seed, 'platform device roles', emitDeviceRoles(rows), '--');
 
   const outputs = [
-    [seedPath, seed],
+    [seedPath, seedWithRoles],
     [path.join(root, 'scripts', 'database', 'seed-asset-classes.sql'), emitSQL(rows)],
     [path.join(root, 'shared', 'assetclass', 'classes_gen.go'),
       emitGo(rows, identifierKinds, cyclonedxTypes, legacyTypes)],
     [path.join(root, 'shared', 'assetclass', 'attribute_schemas_gen.json'), emitSchemasJSON(rows)],
+    [path.join(root, 'shared', 'assetclass', 'cloud_types_gen.go'), emitCloudTypesGo(cloudTypes, genericAliases)],
+    [path.join(root, 'packages', 'primitives', 'src', 'assets', 'cloud-types.gen.ts'), emitCloudTypesTS(cloudTypes)],
     [path.join(root, 'packages', 'primitives', 'src', 'assets', 'classes.gen.ts'), emitTS(rows, identifierKinds)],
     [path.join(root, 'packages', 'primitives', 'src', 'assets', 'attribute-schemas.gen.ts'),
       emitAttributeSchemasTS(rows, reg.attribute_types)],

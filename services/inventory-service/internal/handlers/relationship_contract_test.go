@@ -205,6 +205,29 @@ func sampleNeighbourhood() *services.Neighbourhood {
 	}
 }
 
+// TestContract_GetNeighbourhood_CablePathsConform: the DCIM row 3.6 additions
+// — an edge's interfaces and the cable runs between nodes — are in the spec.
+func TestContract_GetNeighbourhood_CablePathsConform(t *testing.T) {
+	sv := loadSpec(t)
+	g := sampleNeighbourhood()
+	from, to := uuid.New(), uuid.New()
+	g.Edges[0].FromInterfaceID, g.Edges[0].FromInterfaceName = &from, "Gi1/0/1"
+	g.Edges[0].ToInterfaceID, g.Edges[0].ToInterfaceName = &to, "eth0"
+	g.CablePaths = []services.NeighbourhoodCablePath{{
+		ID: from.String(), FromAssetID: g.Nodes[0].AssetID, ToAssetID: g.Nodes[1].AssetID,
+		FromInterfaceID: from, FromInterfaceName: "Gi1/0/1", ToInterfaceID: to, ToInterfaceName: "eth0",
+		CableID: uuid.New(), CableLabel: "C-101", Status: "pending", OperationalStatus: "connected",
+		CableCount: 3, PatchPanelCount: 2,
+	}}
+	g.TotalCablePaths = 1
+	w := do(newRelationshipEngine(NewRelationshipHandler(&stubRelationshipStore{graph: g})), http.MethodGet,
+		assetPath(uuid.New(), "/neighbourhood"), nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "NeighbourhoodResponse", w.Body.Bytes())
+}
+
 func TestContract_GetNeighbourhood_200(t *testing.T) {
 	sv := loadSpec(t)
 	store := &stubRelationshipStore{graph: sampleNeighbourhood()}

@@ -25,7 +25,7 @@ import (
 // --- stub operationalStore -------------------------------------------------
 
 type stubOperationalStore struct {
-	summaries       []models.LocationFindingSummaryRow
+	summaries       []models.SiteFindingSummaryRow
 	summariesErr    error
 	environments    []models.EnvironmentSummary
 	environmentsErr error
@@ -41,10 +41,10 @@ type stubOperationalStore struct {
 	statsErr        error
 }
 
-func (s *stubOperationalStore) GetLocationSummaries(uuid.UUID) ([]models.LocationFindingSummaryRow, error) {
+func (s *stubOperationalStore) GetSiteSummaries(uuid.UUID) ([]models.SiteFindingSummaryRow, error) {
 	return s.summaries, s.summariesErr
 }
-func (s *stubOperationalStore) GetLocationEnvironments(uuid.UUID, uuid.UUID) ([]models.EnvironmentSummary, error) {
+func (s *stubOperationalStore) GetSiteEnvironments(uuid.UUID, uuid.UUID) ([]models.EnvironmentSummary, error) {
 	return s.environments, s.environmentsErr
 }
 func (s *stubOperationalStore) GetEnvironmentAssets(uuid.UUID, uuid.UUID, string, int, int) ([]models.Asset, int, error) {
@@ -68,22 +68,21 @@ func newOperationalEngine(svc *stubOperationalStore) *gin.Engine {
 	// RemediationTemplateService is pure in-memory (hardcoded defaults, no DB),
 	// so the real service is used directly for the templates endpoint.
 	h := &OperationalHandler{operational: svc, templates: services.NewRemediationTemplateService()}
-	grp.GET("/operational/locations-summary", h.GetLocationsSummary)
-	grp.GET("/operational/locations/:id/environments", h.GetLocationEnvironments)
-	grp.GET("/operational/locations/:id/environments/:env/assets", h.GetEnvironmentAssets)
+	grp.GET("/operational/sites-summary", h.GetSitesSummary)
+	grp.GET("/operational/sites/:id/environments", h.GetSiteEnvironments)
+	grp.GET("/operational/sites/:id/environments/:env/assets", h.GetEnvironmentAssets)
 	grp.GET("/operational/remediation-queue", h.GetRemediationQueue)
 	grp.GET("/operational/remediation-queue/stats", h.GetRemediationStats)
 	grp.GET("/operational/remediation-templates", h.GetRemediationTemplates)
 	return r
 }
 
-func sampleSummaryRow() models.LocationFindingSummaryRow {
-	return models.LocationFindingSummaryRow{
-		LocationID:        uuid.New(),
+func sampleSummaryRow() models.SiteFindingSummaryRow {
+	return models.SiteFindingSummaryRow{
+		SiteID:            uuid.New(),
 		TenantID:          uuid.New(),
-		LocationName:      "SF Datacenter",
-		LocationType:      "datacenter",
-		FullPath:          strPtr("US/California/SF Datacenter"),
+		SiteName:          "SF HQ",
+		SiteSlug:          "sf-hq",
 		Environment:       "production",
 		AssetCount:        42,
 		CryptoConfigCount: 80,
@@ -115,14 +114,14 @@ const opBase = "/api/v2/inventory-service"
 
 // --- the contract tests ----------------------------------------------------
 
-func TestContract_OperationalLocationsSummary_200(t *testing.T) {
+func TestContract_OperationalSitesSummary_200(t *testing.T) {
 	sv := loadSpec(t)
-	eng := newOperationalEngine(&stubOperationalStore{summaries: []models.LocationFindingSummaryRow{sampleSummaryRow()}})
-	w := do(eng, http.MethodGet, opBase+"/operational/locations-summary", nil)
+	eng := newOperationalEngine(&stubOperationalStore{summaries: []models.SiteFindingSummaryRow{sampleSummaryRow()}})
+	w := do(eng, http.MethodGet, opBase+"/operational/sites-summary", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
-	sv.assertConforms(t, "LocationsSummaryResponse", w.Body.Bytes())
+	sv.assertConforms(t, "SitesSummaryResponse", w.Body.Bytes())
 }
 
 func TestContract_RemediationQueue_200(t *testing.T) {
@@ -151,17 +150,17 @@ func TestContract_RemediationStats_200(t *testing.T) {
 
 func TestContract_OperationalSummary_DriftIsCaught(t *testing.T) {
 	sv := loadSpec(t)
-	sch, err := sv.compiler.Compile(specBaseURI + "#/components/schemas/LocationFindingSummaryRow")
+	sch, err := sv.compiler.Compile(specBaseURI + "#/components/schemas/SiteFindingSummaryRow")
 	if err != nil {
-		t.Fatalf("compile LocationFindingSummaryRow: %v", err)
+		t.Fatalf("compile SiteFindingSummaryRow: %v", err)
 	}
 	bad, err := jsonschema.UnmarshalJSON(strings.NewReader(
-		`{"location_id":"` + aUUID + `","surprise_field":true}`))
+		`{"site_id":"` + aUUID + `","surprise_field":true}`))
 	if err != nil {
 		t.Fatalf("unmarshal bad body: %v", err)
 	}
 	if err := sch.Validate(bad); err == nil {
-		t.Fatal("expected validation to FAIL for a drifted LocationFindingSummaryRow, but it passed — the guardrail is not actually checking")
+		t.Fatal("expected validation to FAIL for a drifted SiteFindingSummaryRow, but it passed — the guardrail is not actually checking")
 	}
 }
 
@@ -182,20 +181,20 @@ func sampleEnvironmentSummary() models.EnvironmentSummary {
 	}
 }
 
-func TestContract_LocationEnvironments_200(t *testing.T) {
+func TestContract_SiteEnvironments_200(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newOperationalEngine(&stubOperationalStore{environments: []models.EnvironmentSummary{sampleEnvironmentSummary()}})
-	w := do(eng, http.MethodGet, opBase+"/operational/locations/"+aUUID+"/environments", nil)
+	w := do(eng, http.MethodGet, opBase+"/operational/sites/"+aUUID+"/environments", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "EnvironmentsResponse", w.Body.Bytes())
 }
 
-func TestContract_LocationEnvironments_400_badID(t *testing.T) {
+func TestContract_SiteEnvironments_400_badID(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newOperationalEngine(&stubOperationalStore{})
-	w := do(eng, http.MethodGet, opBase+"/operational/locations/not-a-uuid/environments", nil)
+	w := do(eng, http.MethodGet, opBase+"/operational/sites/not-a-uuid/environments", nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}
@@ -205,7 +204,7 @@ func TestContract_LocationEnvironments_400_badID(t *testing.T) {
 func TestContract_EnvironmentAssets_200(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newOperationalEngine(&stubOperationalStore{envAssets: []models.Asset{sampleAsset()}, envAssetsTotal: 1})
-	w := do(eng, http.MethodGet, opBase+"/operational/locations/"+aUUID+"/environments/production/assets", nil)
+	w := do(eng, http.MethodGet, opBase+"/operational/sites/"+aUUID+"/environments/production/assets", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -216,7 +215,7 @@ func TestContract_EnvironmentAssets_200(t *testing.T) {
 func TestContract_EnvironmentAssets_200_empty(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newOperationalEngine(&stubOperationalStore{envAssets: nil, envAssetsTotal: 0})
-	w := do(eng, http.MethodGet, opBase+"/operational/locations/"+aUUID+"/environments/production/assets", nil)
+	w := do(eng, http.MethodGet, opBase+"/operational/sites/"+aUUID+"/environments/production/assets", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
@@ -226,7 +225,7 @@ func TestContract_EnvironmentAssets_200_empty(t *testing.T) {
 func TestContract_EnvironmentAssets_400_badID(t *testing.T) {
 	sv := loadSpec(t)
 	eng := newOperationalEngine(&stubOperationalStore{})
-	w := do(eng, http.MethodGet, opBase+"/operational/locations/not-a-uuid/environments/production/assets", nil)
+	w := do(eng, http.MethodGet, opBase+"/operational/sites/not-a-uuid/environments/production/assets", nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
 	}

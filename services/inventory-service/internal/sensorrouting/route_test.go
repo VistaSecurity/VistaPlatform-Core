@@ -96,7 +96,7 @@ func TestRoute_NeverScanSelf_ObservedBranch(t *testing.T) {
 //
 // Mutation check: delete the `s.IsSelf(target)` skip inside the segment loop
 // and this goes red (xps16 would be assigned its own address via
-// ReasonSegment).
+// ReasonPrefix).
 func TestRoute_NeverScanSelf_SegmentBranch(t *testing.T) {
 	xps := live("xps16-sensor", "198.51.100.0/24")
 	xps.SelfAddresses = map[string]bool{"198.51.100.99": true}
@@ -142,7 +142,7 @@ func TestRoute_SegmentSensorWhenNobodyObserved(t *testing.T) {
 	if got := targetsOf(plan, xps.ID); strings.Join(got, ",") != "198.51.100.42,198.51.100.43" {
 		t.Fatalf("segment routing gave %v", got)
 	}
-	if plan.Groups[0].Reasons["198.51.100.42"] != ReasonSegment {
+	if plan.Groups[0].Reasons["198.51.100.42"] != ReasonPrefix {
 		t.Errorf("reason = %q", plan.Groups[0].Reasons["198.51.100.42"])
 	}
 }
@@ -213,7 +213,7 @@ func TestRoute_OfflineObserver(t *testing.T) {
 			name:     "observer offline, another live sensor covers it: routed there",
 			observer: offline("xps16-sensor", "198.51.100.0/24"),
 			others:   []Sensor{live("branch-sensor", "198.51.100.0/24")},
-			want:     want{sensor: "branch-sensor", reason: ReasonSegment},
+			want:     want{sensor: "branch-sensor", reason: ReasonPrefix},
 		},
 		{
 			name:     "observer offline, the covering sensor is offline too: skipped",
@@ -251,7 +251,7 @@ func TestRoute_OfflineObserver(t *testing.T) {
 				selfHost(live("alpha-sensor", "198.51.100.0/24"), target),
 				live("branch-sensor", "198.51.100.0/24"),
 			},
-			want: want{sensor: "branch-sensor", reason: ReasonSegment},
+			want: want{sensor: "branch-sensor", reason: ReasonPrefix},
 		},
 		{
 			name:     "observer offline, air-gapped and system sensors cover it: never chosen, skipped",
@@ -321,7 +321,7 @@ func TestRoute_OfflineObserver(t *testing.T) {
 			if !chosen.Dispatchable(now) || chosen.System || chosen.AirGapped || chosen.IsSelf(tgt) {
 				t.Errorf("chosen sensor %+v is not a live, non-system, non-air-gapped, non-self tenant sensor", chosen)
 			}
-			if tc.want.reason == ReasonSegment && !chosen.Covers(netip.MustParseAddr(tgt)) {
+			if tc.want.reason == ReasonPrefix && !chosen.Covers(netip.MustParseAddr(tgt)) {
 				t.Errorf("chosen segment sensor %+v does not cover %s", chosen, tgt)
 			}
 			if got := plan.Groups[0].Reasons[tgt]; got != tc.want.reason {
@@ -341,7 +341,7 @@ func TestRoute_OfflineObserverSegmentTieIsDeterministic(t *testing.T) {
 	b := live("beta", "10.1.0.0/16")
 	for i, fleet := range [][]Sensor{{xps, b, a}, {a, xps, b}, {b, a, xps}} {
 		plan := Route([]string{"10.1.0.1"}, map[string]uuid.UUID{"10.1.0.1": xps.ID}, fleet, now)
-		if len(plan.Groups) != 1 || plan.Groups[0].Sensor.Name != "alpha" || plan.Groups[0].Reasons["10.1.0.1"] != ReasonSegment {
+		if len(plan.Groups) != 1 || plan.Groups[0].Sensor.Name != "alpha" || plan.Groups[0].Reasons["10.1.0.1"] != ReasonPrefix {
 			t.Fatalf("fleet order %d: groups = %+v, want alpha by same_segment", i, plan.Groups)
 		}
 		if len(plan.Skipped) != 0 || len(plan.Platform) != 0 {

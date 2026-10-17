@@ -115,6 +115,13 @@ func (s *Service) EvaluateAutoApprovalWithRules(
 		return false, nil, nil
 	}
 
+	// Prefix first (DCIM rows 1.4, 1.6). When the observation's address is in
+	// a prefix that has rules of its own, those rules — and only those —
+	// decide: the longest-matching prefix is the most precise statement about
+	// the network, and an enclosing prefix's rule does not get a second vote.
+	// A prefix with no rule of its own leaves the decision to the rest.
+	rules = prefixFirst(rules, classification)
+
 	// Evaluate each rule. A rule that cannot be evaluated — a query that no
 	// longer validates, because a field was renamed, say — is SKIPPED and
 	// LOGGED. Skipping is the fail-closed direction (a rule that cannot be read
@@ -135,4 +142,22 @@ func (s *Service) EvaluateAutoApprovalWithRules(
 	}
 
 	return false, nil, nil
+}
+
+// prefixFirst narrows a tenant's rules to the ones scoped to the observation's
+// prefix, when there are any.
+func prefixFirst(rules []*Rule, c *Classification) []*Rule {
+	if c == nil || c.PrefixID == nil {
+		return rules
+	}
+	var scoped []*Rule
+	for _, r := range rules {
+		if id, ok := PrefixIDFromQuery(r.Query); ok && id == *c.PrefixID {
+			scoped = append(scoped, r)
+		}
+	}
+	if len(scoped) == 0 {
+		return rules
+	}
+	return scoped
 }

@@ -54,13 +54,13 @@ resources:
   - name: assets
     permissions:
       - action: create
-        description: Create network assets
+        description: Create infrastructure assets
       - action: read
-        description: View network assets
+        description: View infrastructure assets
       - action: update
-        description: Update network assets
+        description: Update infrastructure assets
       - action: delete
-        description: Delete network assets
+        description: Delete infrastructure assets
       - action: manage
         description: Full asset management
 
@@ -184,6 +184,60 @@ resources:
       - action: manage
         description: Manage retention policies, alert rules, scheduled reports and SIEM integrations
 
+  # DCIM programme (asset-inventory ADR-0010 D10, BUILD_PLAN row 0.6). Routes ship
+  # with 0.3 and phase 1; these names are the constants they gate on.
+  - name: dcim
+    permissions:
+      - action: read
+        description: View racks, devices, cables and the other data-centre objects
+      - action: manage
+        description: Create, change and delete racks, devices, cables and the other data-centre objects
+
+  - name: ipam
+    permissions:
+      - action: read
+        description: View prefixes, IP addresses, VLANs and VRFs
+      - action: manage
+        description: Create, change and delete prefixes, IP addresses, VLANs and VRFs
+
+  - name: circuits
+    permissions:
+      - action: read
+        description: View circuits, providers and terminations
+      - action: manage
+        description: Create, change and delete circuits, providers and terminations
+
+  - name: virtualization
+    permissions:
+      - action: read
+        description: View virtual machines, clusters and their interfaces
+      - action: manage
+        description: Create, change and delete virtual machines, clusters and their interfaces
+
+  - name: vpn
+    permissions:
+      - action: read
+        description: View tunnels, IKE and IPsec policies (never pre-shared keys)
+      - action: manage
+        description: Create, change and delete tunnels, IKE and IPsec policies (never pre-shared keys)
+
+  - name: wireless
+    permissions:
+      - action: read
+        description: View wireless LANs and links (never pre-shared keys)
+      - action: manage
+        description: Create, change and delete wireless LANs and links (never pre-shared keys)
+
+  - name: business_units
+    permissions:
+      - action: manage
+        description: Create, change and delete business units
+
+  - name: custom_fields
+    permissions:
+      - action: manage
+        description: Create, change and delete custom field definitions
+
 # ---------------------------------------------------------------------------
 # Permissions removed from the catalogue in an earlier release. seed.sql
 # DELETEs these so an install seeded by an older build converges. CASCADE on
@@ -299,7 +353,7 @@ roles:
     grant:
       any_of:
         # `assets` also lets security_admin create/update/delete inventory-service /integrations — owner decision (authz D6, won't fix); revisit only via a dedicated integrations.manage permission.
-        - resources: [assets, sensors, reports, compliance, pcap, discovery, alerts, certificates]
+        - resources: [assets, sensors, reports, compliance, pcap, discovery, alerts, certificates, dcim, ipam, circuits, virtualization, vpn, wireless]
         - names: [users.read, settings.read, audit.read]
 
   - name: viewer

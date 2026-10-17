@@ -288,15 +288,15 @@ func (s *AssetService) resolveObservationGated(
 			if rErr != nil {
 				return rErr
 			}
-			// An asset in a located segment takes that segment's location when
+			// An asset in a located prefix takes that prefix's location when
 			// it records none, on every intake path that resolves through here
 			// (findings, host observations, posted sightings, source imports).
-			// The engine writes network_segment_id when it creates an asset,
-			// and nothing else on these paths gave the asset the segment's
-			// location — so a hearsay-created asset (a UniFi client table's
-			// peer) sat in the segment under "No site recorded" on the map
-			// while its neighbours sat under the segment's site. Only the
-			// asset's OWN segment is used, never the observation's, and a
+			// The engine writes prefix_id when it creates an asset, and nothing
+			// else on these paths gave the asset the prefix's location — so a
+			// hearsay-created asset (a UniFi client table's peer) sat in the
+			// prefix under "No site recorded" on the map while its neighbours
+			// sat under the prefix's site. Only the asset's OWN prefix is
+			// used, never the observation's, and a
 			// conflict places nothing. Runs before `after`, so a source that
 			// states a site still writes it.
 			if !res.Asset.Zero() && res.Outcome != identity.OutcomeConflict {
@@ -685,7 +685,7 @@ func (s *AssetService) discoveryObservation(tenantID uuid.UUID, f IngestFinding,
 
 // discoveryObservationIn is discoveryObservation scoped against an import
 // request's one segment snapshot ( F4).
-func (s *AssetService) discoveryObservationIn(segs *importSegments, tenantID uuid.UUID, f IngestFinding, effectiveIP *string, ownership string) (identity.Observation, error) {
+func (s *AssetService) discoveryObservationIn(segs *importPrefixes, tenantID uuid.UUID, f IngestFinding, effectiveIP *string, ownership string) (identity.Observation, error) {
 	if f.SourceSensorID != nil && findingCollectorSource(f) {
 		sensorID, err := uuid.Parse(strings.TrimSpace(*f.SourceSensorID))
 		if err != nil || sensorID == uuid.Nil || s.db == nil {

@@ -18,12 +18,15 @@ const (
 	NamespaceID Namespace = "id"
 	// NamespaceTag is `tag.` — a tenant tag key in the `tags` jsonb.
 	NamespaceTag Namespace = "tag"
+	// NamespaceCF is `cf.` — a tenant-defined custom field in the
+	// `custom_fields` jsonb (QUERY_LANGUAGE §15.5, DCIM row 5.1).
+	NamespaceCF Namespace = "cf"
 )
 
-// Namespaces lists the four prefixes, for suggestions and docs.
-var Namespaces = []Namespace{NamespaceAttr, NamespaceFact, NamespaceID, NamespaceTag}
+// Namespaces lists the prefixes, for suggestions and docs.
+var Namespaces = []Namespace{NamespaceAttr, NamespaceFact, NamespaceID, NamespaceTag, NamespaceCF}
 
-// IsNamespace reports whether s names one of the four prefixes.
+// IsNamespace reports whether s names one of the prefixes.
 func IsNamespace(s string) (Namespace, bool) {
 	switch Namespace(strings.ToLower(s)) {
 	case NamespaceAttr:
@@ -34,6 +37,8 @@ func IsNamespace(s string) (Namespace, bool) {
 		return NamespaceID, true
 	case NamespaceTag:
 		return NamespaceTag, true
+	case NamespaceCF:
+		return NamespaceCF, true
 	}
 	return NamespaceNone, false
 }

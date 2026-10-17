@@ -66,9 +66,9 @@ func newHygieneFixture(t *testing.T) *hygieneFixture {
 	f.tidy = uuid.New()
 	exec(t, owner, `INSERT INTO assets
 	    (id, tenant_id, hostname, display_name, class_key, class_path, asset_status,
-	     owner_email, site, last_seen_at)
+	     owner_email, site_id, last_seen_at)
 	    VALUES ($1, $2, 'tidy-1', 'tidy-1', 'server', 'hardware.computer.server', 'monitoring',
-	            'ops@example.com', 'DC1', now())`, f.tidy, tenant)
+	            'ops@example.com', $3, now())`, f.tidy, tenant, testdb.EnsureSite(t, owner, tenant, "DC1"))
 
 	f.untidy = uuid.New()
 	exec(t, owner, `INSERT INTO assets

@@ -138,13 +138,18 @@ func snmpCollectOps(ctx context.Context, conn net.Conn, community string, result
 	}
 
 	// --- interfaces -------------------------------------------------------
-	if interfaces := snmpInterfaces(ctx, result, conn, community, timeout, deadline); len(interfaces) > 0 {
-		result.addFact(factNetInterfaces, interfaces, ConfidenceReported)
-	}
+	// Not a fact any more (DCIM row 1.5d): the interface, address, VLAN and
+	// ARP tables are projected onto InterrogateResult.Network by
+	// snmpCollectNetwork (snmp_network.go), which the platform files through
+	// the identity engine as interfaces and addresses. `net.interfaces` is
+	// retired for this collector.
 
 	// --- neighbours and edges --------------------------------------------
-	neighbors, edges := snmpLLDPObservations(ctx, result, conn, community, timeout, deadline)
-	neighbors = append(neighbors, snmpARPNeighbors(ctx, result, conn, community, timeout, deadline)...)
+	// The LLDP rows are cable ends (DCIM row 3.3): snmpCollectNetwork puts
+	// them on the network observation (snmp_neighbors.go). Only the edges are
+	// kept from this walk, and only the ARP rows stay the net.neighbors fact.
+	_, edges := snmpLLDPObservations(ctx, result, conn, community, timeout, deadline)
+	neighbors := snmpARPNeighbors(ctx, result, conn, community, timeout, deadline)
 	if len(neighbors) > 0 {
 		result.addFact(factNetNeighbors, neighbors, ConfidenceReported)
 	}
@@ -200,84 +205,15 @@ func snmpReadChassis(ctx context.Context, result *InterrogateResult, conn net.Co
 	}
 }
 
-// snmpInterfaces builds the net.interfaces value from ifTable and ifXTable.
-func snmpInterfaces(ctx context.Context, result *InterrogateResult, conn net.Conn, community string, timeout time.Duration, deadline time.Time) []map[string]interface{} {
-	descrs, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfDescr, timeout, deadline)
-	names, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfName, timeout, deadline)
-	if len(descrs) == 0 && len(names) == 0 {
-		return nil
-	}
-	macs, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfPhysAddress, timeout, deadline)
-	admin, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfAdminStatus, timeout, deadline)
-	oper, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfOperStatus, timeout, deadline)
-	highSpeed, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfHighSpeed, timeout, deadline)
-	speed, _ := snmpWalkColumn(ctx, result, conn, community, snmpOIDIfSpeed, timeout, deadline)
-
-	indexes := make([]string, 0, len(descrs)+len(names))
-	seen := map[string]bool{}
-	for _, source := range []map[string]snmpVarBind{names, descrs} {
-		for index := range source {
-			if !seen[index] {
-				seen[index] = true
-				indexes = append(indexes, index)
-			}
-		}
-	}
-	sort.Slice(indexes, func(i, j int) bool { return snmpIndexLess(indexes[i], indexes[j]) })
-
-	out := make([]map[string]interface{}, 0, len(indexes))
-	for _, index := range indexes {
-		// ifName is the short form an operator uses ("Gi1/0/1"); ifDescr is the
-		// long one. Prefer the short one and fall back.
-		name := strings.TrimSpace(names[index].Text())
-		if name == "" {
-			name = strings.TrimSpace(descrs[index].Text())
-		}
-		if name == "" {
-			continue
-		}
-		entry := map[string]interface{}{"name": name}
-		if mac, ok := macs[index].MAC(); ok {
-			entry["mac"] = mac
-		}
-		if state, ok := oper[index].Int(); ok {
-			entry["state"] = snmpOperStatus(state)
-		}
-		if state, ok := admin[index].Int(); ok {
-			entry["admin_state"] = snmpAdminStatus(state)
-		}
-		if mbits, ok := highSpeed[index].Int(); ok && mbits > 0 {
-			entry["speed"] = int(mbits)
-		} else if bits, ok := speed[index].Int(); ok && bits > 0 {
-			entry["speed"] = int(bits / 1_000_000)
-		}
-		out = append(out, entry)
-	}
-	return out
-}
-
-// snmpOperStatus maps IF-MIB ifOperStatus onto the fact vocabulary. dormant,
-// testing and unknown become "unknown" rather than "down": an interface waiting
-// for a call is not an interface that is off, and the difference is what an
-// operator acts on.
+// snmpOperStatus maps IF-MIB ifOperStatus onto the interface vocabulary
+// (up, down, testing, unknown). dormant and unknown become "unknown" rather
+// than "down": an interface waiting for a call is not an interface that is
+// off, and the difference is what an operator acts on.
 func snmpOperStatus(v int64) string {
 	switch v {
 	case 1:
 		return "up"
 	case 2, 6, 7: // down, notPresent, lowerLayerDown
-		return "down"
-	default:
-		return "unknown"
-	}
-}
-
-// snmpAdminStatus maps IF-MIB ifAdminStatus. testing is a real administrative
-// state and the fact schema carries it.
-func snmpAdminStatus(v int64) string {
-	switch v {
-	case 1:
-		return "up"
-	case 2:
 		return "down"
 	case 3:
 		return "testing"

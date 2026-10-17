@@ -259,7 +259,7 @@ func (c *Catalog) resolveFirstClass(tgt catalog.Target, path []string) (ast.Fiel
 	}
 }
 
-// resolveNamespaced resolves attr./fact./id./tag. paths, and the bare `tag`
+// resolveNamespaced resolves attr./fact./id./tag./cf. paths, and the bare `tag`
 // form that means "any key".
 func (c *Catalog) resolveNamespaced(tgt catalog.Target, ns ast.Namespace, path []string) (ast.FieldRef, error) {
 	key := strings.ToLower(strings.Join(path[1:], "."))
@@ -297,6 +297,12 @@ func (c *Catalog) resolveNamespaced(tgt catalog.Target, ns ast.Namespace, path [
 			return ast.FieldRef{}, unknownKey(tgt, path, ns)
 		}
 		return fieldRef(path, f, ns, f.Accessor.Key), nil
+
+	case ast.NamespaceCF:
+		if !customFieldKey.MatchString(key) {
+			return ast.FieldRef{}, unknownKey(tgt, path, ns)
+		}
+		return fieldRef(path, customFieldField(key), ns, key), nil
 
 	default:
 		// tag: any tenant key resolves; tags are free-form by design, so there

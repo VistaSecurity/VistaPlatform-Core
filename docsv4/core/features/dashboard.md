@@ -139,7 +139,7 @@ Anyone who can view assets can see all four dashboards. The individual tiles lin
 ## See also
 
 - [Inventory & Lenses](./inventory-and-lenses.md) — the list every class bar opens
-- [The Map](./map.md) — the estate arranged by site and segment
+- [The Map](./map.md) — the estate arranged by site and prefix
 - [Asset Approval](./asset-approval.md) — the queue behind "Pending approval"
 - [Compliance Frameworks](./compliance-frameworks.md) — Inventory Hygiene and the rest
 - [Findings](./findings.md) — what "open" means, and who produces them

@@ -64,10 +64,10 @@ export type TraverseForm = 'named' | 'rel' | 'any';
  * The prefix a field path carries (§4.2). A bare name resolves only against the
  * target's first-class columns, so a class attribute can never shadow a column.
  */
-export type Namespace = '' | 'attr' | 'fact' | 'id' | 'tag';
+export type Namespace = '' | 'attr' | 'fact' | 'id' | 'tag' | 'cf';
 
 /** The four namespace prefixes, for suggestions and docs. */
-export const NAMESPACES: readonly Exclude<Namespace, ''>[] = ['attr', 'fact', 'id', 'tag'];
+export const NAMESPACES: readonly Exclude<Namespace, ''>[] = ['attr', 'fact', 'id', 'tag', 'cf'];
 
 /** Resolves a string to a namespace prefix, case-insensitively. */
 export function asNamespace(s: string): Namespace | null {
@@ -80,6 +80,8 @@ export function asNamespace(s: string): Namespace | null {
       return 'id';
     case 'tag':
       return 'tag';
+    case 'cf':
+      return 'cf';
     default:
       return null;
   }

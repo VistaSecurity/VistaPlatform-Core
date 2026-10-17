@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -36,8 +37,7 @@ func TestIntegration_HostInventory_EachAddressCarriesItsOwnScopeAndAssignment(t 
 		id         uuid.UUID
 		name, cidr string
 	}{{lan, "LAN", "198.51.100.0/24"}, {guest, "Guest", "192.0.2.0/24"}} {
-		if _, err := owner.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active,metadata)
-		  VALUES($1,$2,$3,'cidr',$4,'production',true,'{"dynamic":true,"dynamic_source":"measured"}'::jsonb)`,
+		if _, err := owner.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,dhcp_managed,source_kind,status) VALUES($1,$2,$3,$4::cidr,'production',true,'declared','active')`,
 			seg.id, tenantID, seg.name, seg.cidr); err != nil {
 			t.Fatal(err)
 		}
@@ -58,7 +58,7 @@ func TestIntegration_HostInventory_EachAddressCarriesItsOwnScopeAndAssignment(t 
 		t.Fatalf("no asset: %+v", counts)
 	}
 
-	rows, err := owner.Query(`SELECT value, coalesce(scope,''), coalesce(address_assignment,'') FROM asset_identifiers
+	rows, err := owner.Query(`SELECT value, coalesce(scope,''), coalesce(address_assignment,'') FROM (`+identifiersql.All+`) ident_rows
 	   WHERE tenant_id=$1 AND asset_id=$2 AND kind='ip_address' ORDER BY value`, tenantID, counts.AssetID)
 	if err != nil {
 		t.Fatal(err)

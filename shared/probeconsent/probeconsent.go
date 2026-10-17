@@ -13,7 +13,7 @@
 //
 //   - private by address class: RFC 1918, RFC 4193 (ULA), loopback or
 //     link-local unicast — see [OwnedByAddressClass];
-//   - inside a prefix the tenant DECLARED as one of its network segments
+//   - inside a prefix the tenant DECLARED as one of its prefixes
 //     (delivered by the platform in [OwnedNetworks.Prefixes]); or
 //   - an endpoint the tenant elevated to a monitored asset (delivered in
 //     [OwnedNetworks.Endpoints]) — the one place a public address the tenant
@@ -55,7 +55,7 @@ import (
 // firewall reporting its ISP transit network is saying where it is connected,
 // not what it owns.
 type OwnedNetworks struct {
-	// Prefixes are CIDRs from the tenant's declared network segments.
+	// Prefixes are CIDRs from the tenant's declared prefixes.
 	Prefixes []string `json:"prefixes"`
 	// Endpoints are "ip:port" pairs the tenant elevated from an external
 	// connection to a monitored asset. An endpoint, not an address: the
@@ -299,4 +299,45 @@ func unmapPrefix(p netip.Prefix) (netip.Prefix, bool) {
 		return netip.Prefix{}, false
 	}
 	return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96).Masked(), true
+}
+
+// PrefixClaim is one IPAM prefix as probe consent reads it (DCIM row 1.4):
+// the prefix twin of a prefix's statement. Row 1.6 retires segments;
+// until then a tenant's ownership and exclusions are the union of both.
+type PrefixClaim struct {
+	Prefix netip.Prefix
+	// Declared is true when a person declared the prefix (source_kind
+	// `declared`). A prefix a collector learned off a device's routing table
+	// says where the device is connected, not what the tenant owns.
+	Declared bool
+	// GrantsOwnership is the network-type rule for the prefix
+	// (dispatchguard.SegmentGrantsOwnership over prefixes.network_type).
+	GrantsOwnership bool
+	// Blocked is `sensitive` or `active_probes_disabled` on the prefix.
+	Blocked bool
+}
+
+// Contribution is how one prefix adds to [OwnedNetworks]: excluded when it is
+// blocked (declared or learned — the conservative direction needs no claim),
+// owned when a person declared it, its type grants ownership, it is not too
+// broad to be anybody's and it is not already private by address class;
+// otherwise neither.
+func (c PrefixClaim) Contribution() (owned, excluded bool) {
+	if !c.Prefix.IsValid() {
+		return false, false
+	}
+	p, ok := unmapPrefix(c.Prefix)
+	if !ok {
+		return false, false
+	}
+	switch {
+	case c.Blocked:
+		return false, true
+	case !c.Declared || !c.GrantsOwnership:
+		return false, false
+	case TooBroadToClaim(p), WhollyOwnedByAddressClass(p):
+		return false, false
+	default:
+		return true, false
+	}
 }

@@ -39,6 +39,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // MaxCIExportPage bounds one page of the CI listing and of the relationship
@@ -78,10 +79,10 @@ var ciExportAssetFields = []struct{ name, expr string }{
 	{"ip_address", "host(primary_address)"},
 	{"description", "description"},
 	{"environment", "environment::text"},
-	{"business_unit", "business_unit"},
+	{"business_unit", "(SELECT bu.name FROM business_units bu WHERE bu.id = assets.business_unit_id)"},
 	{"owner_email", "owner_email"},
 	{"support_group", "support_group"},
-	{"site", "site"},
+	{"site", "(SELECT st.name FROM sites st WHERE st.id = assets.site_id)"},
 	{"region", "region"},
 	{"class_key", "class_key"},
 }
@@ -337,7 +338,7 @@ func (s *CIExportService) ExportAssets(ctx context.Context, tenantID uuid.UUID, 
 
 		if q.IdentifierKind != "" {
 			irows, err := tx.QueryContext(ctx, `
-				SELECT asset_id, value FROM asset_identifiers
+				SELECT asset_id, value FROM (`+identifiersql.All+`) ai
 				WHERE tenant_id = $1 AND kind = $2 AND scope = $3 AND asset_id = ANY($4::uuid[])
 				ORDER BY asset_id, value`,
 				tenantID, q.IdentifierKind, q.IdentifierScope, pq.Array(ids))

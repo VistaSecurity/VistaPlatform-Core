@@ -31,7 +31,7 @@ type Options struct {
 	// so a golden Report is byte-stable.
 	Now func() time.Time
 	// LocalInterfaceFallback permits the ONE documented divergence between the
-	// two modes: when `ip -j addr` cannot run, a local collection may read
+	// two modes: when `ip -d -j addr` cannot run, a local collection may read
 	// net.Interfaces() instead. Off by default, and it only fires after the
 	// command has already failed. The fallback is recorded as a step error, so
 	// it is visible in the Report rather than silently papering over a gap.
@@ -218,7 +218,7 @@ func commandPresent(ctx context.Context, r Runner, argv []string) (string, bool)
 //
 // The ONE place this package consults the local machine rather than the
 // Runner, permitted only in local mode, only behind an explicit option, and
-// only after `ip -j addr` has already failed. Every other divergence between
+// only after `ip -d -j addr` has already failed. Every other divergence between
 // the two modes would be a bug.
 func localInterfaces() ([]Interface, error) {
 	ifaces, err := net.Interfaces()

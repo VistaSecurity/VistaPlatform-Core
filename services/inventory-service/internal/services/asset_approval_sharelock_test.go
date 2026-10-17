@@ -18,7 +18,7 @@ package services
 // using it is guaranteed to run in a window where appliers are active.
 //
 // The exposure is not the approval tests'. It belongs to the FIXTURE, so it is
-// shared by every file that uses it — network_space_test.go as well, whose six
+// shared by every file that uses it — a since-retired settings test as well, whose six
 // DB-backed tests showed the same deadlock class in the same baseline run. Both
 // files are listed below, and a third that starts calling the fixture fails the
 // coverage guard until it is added.
@@ -62,8 +62,6 @@ var sharedFixtureTestFiles = []string{
 	"identity_observation_review_integration_test.go",
 	"identity_observation_ownership_integration_test.go",
 	"asset_approval_test.go",
-	"network_space_test.go",
-	"network_space_settings_integration_test.go",
 	// These two do not use getTestDBAndTenant; they apply the schema inline
 	// (testdb.ApplySchemaAndSeed), which is the SAME exposure by a different
 	// spelling — the deadlock comes from applying the schema, not from the

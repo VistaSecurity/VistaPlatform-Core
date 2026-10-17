@@ -1,6 +1,8 @@
 package services
 
 import (
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -9,11 +11,12 @@ import (
 	gcpclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/gcp"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 )
 
 // The plan builders are pure functions of a provider's projections, which is
-// what lets these tests pin the exact class, identifier, fact and containment
-// each provider produces without a database, a credential or a network.
+// what lets these tests pin the exact class, identifier, fact, interface and
+// prefix each provider produces without a database, a credential or a network.
 
 func findResource(t *testing.T, group []cloudEnumResource, resourceID string) cloudEnumResource {
 	t.Helper()
@@ -53,6 +56,7 @@ func awsFixture() ([]awsclient.Instance, []awsclient.VPC, []awsclient.Subnet, []
 			SecurityGroups:   []awsclient.SecurityGroupRef{{ID: "sg-01", Name: "web"}},
 			Interfaces: []awsclient.NetworkInterface{{
 				Name: "eni-01", MAC: "0a:1b:2c:3d:4e:5f", Addresses: []string{"10.0.1.20"}, State: "in-use",
+				SubnetID: "subnet-01", VPCID: "vpc-01", PublicIP: "203.0.113.20",
 			}},
 			Tags: map[string]string{"Name": "web-01", "environment": "production"},
 		}}, []awsclient.VPC{{
@@ -66,6 +70,32 @@ func awsFixture() ([]awsclient.Instance, []awsclient.VPC, []awsclient.Subnet, []
 		}}
 }
 
+func findNetwork(t *testing.T, group []cloudNetwork, resourceID string) cloudNetwork {
+	t.Helper()
+	for _, n := range group {
+		if n.ResourceID == resourceID {
+			return n
+		}
+	}
+	t.Fatalf("no network with id %q in %d candidates", resourceID, len(group))
+	return cloudNetwork{}
+}
+
+// prefixStrings renders observed prefixes as "prefix@ref dhcp=<v>" for
+// comparison.
+func prefixStrings(ps []identity.ObservedPrefix) []string {
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		dhcp := "unset"
+		if p.DHCPManaged != nil {
+			dhcp = fmt.Sprint(*p.DHCPManaged)
+		}
+		out = append(out, p.Prefix+"@"+p.CloudNetworkRef+" type="+p.NetworkType+" dhcp="+dhcp)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func TestBuildAWSEnumerationPlan(t *testing.T) {
 	instances, vpcs, subnets, groups := awsFixture()
 	plan := buildAWSEnumerationPlan(instances, vpcs, subnets, groups)
@@ -73,41 +103,53 @@ func TestBuildAWSEnumerationPlan(t *testing.T) {
 	if got := plan.counts(); got != (CloudEnumerationCounts{Instances: 1, Networks: 1, Subnets: 1, SecurityGroups: 1}) {
 		t.Fatalf("counts = %+v", got)
 	}
+	const vpcARN = "arn:aws:ec2:us-east-1:123456789012:vpc/vpc-01"
 
-	vpc := findResource(t, plan.Networks, "arn:aws:ec2:us-east-1:123456789012:vpc/vpc-01")
-	if vpc.DeviceType != DeviceTypeAWSVPC {
-		t.Errorf("vpc device type = %q", vpc.DeviceType)
+	// The VPC and its subnet are prefixes, both in the VPC's address space
+	// (row 1.5f): no asset, no class, no containment edge.
+	vpc := findNetwork(t, plan.Networks, vpcARN)
+	subnet := findNetwork(t, plan.Subnets, "arn:aws:ec2:us-east-1:123456789012:subnet/subnet-01")
+	if vpc.NetworkRef != vpcARN || subnet.NetworkRef != vpcARN {
+		t.Errorf("network refs = %q / %q, want both the VPC's ARN", vpc.NetworkRef, subnet.NetworkRef)
 	}
-	if got := DeviceTypeClassKey(vpc.DeviceType); got != string(assetclass.KeyVirtualNetwork) {
-		t.Errorf("a VPC must class as virtual_network, got %q", got)
+	wantPrefixes := []string{
+		"10.0.0.0/16@" + vpcARN + " type=cloud dhcp=false",
+		"10.0.1.0/24@" + vpcARN + " type=cloud dhcp=false",
 	}
-	if vpc.ParentID != "" {
-		t.Errorf("a VPC has no container we model; got parent %q", vpc.ParentID)
+	byAccount, order := plan.networkPrefixesByAccount()
+	if len(order) != 1 || order[0] != "123456789012" {
+		t.Fatalf("prefix accounts = %v", order)
 	}
-
-	subnet := findResource(t, plan.Subnets, "arn:aws:ec2:us-east-1:123456789012:subnet/subnet-01")
-	if got := DeviceTypeClassKey(subnet.DeviceType); got != string(assetclass.KeySubnet) {
-		t.Errorf("a subnet must class as subnet, got %q", got)
-	}
-	if subnet.ParentID != vpc.ResourceID {
-		t.Errorf("subnet parent = %q, want the VPC's ARN", subnet.ParentID)
-	}
-	if subnet.SegmentCIDR != "10.0.1.0/24" {
-		t.Errorf("subnet segment CIDR = %q — without it an instance's address has no scope", subnet.SegmentCIDR)
-	}
-	// MapPublicIpOnLaunch is NOT `is_public`: the class schema defines is_public
-	// as "routes to an internet gateway", which is a different question and
-	// needs DescribeRouteTables.
-	if _, present := subnet.Attributes["is_public"]; present {
-		t.Error("is_public must not be inferred from map_public_ip_on_launch")
+	if got := prefixStrings(byAccount["123456789012"]); fmt.Sprint(got) != fmt.Sprint(wantPrefixes) {
+		t.Errorf("account prefixes = %v, want %v", got, wantPrefixes)
 	}
 
 	inst := findResource(t, plan.Instances, "arn:aws:ec2:us-east-1:123456789012:instance/i-01")
 	if got := DeviceTypeClassKey(inst.DeviceType); got != string(assetclass.KeyComputeInstance) {
 		t.Errorf("an EC2 instance must class as compute_instance, got %q", got)
 	}
-	if inst.ParentID != subnet.ResourceID {
-		t.Errorf("instance parent = %q, want the subnet's ARN", inst.ParentID)
+	if inst.CloudNetworkRef != vpcARN {
+		t.Errorf("instance network = %q, want the VPC's ARN (its address space)", inst.CloudNetworkRef)
+	}
+	// The ENI is a virtual interface named by its id, with its address at the
+	// subnet's length; the instance's sighting carries the prefixes it sits in.
+	if len(inst.Interfaces) != 1 {
+		t.Fatalf("interfaces = %+v", inst.Interfaces)
+	}
+	eni := inst.Interfaces[0]
+	if eni.Name != "eni-01" || eni.Type != "virtual" || eni.MAC != "0a:1b:2c:3d:4e:5f" || eni.OperStatus != "up" {
+		t.Errorf("ENI = %+v", eni)
+	}
+	if len(eni.Addresses) != 1 || eni.Addresses[0] != (identity.ObservedAddress{Address: "10.0.1.20", PrefixLen: 24, Source: "cloud"}) {
+		t.Errorf("ENI addresses = %+v", eni.Addresses)
+	}
+	if got := prefixStrings(inst.Prefixes); fmt.Sprint(got) != fmt.Sprint(wantPrefixes) {
+		t.Errorf("instance prefixes = %v, want %v", got, wantPrefixes)
+	}
+	// The public address is the NAT-outside side: on the instance, never an
+	// interface address.
+	if got := inst.Attributes["nat_outside_addresses"]; fmt.Sprint(got) != "[203.0.113.20]" {
+		t.Errorf("nat_outside_addresses = %v", got)
 	}
 	// The fixture's private DNS name is EC2's IP-NAME form, which is an alias
 	// of the private address and is unique only inside one VPC's resolver. It
@@ -130,27 +172,25 @@ func TestBuildAWSEnumerationPlan(t *testing.T) {
 		t.Errorf("primary address = %q", inst.IPAddress)
 	}
 
-	// Facts: the cloud.* placement set, plus the interfaces.
+	// Facts: the cloud.* placement set. No VPC / subnet id (retired: prefix
+	// containment answers it) and no net.interfaces (the ENIs are interfaces).
 	assertFact(t, inst.Facts, facts.KeyCloudProvider, "aws")
 	assertFact(t, inst.Facts, facts.KeyCloudAccountID, "123456789012")
 	assertFact(t, inst.Facts, facts.KeyCloudRegion, "us-east-1")
 	assertFact(t, inst.Facts, facts.KeyCloudResourceID, inst.ResourceID)
-	assertFact(t, inst.Facts, facts.KeyCloudVPCID, "vpc-01")
-	assertFact(t, inst.Facts, facts.KeyCloudSubnetID, "subnet-01")
+	for _, gone := range []string{facts.KeyCloudVPCID, facts.KeyCloudSubnetID, facts.KeyNetInterfaces} {
+		if _, present := inst.Facts[gone]; present {
+			t.Errorf("fact %q is still written; it is retired by row 1.5f", gone)
+		}
+	}
 	sgs, ok := inst.Facts[facts.KeyCloudSecurityGroups].([]map[string]any)
 	if !ok || len(sgs) != 1 || sgs[0]["id"] != "sg-01" || sgs[0]["name"] != "web" {
 		t.Errorf("cloud.security_groups = %#v", inst.Facts[facts.KeyCloudSecurityGroups])
-	}
-	ifaces, ok := inst.Facts[facts.KeyNetInterfaces].([]map[string]any)
-	if !ok || len(ifaces) != 1 || ifaces[0]["mac"] != "0a:1b:2c:3d:4e:5f" || ifaces[0]["state"] != "up" {
-		t.Errorf("net.interfaces = %#v", inst.Facts[facts.KeyNetInterfaces])
 	}
 
 	// Attributes must be declarable by the class, or they are dropped at write
 	// time and become invisible data.
 	assertAttributesDeclared(t, DeviceTypeClassKey(inst.DeviceType), inst.Attributes)
-	assertAttributesDeclared(t, DeviceTypeClassKey(vpc.DeviceType), vpc.Attributes)
-	assertAttributesDeclared(t, DeviceTypeClassKey(subnet.DeviceType), subnet.Attributes)
 	if inst.Attributes["instance_type"] != "m6i.large" {
 		t.Errorf("instance_type attribute = %v", inst.Attributes["instance_type"])
 	}
@@ -199,7 +239,7 @@ func TestBuildAWSEnumerationPlan_HostnameOnlyFromAGloballyUniqueName(t *testing.
 	}
 }
 
-// A VPC that is missing its account id has no ARN, and a resource with no
+// A VPC that is missing its account id has no ARN, and a network with no
 // canonical id must not be recorded under a weaker one.
 func TestBuildAWSEnumerationPlan_DropsResourcesWithNoCanonicalID(t *testing.T) {
 	instances, vpcs, subnets, groups := awsFixture()
@@ -208,9 +248,9 @@ func TestBuildAWSEnumerationPlan_DropsResourcesWithNoCanonicalID(t *testing.T) {
 	if len(plan.Networks) != 0 {
 		t.Errorf("a VPC with no ARN was recorded: %+v", plan.Networks)
 	}
-	// Its subnet survives, but with no container to point at.
-	if len(plan.Subnets) != 1 || plan.Subnets[0].ParentID != "" {
-		t.Errorf("subnet parent = %+v, want empty rather than a dangling id", plan.Subnets)
+	// Its subnet survives, but names no address space rather than a dangling one.
+	if len(plan.Subnets) != 1 || plan.Subnets[0].NetworkRef != "" {
+		t.Errorf("subnet network = %+v, want empty rather than a dangling id", plan.Subnets)
 	}
 }
 
@@ -233,7 +273,7 @@ func TestBuildAzureEnumerationPlan(t *testing.T) {
 			VMSize: "Standard_D2s_v5", VMID: "b0c1d2e3-4f56-7890-abcd-ef0123456789",
 			OSType: "Linux", ImageReference: "Canonical:jammy:22_04-lts:latest",
 			PrivateIPs: []string{"10.10.1.20"}, SubnetIDs: []string{subnetID},
-			Interfaces: []azureclient.NetworkInterface{{ID: "nic", Name: "nic-01", MAC: "00:0d:3a:1b:2c:3d", Addresses: []string{"10.10.1.20"}}},
+			Interfaces: []azureclient.NetworkInterface{{ID: "nic", Name: "nic-01", MAC: "00:0d:3a:1b:2c:3d", Addresses: []string{"10.10.1.20"}, SubnetID: subnetID}},
 			Tags:       map[string]string{"environment": "production"},
 		}},
 		[]azureclient.VirtualNetwork{{
@@ -254,31 +294,33 @@ func TestBuildAzureEnumerationPlan(t *testing.T) {
 		t.Fatalf("counts = %+v", got)
 	}
 
-	vnet := findResource(t, plan.Networks, vnetID)
-	if got := DeviceTypeClassKey(vnet.DeviceType); got != string(assetclass.KeyVirtualNetwork) {
-		t.Errorf("a VNet must class as virtual_network, got %q", got)
-	}
-
-	subnet := findResource(t, plan.Subnets, subnetID)
-	if got := DeviceTypeClassKey(subnet.DeviceType); got != string(assetclass.KeySubnet) {
-		t.Errorf("an Azure subnet must class as subnet, got %q", got)
-	}
-	if subnet.ParentID != vnetID || subnet.SegmentCIDR != "10.10.1.0/24" {
-		t.Errorf("subnet placement = %+v", subnet)
+	vnet := findNetwork(t, plan.Networks, vnetID)
+	subnet := findNetwork(t, plan.Subnets, subnetID)
+	if vnet.NetworkRef != vnetID || subnet.NetworkRef != vnetID || fmt.Sprint(subnet.CIDRs) != "[10.10.1.0/24]" {
+		t.Errorf("VNet / subnet = %+v / %+v", vnet, subnet)
 	}
 
 	vm := findResource(t, plan.Instances, vmID)
 	if got := DeviceTypeClassKey(vm.DeviceType); got != string(assetclass.KeyComputeInstance) {
 		t.Errorf("an Azure VM must class as compute_instance, got %q", got)
 	}
-	if vm.ParentID != subnetID {
-		t.Errorf("vm parent = %q, want the subnet resolved from its NIC", vm.ParentID)
+	if vm.CloudNetworkRef != vnetID {
+		t.Errorf("vm network = %q, want the VNet resolved from its NIC's subnet", vm.CloudNetworkRef)
+	}
+	if len(vm.Interfaces) != 1 || vm.Interfaces[0].Name != "nic-01" || vm.Interfaces[0].Type != "virtual" ||
+		vm.Interfaces[0].MAC != "00:0d:3a:1b:2c:3d" ||
+		fmt.Sprint(vm.Interfaces[0].Addresses) != fmt.Sprint([]identity.ObservedAddress{{Address: "10.10.1.20", PrefixLen: 24, Source: "cloud"}}) {
+		t.Errorf("NIC = %+v", vm.Interfaces)
+	}
+	if got := prefixStrings(vm.Prefixes); fmt.Sprint(got) != fmt.Sprint([]string{
+		"10.10.0.0/16@" + vnetID + " type=cloud dhcp=false",
+		"10.10.1.0/24@" + vnetID + " type=cloud dhcp=false",
+	}) {
+		t.Errorf("vm prefixes = %v", got)
 	}
 	if vm.Hostname != "" {
 		t.Errorf("hostname = %q — Azure states no DNS name for a VM on the compute API", vm.Hostname)
 	}
-	assertFact(t, vm.Facts, facts.KeyCloudVPCID, vnetID)
-	assertFact(t, vm.Facts, facts.KeyCloudSubnetID, subnetID)
 	assertFact(t, vm.Facts, facts.KeyHWUUID, "b0c1d2e3-4f56-7890-abcd-ef0123456789")
 	// The VM inherits its subnet's NSG as membership.
 	sgs, _ := vm.Facts[facts.KeyCloudSecurityGroups].([]map[string]any)
@@ -330,32 +372,33 @@ func TestBuildGCPEnumerationPlan(t *testing.T) {
 	}
 
 	// Every id is the host-independent partial resource name.
-	net := findResource(t, plan.Networks, "projects/my-project/global/networks/prod-vpc")
-	if got := DeviceTypeClassKey(net.DeviceType); got != string(assetclass.KeyVirtualNetwork) {
-		t.Errorf("a GCP network must class as virtual_network, got %q", got)
+	const netID = "projects/my-project/global/networks/prod-vpc"
+	net := findNetwork(t, plan.Networks, netID)
+	// A GCP network is GLOBAL, and a custom-mode network has no CIDR of its
+	// own: it contributes no prefix, and claiming one would be invented.
+	if net.Region != "" || len(net.prefixes()) != 0 {
+		t.Errorf("custom-mode network = %+v, prefixes %v", net, net.prefixes())
 	}
-	// A GCP network is GLOBAL. Claiming a region it does not have would be an
-	// invented fact.
-	if _, present := net.Facts[facts.KeyCloudRegion]; present {
-		t.Errorf("a GCP network has no region: %v", net.Facts)
+	sn := findNetwork(t, plan.Subnets, "projects/my-project/regions/us-central1/subnetworks/app")
+	if sn.NetworkRef != netID || sn.Region != "us-central1" {
+		t.Errorf("subnetwork = %+v", sn)
 	}
-	// A custom-mode network has no CIDR of its own either.
-	if _, present := net.Attributes["cidr_blocks"]; present {
-		t.Errorf("a custom-mode network's address space lives on its subnetworks: %v", net.Attributes)
-	}
-
-	sn := findResource(t, plan.Subnets, "projects/my-project/regions/us-central1/subnetworks/app")
-	if sn.ParentID != net.ResourceID || sn.SegmentCIDR != "10.128.0.0/20" {
-		t.Errorf("subnet placement = %+v", sn)
-	}
-	assertFact(t, sn.Facts, facts.KeyCloudRegion, "us-central1")
 
 	inst := findResource(t, plan.Instances, "projects/my-project/zones/us-central1-a/instances/web-01")
 	if got := DeviceTypeClassKey(inst.DeviceType); got != string(assetclass.KeyComputeInstance) {
 		t.Errorf("a GCE instance must class as compute_instance, got %q", got)
 	}
-	if inst.ParentID != sn.ResourceID {
-		t.Errorf("instance parent = %q, want the subnetwork", inst.ParentID)
+	if inst.CloudNetworkRef != netID {
+		t.Errorf("instance network = %q", inst.CloudNetworkRef)
+	}
+	// GCE states no MAC for a NIC: the interface carries none rather than an
+	// invented one.
+	if len(inst.Interfaces) != 1 || inst.Interfaces[0].Name != "nic0" || inst.Interfaces[0].MAC != "" ||
+		fmt.Sprint(inst.Interfaces[0].Addresses) != fmt.Sprint([]identity.ObservedAddress{{Address: "10.128.0.5", PrefixLen: 20, Source: "cloud"}}) {
+		t.Errorf("NIC = %+v", inst.Interfaces)
+	}
+	if got := prefixStrings(inst.Prefixes); fmt.Sprint(got) != fmt.Sprint([]string{"10.128.0.0/20@" + netID + " type=cloud dhcp=false"}) {
+		t.Errorf("instance prefixes = %v", got)
 	}
 	if inst.IPAddress != "10.128.0.5" {
 		t.Errorf("primary address = %q", inst.IPAddress)
@@ -389,7 +432,7 @@ func TestEnumerationFactsAreRegisteredForTheCloudCollector(t *testing.T) {
 	instances, vpcs, subnets, groups := awsFixture()
 	plan := buildAWSEnumerationPlan(instances, vpcs, subnets, groups)
 
-	all := append(append(append([]cloudEnumResource{}, plan.Networks...), plan.Subnets...), plan.Instances...)
+	all := plan.Instances
 	if len(all) == 0 {
 		t.Fatal("no resources to check — the fixture has stopped producing any")
 	}
@@ -418,7 +461,7 @@ func TestCloudFactRows_DropsUnregisteredAndInvalidKeys(t *testing.T) {
 		// A registered key with the wrong type.
 		facts.KeyCloudRegion: 42,
 		// A nil value is the absence of a fact, not a fact with no value.
-		facts.KeyCloudVPCID: nil,
+		facts.KeyCloudResourceID: nil,
 	}, cloudSource(stringPtr("AWS")), nowUTCForTest())
 
 	if len(rows) != 1 || rows[0].Key != facts.KeyCloudProvider {
@@ -449,11 +492,7 @@ func TestFilterClassAttributes(t *testing.T) {
 // negotiated no protocol and states no at-rest encryption, and the fallback
 // there is a fabricated TLS:443 endpoint.
 func TestInventoryOnlyDeviceTypesCoverEveryEnumeratedKind(t *testing.T) {
-	for _, dt := range []string{
-		DeviceTypeAWSEC2Instance, DeviceTypeAWSVPC, DeviceTypeAWSSubnet,
-		DeviceTypeAzureVM, DeviceTypeAzureVNet, DeviceTypeAzureSubnet,
-		DeviceTypeGCPComputeInstance, DeviceTypeGCPNetwork, DeviceTypeGCPSubnetwork,
-	} {
+	for _, dt := range []string{DeviceTypeAWSEC2Instance, DeviceTypeAzureVM, DeviceTypeGCPComputeInstance} {
 		if !inventoryOnlyDeviceTypes[dt] {
 			t.Errorf("%s is enumerated but not inventory-only: WriteSensorDiscoveries would fabricate a TLS:443 endpoint for it", dt)
 		}
@@ -462,41 +501,6 @@ func TestInventoryOnlyDeviceTypesCoverEveryEnumeratedKind(t *testing.T) {
 		}
 		if DeviceTypeClassKey(dt) == "" {
 			t.Errorf("%s maps to no class; it would be inventoried as unclassified", dt)
-		}
-	}
-}
-
-func TestNormalizeSegmentEnvironment(t *testing.T) {
-	cases := map[string]string{
-		"production": "production", "PROD": "production",
-		"staging": "staging", "dev": "development", "development": "development",
-		"test": "test", "qa": "test",
-		// The default matches inventory-service's own cloud-segment path.
-		"": "production", "whatever": "production",
-	}
-	for in, want := range cases {
-		if got := normalizeSegmentEnvironment(in); got != want {
-			t.Errorf("normalizeSegmentEnvironment(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestBoolFromConfig(t *testing.T) {
-	// The AWS credential decrypt path stringifies every non-string value, so a
-	// stored `false` can come back as "false". Reading only the bool would have
-	// treated that as "not set" and silently turned the toggle back on.
-	for _, tc := range []struct {
-		in       any
-		want, ok bool
-	}{
-		{true, true, true}, {false, false, true},
-		{"true", true, true}, {"false", false, true},
-		{"FALSE", false, true}, {"0", false, true}, {"1", true, true},
-		{"maybe", false, false}, {nil, false, false}, {42, false, false},
-	} {
-		got, ok := boolFromConfig(tc.in)
-		if got != tc.want || ok != tc.ok {
-			t.Errorf("boolFromConfig(%#v) = %v, %v; want %v, %v", tc.in, got, ok, tc.want, tc.ok)
 		}
 	}
 }
@@ -515,9 +519,11 @@ func TestCloudEnumerationCounts(t *testing.T) {
 	if onlyGroups.Total() != 0 {
 		t.Errorf("Total = %d; a security group is not an asset", onlyGroups.Total())
 	}
+	// Networks and subnets are prefixes since row 1.5f: only the instances are
+	// assets.
 	full := CloudEnumerationCounts{Instances: 2, Networks: 1, Subnets: 4, SecurityGroups: 9}
-	if full.Total() != 7 {
-		t.Errorf("Total = %d, want 7", full.Total())
+	if full.Total() != 2 {
+		t.Errorf("Total = %d, want 2", full.Total())
 	}
 }
 

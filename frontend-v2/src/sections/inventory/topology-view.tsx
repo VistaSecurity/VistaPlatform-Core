@@ -5,8 +5,8 @@
 // asking for it:
 //
 //	"not a force graph of thousands of nodes, which is unreadable everywhere it
-//	 is tried. A hierarchical view by site → segment → class with counts,
-//	 expandable to the assets in a segment, with cross-segment connection
+//	 is tried. A hierarchical view by site → prefix → class with counts,
+//	 expandable to the assets in a prefix, with cross-prefix connection
 //	 summaries drawn as aggregated edges. … The topology view needs no graph
 //	 library; it is a tree with counts and can be built with the existing
 //	 components."
@@ -26,20 +26,26 @@ import { useAssetTopology } from './relationship-queries';
 import { CLASS_GROUP_STYLES, classGroupOf } from './map-model';
 import { classLabel } from './asset-shape';
 import {
-  classDrillThroughQuery, edgeSummary, segmentDrillThroughQuery, segmentKey,
+  classDrillThroughQuery, cloudLensHref, cloudRegionScope, edgeSummary, prefixDrillThroughQuery, prefixKey,
   topologyAssetsHref, topologyEdgeHeadline, topologyTruncationNotice, treeAssetTotal,
-  type TopologyEdge, type TopologySegment, type TopologySite,
+  cablePathsSummary,
+  type TopologyCablePaths, type TopologyCloudAccount, type TopologyEdge, type TopologyPrefix, type TopologySite,
 } from './topology-model';
+import { CABLE_EDGE_COLOR, CABLE_EDGE_WIDTH, cablingLayerOn } from './map-cabling-model';
 
 export function TopologyView() {
   const q = useAssetTopology();
   const t = q.data;
 
-  // Expansion is per (site, segment) and defaults CLOSED for segments, open
+  // Expansion is per (site, prefix) and defaults CLOSED for prefixes, open
   // for sites. A tenant's first look should be the shape of the estate, not
   // three hundred class rows.
-  const [openSegments, setOpenSegments] = useState<Set<string>>(new Set());
+  const [openPrefixes, setOpenPrefixes] = useState<Set<string>>(new Set());
   const [closedSites, setClosedSites] = useState<Set<string>>(new Set());
+
+  // The physical cabling layer (DCIM row 3.6): on by default when any cable
+  // run crosses between prefixes, off and disabled when none does.
+  const [cablingChoice, setCablingChoice] = useState<boolean | null>(null);
 
   const notice = useMemo(() => topologyTruncationNotice(t), [t]);
   const treeTotal = useMemo(() => treeAssetTotal(t), [t]);
@@ -47,7 +53,7 @@ export function TopologyView() {
   if (q.isLoading) {
     return (
       <Centered testId="topology-loading" icon="loader" title="Loading the topology…"
-        message="Grouping every configuration item by site, segment and class." />
+        message="Grouping every asset by site, prefix and class." />
     );
   }
   if (q.isError) {
@@ -61,20 +67,23 @@ export function TopologyView() {
     return (
       <Centered testId="topology-empty" icon="map"
         title="Nothing to map yet"
-        message="The topology groups your configuration items by site, segment and class. Run a discovery, import a spreadsheet, or add an asset by hand and the shape of the estate appears here."
+        message="The topology groups your assets by site, prefix and class. Run a discovery, import a spreadsheet, or add an asset by hand and the shape of the estate appears here."
         action={{ label: 'Go to Discovery', to: '/discovery' }} />
     );
   }
 
   const sites = t.sites ?? [];
+  const clouds = t.clouds ?? [];
   const edges = t.edges ?? [];
   const edgeHeadline = topologyEdgeHeadline(t);
+  const cables = t.cable_paths ?? [];
+  const cablingOn = cablingLayerOn(cablingChoice, cables.length);
 
   return (
     <div data-testid="topology-view" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 26px 30px' }}>
       {/* The headline numbers, and the honesty line under them. */}
       <div style={{ display: 'flex', alignItems: 'flex-end', gap: 26, flexWrap: 'wrap', marginBottom: 16 }}>
-        <Headline n={t.total_assets} label="configuration items" />
+        <Headline n={t.total_assets} label="assets" />
         <Headline n={sites.length} label={sites.length === 1 ? 'site' : 'sites'} />
         <Headline
           n={t.unassigned_assets}
@@ -85,7 +94,7 @@ export function TopologyView() {
         />
         {/* The SERVER's count, not the drawn one. `edges` is what survived the
             cap, and reporting it as the estate's total is the headline saying
-            "200 cross-segment links" about a tenant that has 900. */}
+            "200 cross-prefix links" about a tenant that has 900. */}
         <Headline
           n={edgeHeadline.count}
           label={edgeHeadline.label}
@@ -115,29 +124,71 @@ export function TopologyView() {
               site={site}
               collapsed={closedSites.has(site.site)}
               onToggle={() => setClosedSites((s) => toggled(s, site.site))}
-              openSegments={openSegments}
-              onToggleSegment={(key) => setOpenSegments((s) => toggled(s, key))}
+              openPrefixes={openPrefixes}
+              onTogglePrefix={(key) => setOpenPrefixes((s) => toggled(s, key))}
             />
           ))}
+          {/* The cloud hierarchy (ADR-0009 D7): account → region → prefix →
+              class. The same resources are also under their sites above —
+              two groupings of one estate. */}
+          {clouds.length > 0 && (
+            <>
+              <h3 style={{ margin: '14px 0 2px', fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14, color: 'var(--app-t1)' }}>Cloud</h3>
+              {clouds.map((acc) => (
+                <CloudAccountBlock
+                  key={`${acc.provider}|${acc.account_id}`}
+                  account={acc}
+                  openPrefixes={openPrefixes}
+                  onTogglePrefix={(key) => setOpenPrefixes((s) => toggled(s, key))}
+                />
+              ))}
+            </>
+          )}
         </div>
 
         {/* ---- the aggregated edges ---- */}
         <div style={{ flex: '0 1 320px', minWidth: 280 }}>
-          <h3 style={{ margin: '0 0 4px', fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14, color: 'var(--app-t1)' }}>
-            Between segments
-          </h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <h3 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14, color: 'var(--app-t1)', flex: 1 }}>
+              Between prefixes
+            </h3>
+            <button
+              type="button"
+              className={'ui-btn sm' + (cablingOn ? ' accent' : '')}
+              data-testid="topology-cabling-toggle"
+              aria-pressed={cablingOn}
+              disabled={cables.length === 0}
+              title={cables.length === 0
+                ? 'No cable runs between prefixes. Cables are connected on an asset\'s Ports tab.'
+                : 'Show the physical cable runs between prefixes beside the relationships.'}
+              onClick={() => setCablingChoice(!cablingOn)}
+              style={{ fontSize: 12, opacity: cables.length === 0 ? 0.55 : 1 }}
+            >
+              <Icon name="cable" size={12} />Physical cabling
+            </button>
+          </div>
           <p style={{ margin: '0 0 11px', fontSize: 11.5, color: 'var(--app-t3)', lineHeight: 1.6 }}>
-            Confirmed relationships that cross a segment boundary, aggregated. Pending ones are not drawn —
+            Confirmed relationships that cross a prefix boundary, aggregated. Pending ones are not drawn —
             an aggregate is the one place a single unconfirmed observation is invisible.
           </p>
           {edges.length === 0 ? (
             <div style={{ fontSize: 12, color: 'var(--app-t3)', border: '1px dashed var(--app-border2)', borderRadius: 11, padding: '16px 14px', lineHeight: 1.6 }}>
-              No confirmed relationship crosses a segment boundary yet. This is not "your segments are isolated" —
+              No confirmed relationship crosses a prefix boundary yet. This is not "your prefixes are isolated" —
               it means nothing has observed or declared a link between them.
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }} data-testid="topology-edges">
               {edges.map((e, i) => <EdgeRow key={i} edge={e} />)}
+            </div>
+          )}
+          {cablingOn && (
+            <div data-testid="topology-cable-paths" style={{ marginTop: 14 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: .4, textTransform: 'uppercase', color: 'var(--app-t3)', marginBottom: 7 }}>
+                Cable runs{t.total_cable_paths && t.total_cable_paths > cables.length ? ` (${cables.length} of ${t.total_cable_paths})` : ''}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                {cables.map((c, i) => <CableRow key={i} cable={c} />)}
+              </div>
             </div>
           )}
         </div>
@@ -185,14 +236,14 @@ function Notice({ children, tone, testId }: { children: React.ReactNode; tone: s
   );
 }
 
-function SiteBlock({ site, collapsed, onToggle, openSegments, onToggleSegment }: {
+function SiteBlock({ site, collapsed, onToggle, openPrefixes, onTogglePrefix }: {
   site: TopologySite;
   collapsed: boolean;
   onToggle: () => void;
-  openSegments: Set<string>;
-  onToggleSegment: (key: string) => void;
+  openPrefixes: Set<string>;
+  onTogglePrefix: (key: string) => void;
 }) {
-  const segments = site.segments ?? [];
+  const prefixes = site.prefixes ?? [];
   return (
     <div className="panel" style={{ padding: '12px 15px' }} data-testid="topology-site">
       <button
@@ -206,12 +257,12 @@ function SiteBlock({ site, collapsed, onToggle, openSegments, onToggleSegment }:
       </button>
       {!collapsed && (
         <div style={{ marginTop: 9, display: 'flex', flexDirection: 'column', gap: 5 }}>
-          {segments.map((seg) => (
-            <SegmentRow
-              key={segmentKey(site.site, seg)}
-              segment={seg}
-              open={openSegments.has(segmentKey(site.site, seg))}
-              onToggle={() => onToggleSegment(segmentKey(site.site, seg))}
+          {prefixes.map((seg) => (
+            <PrefixRow
+              key={prefixKey(site.site, seg)}
+              prefix={seg}
+              open={openPrefixes.has(prefixKey(site.site, seg))}
+              onToggle={() => onTogglePrefix(prefixKey(site.site, seg))}
             />
           ))}
         </div>
@@ -220,16 +271,72 @@ function SiteBlock({ site, collapsed, onToggle, openSegments, onToggleSegment }:
   );
 }
 
-function SegmentRow({ segment, open, onToggle }: {
-  segment: TopologySegment; open: boolean; onToggle: () => void;
+function CloudAccountBlock({ account, openPrefixes, onTogglePrefix }: {
+  account: TopologyCloudAccount;
+  openPrefixes: Set<string>;
+  onTogglePrefix: (key: string) => void;
 }) {
-  const classes = segment.classes ?? [];
-  // The unsegmented bucket is drawn differently on purpose: it is an ABSENCE,
-  // not a segment, and giving it the same chrome as a real one would let a
-  // reader take "Unsegmented" for something somebody drew.
-  const isBucket = !segment.segment_id;
+  const regions = account.regions ?? [];
   return (
-    <div data-testid="topology-segment" style={{ borderLeft: `2px solid ${isBucket ? 'var(--app-border2)' : 'var(--accent)'}`, paddingLeft: 11 }}>
+    <div className="panel" style={{ padding: '12px 15px' }} data-testid="topology-cloud-account">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+        <Icon name="cloud" size={14} style={{ color: 'var(--accent)' }} />
+        {account.account_asset_id ? (
+          <Link to={`/inventory/assets/${account.account_asset_id}`} style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--app-t1)', textDecoration: 'none', flex: 1 }}>
+            {account.account_name || account.account_id}
+          </Link>
+        ) : (
+          <span style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--app-t1)', flex: 1 }}>{account.account_id || 'Account not recorded'}</span>
+        )}
+        <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{account.provider} · {account.account_id}</span>
+        <span className="mono" style={{ fontSize: 12, color: 'var(--app-t3)' }}>{account.asset_count.toLocaleString()}</span>
+      </div>
+      <div style={{ marginTop: 9, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {regions.map((r) => {
+          const scope = cloudRegionScope(account, r);
+          const regionKey = `cloud:${account.provider}|${account.account_id}|${r.region}`;
+          return (
+            <div key={r.region} data-testid="topology-cloud-region" style={{ paddingLeft: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                <Icon name="map-pin" size={12} style={{ color: 'var(--app-t3)' }} />
+                <span className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', flex: 1 }}>{r.region}</span>
+                <Link to={cloudLensHref(scope)} className="mono" style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none' }}>
+                  {r.asset_count.toLocaleString()}
+                </Link>
+              </div>
+              <div style={{ marginTop: 5, display: 'flex', flexDirection: 'column', gap: 5, paddingLeft: 12 }}>
+                {(r.prefixes ?? []).map((p) => (
+                  <PrefixRow
+                    key={prefixKey(regionKey, p)}
+                    prefix={p}
+                    scope={scope}
+                    open={openPrefixes.has(prefixKey(regionKey, p))}
+                    onToggle={() => onTogglePrefix(prefixKey(regionKey, p))}
+                  />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PrefixRow({ prefix, open, onToggle, scope }: {
+  prefix: TopologyPrefix; open: boolean; onToggle: () => void;
+  /** ANDed into every drill-through: a cloud region's prefix lists only that
+   *  region's resources. */
+  scope?: string;
+}) {
+  const scoped = (q: string) => (scope ? `${scope} and ${q}` : q);
+  const classes = prefix.classes ?? [];
+  // The no-prefix bucket is drawn differently on purpose: it is an ABSENCE,
+  // not a prefix, and giving it the same chrome as a real one would let a
+  // reader take "No prefix" for something somebody drew.
+  const isBucket = !prefix.prefix_id;
+  return (
+    <div data-testid="topology-prefix" style={{ borderLeft: `2px solid ${isBucket ? 'var(--app-border2)' : 'var(--accent)'}`, paddingLeft: 11 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <button
           onClick={onToggle}
@@ -237,21 +344,21 @@ function SegmentRow({ segment, open, onToggle }: {
         >
           <Icon name={open ? 'chevron-down' : 'chevron-right'} size={13} style={{ color: 'var(--app-t3)' }} />
           <span style={{ fontSize: 12.5, color: isBucket ? 'var(--app-t3)' : 'var(--app-t1)', fontWeight: isBucket ? 400 : 600, fontStyle: isBucket ? 'italic' : 'normal' }}>
-            {segment.segment_name}
+            {prefix.prefix_name}
           </span>
           <span style={{ fontSize: 11, color: 'var(--app-t3)' }}>
             {classes.length} {classes.length === 1 ? 'class' : 'classes'}
           </span>
         </button>
         <Link
-          to={topologyAssetsHref(segmentDrillThroughQuery(segment))}
+          to={topologyAssetsHref(scoped(prefixDrillThroughQuery(prefix)))}
           className="mono"
           style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none' }}
           title={isBucket
-            ? 'Every configuration item with no network segment recorded'
-            : `Every configuration item in ${segment.segment_name}`}
+            ? 'Every asset with no network prefix recorded'
+            : `Every asset in ${prefix.prefix_name}`}
         >
-          {segment.asset_count.toLocaleString()}
+          {prefix.asset_count.toLocaleString()}
         </Link>
       </div>
       {open && (
@@ -262,7 +369,7 @@ function SegmentRow({ segment, open, onToggle }: {
               <Link
                 key={c.class_key}
                 data-testid="topology-class"
-                to={topologyAssetsHref(classDrillThroughQuery(segment, c))}
+                to={topologyAssetsHref(scoped(classDrillThroughQuery(prefix, c)))}
                 title={`${classLabel(c.class_key) || c.class_key} · ${c.class_path}`}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 9px',
@@ -291,15 +398,40 @@ function EdgeRow({ edge }: { edge: TopologyEdge }) {
       style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 11px', borderRadius: 10, border: '1px solid var(--app-border)', fontSize: 12 }}
     >
       <span style={{ color: 'var(--app-t1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 100 }}>
-        {edge.from_segment_name}
+        {edge.from_prefix_name}
       </span>
       <Icon name="arrow-right" size={12} style={{ color: 'var(--app-t3)', flex: 'none' }} />
       <span style={{ color: 'var(--app-t1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 100 }}>
-        {edge.to_segment_name}
+        {edge.to_prefix_name}
       </span>
       <span style={{ flex: 1 }} />
       <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap' }} title={edgeSummary(edge)}>
         {edge.count.toLocaleString()}
+      </span>
+    </div>
+  );
+}
+
+/** One prefix pair's cable runs: a thick bar in the cable colour, dashed when
+ *  every run is still a proposal — the same marks as the neighbourhood. */
+function CableRow({ cable }: { cable: TopologyCablePaths }) {
+  const allProposed = cable.pending_count > 0 && cable.pending_count === cable.count;
+  return (
+    <div
+      data-testid="topology-cable-path"
+      data-proposed={allProposed || undefined}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '7px 11px', borderRadius: 10, fontSize: 12,
+        border: '1px solid var(--app-border)',
+        borderLeft: `${CABLE_EDGE_WIDTH + 1}px ${allProposed ? 'dashed' : 'solid'} ${CABLE_EDGE_COLOR}`,
+      }}
+    >
+      <span style={{ color: 'var(--app-t1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 100 }}>{cable.from_prefix_name}</span>
+      <Icon name="cable" size={12} style={{ color: CABLE_EDGE_COLOR, flex: 'none' }} />
+      <span style={{ color: 'var(--app-t1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 100 }}>{cable.to_prefix_name}</span>
+      <span style={{ flex: 1 }} />
+      <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap' }} title={cablePathsSummary(cable)}>
+        {cable.count.toLocaleString()}{cable.pending_count > 0 ? ` (${cable.pending_count} proposed)` : ''}
       </span>
     </div>
   );

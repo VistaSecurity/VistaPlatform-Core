@@ -16,7 +16,7 @@ func TestIntegration_IdentityDismissal_PrecedesMatchingAndRequiresStrongerProof(
 	testdb.WithSchemaShareLock(t, db.DB.DB, func() {
 		svc := NewAssetService(db)
 		actor := seedUser(t, db, tenant)
-		segment := seedSegment(t, db, tenant, "Dismissal scope", "192.0.2.0/24")
+		segment := seedPrefix(t, db, tenant, "Dismissal scope", "192.0.2.0/24")
 		if _, err := db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant); err != nil {
 			t.Fatal(err)
 		}

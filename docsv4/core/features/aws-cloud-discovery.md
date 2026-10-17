@@ -36,8 +36,8 @@ EC2 instance negotiates no protocol and states no at-rest encryption — and it 
 what makes the rest of a run legible: a TLS listener on a machine that is not in
 your inventory is half an answer.
 
-It is controlled by one switch per integration, **Inventory compute, networks and
-subnets** in Discovery → Cloud → Edit integration. It is **on by default**,
+It is controlled by one switch per integration, **Inventory compute instances and
+their networks** in Discovery → Cloud → Edit integration. It is **on by default**,
 including for integrations created before this feature existed. Turning it off
 stops all four calls below.
 
@@ -45,9 +45,9 @@ stops all four calls below.
 
 | Call | Per | Produces |
 |---|---|---|
-| `ec2:DescribeInstances` | Region, paginated | One asset per non-terminated instance |
-| `ec2:DescribeVpcs` | Region, paginated | One asset per VPC |
-| `ec2:DescribeSubnets` | Region, paginated | One asset per subnet |
+| `ec2:DescribeInstances` | Region, paginated | One asset per non-terminated instance, with its network interfaces (ENIs) |
+| `ec2:DescribeVpcs` | Region, paginated | One prefix per VPC address range (Inventory → Networks) |
+| `ec2:DescribeSubnets` | Region, paginated | One prefix per `Subnet`, inside its VPC's |
 | `ec2:DescribeSecurityGroups` | Region, paginated | Group **membership** on the instances — never the rules |
 
 **Cost.** Four extra calls per selected region per run, each paginated (the AWS
@@ -68,20 +68,28 @@ policies. If your policy already grants `ec2:Describe*`, nothing is needed.
 
 ### What lands in the inventory
 
-| AWS resource | Asset class | Identified by |
+| AWS resource | Lands as | Identified by |
 |---|---|---|
-| EC2 instance | Compute instance | `arn:aws:ec2:<region>:<account>:instance/<id>` |
-| VPC | Virtual network | `arn:aws:ec2:<region>:<account>:vpc/<id>` |
-| Subnet | Subnet | the subnet's own `SubnetArn` |
+| EC2 instance | Compute instance asset | `arn:aws:ec2:<region>:<account>:instance/<id>` |
+| ENI | an interface of the instance (type *Virtual*), named by its ENI id | the instance and the ENI id |
+| VPC | a prefix per address range, in **Inventory → Networks** | the range, and the VPC's ARN as its cloud network |
+| `Subnet` | a prefix inside its VPC's | the range, and the VPC's ARN as its cloud network |
 | Security group | *not an asset* | recorded as membership on the instance |
 
-Each instance carries its private addresses, its interfaces (name, MAC,
-addresses), its instance type and image id, its tags, and the `cloud.*`
-placement facts (provider, account, region, VPC, subnet, security groups). The
-relationships **VPC contains subnet** and **subnet contains instance** are drawn
-from the provider's own placement, and a subnet's CIDR becomes a network segment
-so an instance's private address resolves to the same asset when an agent or a
-sensor sees it from inside.
+A VPC and its address ranges are **not assets**: they are prefixes, the same
+objects your on-premises networks are, each naming the VPC it belongs to. Which
+network an instance is in is answered by the prefix its address falls in — open
+the prefix in Inventory → Networks to see the addresses in it.
+
+Each instance's **Interfaces** tab lists its ENIs, each with its MAC and its
+private addresses at the prefix length of the range they sit in. An ENI's
+public (Elastic or auto-assigned) address is the NAT-outside side of a private
+one, so it is recorded on the instance as *NAT outside addresses* rather than as
+an interface address. The instance also carries its instance type and image id,
+its tags, and the `cloud.*` placement facts (provider, account, region,
+security groups). Because the prefixes are recorded before the instances, an
+instance's private address resolves to the same asset when an agent or a sensor
+sees it from inside.
 
 **Hostname.** EC2 offers two private DNS name formats and only one of them is a
 name. The *resource-name* format (`i-0abc….ec2.internal`) is built from the
@@ -102,13 +110,13 @@ matches on the ARN and updates; it never creates a second asset.
 A private address is not unique in an AWS account, and the inventory is built so
 that it never has to be.
 
-- **Two VPCs using the same CIDR** — two VPCs created from the same Terraform
-  module both get `10.0.0.0/16`, and their subnets both get `10.0.1.0/24` — are
-  two separate network segments, tagged with the VPC they belong to. Two
-  instances at `10.0.1.20` in two different VPCs are **two assets**, and neither
-  is affected by the other.
-- **An address reused inside one subnet** — EC2 gives a freed private address to
-  the next instance launched — is genuinely the same segment, and the platform
+- **Two VPCs using the same address range** — two VPCs created from the same
+  Terraform module both get `10.0.0.0/16` and `10.0.1.0/24` — are two address
+  spaces. Two instances at `10.0.1.20` in two different VPCs are **two assets**,
+  and neither is affected by the other. (Inventory → Networks shows one prefix
+  per range for now, named for the first VPC it was seen in.)
+- **An address reused inside one VPC** — EC2 gives a freed private address to
+  the next instance launched — is genuinely the same address space, and the platform
   cannot tell from outside whether an address that changed hands means a new
   machine or a rebuilt one. So it does not guess: the new instance is recorded
   as its own asset in Pending approval, and a **review item appears in
@@ -132,7 +140,7 @@ that it never has to be.
   string ("Linux/UNIX") and an image name is a label someone chose; neither is
   the product the machine runs, so the OS fields stay empty rather than carrying
   a guess. Guest OS comes from the host agent.
-- **A subnet's "public" flag.** Whether a subnet routes to an internet gateway
+- **Whether a range is "public".** Whether a range routes to an internet gateway
   needs `ec2:DescribeRouteTables`, which is a further grant and a further call.
   `MapPublicIpOnLaunch` is a different setting and is not used as a stand-in.
 
@@ -246,7 +254,7 @@ A schedule for this integration (Discovery → Scheduled Scans) runs the same co
 
 ### 4. Automatic processing
 
-The service creates a discovery job, enumerates and interrogates the resources, and writes discoveries to the `sensor_discoveries` table — the same pipeline sensor discoveries use. Each discovery carries its `cloud_provider` and `cloud_region`, so cloud resources are grouped into per-region cloud network segments.
+The service creates a discovery job, enumerates and interrogates the resources, and writes discoveries to the `sensor_discoveries` table — the same pipeline sensor discoveries use. Each discovery carries its `cloud_provider` and `cloud_region`, so cloud resources are grouped into per-region cloud prefixes.
 
 ### 5. Reading the result: "found nothing" vs "could not look"
 
@@ -266,7 +274,7 @@ A failed type shows the region it failed in, the provider's own error code (`Acc
 
 The banner above the list gives the run's verdict: **complete** (everything requested was read), **partly collected**, or **nothing could be collected**. Only a *complete* run reports `success: true`, so a discovery whose KMS permission was revoked can no longer look like a clean run that found no keys.
 
-The account-enumeration calls are listed there too — **EC2 instances**, **VPCs**, **Subnets** and **Security group membership**, per region. A region where `ec2:DescribeInstances` (or another `ec2:Describe*` call) was refused shows as *Could not collect* or *Partly collected* with AWS's `UnauthorizedOperation`, not as a region with no instances.
+The account-enumeration calls are listed there too — **EC2 instances**, **VPCs**, **Network prefixes** and **Security group membership**, per region. A region where `ec2:DescribeInstances` (or another `ec2:Describe*` call) was refused shows as *Could not collect* or *Partly collected* with AWS's `UnauthorizedOperation`, not as a region with no instances.
 
 If the integration has account-wide compute enumeration switched off, or enumeration could not run, the job detail says so rather than leaving the instance and VPC counts silently at zero.
 
@@ -274,7 +282,7 @@ If the integration has account-wide compute enumeration switched off, or enumera
 
 **UI:** Discovery → Approvals.
 
-Cloud-discovered assets appear alongside sensor-discovered ones with hostname, port, protocol, protocol version, cipher suite and certificate detail. They carry `discovery_method = 'cloud_api'` and arrive as `pending_approval` — unless the cloud segment they belong to (the per-region segment created from their `cloud_provider`/`cloud_region`) has auto-approve enabled **with cloud discoveries among its sources**, in which case they go straight to `monitoring`. Cloud coverage is off on every pre-existing segment and is enabled per segment in Settings → Infrastructure; see [Asset Approval](asset-approval.md#which-discoveries-a-segment-auto-approves).
+Cloud-discovered assets appear alongside sensor-discovered ones with hostname, port, protocol, protocol version, cipher suite and certificate detail. They carry `discovery_method = 'cloud_api'` and hang off the account's **Cloud Account** asset (a `hosted_on` relationship). They go straight to `monitoring` when the integration's **Auto-approve resources** switch is on (the default) and wait as `pending_approval` when it is off — the account decides, not a prefix; see [Asset Approval](asset-approval.md#cloud-resources-are-auto-approved-per-account).
 
 Approved resources appear as Infrastructure Assets with their Crypto Configurations. Cloud resource types render with readable names ("AWS S3 bucket", "AWS KMS key") on Discovery → Devices and in the job drawer, and each asset is given the **class** that says what it is: an ELB becomes a **Cloud Load Balancer**, an S3 bucket **Object Storage**, a KMS key a **Key Store**, an API Gateway domain an **API Gateway**, a CloudFront distribution a **CDN Distribution**, an RDS instance a **Managed Database** and an EC2 instance a **Compute Instance**. All of them sit under **Cloud Resource** in the class tree, so filtering the Inventory list by that one class shows every cloud thing this integration found, and a resource type the platform has not seen before is filed as a plain Cloud Resource rather than guessed into the wrong family.
 
@@ -473,7 +481,7 @@ Read this section before drawing conclusions from a run.
 
 ### KMS keys appear in two places
 
-Discovered KMS keys are listed in **Inventory → Keys**, with their spec, state, rotation setting and who manages them (you or AWS). Each key is also a **Key Store** Infrastructure Asset with no endpoint. The key inventory creates and refreshes that asset directly, without passing it through the discovery queue; it is approved or held in Discovery → Approvals by the same segment rules as any other cloud discovery, and a Key Store asset from an earlier release is the same asset, not a duplicate. A run's job detail still counts the keys it found under `kms`, and a run whose keys could not be recorded reports the KMS type as failed rather than complete.
+Discovered KMS keys are listed in **Inventory → Keys**, with their spec, state, rotation setting and who manages them (you or AWS). Each key is also a **Key Store** Infrastructure Asset with no endpoint. The key inventory creates and refreshes that asset directly, without passing it through the discovery queue; it is approved automatically or held in Discovery → Approvals by its account's Auto-approve resources switch, like any other cloud resource, and a Key Store asset from an earlier release is the same asset, not a duplicate. A run's job detail still counts the keys it found under `kms`, and a run whose keys could not be recorded reports the KMS type as failed rather than complete.
 
 ### S3 and RDS records are not reachable endpoints
 

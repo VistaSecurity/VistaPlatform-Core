@@ -138,8 +138,8 @@ func TestF5Interrogator_RefusedEndpointIsAWarningNotASilence(t *testing.T) {
 	w := findWarning(t, result, "/mgmt/tm/net/vlan")
 	assertWarning(t, w, "f5", WarningPermissionDenied, "VLAN")
 
-	if !hasFact(result, factNetInterfaces) {
-		t.Errorf("the interfaces fact was lost with the VLAN table: %v", factKeys(result))
+	if result.Network == nil || len(result.Network.Interfaces) == 0 {
+		t.Errorf("the interfaces were lost with the VLAN table: %+v", result.Network)
 	}
 	if len(result.Assets) == 0 {
 		t.Error("the VIP assets were lost with the VLAN table")
@@ -217,8 +217,8 @@ func TestCiscoCollectOps_UnavailableCommandsAreWarnings(t *testing.T) {
 	ciscoCollectOps(context.Background(), result, newCiscoFixtureRunner(t, ciscoIOSFixturesWithout("show vlan brief")), map[string]interface{}{})
 
 	assertWarning(t, findWarning(t, result, "show vlan brief"), "cisco", WarningError, "VLAN")
-	if !hasFact(result, factNetInterfaces) {
-		t.Errorf("the interfaces fact was lost with the VLAN table: %v", factKeys(result))
+	if result.Network == nil || len(result.Network.Interfaces) == 0 {
+		t.Errorf("the interfaces were lost with the VLAN table: %+v", result.Network)
 	}
 }
 
@@ -273,8 +273,8 @@ func TestSNMPInterrogator_TruncatedWalkIsAWarning(t *testing.T) {
 		t.Fatalf("a walk cut at the row cap raised no warning naming the table; warnings: %+v", result.Warnings)
 	}
 	assertWarning(t, *got, "snmp", WarningTruncated, strconv.Itoa(snmpMaxWalkRows))
-	if !hasFact(result, factNetInterfaces) {
-		t.Errorf("the partial interface table was dropped instead of kept: %v", factKeys(result))
+	if result.Network == nil || len(result.Network.Interfaces) == 0 {
+		t.Errorf("the partial interface table was dropped instead of kept: %+v", result.Network)
 	}
 }
 

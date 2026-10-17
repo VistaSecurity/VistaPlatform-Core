@@ -37,7 +37,7 @@ export function enumerationSummary(e: EnumerationCounts | undefined): string | n
   const parts = [
     e.instances ? count(e.instances, 'instance', 'instances') : null,
     e.networks ? count(e.networks, 'network', 'networks') : null,
-    e.subnets ? count(e.subnets, 'subnet', 'subnets') : null,
+    e.subnets ? count(e.subnets, 'network prefix', 'network prefixes') : null,
     e.security_groups ? count(e.security_groups, 'security group', 'security groups') : null,
   ].filter(Boolean);
   return parts.length ? parts.join(', ') : 'no compute found';

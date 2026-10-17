@@ -162,12 +162,13 @@ func (s *AssetService) DeleteAssets(tenantID uuid.UUID, assetIDs []uuid.UUID) (i
 // are merged, never replaced: replacing would erase every tag a selection of
 // different assets carried for the sake of adding one.
 type BulkAssetChanges struct {
-	OwnerEmail   *string
-	Environment  *string
-	BusinessUnit *string
-	SupportGroup *string
-	AddTags      map[string]string
-	RemoveTags   []string
+	OwnerEmail  *string
+	Environment *string
+	// BusinessUnitID is a business_units id; "" clears the assignment.
+	BusinessUnitID *string
+	SupportGroup   *string
+	AddTags        map[string]string
+	RemoveTags     []string
 }
 
 // ErrBulkChangesInvalid is a field edit that changes nothing or names a value
@@ -192,12 +193,17 @@ func (c *BulkAssetChanges) Normalize() error {
 		return &v
 	}
 	c.OwnerEmail, c.Environment = trim(c.OwnerEmail), trim(c.Environment)
-	c.BusinessUnit, c.SupportGroup = trim(c.BusinessUnit), trim(c.SupportGroup)
+	c.BusinessUnitID, c.SupportGroup = trim(c.BusinessUnitID), trim(c.SupportGroup)
 	if c.Environment != nil {
 		v := strings.ToLower(*c.Environment)
 		c.Environment = &v
 		if v != "" && !bulkEnvironments[v] {
 			return fmt.Errorf("%w: environment %q is not one of production, staging, development, test", ErrBulkChangesInvalid, v)
+		}
+	}
+	if c.BusinessUnitID != nil && *c.BusinessUnitID != "" {
+		if _, err := uuid.Parse(*c.BusinessUnitID); err != nil {
+			return fmt.Errorf("%w: business_unit_id %q is not a uuid", ErrBulkChangesInvalid, *c.BusinessUnitID)
 		}
 	}
 	if c.OwnerEmail != nil && *c.OwnerEmail != "" {
@@ -224,7 +230,7 @@ func (c *BulkAssetChanges) Normalize() error {
 	if len(c.AddTags)+len(c.RemoveTags) > maxBulkTags {
 		return fmt.Errorf("%w: at most %d tags can be added or removed at once", ErrBulkChangesInvalid, maxBulkTags)
 	}
-	if c.OwnerEmail == nil && c.Environment == nil && c.BusinessUnit == nil && c.SupportGroup == nil &&
+	if c.OwnerEmail == nil && c.Environment == nil && c.BusinessUnitID == nil && c.SupportGroup == nil &&
 		len(c.AddTags) == 0 && len(c.RemoveTags) == 0 {
 		return fmt.Errorf("%w: nothing to change", ErrBulkChangesInvalid)
 	}
@@ -237,6 +243,18 @@ func (c *BulkAssetChanges) Normalize() error {
 func (s *AssetService) BulkUpdateAssets(tenantID uuid.UUID, assetIDs []uuid.UUID, changes BulkAssetChanges, actor uuid.UUID) (int, error) {
 	if err := changes.Normalize(); err != nil {
 		return 0, err
+	}
+	if changes.BusinessUnitID != nil && *changes.BusinessUnitID != "" {
+		want, _ := uuid.Parse(*changes.BusinessUnitID)
+		if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+			_, e := getBusinessUnitTx(context.Background(), tx, tenantID, want)
+			return e
+		}); err != nil {
+			if errors.Is(err, ErrBusinessUnitNotFound) {
+				return 0, fmt.Errorf("%w: business_unit_id does not exist", ErrBulkChangesInvalid)
+			}
+			return 0, err
+		}
 	}
 	// $1 tenant, $2 ids; the edit's own parameters follow.
 	args := []any{tenantID, nil}
@@ -258,7 +276,7 @@ func (s *AssetService) BulkUpdateAssets(tenantID uuid.UUID, assetIDs []uuid.UUID
 	}
 	column("owner_email", changes.OwnerEmail, "::text")
 	column("environment", changes.Environment, "::environment_type")
-	column("business_unit", changes.BusinessUnit, "::text")
+	column("business_unit_id", changes.BusinessUnitID, "::uuid")
 	column("support_group", changes.SupportGroup, "::text")
 	if len(changes.AddTags) > 0 || len(changes.RemoveTags) > 0 {
 		add, err := json.Marshal(changes.AddTags)

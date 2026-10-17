@@ -4,8 +4,8 @@ package services
 //
 // An interrogated router, firewall or controller reports every network it
 // serves in its `net.vlans` fact, and each entry with a prefix also carries the
-// device's OWN address on that network (`gateway`). ensureVLANSegments has
-// always turned the prefixes into segments; nothing read the addresses, so the
+// device's OWN address on that network (`gateway`). ensureVLANPrefixes turns
+// the prefixes into measured IPAM prefixes; nothing read the addresses, so the
 // router stayed known only on the networks a sensor had heard it on, and a
 // stray record created from one of its addresses kept that address for good.
 //
@@ -16,20 +16,20 @@ package services
 //  1. Each gateway address goes to inventory-service as a CLAIMED address
 //     (identity.IdentifierProvenance.Claimed) in a first-hand sighting bound to
 //     the device by the identifiers it already holds. The engine attaches it
-//     pinned, scoped to the segment it falls in, re-homes it from a
+//     pinned, scoped to the prefix it falls in, re-homes it from a
 //     provisional or address-only holder, and opens a merge proposal against
 //     any stronger holder rather than taking it (shared/identity/claimed.go).
 //     One sighting per address, so one contested address does not hold up the
 //     others.
-//  2. The device's HOME segment is set: the segment of the address it was
+//  2. The device's HOME prefix is set: the prefix of the address it was
 //     interrogated at (its management address), not whichever of its
 //     addresses a finding last arrived on. Claimed-address sightings never
 //     place the device (identity.Sighting.ClaimsAddresses); this does.
 //  3. (Slice B) The run's complete address list goes to inventory-service's
 //     gateway-links route, which makes the device the gateway of every
-//     segment where it now HOLDS one of them and of no other
+//     prefix where it now HOLDS one of them and of no other
 //     (linkGatewaySegments; the rules are in shared/identity/postgres
-//     segment_gateway.go).
+//     prefix_gateway.go).
 
 import (
 	"context"
@@ -54,8 +54,8 @@ import (
 )
 
 // reasonHomeSegment is the history reason on the entry that moves a device to
-// its home segment.
-const reasonHomeSegment = "home_segment_is_management_address"
+// its home prefix.
+const reasonHomeSegment = "home_prefix_is_management_address"
 
 // maxGatewayClaimsPerPost bounds one post of claimed-address sightings, well
 // under inventory-service's MaxSightingsPerCall.
@@ -65,7 +65,7 @@ const maxGatewayClaimsPerPost = 100
 // net.vlans fact reports, in the fact's order and without duplicates.
 //
 // An entry contributes only when it has BOTH a segmentable prefix (the same
-// test ensureVLANSegments applies, so every address lands inside a segment
+// test ensureVLANPrefixes applies, so every address lands inside a prefix
 // that exists) and a gateway address inside that prefix that is neither the
 // network nor, for IPv4, the broadcast address. An entry without a prefix — a
 // Cisco VLAN database row — is skipped silently: it names a VLAN, not an
@@ -182,7 +182,7 @@ func reportsOwnNetworks(fs []di.FactObservation) bool {
 
 // persistGatewayClaims claims each gateway address the device reported, sets
 // its home segment, and then links it as the gateway of the networks where it
-// now holds its address. Called from persist, after ensureVLANSegments, so
+// now holds its address. Called from persist, after ensureVLANPrefixes, so
 // every address resolves into the segment the same run created.
 func (s *ObservationSink) persistGatewayClaims(ctx context.Context, tenantID, assetID uuid.UUID, source identity.Source, at time.Time, fs []di.FactObservation) error {
 	if s.db == nil || !reportsOwnNetworks(fs) {
@@ -216,9 +216,9 @@ var errNoGatewayLinker = errors.New("identity: the inventory-service client cann
 
 // linkGatewaySegments hands inventory-service the run's COMPLETE list of the
 // device's gateway addresses ( slice B, spec §3.3). inventory-service
-// owns the segment → gateway link: it links the device to every segment where
+// owns the prefix → gateway link: it links the device to every prefix where
 // it now HOLDS one of these addresses — so a claim that opened a merge
-// proposal instead links nothing — and unlinks it from every segment where it
+// proposal instead links nothing — and unlinks it from every prefix where it
 // no longer does (shared/identity/postgres ReconcileGatewayLinks). An empty
 // list from a run that did report its networks unlinks the device everywhere.
 func (s *ObservationSink) linkGatewaySegments(ctx context.Context, tenantID, assetID uuid.UUID, source identity.Source, at time.Time, addresses []string) error {
@@ -287,18 +287,18 @@ func (s *ObservationSink) claimGatewayAddresses(ctx context.Context, tenantID, a
 	return nil
 }
 
-// assertHomeSegment sets the device's network_segment_id to the segment of the
-// address it was interrogated at ( §3.4).
+// assertHomeSegment sets the device's prefix_id to the prefix of the address it
+// was interrogated at ( §3.4; DCIM row 1.6).
 //
 // A device that routes several networks holds an address in each, so "its
-// segment" read off whichever address a finding or a sighting arrived on is
-// a different answer every run. The management address is the one the
-// operator registered the device at and the platform reaches it on. When it
-// is a name rather than an address, or falls in no segment (an upstream WAN
-// address), the device's segment is left as it is: there is no home to
-// assert, and guessing one of the routed segments is the bug this replaces.
+// prefix" read off whichever address a finding or a sighting arrived on is a
+// different answer every run. The management address is the one the operator
+// registered the device at and the platform reaches it on. When it is a name
+// rather than an address, or falls in no prefix (an upstream WAN address), the
+// device's prefix is left as it is: there is no home to assert, and guessing
+// one of the routed prefixes is the bug this replaces.
 //
-// The location then follows the home segment only (ProjectSegmentLocation,
+// The location then follows the home prefix only (ProjectSegmentLocation,
 // which never overwrites a location somebody stated).
 func (s *ObservationSink) assertHomeSegment(ctx context.Context, tenantID, assetID uuid.UUID, source identity.Source) error {
 	var managementURL sql.NullString
@@ -307,7 +307,7 @@ func (s *ObservationSink) assertHomeSegment(ctx context.Context, tenantID, asset
 			SELECT management_url FROM public.asset_management
 			WHERE tenant_id = $1 AND asset_id = $2`, tenantID, assetID).Scan(&managementURL)
 	}); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("home segment: reading the management address: %w", err)
+		return fmt.Errorf("home prefix: reading the management address: %w", err)
 	}
 	addr, err := netip.ParseAddr(managementHost(managementURL.String))
 	if err != nil {
@@ -316,18 +316,18 @@ func (s *ObservationSink) assertHomeSegment(ctx context.Context, tenantID, asset
 	repo := s.store()
 	scope, _, err := repo.ScopeForAddress(ctx, tenantID.String(), addr.Unmap().WithZone(""), "")
 	if err != nil {
-		return fmt.Errorf("home segment: scoping the management address: %w", err)
+		return fmt.Errorf("home prefix: scoping the management address: %w", err)
 	}
 	home, err := uuid.Parse(scope)
 	if err != nil {
-		// The tenant default: the management address is in no segment.
+		// The tenant default: the management address is in no prefix.
 		return nil
 	}
 	ref := identity.AssetRef{TenantID: tenantID.String(), ID: assetID.String()}
 	err = repo.RunInTx(ctx, tenantID.String(), func(bound *pgidentity.Repository) error {
 		var previous sql.NullString
 		err := bound.Tx().QueryRowContext(ctx, `
-			SELECT network_segment_id::text FROM public.assets
+			SELECT prefix_id::text FROM public.assets
 			WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
 			FOR UPDATE`, tenantID, assetID).Scan(&previous)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -338,26 +338,26 @@ func (s *ObservationSink) assertHomeSegment(ctx context.Context, tenantID, asset
 		}
 		if previous.String != home.String() {
 			if _, err := bound.Tx().ExecContext(ctx, `
-				UPDATE public.assets SET network_segment_id = $3, updated_at = now()
+				UPDATE public.assets SET prefix_id = $3, updated_at = now()
 				WHERE tenant_id = $1 AND id = $2`, tenantID, assetID, home); err != nil {
 				return err
 			}
 			if err := bound.RecordHistory(ctx, identity.HistoryEntry{
 				TenantID: ref.TenantID, AssetID: ref.ID, Action: identity.ActionUpdated, Source: source,
 				Changes: map[string]any{
-					"network_segment_id": map[string]string{"from": previous.String, "to": home.String()},
-					"reason":             reasonHomeSegment,
+					"prefix_id": map[string]string{"from": previous.String, "to": home.String()},
+					"reason":    reasonHomeSegment,
 				},
 			}); err != nil {
 				return err
 			}
 		}
-		// The location follows the home segment only, and never replaces one
+		// The location follows the home prefix only, and never replaces one
 		// somebody stated.
 		return bound.ProjectSegmentLocation(ctx, ref, home.String(), source)
 	})
 	if err != nil {
-		return fmt.Errorf("home segment: %w", err)
+		return fmt.Errorf("home prefix: %w", err)
 	}
 	return nil
 }

@@ -26,12 +26,13 @@ import (
 // each. Adding a producer to the struct without adding it here is caught by the
 // second test below, which reads the struct and demands a row for every field.
 var producerCalls = map[string]string{
-	"eol":     "j.eol.Run(ctx, tenantID)",
-	"vuln":    "j.vuln.Run(ctx, tenantID)",
-	"crypto":  "j.crypto.Run(ctx, tenantID)",
-	"config":  "j.config.Run(ctx, tenantID)",
-	"hygiene": "j.hygiene.Run(ctx, tenantID)",
-	"drift":   "j.drift.Run(ctx, tenantID)",
+	"eol":      "j.eol.Run(ctx, tenantID)",
+	"vuln":     "j.vuln.Run(ctx, tenantID)",
+	"crypto":   "j.crypto.Run(ctx, tenantID)",
+	"config":   "j.config.Run(ctx, tenantID)",
+	"hygiene":  "j.hygiene.Run(ctx, tenantID)",
+	"drift":    "j.drift.Run(ctx, tenantID)",
+	"wireless": "j.wireless.Run(ctx, tenantID)",
 }
 
 func producerJobSource(t *testing.T) string {

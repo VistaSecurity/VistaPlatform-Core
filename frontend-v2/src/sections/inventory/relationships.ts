@@ -71,7 +71,7 @@ export const TYPE_HELP: Readonly<Record<RelationshipType, string>> = {
   depends_on: 'This needs that to work — an application and its database.',
   connects_to: 'An observed network connection. Not a dependency.',
   member_of: 'A node in a cluster, an access point on its controller, an asset in a group.',
-  contains: 'A virtual network and its subnets, a cluster and its nodes.',
+  contains: 'A cluster and its nodes, a chassis and its modules.',
   manages: 'A controller and the things it manages.',
   sends_data_to: 'A declared data flow between applications.',
   impacts: 'This affects a business service.',

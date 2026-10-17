@@ -38,7 +38,7 @@ What that changes, in practice:
 - **A newly discovered asset waits in Approvals**, exactly like a sensor
   discovery. It appears on the Devices page immediately and you can interrogate
   it straight away; its cryptographic findings reach Inventory once the asset is
-  approved (or automatically, if an auto-approval rule covers its segment).
+  approved (or automatically, if an auto-approval rule covers its prefix).
 - **"Stop managing" is not "delete".** The row action is **Stop managing this
   asset**, and that is exactly what it does: it removes the management
   configuration and the stored credentials, and takes the row off this page. The
@@ -83,7 +83,7 @@ Automatically discover cryptographic configurations and certificates from cloud 
 - AWS: ALB, ELB, NLB, API Gateway, CloudFront distributions
   - Full certificate chain extraction via TLS handshake against public endpoints
   - ACM metadata enrichment (ARN, renewal eligibility, validation status)
-  - Complete crypto implementation records with linked certificates
+  - Complete crypto configuration records with linked certificates
 - Azure: Application Gateway, Load Balancer, App Service TLS bindings
   - TLS handshake verification for Application Gateways
 - GCP: Cloud Load Balancing, Cloud SQL encryption settings
@@ -172,7 +172,10 @@ details by hand instead**.
 
 **What it takes:** a device type, a way to reach it (hostname, IP address or
 management URL), the credentials, and optionally vendor, model, serial and
-firmware. Anything you leave blank an interrogation can fill in later.
+firmware, and the MAC address and interface name of the interface the IP address
+is on (`mac_address`, `interface_name`) — the device then has that interface,
+holding the MAC and the address; with no interface name the platform names it.
+Anything you leave blank an interrogation can fill in later.
 
 ### 3. Credentials
 
@@ -255,7 +258,7 @@ hosts from endpoints, and redacts secrets in the detail text.
 ### 6. Where it lands
 
 There is no import step. Results reach the inventory through the pipeline
-described above — the asset is either auto-approved by its segment's rule or
+described above — the asset is either auto-approved by its prefix's rule or
 waiting in **Discovery → Approvals** — and carry a discovery method of
 `device_interrogation` or `cloud_api` so you can tell where they came from.
 
@@ -287,15 +290,26 @@ Per vendor, beyond the cryptographic posture described under Device Types:
 | Vendor | Operational facts | Relationships |
 |---|---|---|
 | **Ubiquiti UniFi** | Per managed device: vendor, model, serial, firmware, uptime, interfaces (name, MAC, link and admin state, speed, VLAN). Per site: each LAN and VLAN with its name, prefix, gateway, and whether DHCP is served — never the DHCP range or its options. | Each adopted device to its controller, each device to the switch it uplinks through (with port names on both ends), and each LLDP neighbour. |
-| **Palo Alto Networks** | Hostname, model, serial, PAN-OS version, uptime, management address and MAC, every interface (address, VLAN tag, MAC, link state, speed), and the ARP table. | Each LLDP neighbour, with the local and remote port names. |
-| **Cisco** | Chassis model and serial from `show inventory` (the chassis only — a power supply or transceiver is a part, not an asset), IOS / IOS-XE / IOS-XR / NX-OS / ASA version, uptime, every interface (address, MAC, administrative and operational state, bandwidth), the active VLANs, the ARP table, and whether the device accepts **telnet** on its management plane (reported as a plaintext-management finding when it does). On **NX-OS** the interface list is the device's layer-3 interfaces only: a Nexus formats the detailed interface command differently from IOS, so the summary form is what is read there, and it reports the interfaces that carry an address. | Each CDP and each LLDP neighbour, with the local and remote port names, and a proposed class for the neighbour taken from the platform it advertises. |
-| **Fortinet FortiGate** | Model, serial, FortiOS version, every interface (address, MAC, administrative status, 802.1Q tag) joined to its live link state and negotiated speed, each tagged VLAN with its prefix and the firewall's own address on it, and the routing next-hop count described above. | None — a FortiGate reports no neighbour table this integration reads. |
-| **F5 BIG-IP** | Chassis serial and platform from `sys/hardware`, TMOS version, every interface (MAC, administrative state, link state, negotiated speed), and each VLAN with its tag, prefix and self IP. | **Each virtual server to the members of the pool it forwards to**, with the pool name, the member port and the monitor's verdict. This is the dependency map a load balancer already holds and nothing else on the network states outright. A pool member is not classified from the pool: a pool states an address, a port and a monitor verdict, not whether the thing behind it is a server, another load balancer or a container ingress. |
-| **Generic SNMP** | Vendor, model, serial and firmware from the chassis entry, uptime, every interface (name, MAC, admin and operational state, speed), the ARP cache, and that the device is managed over SNMP v2c — which carries its credentials in the clear, and is reported as a finding. | Each LLDP neighbour, with the local and remote port names. |
+| **Palo Alto Networks** | Hostname, model, serial, PAN-OS version, uptime, and the device's **interfaces**: every physical port, aggregate (`ae1`, with its member ports) and tagged sub-interface (under its parent, with its VLAN), the management interface, each with its MAC, link state, speed and addresses — an address in a virtual router other than `default` is recorded in the VRF of that name. The connected prefixes and VLANs, and the ARP table. | Each LLDP neighbour, with the local and remote port names. |
+| **Cisco** | Chassis model and serial from `show inventory` (the chassis only — a power supply or transceiver is a part, not an asset), IOS / IOS-XE / IOS-XR / NX-OS / ASA version, uptime, and the device's **interfaces**: each port with its type from the media it reports (`1000base-t`, `10gbase-x-sfpp`, …), MAC, administrative and operational state, MTU and negotiated speed; switch ports as access ports with their VLAN or trunks with their native and allowed VLANs (`tagged-all` when every VLAN is allowed); port-channels with their member ports; dot1Q sub-interfaces under their parent; SVIs (`Vlan10`) with their addresses. The VLAN table, each SVI's or sub-interface's **connected prefix** on its VLAN, the ARP table, and whether the device accepts **telnet** on its management plane (reported as a plaintext-management finding when it does). On **NX-OS** the interface list is the device's layer-3 interfaces only: a Nexus formats the detailed interface command differently from IOS, so the summary form is what is read there, and it reports the interfaces that carry an address. | Each CDP and each LLDP neighbour, with the local and remote port names, and a proposed class for the neighbour taken from the platform it advertises. |
+| **Fortinet FortiGate** | Model, serial, FortiOS version, the device's **interfaces** — physical ports, aggregates with their members, VLAN interfaces under their parent with their VLAN — each with its MAC, administrative status, live link state, negotiated speed, configured MTU and address (an interface in a VDOM other than `root` has its address recorded in the VRF named after the VDOM); the connected prefixes and VLANs; the ARP table; and the routing next-hop count described above. | None — a FortiGate reports no neighbour table this integration reads. |
+| **F5 BIG-IP** | Chassis serial and platform from `sys/hardware`, TMOS version, and the device's **interfaces**: each port (type from its media, MAC, administrative and link state, speed, MTU), each trunk with its member ports, and each VLAN as an interface of its own carrying its self IPs, with the ports and trunks it is tagged or untagged on. A self IP in a route domain other than 0 is recorded in the VRF named after the route domain. The connected prefixes and VLANs, and the ARP table. | **Each virtual server to the members of the pool it forwards to**, with the pool name, the member port and the monitor's verdict. This is the dependency map a load balancer already holds and nothing else on the network states outright. A pool member is not classified from the pool: a pool states an address, a port and a monitor verdict, not whether the thing behind it is a server, another load balancer or a container ingress. |
+| **Generic SNMP** | Vendor, model, serial and firmware from the chassis entry, uptime, and that the device is managed over SNMP v2c — which carries its credentials in the clear, and is reported as a finding. Every interface, filed on the asset's **Interfaces** tab: its name (in the vendor's long form, so `Gi1/0/1` and `GigabitEthernet1/0/1` are one interface), type (from the interface type and speed, a LAG as `lag`, a VLAN or loopback interface as `virtual`), MAC, MTU, speed, administrative and operational state, the addresses on it with their prefix length and whether they are static or leased, the LAG a port belongs to, a sub-interface's parent, and — on a switch that answers the bridge VLAN tables — each port's native and trunked VLANs and the VLANs themselves. The ARP cache is read as supporting evidence about other devices (below). | Each LLDP neighbour, with the local and remote port names. |
+
+**What the ARP cache does** (SNMP, Palo Alto, Cisco, FortiGate, F5 BIG-IP). A switch's, router's or firewall's ARP entries describe other devices' addresses, so they never create anything: an address the platform already holds on another asset gains the MAC it resolved to if it had none, and an address nobody holds is kept as a pending link to "whatever device turns out to have that MAC" until such a device appears or 30 days pass. An incomplete or invalid entry, and the device's own addresses, are ignored.
 
 Interfaces, neighbours and VLANs are ordinary inventory data, not secrets. They
 are what makes a device page answer "what is this, where is it plugged in, and
 what is it talking to" without a second tool.
+
+**Where the interfaces land.** For Palo Alto, Cisco, FortiGate and F5 BIG-IP,
+the interfaces and addresses appear on the device's **Interfaces** tab, and the
+connected prefixes and VLANs in **Inventory → Networks** — as measured objects,
+written by the same identification step every other source goes through. The
+device's own address on the record (the one you added it with) is its primary
+IP. An interface you edited by hand keeps your edits; a later interrogation
+refreshes only what it measured (state, speed, MTU).
+Their ARP tables are handled as **What the ARP cache does** above describes.
 
 ## Device Types
 
@@ -342,7 +356,8 @@ what is it talking to" without a second tool.
   - `/mgmt/tm/ltm/profile/client-ssl` - Client SSL profiles
   - `/mgmt/tm/ltm/profile/server-ssl` - Server SSL profiles
   - `/mgmt/tm/sys/hardware` - chassis serial and platform
-  - `/mgmt/tm/net/interface`, `/mgmt/tm/net/vlan`, `/mgmt/tm/net/self` - interfaces, VLANs and self IPs
+  - `/mgmt/tm/net/interface`, `/mgmt/tm/net/trunk`, `/mgmt/tm/net/vlan` (members expanded), `/mgmt/tm/net/self`, `/mgmt/tm/net/route-domain` - interfaces, trunks, VLANs with their tagged and untagged members, self IPs, and the names of the route domains they sit in
+  - `/mgmt/tm/net/arp` - the ARP table
   - `/mgmt/tm/ltm/pool` (members expanded) - pool membership, for the dependency edges
 - **Never read**: `/mgmt/tm/sys/crypto/key` and `/mgmt/tm/sys/file/ssl-key` (the private half of every certificate on the box — only the public half, `sys/crypto/cert`, is read), `/mgmt/tm/auth/user` and `/mgmt/tm/sys/db` (administrator accounts and the authentication configuration, including LDAP and RADIUS bind secrets), `/mgmt/tm/ltm/rule` (iRules — customer-written code, and a place people do put credentials), `/mgmt/tm/ltm/monitor/*` (health monitors carry the password a monitor authenticates to the backend with), and `/mgmt/tm/net/route`.
 
@@ -352,7 +367,7 @@ what is it talking to" without a second tool.
 - **Data Collected**: Crypto maps, IPsec SAs, IKEv1 and IKEv2 SAs, SSL proxy settings, plus device identity and the operational facts listed under [What is collected](#what-is-collected)
 - **Versions are the device's own.** The SSH management row's protocol version is taken from the banner the device sends. A device announcing `SSH-1.99` still accepts the obsolete SSH-1 protocol and is recorded and scored that way, not as SSH-2.0. The `show ssl` and WebVPN rows carry a TLS version only when the output names one. When it names none, the version is **not measured** and the configuration is partially assessed (see [Crypto risks](crypto-risks.md)).
 - **VPN tunnels are the device's configuration.** Each crypto map entry and each IPsec / IKE SA is recorded on the Cisco device itself, on UDP 500, or 4500 when the SA says NAT traversal is in use. The remote peer is recorded as the tunnel's peer address, not as a separate server. The IKE version is the one the device states: an IKEv1 or IKEv2 SA is that version, a crypto map entry is IKEv2 when it names an IKEv2 profile and IKEv1 when it names an ISAKMP profile, and it is left blank when the device does not say.
-- **Commands**: `show version`, `show crypto map`, `show crypto ipsec sa`, `show crypto isakmp sa` (on ASA: `show crypto ikev1 sa detail`), `show crypto ikev2 sa`, `show ssl`, `show webvpn`, `show running-config | include ssl cipher`, `show inventory`, `show ip interface brief` (on ASA: `show interface ip brief`), `show interfaces`, `show vlan brief`, `show cdp neighbors detail`, `show lldp neighbors detail`, `show ip arp` (on IOS-XR and ASA: `show arp`), and one narrow telnet check per platform: `show running-config | include ^line vty|transport input` (IOS / IOS-XE), `show feature | include telnet` (NX-OS), `show running-config telnet` (IOS-XR and ASA). To check the privilege level: `show privilege` (IOS / IOS-XE) or `show curpriv` (ASA). That is the whole list — it is a closed set, and adding to it is a deliberate edit the test suite makes visible.
+- **Commands**: `show version`, `show crypto map`, `show crypto ipsec sa`, `show crypto isakmp sa` (on ASA: `show crypto ikev1 sa detail`), `show crypto ikev2 sa`, `show ssl`, `show webvpn`, `show running-config | include ssl cipher`, `show inventory`, `show ip interface brief` (on ASA: `show interface ip brief`), `show interfaces`, `show interfaces status` (each switch port's VLAN or trunk and its media type; the port-description column is never read), `show interfaces trunk`, `show vlan brief`, `show cdp neighbors detail`, `show lldp neighbors detail`, `show ip arp` (on IOS-XR and ASA: `show arp`), and one narrow telnet check per platform: `show running-config | include ^line vty|transport input` (IOS / IOS-XE), `show feature | include telnet` (NX-OS), `show running-config telnet` (IOS-XR and ASA). To check the privilege level: `show privilege` (IOS / IOS-XE) or `show curpriv` (ASA). That is the whole list — it is a closed set, and adding to it is a deliberate edit the test suite makes visible.
 - **Never run**: `show running-config` in any form broader than the filtered ones above (the section form returns pre-shared keys, enable secrets, SNMP communities and tunnel-group passwords), `show startup-config`, `show ip route`, `show mac address-table`, `show snmp`, `show crypto key`, and no configuration command. Every command output is read up to a size bound and a time limit, and a reply cut short — at the bound, or at a `--More--` pager prompt — is reported as partial rather than presented as a complete table.
 - **Account and privilege**: the collector needs an account that can run the commands above, which on IOS, IOS-XE and ASA means **privilege level 15**. Two ways to get there:
   - an account whose own level is 15 (for example `username netops privilege 15`, or a TACACS+/RADIUS profile that assigns level 15), which is the simplest; or
@@ -384,6 +399,7 @@ what is it talking to" without a second tool.
   - `/api/v2/cmdb/system/interface` - configured interfaces, addresses and VLAN tags
   - `/api/v2/monitor/system/interface` - live link state and negotiated speed
   - `/api/v2/monitor/router/ipv4` - read to count distinct next hops; nothing from it is stored
+  - `/api/v2/monitor/network/arp` - the ARP table
 - **Never read**: `firewall/address`, `firewall/addrgrp`, `firewall/policy`, anything under `user/`, `system/admin`, `system/api-user`, or the CA and remote certificate stores
 
 #### Palo Alto Networks ✅ **IMPLEMENTED**
@@ -436,7 +452,7 @@ what is it talking to" without a second tool.
 #### Generic SNMP ✅ **IMPLEMENTED**
 - **Method**: SNMP v2c (UDP/161), hand-rolled (no CGO)
 - **Supported Types**: `generic_snmp`
-- **Extracts**: the standard system OIDs (sysDescr, sysName, sysObjectID, sysUpTime) plus the standard MIBs every network device answers — ENTITY-MIB for the chassis model, serial and firmware; IF-MIB for interfaces; LLDP-MIB for neighbours; IP-MIB for the ARP cache. This is the fallback that inventories an appliance from any vendor without a dedicated integration.
+- **Extracts**: the standard system OIDs (sysDescr, sysName, sysObjectID, sysUpTime) plus the standard MIBs every network device answers — ENTITY-MIB for the chassis model, serial and firmware; IF-MIB for interfaces (name, type, MTU, speed, MAC, administrative and operational state); IP-MIB for the addresses on each interface and for the ARP cache (RFC 1213's address table on agents without it); the Q-BRIDGE and LAG MIBs for VLANs, native and trunked VLANs per port, and LAG membership where the device answers them; LLDP-MIB for neighbours. Only those typed fields are read: a port's free-text description and every other field that could carry an operator's secrets are not collected, and the community string is removed from anything the device echoes back. Link-local, loopback and container-bridge addresses are not recorded as the device's. This is the fallback that inventories an appliance from any vendor without a dedicated integration.
 - **Bounded**: each table walk stops at 500 rows and the whole collection at 30 seconds, so a device with a very large table cannot hold a job open.
 - **Note**: SNMP v2c authenticates with a community string sent in the clear. A device managed this way is recorded as having a plaintext management plane, which raises a finding.
 

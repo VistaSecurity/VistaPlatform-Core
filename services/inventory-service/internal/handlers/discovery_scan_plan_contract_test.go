@@ -135,7 +135,7 @@ func TestContract_CreateDiscoveryJob_CreatedJobCarriesItsPlan(t *testing.T) {
 	plan, err := shareddisc.BuildScanPlan(spec.Spec, nil, []shareddisc.PlanTargetInput{
 		{Target: "10.20.30.0/24", Class: shareddisc.ClassPrivate},
 		{Target: "93.184.216.34", Class: shareddisc.ClassExternal},
-		{Target: "93.184.217.0/29", Class: shareddisc.ClassRegisteredSegment, SegmentID: uuid.NewString()},
+		{Target: "93.184.217.0/29", Class: shareddisc.ClassRegisteredPrefix, PrefixID: uuid.NewString()},
 	})
 	if err != nil {
 		t.Fatal(err)

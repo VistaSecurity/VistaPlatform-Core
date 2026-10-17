@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -138,7 +139,7 @@ func newHostInventoryJob(t *testing.T, appDB, owner *sql.DB, tenantID, agentID u
 func identifierValues(t *testing.T, db *sql.DB, tenantID uuid.UUID, assetID string, kind string) []string {
 	t.Helper()
 	rows, err := db.Query(
-		`SELECT value FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2 AND kind = $3 ORDER BY value`,
+		`SELECT value FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1 AND asset_id = $2 AND kind = $3 ORDER BY value`,
 		tenantID, assetID, kind)
 	if err != nil {
 		t.Fatalf("read %s identifiers: %v", kind, err)
@@ -195,7 +196,10 @@ func TestIntegration_HostInventoryRetainedReplayPreservesSnapshotTime(t *testing
 	if err != nil || !first.FullyMaterialized() {
 		t.Fatalf("baseline: %+v %v", first, err)
 	}
-	if _, err = owner.Exec(`UPDATE assets SET asset_status='monitoring',class_key='unknown_host',class_source_kind='declared',site='Declared site' WHERE tenant_id=$1 AND id=$2`, tenant, first.AssetID); err != nil {
+	if _, err = owner.Exec(`INSERT INTO sites(tenant_id,name,slug) VALUES($1,'Declared site','declared-site') ON CONFLICT DO NOTHING`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = owner.Exec(`UPDATE assets SET asset_status='monitoring',class_key='unknown_host',class_source_kind='declared',site_id=(SELECT id FROM sites WHERE tenant_id=$1 AND name='Declared site') WHERE tenant_id=$1 AND id=$2`, tenant, first.AssetID); err != nil {
 		t.Fatal(err)
 	}
 	mode := func(value string) {
@@ -243,7 +247,7 @@ func TestIntegration_HostInventoryRetainedReplayPreservesSnapshotTime(t *testing
 	}
 	var seen time.Time
 	var class, site string
-	if err = owner.QueryRow(`SELECT last_seen_at,class_key,site FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, first.AssetID).Scan(&seen, &class, &site); err != nil {
+	if err = owner.QueryRow(`SELECT last_seen_at,class_key,coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),'') FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, first.AssetID).Scan(&seen, &class, &site); err != nil {
 		t.Fatal(err)
 	}
 	if !seen.Equal(report.Collected) || class != "unknown_host" || site != "Declared site" {
@@ -559,12 +563,15 @@ func TestIntegration_HostInventory_Materialises_LocalMode(t *testing.T) {
 			t.Errorf("fact %s = %s, want %s", key, got, want)
 		}
 	}
-	// net.interfaces and svc.listening_sockets are arrays; their presence is
-	// what matters here, their shape is pinned in the collector's own tests.
-	for _, key := range []string{facts.KeyNetInterfaces, facts.KeySvcListeningSockets} {
-		if _, ok := factValue(t, owner, tenantID, counts.AssetID, key); !ok {
-			t.Errorf("fact %s is missing", key)
-		}
+	// svc.listening_sockets is an array; its presence is what matters here,
+	// its shape is pinned in the collector's own tests. net.interfaces is NOT
+	// a host fact any more (DCIM row 1.5): the interfaces are `interfaces`
+	// rows — host_inventory_interfaces_integration_test.go.
+	if _, ok := factValue(t, owner, tenantID, counts.AssetID, facts.KeySvcListeningSockets); !ok {
+		t.Errorf("fact %s is missing", facts.KeySvcListeningSockets)
+	}
+	if _, ok := factValue(t, owner, tenantID, counts.AssetID, facts.KeyNetInterfaces); ok {
+		t.Errorf("fact %s was written for a host; the key is retired for hosts", facts.KeyNetInterfaces)
 	}
 	// The facts are written under the DEVICE-AGENT producer. Routing them
 	// through device-interrogation would fail the registry check for os.kernel,
@@ -888,10 +895,10 @@ func TestIntegration_HostInventory_Materialises_ContestedSerialOpensAProposal(t 
 
 	// Placement is now available, but this contested observation must not project it.
 	location := uuid.New()
-	if _, err := owner.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'Contested Site','site')`, location, tenantID); err != nil {
+	if _, err := owner.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,'Contested Site',regexp_replace(lower('Contested Site'),'[^a-z0-9]+','-','g')) RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,'Contested Site',regexp_replace(lower('Contested Site'),'[^a-z0-9]+','-','g') FROM s`, location, tenantID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := owner.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,environment,location_id) VALUES($1,'Contested','cidr','198.51.100.0/24','production',$2)`, tenantID, location); err != nil {
+	if _, err := owner.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,environment,scope_kind,scope_id,source_kind,status) VALUES($1,'Contested','198.51.100.0/24'::cidr,'production','location',$2,'declared','active')`, tenantID, location); err != nil {
 		t.Fatal(err)
 	}
 	// Same agent id, DIFFERENT serial.
@@ -905,7 +912,7 @@ func TestIntegration_HostInventory_Materialises_ContestedSerialOpensAProposal(t 
 	if !secondCounts.Contested {
 		t.Fatalf("a disagreeing serial was not contested: %+v", secondCounts)
 	}
-	if n := countRows(t, owner, `SELECT count(*) FROM assets WHERE tenant_id=$1 AND (location_id IS NOT NULL OR coalesce(site,'')<>'')`, tenantID); n != 0 {
+	if n := countRows(t, owner, `SELECT count(*) FROM assets WHERE tenant_id=$1 AND (location_id IS NOT NULL OR coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),'')<>'')`, tenantID); n != 0 {
 		t.Fatalf("contested placement projected onto %d assets", n)
 	}
 	if secondCounts.AssetID == firstCounts.AssetID {

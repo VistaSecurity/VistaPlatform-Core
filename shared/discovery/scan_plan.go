@@ -14,14 +14,14 @@ package discovery
 //
 // THE PER-TARGET EXTERNAL CAP (owner decision D3) is a guardrail for targets
 // nobody has claimed, not an access control. A target outside private address
-// space and outside every network segment the tenant registered is scanned at
+// space and outside every prefix the tenant registered is scanned at
 // Standard depth at most; a person with `settings.update` can register the
 // range as theirs, after which it is internal and may be scanned deeper. That
 // is intended ("we don't judge, we enable"). What the cap buys is that the
 // platform's own address is not used to sweep all 65,535 ports of a third
 // party's block on a click, and that a deeper scan of someone else's network
-// leaves a paper trail: the segment registration (audited) and, on the job,
-// the segment that granted ownership (PlanTarget.SegmentID).
+// leaves a paper trail: the prefix declaration (its change log) and, on the job,
+// the prefix that granted ownership (PlanTarget.PrefixID).
 
 import (
 	"errors"
@@ -71,9 +71,9 @@ type TargetClass string
 const (
 	// ClassPrivate: inside private address space (RFC 1918 / RFC 4193).
 	ClassPrivate TargetClass = "private"
-	// ClassRegisteredSegment: public space inside a network segment the tenant
-	// registered (or claimed) as its own. PlanTarget.SegmentID names it.
-	ClassRegisteredSegment TargetClass = "registered_segment"
+	// ClassRegisteredPrefix: public space inside a prefix the tenant
+	// registered (or claimed) as its own. PlanTarget.PrefixID names it.
+	ClassRegisteredPrefix TargetClass = "registered_prefix"
 	// ClassExternal: neither; scanned only on a person's confirmation, and at
 	// Standard depth at most.
 	ClassExternal TargetClass = "external"
@@ -414,10 +414,10 @@ type DepthAdjustment struct {
 type PlanTarget struct {
 	Target string      `json:"target"`
 	Class  TargetClass `json:"class"`
-	// SegmentID is the registered network segment that made a public target
-	// the tenant's (class registered_segment): who claimed what, then scanned
+	// PrefixID is the declared prefix that made a public target
+	// the tenant's (class registered_prefix): who claimed what, then scanned
 	// it, is answerable from the job alone.
-	SegmentID string `json:"segment_id,omitempty"`
+	PrefixID string `json:"prefix_id,omitempty"`
 	// Depth is the depth applied to this target.
 	Depth ScanDepth `json:"depth"`
 	// SNICandidates are names the target is known by (at most
@@ -439,9 +439,9 @@ type PlanTarget struct {
 
 // PlanTargetInput is one target as the authorization guard classified it.
 type PlanTargetInput struct {
-	Target    string
-	Class     TargetClass
-	SegmentID string
+	Target   string
+	Class    TargetClass
+	PrefixID string
 	// SNICandidates is what the requester supplied for this target; BuildScanPlan
 	// sanitizes it, so what the plan records is already bounded and valid.
 	SNICandidates []string
@@ -473,7 +473,7 @@ func BuildScanPlan(spec ScanSpec, extraTCP []int, targets []PlanTargetInput) (Sc
 		if err != nil {
 			return ScanPlan{}, err
 		}
-		pt := PlanTarget{Target: t.Target, Class: t.Class, SegmentID: t.SegmentID, Depth: spec.Depth, Addresses: saturatingUint64(size),
+		pt := PlanTarget{Target: t.Target, Class: t.Class, PrefixID: t.PrefixID, Depth: spec.Depth, Addresses: saturatingUint64(size),
 			SNICandidates: SanitizeSNICandidates(t.SNICandidates)}
 		tcp, udp := requestedTCP, spec.UDP
 		if t.Class == ClassExternal {

@@ -1,6 +1,6 @@
 {
   "vendor": "fortinet",
-  "input_sha256": "3a9bdb5f84519bcd94591fcfabebaef64e6c688443398a9016363fcbfcdb6519",
+  "input_sha256": "be5ba501a8548cd92cb9e2b93861ca91a7172f81ba68eef25c740ce9db101ffb",
   "imports": [
     {
       "findings": [
@@ -93,17 +93,21 @@
     }
   ],
   "process_error": "",
-  "learned_segments": [
+  "learned_prefixes": [
+    {
+      "value": "192.0.2.0/24",
+      "network_type": "",
+      "dhcp_managed": null
+    },
     {
       "value": "198.51.100.0/24",
-      "segment_type": "cidr",
-      "network_type": "public",
-      "metadata": {
-        "dhcp": "unknown",
-        "source": "interrogation",
-        "source_asset_id": "{{DEVICE_ASSET_ID}}",
-        "source_device_type": "fortinet"
-      }
+      "network_type": "",
+      "dhcp_managed": null
+    },
+    {
+      "value": "203.0.113.0/29",
+      "network_type": "",
+      "dhcp_managed": null
     }
   ],
   "assets": [
@@ -127,8 +131,20 @@
         },
         {
           "kind": "ip_address",
+          "value": "192.0.2.1",
+          "scope": "prefix:192.0.2.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
           "value": "198.51.100.1",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "203.0.113.2",
+          "scope": "prefix:203.0.113.0/29",
           "source_kind": "measured"
         },
         {

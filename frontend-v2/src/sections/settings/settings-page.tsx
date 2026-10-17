@@ -2,10 +2,10 @@
 // nav registries, enforce the page's RBAC permission (primitives), and render
 // the built page or the spec-pending fallback. Mirrors the mock's
 // Settings.jsx/sectionF.jsx page-key dispatch with react-router params.
-import { useParams } from 'react-router';
+import { Navigate, useParams } from 'react-router';
 import { usePermissions } from '@vistasecurity/primitives/rbac';
 import { useFeatures } from '@vistasecurity/primitives/features';
-import { settingsPageMeta, profilePageMeta, type SettingsNavItem } from './nav';
+import { settingsPageMeta, workspacePageMeta, profilePageMeta, type SettingsNavItem } from './nav';
 import { SpecPendingPage, AccessNotice } from './spec-pending';
 import { SPage, SCard, StateNote } from './kit';
 import { OrgOverviewPage, OrgBrandingPage } from './pages-org';
@@ -14,11 +14,28 @@ import { ScopesPage, FrameworksPage } from './pages-policies';
 import { CustomPoliciesPage } from './pages-custom-policies';
 import { ClassesPage, IdentificationRulesPage } from './pages-classes';
 import { TrustedCAsPage } from './pages-trusted-cas';
+import { IpamSettingsPage } from './pages-ipam';
+import { VirtualizationSettingsPage } from './pages-virtualization';
+import { VpnPoliciesSettingsPage } from './pages-vpn-policies';
+import { WirelessSettingsPage } from './pages-wireless';
+import { ContactsSettingsPage } from './pages-contacts';
+import { ConfigContextsSettingsPage } from './pages-config-contexts';
+import { ExportTemplatesSettingsPage } from './pages-export-templates';
+import { BulkImportPage } from './bulk-import-page';
+import { CircuitProvidersPage } from './pages-circuit-providers';
+import { CustomFieldsSettingsPage } from './pages-custom-fields';
+import { DeviceTypesPage } from './device-types-page';
+import { DeviceRolesPage, ManufacturersPage, PlatformsPage } from './device-catalogue-pages';
 import { BillingPage, UsagePage } from './pages-account';
 import { IntegrationsPage, RoutingRulesPage, AlertRulesPage } from './pages-integrations';
 import { NotificationHistoryPage } from './pages-notification-history';
 import { AuditPage } from './pages-audit';
-import { LocationsPage, NetworkSegmentsPage, AssetLifecyclePage } from './pages-infra';
+import { AssetLifecyclePage } from './pages-infra';
+import { SitesPage } from './sites-page';
+import { RacksPage } from './racks-page';
+import { ModuleTypesPage } from './module-types-page';
+import { BusinessUnitsPage } from './business-units-page';
+import { SavedFiltersPage } from './saved-filters-page';
 import { AutoScanPage } from './pages-auto-scan';
 import { AIAssistantPage } from './pages-ai';
 import { ProfilePersonalPage, ProfileSecurityPage, ProfileNotificationsPage } from './pages-profile';
@@ -70,6 +87,24 @@ function AccessCheckFailed({ meta, onRetry }: { meta: SettingsNavItem & { sectio
 export function SettingsPage() {
   const { page = '' } = useParams();
   const meta = settingsPageMeta(page);
+  if (meta.workspacePath) return <Navigate to={meta.workspacePath} replace />;
+  return <GuardedPage page={page} meta={meta} />;
+}
+
+/**
+ * Renders a former Settings page in its operational home.  The same component,
+ * permission and feature gates are reused; only the navigation ownership and
+ * URL change.
+ */
+export function WorkspacePage({ page: fixedPage }: { page?: string }) {
+  const params = useParams();
+  const page = fixedPage ?? params.page ?? '';
+  const meta = workspacePageMeta(page);
+  if (!meta) return <SpecPendingPage meta={settingsPageMeta('')} eyebrow="Infrastructure" />;
+  return <GuardedPage page={page} meta={meta} />;
+}
+
+function GuardedPage({ page, meta }: { page: string; meta: SettingsNavItem & { section?: string } }) {
   const { hasPermission, isLoading, isError: permsError, refetch: refetchPerms } = usePermissions();
   // Fail CLOSED while flags resolve (defaultFeatures is all-off), same posture
   // as the permission gate below: never flash an Enterprise page body — and its
@@ -99,6 +134,11 @@ export function SettingsPage() {
   switch (page) {
     case 'org-overview': return <OrgOverviewPage meta={meta} />;
     case 'org-branding': return <OrgBrandingPage meta={meta} />;
+    case 'business-units': return <BusinessUnitsPage meta={meta} />;
+    case 'sites': return <SitesPage meta={meta} />;
+    case 'saved-filters': return <SavedFiltersPage meta={meta} />;
+    case 'racks': return <RacksPage meta={meta} />;
+    case 'module-types': return <ModuleTypesPage meta={meta} />;
     case 'members': return <MembersPage meta={meta} />;
     case 'roles': return <RolesPage meta={meta} />;
     case 'security-sso': return <SecuritySsoPage meta={meta} />;
@@ -116,8 +156,20 @@ export function SettingsPage() {
     case 'identification-rules': return <IdentificationRulesPage meta={meta} />;
     case 'trusted-cas': return <TrustedCAsPage meta={meta} />;
     case 'audit': return <AuditPage meta={meta} />;
-    case 'locations': return <LocationsPage meta={meta} />;
-    case 'segments': return <NetworkSegmentsPage meta={meta} />;
+    case 'ipam': return <IpamSettingsPage meta={meta} />;
+    case 'cluster-types': return <VirtualizationSettingsPage meta={meta} />;
+    case 'vpn-policies': return <VpnPoliciesSettingsPage meta={meta} />;
+    case 'wireless': return <WirelessSettingsPage meta={meta} />;
+    case 'contacts': return <ContactsSettingsPage meta={meta} />;
+    case 'config-contexts': return <ConfigContextsSettingsPage meta={meta} />;
+    case 'export-templates': return <ExportTemplatesSettingsPage meta={meta} />;
+    case 'import': return <BulkImportPage meta={meta} />;
+    case 'circuit-providers': return <CircuitProvidersPage meta={meta} />;
+    case 'custom-fields': return <CustomFieldsSettingsPage meta={meta} />;
+    case 'device-types': return <DeviceTypesPage meta={meta} />;
+    case 'manufacturers': return <ManufacturersPage meta={meta} />;
+    case 'device-roles': return <DeviceRolesPage meta={meta} />;
+    case 'platforms': return <PlatformsPage meta={meta} />;
     case 'asset-lifecycle': return <AssetLifecyclePage meta={meta} />;
     case 'sensor-config': return <AutoScanPage meta={meta} />;
     default: return <SpecPendingPage meta={meta} />;

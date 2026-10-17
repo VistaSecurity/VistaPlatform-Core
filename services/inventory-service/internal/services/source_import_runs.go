@@ -32,6 +32,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // Run actions a source may tag an asset with.
@@ -218,7 +219,7 @@ func (s *SourceImportService) undoCandidates(ctx context.Context, tenantID uuid.
 			            AND h.changes_json->'`+historyKeySourceRun+`'->>'action' = 'created') AS created_by_run,
 			       COALESCE((
 			         SELECT e.who FROM (
-			           SELECT COALESCE(NULLIF(i.source_ref, ''), i.source_kind) AS who FROM asset_identifiers i
+			           SELECT COALESCE(NULLIF(i.source_ref, ''), i.source_kind) AS who FROM (`+identifiersql.All+`) i
 			            WHERE i.tenant_id = a.tenant_id AND i.asset_id = a.id
 			              AND COALESCE(i.source_ref, '') <> $3 AND i.source_kind IN ('measured', 'imported')
 			           UNION ALL

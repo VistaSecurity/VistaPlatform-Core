@@ -52,7 +52,7 @@ type operatorScanFixture struct {
 func newOperatorScanFixture(t *testing.T) *operatorScanFixture {
 	f := &operatorScanFixture{provisionalFixture: newProvisionalFixture(t)}
 	// The DHCP segment: an address here never decides a match.
-	f.exec(`UPDATE network_segments SET metadata = '{"dynamic":true,"dynamic_source":"measured"}'::jsonb
+	f.exec(`UPDATE prefixes SET dhcp_managed = true
 	         WHERE tenant_id=$1 AND id=$2`, f.tenant, f.segA)
 	f.user = f.actor()
 	return f

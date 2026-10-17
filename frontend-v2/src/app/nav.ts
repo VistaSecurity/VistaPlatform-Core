@@ -6,6 +6,8 @@ import { DASHBOARDS } from '../sections/dashboard/dashboards';
 export interface NavSubItem {
   path: string;
   label: string;
+  /** Non-lens workspace destinations supply their own icon. */
+  icon?: string;
   /**
    * Inventory only: the lens this item selects. The Inventory section's items
    * all live at `/inventory` and differ by `?lens=`, so active state cannot be
@@ -63,8 +65,8 @@ export const SECTIONS: NavSection[] = [
         label: 'Sensors & Scanning',
         items: [
           { path: '/discovery/sensors', label: 'Sensors & Agents' },
-          { path: '/discovery/devices', label: 'Devices' },
-          { path: '/discovery/cloud', label: 'Cloud' },
+          { path: '/discovery/devices', label: 'Managed Devices' },
+          { path: '/discovery/cloud', label: 'Cloud Accounts' },
           { path: '/discovery/pcap', label: 'PCAP Upload' },
           { path: '/discovery/sbom', label: 'SBOM Upload' },
         ],
@@ -90,7 +92,7 @@ export const SECTIONS: NavSection[] = [
     // had, grouped under one label so it reads as a module of the inventory
     // rather than as the whole of it.
     id: 'inventory',
-    label: 'Inventory',
+    label: 'Infrastructure',
     icon: 'Database',
     path: '/inventory',
     groups: [
@@ -98,8 +100,46 @@ export const SECTIONS: NavSection[] = [
         label: 'Assets',
         items: [
           { path: '/inventory?lens=assets', label: 'All assets', lens: 'assets' },
-          { path: '/inventory?lens=map', label: 'Map', lens: 'map' },
           { path: '/inventory?lens=software', label: 'Software', lens: 'software' },
+          { path: '/inventory?lens=cloud', label: 'Cloud resources', lens: 'cloud' },
+        ],
+      },
+      {
+        label: 'Facilities',
+        items: [
+          { path: '/inventory?lens=map', label: 'Map', lens: 'map' },
+          { path: '/inventory?lens=sites', label: 'Sites & locations', lens: 'sites' },
+          { path: '/inventory?lens=racks', label: 'Racks', lens: 'racks' },
+        ],
+      },
+      {
+        label: 'Network & Connectivity',
+        items: [
+          { path: '/inventory?lens=networks', label: 'Networks & IPAM', lens: 'networks' },
+          { path: '/inventory?lens=vlans', label: 'VLANs', lens: 'vlans' },
+          { path: '/inventory?lens=circuits', label: 'Circuits', lens: 'circuits' },
+          { path: '/inventory?lens=cabling', label: 'Cabling', lens: 'cabling' },
+          { path: '/inventory/manage/wireless', label: 'Wireless', icon: 'wifi' },
+          { path: '/inventory?lens=tunnels', label: 'VPN tunnels', lens: 'tunnels' },
+        ],
+      },
+      {
+        label: 'Compute',
+        items: [
+          { path: '/inventory?lens=clusters', label: 'Clusters', lens: 'clusters' },
+        ],
+      },
+      {
+        label: 'Organization',
+        items: [
+          { path: '/inventory/manage/organization', label: 'Business units & contacts', icon: 'building-2' },
+        ],
+      },
+      {
+        label: 'Catalog & Data',
+        items: [
+          { path: '/inventory/manage/catalog', label: 'Device catalog', icon: 'blocks' },
+          { path: '/inventory/manage/import', label: 'Import', icon: 'file-up' },
         ],
       },
       {
@@ -118,6 +158,7 @@ export const SECTIONS: NavSection[] = [
         label: 'Lifecycle',
         items: [
           { path: '/inventory?lens=stale', label: 'Stale', lens: 'stale' },
+          { path: '/inventory?lens=changes', label: 'Changes', lens: 'changes' },
           // Pending is a CROSS-LINK, not a second queue (ADR-0006 D1). Pending
           // assets are reviewed in one place; listing them here as well would
           // be the second inbox the ADR rules out.
@@ -143,6 +184,8 @@ export const SECTIONS: NavSection[] = [
           // exists to catch. The ROUTE stays /cbom: it is a URL people have
           // bookmarked, and renaming it would buy nothing.
           { path: '/risk-compliance/cbom', label: 'Bills of Materials' },
+          { path: '/risk-compliance/scopes', label: 'Scopes' },
+          { path: '/risk-compliance/audit', label: 'Audit Log' },
         ],
       },
     ],
@@ -162,6 +205,7 @@ export const SECTIONS: NavSection[] = [
           // all before — a built endpoint with no way to reach it. The
           // nav entry is what makes it a feature rather than a URL.
           { path: '/remediation/progress', label: 'Progress' },
+          { path: '/remediation/delivery', label: 'Notification Delivery' },
         ],
       },
     ],

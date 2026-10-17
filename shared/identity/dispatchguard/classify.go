@@ -4,7 +4,7 @@ package dispatchguard
 //
 // AuthorizeManual answers "may this job run" and returns only the external
 // targets. A scan plan needs one more thing per target: WHICH class the guard
-// put it in — private space, a registered network segment (and which one), or
+// put it in — private space, a declared prefix (and which one), or
 // external — because the depth a target may be scanned at depends on it, and
 // "who claimed this range, then scanned it" should be answerable from the job.
 // The classes come from the same classifier every path uses (classify), so the
@@ -16,30 +16,30 @@ import (
 
 // Target classes, spelled as shared/discovery.TargetClass spells them.
 const (
-	ClassPrivate           = "private"
-	ClassRegisteredSegment = "registered_segment"
-	ClassExternal          = "external"
+	ClassPrivate          = "private"
+	ClassRegisteredPrefix = "registered_prefix"
+	ClassExternal         = "external"
 )
 
 // TargetVerdict is one manual target's class.
 type TargetVerdict struct {
 	// Target is the target as the job stores it (ManualTarget.Input).
 	Target string
-	// Class is ClassPrivate, ClassRegisteredSegment or ClassExternal.
+	// Class is ClassPrivate, ClassRegisteredPrefix or ClassExternal.
 	Class string
-	// SegmentID is the registered segment that made the target the tenant's
-	// (ClassRegisteredSegment only). A hostname whose addresses fall in more
-	// than one segment names the segment of its first such address.
-	SegmentID string
+	// PrefixID is the declared prefix that made the target the tenant's
+	// (ClassRegisteredPrefix only). A hostname whose addresses fall in more
+	// than one prefix names the prefix of its first such address.
+	PrefixID string
 }
 
 // ClassifyManual classifies targets that AuthorizeManual already admitted. A
 // target is private when it lies wholly in private address space (that is
-// ownership by address class; no segment granted it), registered when a
-// registered segment contains it, and external otherwise. A hostname is
+// ownership by address class; no prefix granted it), registered when a
+// declared prefix contains it, and external otherwise. A hostname is
 // external if ANY address it resolved to is external — the same rule
 // AuthorizeManual applies — and otherwise registered if any address needed a
-// segment.
+// prefix.
 func (s TargetScope) ClassifyManual(targets []ResolvedTarget) []TargetVerdict {
 	out := make([]TargetVerdict, 0, len(targets))
 	for _, t := range targets {
@@ -53,12 +53,12 @@ func (s TargetScope) ClassifyManual(targets []ResolvedTarget) []TargetVerdict {
 			intervals = append(intervals, [2]netip.Addr{lo, hi})
 		}
 		for _, iv := range intervals {
-			class, segment := s.classOf(iv[0], iv[1])
+			class, prefix := s.classOf(iv[0], iv[1])
 			switch {
 			case class == ClassExternal:
-				v.Class, v.SegmentID = ClassExternal, ""
-			case class == ClassRegisteredSegment && v.Class == ClassPrivate:
-				v.Class, v.SegmentID = ClassRegisteredSegment, segment
+				v.Class, v.PrefixID = ClassExternal, ""
+			case class == ClassRegisteredPrefix && v.Class == ClassPrivate:
+				v.Class, v.PrefixID = ClassRegisteredPrefix, prefix
 			}
 			if v.Class == ClassExternal {
 				break
@@ -85,10 +85,10 @@ func (s TargetScope) classOf(lo, hi netip.Addr) (string, string) {
 	for i, p := range s.allowed {
 		if p.Contains(lo) && p.Contains(hi) {
 			id := ""
-			if i < len(s.allowedSegments) {
-				id = s.allowedSegments[i]
+			if i < len(s.allowedPrefixes) {
+				id = s.allowedPrefixes[i]
 			}
-			return ClassRegisteredSegment, id
+			return ClassRegisteredPrefix, id
 		}
 	}
 	return ClassExternal, ""

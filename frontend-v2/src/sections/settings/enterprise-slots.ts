@@ -29,9 +29,18 @@ export interface CmdbSectionProps {
   onCreateClose: () => void;
 }
 
+/** What the Integrations page hands the Device42 import section (row 5.6). */
+export interface Device42ImportSectionProps {
+  /** The connector catalogue asked for a new connection. */
+  createOpen: boolean;
+  /** The new-connection dialog closed. */
+  onCreateClose: () => void;
+}
+
 export interface EnterpriseSettingsSlots {
   NetBoxSection?: ComponentType<NetBoxSectionProps>;
   CmdbSection?: ComponentType<CmdbSectionProps>;
+  Device42ImportSection?: ComponentType<Device42ImportSectionProps>;
 }
 
 export const enterpriseSettings: EnterpriseSettingsSlots = {

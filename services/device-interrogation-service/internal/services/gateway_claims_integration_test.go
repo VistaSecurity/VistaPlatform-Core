@@ -17,6 +17,7 @@ import (
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -59,10 +60,10 @@ func newGatewayFixture(t *testing.T) *gatewayFixture {
 
 	// The segments exist before the gateway is first interrogated (a seed,
 	// an operator, an earlier run): the claims must land inside them.
-	if err := NewObservationSink(db).ensureVLANSegments(ctx, f.tenant, uuid.New(), gatewayVLANs()); err != nil {
-		t.Fatalf("ensureVLANSegments: %v", err)
+	if err := NewObservationSink(db).ensureVLANPrefixes(ctx, f.tenant, uuid.New(), gatewayVLANs()); err != nil {
+		t.Fatalf("ensureVLANPrefixes: %v", err)
 	}
-	rows, err := db.Query(`SELECT value, id::text FROM network_segments WHERE tenant_id=$1`, f.tenant)
+	rows, err := db.Query(`SELECT prefix::text, id::text FROM prefixes WHERE tenant_id=$1`, f.tenant)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +132,7 @@ func (f *gatewayFixture) interrogate(t *testing.T, job uuid.UUID, at time.Time) 
 // scope.
 func (f *gatewayFixture) holder(t *testing.T, address string) (asset, assignment, scope string) {
 	t.Helper()
-	err := f.db.QueryRow(`SELECT asset_id::text, coalesce(address_assignment,''), scope FROM asset_identifiers
+	err := f.db.QueryRow(`SELECT asset_id::text, coalesce(address_assignment,''), scope FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id=$1 AND kind='ip_address' AND value=$2`, f.tenant, address).Scan(&asset, &assignment, &scope)
 	if err == sql.ErrNoRows {
 		return "", "", ""
@@ -201,7 +202,7 @@ func TestIntegration_GatewayClaims_LandOnTheGatewayAndSettleEveryHolder(t *testi
 		}
 	}
 	var guessHostname int
-	if err := f.db.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE asset_id=$1 AND kind='hostname'`, guess).Scan(&guessHostname); err != nil {
+	if err := f.db.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE asset_id=$1 AND kind='hostname'`, guess).Scan(&guessHostname); err != nil {
 		t.Fatal(err)
 	}
 	if guessHostname != 1 {
@@ -211,7 +212,7 @@ func TestIntegration_GatewayClaims_LandOnTheGatewayAndSettleEveryHolder(t *testi
 	// Home segment: the management address's network, not the one it was
 	// filed under, recorded in history.
 	var home string
-	if err := f.db.QueryRow(`SELECT coalesce(network_segment_id::text,'') FROM assets WHERE id=$1`, f.gateway).Scan(&home); err != nil {
+	if err := f.db.QueryRow(`SELECT coalesce(prefix_id::text,'') FROM assets WHERE id=$1`, f.gateway).Scan(&home); err != nil {
 		t.Fatal(err)
 	}
 	if home != seg["198.51.100.0/24"] {
@@ -241,24 +242,24 @@ func TestIntegration_GatewayClaims_LocationFollowsTheHomeSegmentOnly(t *testing.
 	f := newGatewayFixture(t)
 	home, other := uuid.New(), uuid.New()
 	for id, name := range map[uuid.UUID]string{home: "Home site", other: "Other site"} {
-		if _, err := f.db.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,$3,'site')`, id, f.tenant, name); err != nil {
+		if _, err := f.db.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,$3::text,regexp_replace(lower($3::text),'[^a-z0-9]+','-','g')) RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,$3::text,regexp_replace(lower($3::text),'[^a-z0-9]+','-','g') FROM s`, id, f.tenant, name); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for cidr, loc := range map[string]uuid.UUID{"198.51.100.0/24": home, "192.0.2.0/24": other, "203.0.113.0/24": other, "2001:db8:4::/64": other} {
-		if _, err := f.db.Exec(`UPDATE network_segments SET location_id=$2 WHERE id=$1`, f.segments[cidr], loc); err != nil {
+		if _, err := f.db.Exec(`UPDATE prefixes SET scope_kind='location', scope_id=$2 WHERE id=$1`, f.segments[cidr], loc); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// No segment yet, so nothing but the rule decides where it lands.
-	if _, err := f.db.Exec(`UPDATE assets SET network_segment_id=NULL WHERE id=$1`, f.gateway); err != nil {
+	if _, err := f.db.Exec(`UPDATE assets SET prefix_id=NULL WHERE id=$1`, f.gateway); err != nil {
 		t.Fatal(err)
 	}
 
 	f.interrogate(t, uuid.New(), time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC))
 
 	var location, site, segment string
-	if err := f.db.QueryRow(`SELECT coalesce(location_id::text,''), coalesce(site,''), coalesce(network_segment_id::text,'') FROM assets WHERE id=$1`,
+	if err := f.db.QueryRow(`SELECT coalesce(location_id::text,''), coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),''), coalesce(prefix_id::text,'') FROM assets WHERE id=$1`,
 		f.gateway).Scan(&location, &site, &segment); err != nil {
 		t.Fatal(err)
 	}
@@ -276,13 +277,13 @@ func TestIntegration_GatewayClaims_ManagementAddressOutsideEverySegmentAssertsNo
 	if _, err := f.db.Exec(`UPDATE asset_management SET management_url='https://100.64.0.2' WHERE asset_id=$1`, f.gateway); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.db.Exec(`UPDATE assets SET network_segment_id=NULL WHERE id=$1`, f.gateway); err != nil {
+	if _, err := f.db.Exec(`UPDATE assets SET prefix_id=NULL WHERE id=$1`, f.gateway); err != nil {
 		t.Fatal(err)
 	}
 	f.interrogate(t, uuid.New(), time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC))
 
 	var segment, location string
-	if err := f.db.QueryRow(`SELECT coalesce(network_segment_id::text,''), coalesce(location_id::text,'') FROM assets WHERE id=$1`,
+	if err := f.db.QueryRow(`SELECT coalesce(prefix_id::text,''), coalesce(location_id::text,'') FROM assets WHERE id=$1`,
 		f.gateway).Scan(&segment, &location); err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +353,7 @@ func TestIntegration_GatewayClaims_SharedMACAndReflectorDoNotRegress(t *testing.
 		t.Errorf("the reflected advert resolved onto the gateway (%s)", res.Outcome)
 	}
 	var absorbed int
-	if err := f.db.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE asset_id=$1 AND kind='hostname' AND value='office-printer.local'`,
+	if err := f.db.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE asset_id=$1 AND kind='hostname' AND value='office-printer.local'`,
 		f.gateway).Scan(&absorbed); err != nil {
 		t.Fatal(err)
 	}

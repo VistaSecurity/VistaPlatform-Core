@@ -42,7 +42,7 @@ func TestClassify(t *testing.T) {
 		{"ipv4-mapped private", "::ffff:10.0.0.9", true, ReasonPrivate},
 
 		// --- accepted: the tenant declared the range as theirs -----------
-		{"inside a registered segment", docPublicC, true, ReasonSegment},
+		{"inside a declared prefix", docPublicC, true, ReasonPrefix},
 
 		// --- refused: not the tenant's, or not a host at all -------------
 		// The whole point of the feature's scope rule: an unattended DAILY
@@ -107,13 +107,13 @@ func TestClassify_ExclusionBeatsSegment(t *testing.T) {
 	}
 }
 
-// A registered segment is the explicit statement of ownership the CGNAT
+// A declared prefix is the explicit statement of ownership the CGNAT
 // refusal asks for, so a tenant who declares their 100.64/10 estate gets it
 // scanned — the refusal names the fix, and the fix has to work.
 func TestClassify_RegisteredSegmentAdmitsCarrierGradeNAT(t *testing.T) {
 	segments := ParsePrefixes([]string{"100.100.0.0/16"})
-	if ok, reason := Classify(mustAddr(t, "100.100.4.9"), segments, nil); !ok || reason != ReasonSegment {
-		t.Fatalf("got (%v, %s), want (true, %s)", ok, reason, ReasonSegment)
+	if ok, reason := Classify(mustAddr(t, "100.100.4.9"), segments, nil); !ok || reason != ReasonPrefix {
+		t.Fatalf("got (%v, %s), want (true, %s)", ok, reason, ReasonPrefix)
 	}
 	if ok, reason := Classify(mustAddr(t, "100.64.4.9"), segments, nil); ok || reason != ReasonCarrierGradeNAT {
 		t.Fatalf("outside the segment: got (%v, %s), want (false, %s)", ok, reason, ReasonCarrierGradeNAT)

@@ -12,6 +12,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // Snapshot is what the tenant looked like before a path ran. Effect diffs a
@@ -32,8 +33,8 @@ func (f *Fixture) Take(t *testing.T) Snapshot {
 	t.Helper()
 	return Snapshot{
 		receipts:    f.set(t, `SELECT observation_id::text||'|'||receipt_key FROM identity_observation_receipts WHERE tenant_id=$1`),
-		identifiers: f.set(t, `SELECT asset_id::text||'|'||kind||'|'||lower(value)||'|'||coalesce(scope,'') FROM asset_identifiers WHERE tenant_id=$1`),
-		sourceKinds: f.pairs(t, `SELECT asset_id::text||'|'||kind||'|'||lower(value)||'|'||coalesce(scope,''), source_kind FROM asset_identifiers WHERE tenant_id=$1`),
+		identifiers: f.set(t, `SELECT asset_id::text||'|'||kind||'|'||lower(value)||'|'||coalesce(scope,'') FROM (`+identifiersql.All+`) ai WHERE tenant_id=$1`),
+		sourceKinds: f.pairs(t, `SELECT asset_id::text||'|'||kind||'|'||lower(value)||'|'||coalesce(scope,''), source_kind FROM (`+identifiersql.All+`) ai WHERE tenant_id=$1`),
 		endpoints:   f.set(t, `SELECT asset_id::text||'|'||coalesce(host(address),fqdn,'')||'|'||coalesce(port::text,'') FROM asset_endpoints WHERE tenant_id=$1`),
 		assets:      f.set(t, `SELECT id::text FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`),
 		proposals:   f.count(t, `SELECT count(*) FROM asset_history WHERE tenant_id=$1 AND action='merge_proposed'`),

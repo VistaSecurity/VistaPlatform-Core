@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "name": "198.51.100.1",
+      "ipAddress": "198.51.100.1",
+      "macAddress": "00:00:5e:00:53:f1",
+      "vlan": "/Common/external",
+      "status": "resolved"
+    },
+    {
+      "name": "10.50.31.20",
+      "ipAddress": "10.50.31.20",
+      "macAddress": "00:50:56:dd:31:20",
+      "vlan": "/Common/servers",
+      "status": "resolved"
+    },
+    {
+      "name": "10.50.201.30%2",
+      "ipAddress": "10.50.201.30%2",
+      "macAddress": "00:50:56:dd:20:30",
+      "vlan": "/Common/internal",
+      "status": "resolved"
+    },
+    {
+      "name": "10.50.31.99",
+      "ipAddress": "10.50.31.99",
+      "macAddress": "incomplete",
+      "vlan": "/Common/servers",
+      "status": "incomplete"
+    }
+  ]
+}

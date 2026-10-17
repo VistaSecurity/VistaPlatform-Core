@@ -141,8 +141,10 @@ func Setup(t *testing.T, db *sql.DB, tenant uuid.UUID) *Fixture {
 			t.Fatalf("intakematrix fixture: %s: %v", q, err)
 		}
 	}
-	exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'matrix dynamic LAN','cidr',$3,true,'production')`, f.DynamicSegment, tenant, DynamicCIDR)
-	exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'matrix static LAN','cidr',$3,true,'production')`, f.StaticSegment, tenant, StaticCIDR)
+	// Two global-VRF prefixes: the dynamic LAN a controller reported, the
+	// static one a person declared (DCIM row 1.6).
+	exec(`INSERT INTO prefixes(id,tenant_id,prefix,description,source_kind,status,environment) VALUES($1,$2,$3::cidr,'matrix dynamic LAN','measured','active','production')`, f.DynamicSegment, tenant, DynamicCIDR)
+	exec(`INSERT INTO prefixes(id,tenant_id,prefix,description,source_kind,status,environment) VALUES($1,$2,$3::cidr,'matrix static LAN','declared','active','production')`, f.StaticSegment, tenant, StaticCIDR)
 	// Enforce admission, as on the cluster this matrix was written about, and
 	// room for the assets the create rows mint.
 	exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant)
@@ -172,12 +174,10 @@ func Setup(t *testing.T, db *sql.DB, tenant uuid.UUID) *Fixture {
 	}
 	f.Asset = uuid.MustParse(ref.ID)
 
-	// The DHCP posture the way a controller states it: measured, with the
-	// gateway as the device that answered.
-	res, err := pgidentity.RecordSegmentPosture(ctx, db, tenant.String(), f.DynamicSegment.String(),
-		pgidentity.PostureMeasured, true, pgidentity.PostureEvidence{SourceAssetID: f.Asset.String(), ObservedAt: seen})
-	if err != nil || !res.Written {
-		t.Fatalf("intakematrix fixture: record the dynamic posture: written=%v err=%v", res.Written, err)
+	// The DHCP posture the way a controller states it.
+	written, err := pgidentity.RecordPrefixPosture(ctx, db, tenant.String(), f.DynamicSegment.String(), true)
+	if err != nil || !written {
+		t.Fatalf("intakematrix fixture: record the dynamic posture: written=%v err=%v", written, err)
 	}
 	return f
 }

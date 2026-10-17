@@ -188,7 +188,7 @@ func TestConformance_RegistryCatalogNoTenantPredicate(t *testing.T) {
 func TestDefaultCatalogIsTheRegistryCatalogue(t *testing.T) {
 	cat := query.DefaultCatalog()
 
-	if got, want := len(cat.Targets()), 10; got != want {
+	if got, want := len(cat.Targets()), 11; got != want {
 		t.Errorf("DefaultCatalog has %d targets, want %d", got, want)
 	}
 	if _, err := cat.Resolve("asset", []string{"attr", "firmware_version"}); err != nil {

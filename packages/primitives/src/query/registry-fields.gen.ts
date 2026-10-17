@@ -7,8 +7,8 @@
 //
 // This half of the catalogue is HAND-WRITTEN on the Go side and cannot be
 // otherwise: a column name is not a field name — the language says
-// `first_seen` where the column is `first_discovered_at`, `segment_id` where it is
-// `network_segment_id` — and nothing in the schema records which columns are
+// `first_seen` where the column is `first_discovered_at`, `network.prefix_id` where it is
+// `network_prefix_id` — and nothing in the schema records which columns are
 // queryable at all. What is generated is this MIRROR of it. Every closed value
 // set below is a Postgres enum type or the ARRAY of a CHECK constraint, and Go's
 // TestEnumsMatchSchema parses scripts/database/schema.sql and fails on any
@@ -44,7 +44,7 @@ export const REGISTRY_TARGETS: readonly Target[] = [
     table: 'assets',
     alias: 'a',
     idColumn: 'id',
-    subs: ['endpoint', 'software', 'finding', 'cert', 'crypto', 'identifier', 'relationship'],
+    subs: ['endpoint', 'software', 'finding', 'cert', 'crypto', 'identifier', 'relationship', 'interface'],
     traversable: true,
     freeTextable: true,
   },
@@ -106,6 +106,16 @@ export const REGISTRY_TARGETS: readonly Target[] = [
     freeTextable: false,
   },
   {
+    name: 'interface',
+    table: 'interfaces',
+    alias: 'ifc',
+    idColumn: 'id',
+    assetIdColumn: 'asset_id',
+    subs: ['asset'],
+    traversable: false,
+    freeTextable: false,
+  },
+  {
     name: 'relationship',
     table: 'asset_relationships',
     alias: 'r',
@@ -147,9 +157,49 @@ export const REGISTRY_TARGETS: readonly Target[] = [
 export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldInfo[]>> = {
   asset: [
     {
+      name: 'account',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cloud_account' },
+    },
+    {
+      name: 'asset_tag',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'asset_tag' },
+    },
+    {
       name: 'business_unit',
       type: 'keyword',
-      accessor: { kind: 'column', column: 'business_unit' },
+      accessor: { kind: 'derived', derived: 'asset.business_unit' },
+    },
+    {
+      name: 'business_unit.id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'business_unit_id' },
+    },
+    {
+      name: 'business_unit.parent',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.business_unit_parent' },
+    },
+    {
+      name: 'cable.status',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cable.status' },
+      enum: ['connected', 'planned', 'decommissioning'],
+      description: 'the operational status (connected, planned, decommissioning) of a cable on one of the asset\'s ports',
+    },
+    {
+      name: 'cable.type',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cable.type' },
+      enum: ['cat3', 'cat5', 'cat5e', 'cat6', 'cat6a', 'cat7', 'cat7a', 'cat8', 'dac-active', 'dac-passive', 'mrj21-trunk', 'coaxial', 'mmf', 'mmf-om1', 'mmf-om2', 'mmf-om3', 'mmf-om4', 'mmf-om5', 'smf', 'smf-os1', 'smf-os2', 'aoc', 'usb', 'power'],
+      description: 'the type of a cable on one of the asset\'s ports',
+    },
+    {
+      name: 'cabled_to',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cabled_to' },
+      description: 'an asset on the far end of one of the asset\'s cables, by hostname or display name',
     },
     {
       name: 'cert_trust',
@@ -157,6 +207,21 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'derived', derived: 'asset.cert_trust' },
       enum: ['public', 'private_trusted', 'incomplete', 'self_signed', 'untrusted', 'distrusted', 'unevaluated', 'none'],
       description: 'worst trust status of the asset\'s certificates; unevaluated = none evaluated yet, none = no certificate',
+    },
+    {
+      name: 'circuit',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.circuit' },
+    },
+    {
+      name: 'circuit.cid',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.circuit_cid' },
+    },
+    {
+      name: 'circuit.provider',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.circuit_provider' },
     },
     {
       name: 'class',
@@ -168,6 +233,31 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       name: 'class_confidence',
       type: 'number',
       accessor: { kind: 'column', column: 'class_confidence' },
+    },
+    {
+      name: 'cloud.type',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cloud_type' },
+    },
+    {
+      name: 'cluster',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cluster' },
+    },
+    {
+      name: 'cluster.group',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cluster_group' },
+    },
+    {
+      name: 'cluster.id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'cluster_id' },
+    },
+    {
+      name: 'cluster.type',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cluster_type' },
     },
     {
       name: 'confidence_score',
@@ -185,6 +275,31 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'description' },
     },
     {
+      name: 'device_role',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.device_role' },
+    },
+    {
+      name: 'device_role.id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'device_role_id' },
+    },
+    {
+      name: 'device_type',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.device_type' },
+    },
+    {
+      name: 'device_type.id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'device_type_id' },
+    },
+    {
+      name: 'device_type.manufacturer',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.device_type_manufacturer' },
+    },
+    {
       name: 'display_name',
       type: 'text',
       accessor: { kind: 'column', column: 'display_name' },
@@ -194,6 +309,12 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       type: 'keyword',
       accessor: { kind: 'column', column: 'environment', cast: 'text' },
       enum: ['production', 'staging', 'development', 'test'],
+    },
+    {
+      name: 'face',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'face', cast: 'text' },
+      enum: ['front', 'rear'],
     },
     {
       name: 'first_seen',
@@ -218,6 +339,35 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       enum: ['legacy', 'established', 'provisional', 'operator_confirmed'],
     },
     {
+      name: 'inventory_item.serial',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.inventory_item_serial' },
+    },
+    {
+      name: 'ip.address',
+      type: 'inet',
+      accessor: { kind: 'derived', derived: 'asset.ip.address' },
+      description: 'an IP address of the asset; \':\' is CIDR containment (ip.address:10.0.0.0/24)',
+    },
+    {
+      name: 'ip.dns_name',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.ip.dns_name' },
+      description: 'the DNS name recorded on one of the asset\'s addresses',
+    },
+    {
+      name: 'ip.role',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.ip.role' },
+      enum: ['loopback', 'secondary', 'anycast', 'vip', 'vrrp', 'hsrp', 'glbp', 'carp'],
+    },
+    {
+      name: 'ip.status',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.ip.status' },
+      enum: ['active', 'reserved', 'deprecated', 'dhcp', 'slaac'],
+    },
+    {
       name: 'last_scanned',
       type: 'timestamp',
       accessor: { kind: 'jsonb', jsonColumn: 'metadata', key: 'last_scanned_at' },
@@ -229,9 +379,19 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'last_seen_at' },
     },
     {
+      name: 'location',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.location' },
+    },
+    {
       name: 'location_id',
       type: 'uuid',
       accessor: { kind: 'column', column: 'location_id' },
+    },
+    {
+      name: 'module_type',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.module_type' },
     },
     {
       name: 'owner_email',
@@ -245,6 +405,43 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       enum: ['internal', 'third_party', 'unknown'],
     },
     {
+      name: 'platform',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.platform' },
+    },
+    {
+      name: 'platform.id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'platform_id' },
+    },
+    {
+      name: 'position',
+      type: 'number',
+      accessor: { kind: 'column', column: 'position' },
+    },
+    {
+      name: 'prefix.network_type',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.prefix.network_type' },
+    },
+    {
+      name: 'prefix.prefix',
+      type: 'inet',
+      accessor: { kind: 'derived', derived: 'asset.prefix.prefix' },
+      description: 'the longest-match prefix (within its VRF) of one of the asset\'s addresses',
+    },
+    {
+      name: 'prefix.status',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.prefix.status' },
+      enum: ['container', 'active', 'reserved', 'deprecated'],
+    },
+    {
+      name: 'prefix_id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'prefix_id' },
+    },
+    {
       name: 'primary_address',
       type: 'inet',
       accessor: { kind: 'column', column: 'primary_address' },
@@ -256,9 +453,36 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       description: 'sugar for source in (inferred, rule) and class_source_ref=<producer> (§12 amendment 7)',
     },
     {
+      name: 'provider',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.cloud_provider' },
+      enum: ['aws', 'azure', 'gcp', 'oci', 'other'],
+    },
+    {
+      name: 'rack',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.rack' },
+    },
+    {
+      name: 'rack.id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'rack_id' },
+    },
+    {
+      name: 'rack.role',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.rack_role' },
+    },
+    {
+      name: 'rack.site',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.rack_site' },
+    },
+    {
       name: 'region',
       type: 'keyword',
-      accessor: { kind: 'column', column: 'region' },
+      accessor: { kind: 'derived', derived: 'asset.region' },
+      description: 'the location region, or the provider region of a cloud resource that has none',
     },
     {
       name: 'risk',
@@ -277,14 +501,29 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'risk_score' },
     },
     {
-      name: 'segment_id',
-      type: 'uuid',
-      accessor: { kind: 'column', column: 'network_segment_id' },
+      name: 'serial',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'serial' },
     },
     {
       name: 'site',
       type: 'keyword',
-      accessor: { kind: 'column', column: 'site' },
+      accessor: { kind: 'derived', derived: 'asset.site' },
+    },
+    {
+      name: 'site.group',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.site_group' },
+    },
+    {
+      name: 'site.id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'site_id' },
+    },
+    {
+      name: 'site.region',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.site_region' },
     },
     {
       name: 'source',
@@ -310,9 +549,68 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'support_group' },
     },
     {
+      name: 'tunnel',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.tunnel' },
+      description: 'a tunnel one of the asset\'s interfaces terminates, by name',
+    },
+    {
+      name: 'tunnel.encapsulation',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.tunnel.encapsulation' },
+      enum: ['ipsec-transport', 'ipsec-tunnel', 'ip-ip', 'gre', 'wireguard', 'l2tp', 'pptp', 'openvpn'],
+    },
+    {
+      name: 'tunnel.ike_version',
+      type: 'number',
+      accessor: { kind: 'derived', derived: 'asset.tunnel.ike_version' },
+      description: 'the IKE version (1 or 2) of a tunnel the asset terminates',
+    },
+    {
+      name: 'tunnel.pfs_group',
+      type: 'number',
+      accessor: { kind: 'derived', derived: 'asset.tunnel.pfs_group' },
+      description: 'the phase-2 PFS Diffie-Hellman group of a tunnel the asset terminates',
+    },
+    {
       name: 'updated_at',
       type: 'timestamp',
       accessor: { kind: 'column', column: 'updated_at' },
+    },
+    {
+      name: 'virtual_chassis',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.virtual_chassis' },
+    },
+    {
+      name: 'vlan.name',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.vlan.name' },
+    },
+    {
+      name: 'vlan.vid',
+      type: 'number',
+      accessor: { kind: 'derived', derived: 'asset.vlan.vid' },
+      description: 'the VLAN of the prefix one of the asset\'s addresses is in',
+    },
+    {
+      name: 'vrf.name',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.vrf.name' },
+      description: 'the VRF one of the asset\'s addresses is in',
+    },
+    {
+      name: 'wireless_lan.auth_type',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.wireless_lan.auth_type' },
+      enum: ['open', 'wep', 'wpa-personal', 'wpa-enterprise'],
+      description: 'the authentication of a wireless LAN the asset serves',
+    },
+    {
+      name: 'wireless_lan.ssid',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.wireless_lan.ssid' },
+      description: 'the SSID of a wireless LAN one of the asset\'s interfaces serves',
     },
     {
       name: 'zone',
@@ -365,7 +663,7 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       name: 'protocol',
       type: 'keyword',
       accessor: { kind: 'column', column: 'protocol', cast: 'text' },
-      enum: ['TLS', 'SSH', 'IPSec', 'VPN', 'Database', 'API', 'SMB', 'Kerberos', 'QUIC', 'PPTP', 'Modbus', 'DNP3', 'MMS', 'ICCP', 'IEC62351', 'OPC_UA', 'EtherNet_IP', 'BACnet', 'BACnet_SC', 'HART_IP', 'S7'],
+      enum: ['TLS', 'SSH', 'IPSec', 'VPN', 'Database', 'API', 'SMB', 'Kerberos', 'QUIC', 'PPTP', 'IKE', 'Modbus', 'DNP3', 'MMS', 'ICCP', 'IEC62351', 'OPC_UA', 'EtherNet_IP', 'BACnet', 'BACnet_SC', 'HART_IP', 'S7'],
     },
     {
       name: 'service_name',
@@ -504,7 +802,7 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       name: 'protocol',
       type: 'keyword',
       accessor: { kind: 'column', column: 'protocol', cast: 'text' },
-      enum: ['TLS', 'SSH', 'IPSec', 'VPN', 'Database', 'API', 'SMB', 'Kerberos', 'QUIC', 'PPTP', 'Modbus', 'DNP3', 'MMS', 'ICCP', 'IEC62351', 'OPC_UA', 'EtherNet_IP', 'BACnet', 'BACnet_SC', 'HART_IP', 'S7'],
+      enum: ['TLS', 'SSH', 'IPSec', 'VPN', 'Database', 'API', 'SMB', 'Kerberos', 'QUIC', 'PPTP', 'IKE', 'Modbus', 'DNP3', 'MMS', 'ICCP', 'IEC62351', 'OPC_UA', 'EtherNet_IP', 'BACnet', 'BACnet_SC', 'HART_IP', 'S7'],
     },
     {
       name: 'protocol_version',
@@ -698,6 +996,72 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'value' },
     },
   ],
+  interface: [
+    {
+      name: 'description',
+      type: 'text',
+      accessor: { kind: 'column', column: 'description' },
+    },
+    {
+      name: 'enabled',
+      type: 'boolean',
+      accessor: { kind: 'column', column: 'enabled' },
+    },
+    {
+      name: 'id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'id' },
+    },
+    {
+      name: 'mac_address',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'interface.mac_address' },
+      description: 'the primary MAC, colon form; an EUI-48 compares as 6 octets',
+    },
+    {
+      name: 'mgmt_only',
+      type: 'boolean',
+      accessor: { kind: 'column', column: 'mgmt_only' },
+    },
+    {
+      name: 'mode',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'mode', cast: 'text' },
+      enum: ['access', 'tagged', 'tagged-all', 'q-in-q'],
+    },
+    {
+      name: 'mtu',
+      type: 'number',
+      accessor: { kind: 'column', column: 'mtu' },
+    },
+    {
+      name: 'name',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'name' },
+    },
+    {
+      name: 'operational_status',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'operational_status', cast: 'text' },
+      enum: ['up', 'down', 'testing', 'unknown'],
+    },
+    {
+      name: 'speed_kbps',
+      type: 'number',
+      accessor: { kind: 'column', column: 'speed_kbps' },
+    },
+    {
+      name: 'status',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'status', cast: 'text' },
+      enum: ['pending', 'active', 'rejected', 'stale', 'archived'],
+    },
+    {
+      name: 'type',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'type' },
+    },
+  ],
   relationship: [
     {
       name: 'confidence',
@@ -750,6 +1114,11 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'class_key', pathColumn: 'class_path' },
     },
     {
+      name: 'cloud.account_id',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'cloud_account_id' },
+    },
+    {
       name: 'confidence',
       type: 'number',
       accessor: { kind: 'column', column: 'confidence' },
@@ -765,6 +1134,11 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'hostname' },
     },
     {
+      name: 'interface_id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'interface_id' },
+    },
+    {
       name: 'kind',
       type: 'keyword',
       accessor: { kind: 'column', column: 'kind', cast: 'text' },
@@ -777,15 +1151,20 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       enum: ['internal', 'third_party', 'unknown'],
     },
     {
-      name: 'network.segment_id',
+      name: 'network.prefix_id',
       type: 'uuid',
-      accessor: { kind: 'column', column: 'network_segment_id' },
+      accessor: { kind: 'column', column: 'network_prefix_id' },
     },
     {
       name: 'network.type',
       type: 'keyword',
       accessor: { kind: 'column', column: 'network_type', cast: 'text' },
       enum: ['private', 'public', 'vpn', 'cloud'],
+    },
+    {
+      name: 'network.vrf_id',
+      type: 'uuid',
+      accessor: { kind: 'column', column: 'network_vrf_id' },
     },
     {
       name: 'source',

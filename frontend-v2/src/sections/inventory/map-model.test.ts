@@ -94,7 +94,7 @@ describe('buildMapGraph', () => {
     expect(g.edges.map((e) => e.id)).toEqual(['e1']);
   });
 
-  it('flags a pending edge so it can be drawn dashed, and does not flag the others', () => {
+  it('flags an edge still awaiting approval so it can be drawn dashed, and does not flag the others', () => {
     const g = buildMapGraph(neighbourhood());
     expect(g.edges.find((e) => e.id === 'e2')!.pending).toBe(true);
     expect(g.edges.find((e) => e.id === 'e1')!.pending).toBe(false);

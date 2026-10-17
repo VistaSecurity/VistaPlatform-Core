@@ -76,7 +76,7 @@ func TestContract_BulkActions_200(t *testing.T) {
 			eng := newBulkEngine(a, &stubBulkLifecycle{changed: 2})
 			body := `{"query":"environment:staging","expected_count":3`
 			if action == "update" {
-				body += `,"changes":{"business_unit":"Payments","add_tags":{"zone":"dmz"}}`
+				body += `,"changes":{"business_unit_id":"` + aUUID + `","add_tags":{"zone":"dmz"}}`
 			}
 			w := do(eng, http.MethodPost, bulkBase+action, strings.NewReader(body+"}"))
 			if w.Code != http.StatusOK {
@@ -109,8 +109,8 @@ func TestContract_BulkUpdate_ChangesReachTheService(t *testing.T) {
 	if ch.OwnerEmail == nil || *ch.OwnerEmail != "" {
 		t.Errorf("owner_email \"\" must reach the service as a CLEAR, got %v", ch.OwnerEmail)
 	}
-	if ch.BusinessUnit != nil {
-		t.Errorf("an absent business_unit must stay nil (leave alone), got %q", *ch.BusinessUnit)
+	if ch.BusinessUnitID != nil {
+		t.Errorf("an absent business_unit_id must stay nil (leave alone), got %q", *ch.BusinessUnitID)
 	}
 	if ch.Environment == nil || *ch.Environment != "production" || len(ch.RemoveTags) != 1 {
 		t.Errorf("changes reached the service as %+v", ch)

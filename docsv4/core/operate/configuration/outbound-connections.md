@@ -146,8 +146,7 @@ That setting never opens:
 The same ranges are kept out of **scans the Platform Sensor runs**: the
 Platform Sensor (`cluster-sensor-service`) also receives
 `networkPolicy.clusterInternalCIDRs`, and a tenant's Discover Assets or Active
-Scan run from the platform refuses any address inside them, whatever network
-segments the tenant has registered. A scan run by a tenant's own sensor is
+Scan run from the platform refuses any address inside them, whatever prefixes the tenant has declared. A scan run by a tenant's own sensor is
 unaffected: to that sensor the same numbers are the customer's own address
 space. Private address space is otherwise the tenant's own, so the rest of
 RFC 1918 stays scannable. Set `clusterInternalCIDRs` to your cluster's real pod

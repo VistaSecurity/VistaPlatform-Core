@@ -65,6 +65,65 @@ that shouldn't be. IP is used to identify an asset only when nothing
 stronger is available, and only within a network that isn't known to hand
 addresses out dynamically.
 
+## Interface
+
+An interface is where an asset meets the network: a switch port, a server's
+`eth0`, a firewall's `port1`, a link aggregation group, a VLAN interface, a
+loopback, a virtual machine's network adapter. Physical and virtual interfaces
+live in one list on whatever asset owns them, and an interface is what carries
+the asset's MAC addresses and IP addresses. Discovery fills them in; you can
+add and edit them by hand. See [Interfaces](./inventory/interfaces.md).
+
+*Example:* `sw-core-1` has an interface `GigabitEthernet1/0/24` in 802.1Q
+access mode on VLAN 20, with one MAC address.
+
+## IP address and prefix
+
+An **IP address** is an address on one interface, with a status, a DNS name and
+the VRF it lives in. A **prefix** is a network you run, such as `10.10.0.0/24`:
+it nests inside the prefix that contains it, shows how full it is, and tells
+discovery how to treat everything inside it (for example, whether to
+auto-approve). Together they replace the segment concept earlier releases used.
+See [Networks, VLANs and IP addresses](./inventory/networks.md).
+
+*Example:* `10.10.0.5/24` is an IP address on `eth0` of `web-01`; the prefix
+`10.10.0.0/24` contains it and sits under `10.10.0.0/16`.
+
+## VLAN and VRF
+
+A **VLAN** is an 802.1Q virtual LAN, identified by its VLAN ID within a VLAN
+group; prefixes and interfaces refer to it. A **VRF** is a separate routing
+table: the same address in two VRFs is two different addresses, and the
+inventory never confuses them. Addresses and prefixes that are in no VRF are in
+the global table.
+
+## Business unit
+
+A business unit is the party an asset or prefix belongs to or is billed to — a
+department, a customer, a cost centre. Units nest up to four levels deep. It is
+*not* your Vista Platform account (that is the tenant). See
+[Business Units](./inventory/business-units.md).
+
+## Change, journal and tag
+
+A **change** is a record of one edit to an object: who made it, where it came
+from (web UI, API, discovery or sync), and which fields moved. The **journal**
+is the other half of an object's history: dated notes that people write — a
+repair, a move, a decision. A **tag** is a free-form marker with a colour, shared
+across your tenant, that you can put on many kinds of objects and search by.
+Changes are recorded for you; journal entries and tags are yours.
+
+## Region, site and location
+
+Where an asset is. A **site** is one place: a data centre, an office, a
+colocation suite, or a cloud account (each connected account gets a site of its
+own). A **location** is a place inside one site — a hall, a cage, a row — and
+locations nest. A **region** is geography (a continent, a country, a metro) and
+a **site group** a functional grouping (Branches, Colo); both nest, and a site
+may belong to one of each, either, or neither. An asset is in at most one site
+and, optionally, one location inside that site; the location is always in the
+asset's own site. See [Sites and locations](./inventory/sites.md).
+
 ## Relationship
 
 Assets are connected by typed, directional relationships: runs on, hosted
@@ -127,7 +186,7 @@ Nothing enters your inventory unannounced. A newly discovered asset, a
 suggestion that two records describe the same thing and should merge, a
 proposed reclassification, or a proposed relationship — all of these wait in
 [**Approvals**](./features/asset-approval.md) until a person accepts them, or until a rule you've configured
-admits them automatically (by network segment, for example).
+admits them automatically (by prefix, for example).
 
 This applies equally to anything an AI-assisted part of the platform
 suggests. A model proposing that two assets are duplicates, or that a newly

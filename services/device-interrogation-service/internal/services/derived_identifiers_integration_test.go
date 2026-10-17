@@ -18,6 +18,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/relationships"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -52,7 +53,7 @@ func TestIntegration_ManualDeviceSerialMeetsTheControllerReportByMAC(t *testing.
 		t.Fatalf("CreateDevice(gateway): %v", err)
 	}
 	var kind, ref string
-	if err := db.QueryRow(`SELECT source_kind, COALESCE(source_ref,'') FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind='mac_address' AND value=$3`,
+	if err := db.QueryRow(`SELECT source_kind, COALESCE(source_ref,'') FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND asset_id=$2 AND kind='mac_address' AND value=$3`,
 		tenant, gateway.ID, testSerialMAC).Scan(&kind, &ref); err != nil {
 		t.Fatalf("the MAC the serial spells was not recorded on the typed-in device: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestIntegration_ManualDeviceSerialMeetsTheControllerReportByMAC(t *testing.
 
 	assertCount(t, db, 2, `SELECT count(*) FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant)
 	assertCount(t, db, 1, `SELECT count(*) FROM asset_relationships WHERE tenant_id=$1 AND to_asset_id=$2`, tenant, gateway.ID)
-	if err := db.QueryRow(`SELECT source_kind FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind='mac_address' AND value=$3`,
+	if err := db.QueryRow(`SELECT source_kind FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND asset_id=$2 AND kind='mac_address' AND value=$3`,
 		tenant, gateway.ID, testSerialMAC).Scan(&kind); err != nil {
 		t.Fatal(err)
 	}
@@ -137,8 +138,8 @@ func TestIntegration_ObservationSink_PeerIPv6Hygiene(t *testing.T) {
 	if err := json.Unmarshal([]byte(temps), &got); err != nil || !slices.Equal(got, []string{testPeerTemp}) {
 		t.Errorf("ipv6_temporary_addresses = %q (%v), want [%s]", temps, err, testPeerTemp)
 	}
-	assertCount(t, db, 1, `SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind='ip_address' AND value=$3`, tenant, peerAsset, testPeerEUI64)
-	assertCount(t, db, 0, `SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address' AND value IN ($2, '2001:db8::5e1a:77c2:913b:d04f')`, tenant, testPeerTemp)
+	assertCount(t, db, 1, `SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND asset_id=$2 AND kind='ip_address' AND value=$3`, tenant, peerAsset, testPeerEUI64)
+	assertCount(t, db, 0, `SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='ip_address' AND value IN ($2, '2001:db8::5e1a:77c2:913b:d04f')`, tenant, testPeerTemp)
 	assertCount(t, db, 2, `SELECT count(*) FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant)
 }
 
@@ -173,11 +174,11 @@ func TestIntegration_ObservationSink_PeerSerialDerivesAMACOnlyWithoutOne(t *test
 		t.Fatalf("Persist: %v", err)
 	}
 	var kind, ref string
-	if err := db.QueryRow(`SELECT source_kind, COALESCE(source_ref,'') FROM asset_identifiers WHERE tenant_id=$1 AND kind='mac_address' AND value='00:00:0c:4d:3e:2f'`, tenant).Scan(&kind, &ref); err != nil {
+	if err := db.QueryRow(`SELECT source_kind, COALESCE(source_ref,'') FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='mac_address' AND value='00:00:0c:4d:3e:2f'`, tenant).Scan(&kind, &ref); err != nil {
 		t.Fatalf("the serial-only peer carries no derived MAC: %v", err)
 	}
 	if kind != "inferred" || ref != "derived:serial:00000C4D3E2F" {
 		t.Errorf("derived MAC provenance = %s / %s, want inferred / derived:serial:00000C4D3E2F", kind, ref)
 	}
-	assertCount(t, db, 0, `SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND kind='mac_address' AND value='00:00:0c:4d:3e:30'`, tenant)
+	assertCount(t, db, 0, `SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='mac_address' AND value='00:00:0c:4d:3e:30'`, tenant)
 }

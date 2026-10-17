@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // SQL fragments for the asset read paths.
@@ -175,7 +176,7 @@ func (s *AssetService) getAssetIdentifiers(tenantID, assetID uuid.UUID) ([]model
 		rows, err := tx.Query(`
 			SELECT id, asset_id, kind, value, scope, source_kind, source_ref, confidence,
 			       first_seen_at, last_seen_at, address_assignment
-			FROM asset_identifiers
+			FROM (`+identifiersql.All+`) ai
 			WHERE tenant_id = $1 AND asset_id = $2
 			ORDER BY array_position($3::text[], kind), value`,
 			tenantID, assetID, identifierPrecedenceArray())
@@ -284,7 +285,7 @@ func loadIdentifiersForAssets(tx *sqlx.Tx, tenantID uuid.UUID, ids []uuid.UUID) 
 	rows, err := tx.Query(`
 		SELECT id, asset_id, kind, value, scope, source_kind, source_ref, confidence,
 		       first_seen_at, last_seen_at, address_assignment
-		FROM asset_identifiers
+		FROM (`+identifiersql.All+`) ai
 		WHERE tenant_id = $1 AND asset_id = ANY($2::uuid[])
 		ORDER BY asset_id, array_position($3::text[], kind), value`,
 		tenantID, pq.Array(uuidStrings(ids)), identifierPrecedenceArray())

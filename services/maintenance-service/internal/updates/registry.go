@@ -167,9 +167,12 @@ type Lister struct {
 	Scheme string
 }
 
-// NewLister builds a lister with a bounded HTTP client.
-func NewLister(src Source, creds Credentials) *Lister {
-	return &Lister{Source: src, Creds: creds, HTTP: &http.Client{Timeout: 15 * time.Second}, Scheme: "https"}
+// NewLister builds a lister with a bounded HTTP client. transport is the
+// RoundTripper to use (nil = Go's default): the trust bundle's transport
+// when an operator configured EXTRA_TRUSTED_CA_PATH, so a registry signed by
+// a private CA verifies.
+func NewLister(src Source, creds Credentials, transport http.RoundTripper) *Lister {
+	return &Lister{Source: src, Creds: creds, HTTP: &http.Client{Timeout: 15 * time.Second, Transport: transport}, Scheme: "https"}
 }
 
 type tagList struct {

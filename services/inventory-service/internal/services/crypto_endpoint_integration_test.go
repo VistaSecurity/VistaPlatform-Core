@@ -45,14 +45,14 @@ func TestIntegration_CryptoEndpointReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Name improvement must not disturb either endpoint's certificate or curated placement/class.
-	if _, err := raw.Exec(`UPDATE assets SET hostname='aabbccddeeff.local',display_name='aabbccddeeff.local',site='Curated',class_source_kind='declared',metadata='{"name_source_kind":"measured-active"}' WHERE id=$1`, asset); err != nil {
+	if _, err := raw.Exec(`UPDATE assets SET hostname='aabbccddeeff.local',display_name='aabbccddeeff.local',site_id=$2,class_source_kind='declared',metadata='{"name_source_kind":"measured-active"}' WHERE id=$1`, asset, testdb.EnsureSite(t, raw, tenant, "Curated")); err != nil {
 		t.Fatal(err)
 	}
 	if err := pgrepo.New(raw).PromoteNames(context.Background(), identity.AssetRef{TenantID: tenant.String(), ID: asset.String()}, "multi.example.test", "multi.example.test", "measured-active"); err != nil {
 		t.Fatal(err)
 	}
 	var name, site, class, kind string
-	if err := raw.QueryRow(`SELECT hostname,site,class_key,class_source_kind FROM assets WHERE id=$1 AND tenant_id=$2`, asset, tenant).Scan(&name, &site, &class, &kind); err != nil {
+	if err := raw.QueryRow(`SELECT hostname,`+testdb.SiteNameSQL+`,class_key,class_source_kind FROM assets WHERE id=$1 AND tenant_id=$2`, asset, tenant).Scan(&name, &site, &class, &kind); err != nil {
 		t.Fatal(err)
 	}
 	if name != "multi.example.test" || site != "Curated" || class != "server" || kind != "declared" {

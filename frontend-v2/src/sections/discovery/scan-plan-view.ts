@@ -251,7 +251,7 @@ export function depthAdjustmentGroups(adjustments?: DepthAdjustment[] | null): D
 
 const CLASS_LABEL: Record<string, string> = {
   private: 'private network',
-  registered_segment: 'your registered network',
+  registered_prefix: 'your registered network',
   external: 'outside your registered networks',
 };
 

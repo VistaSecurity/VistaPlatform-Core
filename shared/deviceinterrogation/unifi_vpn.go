@@ -284,3 +284,62 @@ func firstUnifiNumber(conf map[string]interface{}, keys ...string) int {
 	}
 	return 0
 }
+
+// unifiTunnels projects the site-to-site VPN networks (purpose "site-vpn")
+// onto tunnel objects (DCIM row 4.3). Remote-user VPN servers are not tunnels
+// between two sites and stay assets only. UniFi exposes one proposal set that
+// serves both phases, so it is reported as the IKE proposal and, with PFS on,
+// the phase-2 group too. The IPsec pre-shared key (`x_ipsec_pre_shared_key`)
+// is never read: only that the network authenticates by PSK, which every
+// UniFi site-to-site IPsec network does.
+func unifiTunnels(confs []map[string]interface{}) []ObservedTunnel {
+	var out []ObservedTunnel
+	for _, conf := range confs {
+		if purpose, _ := conf["purpose"].(string); purpose != "site-vpn" {
+			continue
+		}
+		name := firstUnifiString(conf, "name")
+		if name == "" {
+			continue
+		}
+		vpnType, _ := conf["vpn_type"].(string)
+		t := ObservedTunnel{
+			Name:    name,
+			LocalIP: firstUnifiString(conf, "ipsec_local_ip"),
+			PeerIP:  firstUnifiString(conf, "ipsec_peer_ip", "remote_vpn_ip"),
+		}
+		if enabled, ok := conf["enabled"].(bool); ok && !enabled {
+			t.Status = "disabled"
+		}
+		switch {
+		case strings.Contains(vpnType, "openvpn"):
+			t.Encapsulation = "openvpn"
+		case strings.Contains(vpnType, "wireguard"):
+			t.Encapsulation = "wireguard"
+		default:
+			t.Encapsulation = "ipsec-tunnel"
+			t.AuthenticationMethod, t.PresharedKeyPresent = "preshared-keys", true
+			if v := canonicalIKEVersion(firstUnifiString(conf, "ipsec_key_exchange", "ike_version")); v != "" {
+				t.IKEVersion = map[string]int{"IKEv1": 1, "IKEv2": 2}[v]
+			}
+			enc := firstUnifiString(conf, "ipsec_encryption", "ike_encryption")
+			hash := firstUnifiString(conf, "ipsec_hash", "ike_hash")
+			groups := ikeGroupIDs(firstUnifiValue(conf, "ipsec_dh_group", "ike_dh_group"))
+			group := 0
+			if len(groups) > 0 {
+				group = groups[0]
+			}
+			if enc != "" || hash != "" || group != 0 {
+				t.IKEProposals = []ObservedIKEProposal{{Encryption: enc, Integrity: hash, Group: group}}
+			}
+			if enc != "" || hash != "" {
+				t.IPsecProposals = []ObservedIPsecProposal{{Encryption: enc, Integrity: hash}}
+			}
+			if pfs, ok := conf["ipsec_pfs"].(bool); ok && pfs {
+				t.PFSGroup = group
+			}
+		}
+		out = append(out, t)
+	}
+	return out
+}

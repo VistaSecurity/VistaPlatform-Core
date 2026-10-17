@@ -174,8 +174,8 @@ func EnsureRLSAppRole(t *testing.T, db *sql.DB) {
 		// them from the app role again (they're reachable only through the
 		// *_tenant wrapper views). Without this, tests would pass against
 		// privileges production doesn't have.
-		`DO $$ BEGIN IF to_regclass('public.mv_location_finding_summary') IS NOT NULL THEN
-		   REVOKE ALL ON public.mv_location_finding_summary FROM ` + RLSAppRole + `; END IF; END $$;`,
+		`DO $$ BEGIN IF to_regclass('public.mv_site_finding_summary') IS NOT NULL THEN
+		   REVOKE ALL ON public.mv_site_finding_summary FROM ` + RLSAppRole + `; END IF; END $$;`,
 		`DO $$ BEGIN IF to_regclass('public.mv_remediation_queue') IS NOT NULL THEN
 		   REVOKE ALL ON public.mv_remediation_queue FROM ` + RLSAppRole + `; END IF; END $$;`,
 		`DO $$ BEGIN IF to_regclass('public.tenant_cost_summary') IS NOT NULL THEN

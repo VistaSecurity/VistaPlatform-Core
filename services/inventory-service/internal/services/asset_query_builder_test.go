@@ -160,7 +160,6 @@ func TestLegacyFiltersToQuery_EveryParameterCompiles(t *testing.T) {
 		LocationBuilding:         []string{"B1"},
 		LocationZone:             []string{"z1"},
 		LocationID:               []string{"550e8400-e29b-41d4-a716-446655440000"},
-		NetworkSegmentID:         []string{"550e8400-e29b-41d4-a716-446655440001"},
 		AssetOwnership:           []string{"internal"},
 		AssetStatus:              []string{"monitoring"},
 		UnscannedOnly:            &yes,

@@ -9,7 +9,7 @@
 // the platform already knows about.
 import { describe, expect, it } from 'vitest';
 import { ASSET_CLASSES, ASSET_CLASS_KEYS } from '@vistasecurity/primitives/assets';
-import { ASSET_FIELDS, IDENTIFIER_COLUMNS, autoGuess, buildAsset } from './import-modal';
+import { ASSET_FIELDS, ASSET_TEMPLATE_HEADERS, IDENTIFIER_COLUMNS, assetTemplateCSV, autoGuess, buildAsset, describeRowInterface } from './import-modal';
 
 const classField = ASSET_FIELDS.find((f) => f.key === 'class_key')!;
 
@@ -159,21 +159,21 @@ describe('identifier columns are guessed on whole words, never substrings (gate1
   // a CMDB export with a "Description" column silently mapped it onto the
   // ip_address IDENTIFIER. That is not a mis-filed value: an identifier is what
   // the engine matches on, so a free-text column became identity.
-  it('does not read an IP identifier out of "Description"', () => {
+  it('does not read an IP address out of "Description"', () => {
     expect(autoGuess(ASSET_FIELDS, ['Description']).ip_address).toBe('');
   });
 
-  it('does not read an IP identifier out of "Equipment"', () => {
+  it('does not read an IP address out of "Equipment"', () => {
     expect(autoGuess(ASSET_FIELDS, ['Equipment']).ip_address).toBe('');
   });
 
-  it('gives "Email Address" to the owner email, not to the IP identifier', () => {
+  it('gives "Email Address" to the owner email, not to the IP address', () => {
     const mapping = autoGuess(ASSET_FIELDS, ['Email Address']);
     expect(mapping.ip_address).toBe('');
     expect(mapping.owner_email).toBe('Email Address');
   });
 
-  it('still takes a bare "Address" column as the IP identifier', () => {
+  it('still takes a bare "Address" column as the IP address', () => {
     // The whole header IS an address word — the one case where `address` alone
     // means the machine's address rather than a person's.
     expect(autoGuess(ASSET_FIELDS, ['Address']).ip_address).toBe('Address');
@@ -203,5 +203,55 @@ describe('identifier columns are guessed on whole words, never substrings (gate1
     for (const f of ASSET_FIELDS) {
       expect(f.identifier === true).toBe(identifierKeys.includes(f.key));
     }
+  });
+});
+
+// DCIM row 1.5f: a row's interface, MAC, IP, prefix length and VLAN become a
+// declared interface carrying the address.
+describe('the interface columns', () => {
+  const mapping = autoGuess(ASSET_FIELDS, [...ASSET_TEMPLATE_HEADERS]);
+  const row = {
+    Class: 'server', Hostname: 'app-01', 'IP address': '192.0.2.10', 'Prefix length': '24',
+    'MAC address': 'b4:96:91:0a:00:01', Interface: 'eth0', VLAN: '20',
+  };
+
+  it('auto-maps every header of the downloadable template onto its own field', () => {
+    const want: Record<string, string> = {
+      class_key: 'Class', hostname: 'Hostname', fqdn: 'FQDN', ip_address: 'IP address', prefix_length: 'Prefix length',
+      mac_address: 'MAC address', interface: 'Interface', vlan: 'VLAN', serial_number: 'Serial number',
+      display_name: 'Display name', environment: 'Environment', operating_system: 'Operating system',
+      owner_email: 'Owner email', description: 'Description',
+    };
+    for (const [field, header] of Object.entries(want)) expect(mapping[field], field).toBe(header);
+    expect(assetTemplateCSV().split('\n')[0]).toBe(ASSET_TEMPLATE_HEADERS.join(','));
+  });
+
+  it('claims an "Interface Name" column for the interface, not the display name', () => {
+    expect(autoGuess(ASSET_FIELDS, ['Interface Name', 'Host Name']).interface).toBe('Interface Name');
+  });
+
+  // MUTATION: drop the `interfaces` spread in buildAsset — red.
+  it('turns a row with an interface, IP and MAC into a declared interface with the address at its length', () => {
+    const { input, error } = buildAsset(row, mapping, {});
+    expect(error).toBeNull();
+    expect(input.interfaces).toEqual([{
+      name: 'eth0', mac_address: 'b4:96:91:0a:00:01', untagged_vlan: 20,
+      addresses: [{ address: '192.0.2.10', prefix_length: 24 }],
+    }]);
+    // The IP and MAC stay identifiers too: they are what the row is matched on.
+    expect(input.identifiers?.map((i) => i.kind)).toEqual(['hostname', 'ip_address', 'mac_address']);
+    expect(describeRowInterface(input)).toBe('eth0 · 192.0.2.10/24 · VLAN 20 · b4:96:91:0a:00:01');
+  });
+
+  it('declares no interface for a row that names none — the platform names it', () => {
+    const { input, error } = buildAsset({ ...row, Interface: '' }, mapping, {});
+    expect(error).toBeNull();
+    expect(input.interfaces).toBeUndefined();
+    expect(describeRowInterface(input)).toBe('named by the platform');
+  });
+
+  it('rejects a prefix length or VLAN that is not one', () => {
+    expect(buildAsset({ ...row, 'Prefix length': '33x' }, mapping, {}).error).toMatch(/prefix length/);
+    expect(buildAsset({ ...row, VLAN: '5000' }, mapping, {}).error).toMatch(/VLAN/);
   });
 });

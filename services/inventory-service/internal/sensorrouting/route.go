@@ -91,9 +91,9 @@ type Reason string
 const (
 	// ReasonObserved: the tenant sensor that most recently saw the host.
 	ReasonObserved Reason = "observing_sensor"
-	// ReasonSegment: a live tenant sensor bound to the host's network — either
+	// ReasonPrefix: a live tenant sensor bound to the host's network — either
 	// nothing observed the host, or its observer is offline.
-	ReasonSegment Reason = "same_segment"
+	ReasonPrefix Reason = "same_segment"
 	// ReasonPlatform: no tenant sensor is a better executor.
 	ReasonPlatform Reason = "platform"
 	// ReasonObserverOffline: the observing sensor exists but is not live and
@@ -224,7 +224,7 @@ func Route(targets []string, observedBy map[string]uuid.UUID, sensors []Sensor, 
 				// evidence that it may only be reachable from inside, so
 				// with no live segment sensor it is skipped and stays due.
 				if s, ok := segmentSensor(target); ok {
-					assign(s, target, ReasonSegment)
+					assign(s, target, ReasonPrefix)
 					continue
 				}
 				plan.Skipped = append(plan.Skipped, Skip{Target: target, Sensor: observer, Reason: ReasonObserverOffline})
@@ -240,7 +240,7 @@ func Route(targets []string, observedBy map[string]uuid.UUID, sensors []Sensor, 
 		}
 
 		if s, ok := segmentSensor(target); ok {
-			assign(s, target, ReasonSegment)
+			assign(s, target, ReasonPrefix)
 			continue
 		}
 

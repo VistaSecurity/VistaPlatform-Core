@@ -227,6 +227,9 @@ func (e *JobExecutor) executeDeviceInterrogation(ctx context.Context, job *model
 		// in cannot be validated at all.
 		Facts:         result.Facts,
 		Relationships: result.Relationships,
+		// The device's own interfaces, addresses, VLANs and ARP cache (DCIM
+		// row 1.5): the platform files them through the identity engine.
+		Network: result.Network,
 		// What the collector could not read. Without this the platform's job
 		// detail says nothing about an endpoint the account was refused — the
 		// in-cluster executor reports the same list for the same device.

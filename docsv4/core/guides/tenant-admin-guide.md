@@ -32,7 +32,7 @@ asset lifecycle.
 8. [Notifications & Alerts](#notifications--alerts)
 9. [Policies](#policies)
 10. [Audit](#audit)
-11. [Infrastructure (Locations & Segments)](#infrastructure-locations--segments)
+11. [Infrastructure](#infrastructure)
 12. [Working with Inventory & Certificates](#working-with-inventory--certificates)
 13. [Compliance & Frameworks](#compliance--frameworks)
 14. [Evidence: Bills of Materials & Exports](#evidence-bills-of-materials--exports)
@@ -55,7 +55,7 @@ asset lifecycle.
 
 New organizations get a guided checklist. Open it any time from the **profile
 chip** (your avatar, bottom of the left rail) → **Getting Started**. It walks
-you through defining network segments, adding locations, and registering your
+you through defining prefixes, adding locations, and registering your
 first sensor or agent. Detail: [Getting Started](../features/getting-started.md).
 
 ### The Profile Chip Menu
@@ -95,14 +95,14 @@ rail with its own navigation, in this order:
 
 | Settings section | Pages |
 |---|---|
-| **Organization** | Overview · Branding |
+| **Organization** | Overview · Business Units · Sites · Saved Filters · Racks · Module Types · Branding |
 | **Account** | Billing account · Usage & Limits |
 | **People & Access** | Members · Roles & Permissions · Security & SSO *(Enterprise)* |
 | **Integrations** | Integrations · AI assistant |
 | **Notifications & Alerts** | Routing Rules · Alert Rules · Delivery History |
 | **Policies** | Compliance Frameworks · Custom Policies *(Enterprise)* · Asset Lifecycle · Scopes · Classes · Identification rules |
 | **Audit** | Audit |
-| **Infrastructure** | Locations · Network Segments |
+| **Infrastructure** | Active Scanning · IPAM · Cluster Types & Groups · VPN Policies · Wireless · Contacts · Config Contexts · Export Templates · Import · Circuit Providers · Custom Fields · Device Types · Manufacturers · Device Roles · Platforms (OS) |
 
 Throughout this guide, "**Settings → *Section* → *Page***" means: open the
 profile chip, click **Organization Settings**, then pick the page from the
@@ -121,7 +121,7 @@ settings rail.
 
 | If you are looking for… | It is now |
 |---|---|
-| Three pages an earlier version of this guide described | **Never built, and now removed from this guide** rather than described. Global sensor configuration: active-scanning policy is set per network segment (**Settings → Infrastructure → Network Segments**) and per scan, and sensor binaries are downloaded from **Discovery → Sensors & Agents**. Algorithm severity ratings: published read-only under **Risk & Compliance → Posture → Algorithm Reference**. Personal app preferences: light/dark mode is the theme toggle in the profile chip menu, and there is no personal framework-default override — the organization default under **Policies → Compliance Frameworks** applies to everyone. |
+| Three pages an earlier version of this guide described | **Never built, and now removed from this guide** rather than described. Global sensor configuration: active-scanning policy is set per prefix (**Inventory → Networks**) and per scan, and sensor binaries are downloaded from **Discovery → Sensors & Agents**. Algorithm severity ratings: published read-only under **Risk & Compliance → Posture → Algorithm Reference**. Personal app preferences: light/dark mode is the theme toggle in the profile chip menu, and there is no personal framework-default override — the organization default under **Policies → Compliance Frameworks** applies to everyone. |
 | "Why is this asset classified as a Server?" | **Settings → Policies → Classes** — the taxonomy, its attributes, and what a class decides. |
 | "Why did these two records become one asset?" | **Settings → Policies → Identification rules** — identifier precedence per class, and the auto-accept threshold. |
 | Which AI capabilities are on, and what answers without them | **Settings → Integrations → AI assistant**. |
@@ -349,7 +349,7 @@ which is why the channels you add become the delivery targets in
 ### NetBox
 
 > **Enterprise capability.** Core does not mount the NetBox endpoints. Discovery,
-> the inventory and the network-segment editor are included in every edition.
+> the inventory and the network-prefix editor are included in every edition.
 
 
 ### Available connectors
@@ -559,7 +559,7 @@ Below the threshold is a second, **on-by-default** switch. Where the threshold
 lets a matcher's *score* settle a question, this lets fixed *rules* merge two
 records they are sure are one device: the same MAC address or serial number seen
 directly on the device (or reported by a controller that manages it), both
-records on the same network segment, never an address alone, nothing contradicting it, and neither ever
+records on the same prefix, never an address alone, nothing contradicting it, and neither ever
 marked **keep separate**. A record you typed in by hand is the survivor and keeps
 the values you entered — unless it is still waiting for approval while the other
 is already in your inventory, in which case the approved record survives and your
@@ -666,145 +666,145 @@ taxonomy and the investigation workflows, see the
 
 ---
 
-## Infrastructure (Locations & Segments)
+## Infrastructure
 
-**Settings → Infrastructure** defines where your infrastructure lives and how
-discovered assets are placed. **Discovery works best with at least one location
-and one network segment**, and the Getting Started checklist asks for both.
+Where your infrastructure lives, what it is made of and how it is connected is
+maintained in three places. **Discovery works best with at least one site and one
+prefix**, and the Getting Started checklist asks for both.
 
-### Locations
+| You want to maintain… | Go to | Guide |
+|---|---|---|
+| Regions, site groups, sites and the locations inside them | **Settings → Organization → Sites** | [Sites](../inventory/sites.md) |
+| Racks, rack types and reservations | **Settings → Organization → Racks** | [Racks](../inventory/racks.md) |
+| Business Units | **Settings → Organization → Business Units** | [Business Units](../inventory/business-units.md) |
+| Prefixes, VLANs, VRFs, IP ranges | **Inventory → Networks** and **VLANs**; the catalogues under **Settings → Infrastructure → IPAM** | [Networks](../inventory/networks.md) |
+| Device types, manufacturers, device roles, platforms, module types | **Settings → Infrastructure** (and **Organization → Module Types**) | [Device types](../inventory/device-types.md) |
+| Cables and the ports they join | **Inventory → Cabling**, and an asset's **Ports** tab | [Cabling](../inventory/cabling.md) |
+| Circuit providers and circuits | **Settings → Infrastructure → Circuit Providers**, **Inventory → Circuits** | [Circuits](../inventory/circuits.md) |
+| Clusters and virtual machines | **Settings → Infrastructure → Cluster Types & Groups**, **Inventory → Clusters** | [Virtualization](../inventory/virtualization.md) |
+| IKE and IPsec policies, tunnels | **Settings → Infrastructure → VPN Policies**, **Inventory → Tunnels** | [VPN](../inventory/vpn.md) |
+| Wireless LANs and links | **Settings → Infrastructure → Wireless** | [Wireless](../inventory/wireless.md) |
+| Contacts and their roles | **Settings → Infrastructure → Contacts** | [Contacts](../inventory/contacts.md) |
+| Your own fields on objects | **Settings → Infrastructure → Custom Fields** | [Custom fields](../inventory/custom-fields.md) |
+| JSON config rendered per asset | **Settings → Infrastructure → Config Contexts** | [Config contexts](../inventory/config-contexts.md) |
+| Saved queries; download templates | **Settings → Organization → Saved Filters**; **Settings → Infrastructure → Export Templates** | [Saved filters and export templates](../inventory/saved-filters-and-export-templates.md) |
+| Who changed what | **Inventory → Changes** | [Changes and journal](../inventory/changes-and-journal.md) |
+| Bulk CSV import and export | **Settings → Infrastructure → Import** | [Bulk import and export](../inventory/import-export.md) |
 
-**Infrastructure → Locations** maintains the hierarchical physical/cloud location
-registry used by Inventory and Discovery. Create hierarchical locations (region →
-datacenter → rack) or cloud regions, each with an optional physical address,
-cloud provider and region, and timezone. Each row shows how many assets sit
-there. A segment can point at a location, so it is usually easiest to create
-locations first.
+Each page needs the matching `dcim`, `ipam`, `circuits`, `virtualization`, `vpn` or
+`wireless` permission — see [Roles & Permissions](../features/roles-and-permissions.md).
 
-### Network Segments
+### Networks
 
-**Infrastructure → Network Segments** defines the boundaries Discovery scopes
-scans against — and the scope inside which a hostname or IP address is treated as
-unique (see [Identification rules](#identification-rules)).
+Your networks are **prefixes** in **Inventory → Networks** (the IPAM tree,
+with VLANs and VRFs beside it — see [Networks](../inventory/networks.md)). They
+define what Discovery scopes scans against — and the scope inside which an IP
+address is treated as unique (see [Identification rules](#identification-rules)).
+Adding, editing, approving and claiming prefixes needs **Manage IPAM**
+(`ipam.manage`); reading them needs **View IPAM**.
 
-**New segment** asks for a **name**, a **type** — CIDR block, IP range, domain
-pattern or cloud VPC — a **value** in that type's format (validated as you type),
-a **network type** and an **environment**. Location, business unit, owner email
-and description are optional.
+**Add prefix** asks for the CIDR (host bits are cleared: `10.10.0.7/24` is
+stored as `10.10.0.0/24`), with optional status, role, VLAN, business unit and
+description, and the discovery settings below. Open a prefix to see them under
+**Discovery**, and **Edit** to change them:
 
-For a CIDR or IP-range segment the form also asks **This network hands out
-addresses (DHCP)** — see [DHCP on a segment](#dhcp-on-a-segment) below.
-
-Two switches sit at the bottom:
-
-- **Active** — whether Discovery scopes against it at all.
-- **Auto-approve discoveries** — assets found here skip **Discovery → Approvals**
-  and go straight to monitoring. Turning it on asks *which* sources it covers:
-  **sensor discoveries**, **cloud discoveries**, or both. A cloud VPC segment
-  defaults to cloud only, because no IP address ever falls inside one. See
+- **Network type** — Private, Public, VPN or Cloud; unset, the address decides.
+- **Environment** — what assets placed in the prefix take.
+- **Addresses handed out by DHCP** — see [DHCP on a prefix](#dhcp-on-a-prefix).
+- **Auto-approve what sensors discover in this prefix** — assets found here
+  skip **Discovery → Approvals** and go straight to monitoring. It covers sensor
+  discoveries; cloud resources are approved by their account instead. See
   [Asset Approval](../features/asset-approval.md).
+- **Never actively scan this prefix** and **Sensitive** — exclusions every scan
+  honours.
 
-**Import** (top right) bulk-creates segments from a spreadsheet — see
+The spreadsheet import (**Discovery → Command Center → Import**, target
+**Networks (prefixes)**) bulk-creates prefixes — see
 [Spreadsheet Import](../features/spreadsheet-import.md).
 
-**Learned segments.** Interrogating a network device (Discovery → Devices) also
-adds a segment for each VLAN or interface network the device reports with a
-prefix — a UniFi site's networks, a FortiGate's VLAN subinterfaces, an F5's
-self-IP networks. Under its name the row says where it came from and what is
-known about DHCP on it, for example *Learned from Fortinet · DHCP unknown*.
-The network type is set from the prefix: RFC 1918 and IPv6 ULA space is *private*,
-anything else — carrier-grade NAT (100.64.0.0/10) included — is *public*. A
-learned public segment is used only to tell hosts apart; it does not make its
-range scannable, because a firewall's internet-facing network is where it
-connects, not necessarily something you own. Its row says *Public range · not
-treated as yours*. If the range is yours, press **Claim as mine** on the row
-(needs `settings.update`): after you confirm, the range is treated exactly like a
-public segment you created — scannable when someone asks, never automatically —
-and the row shows *Claimed by … · date* with a **Revoke claim** action. The claim
-is your own statement; the platform does not verify it, and it records each claim
-and revocation in the audit log. Do not claim a range you do not control. See
+**Learned prefixes.** Interrogating a network device (Discovery → Devices) also
+adds a prefix, pending your approval, for each VLAN or interface network the
+device reports with a prefix — a UniFi site's networks, a FortiGate's VLAN
+subinterfaces, an F5's self-IP networks. Its **Scanning** line reads *Learned
+from a device — not treated as yours*. With no network type set, RFC 1918 and
+IPv6 ULA space reads *private*; anything else — carrier-grade NAT
+(100.64.0.0/10) included — reads *public*. A learned public prefix is used only
+to tell hosts apart; it does not make its range scannable, because a firewall's
+internet-facing network is where it connects, not necessarily something you
+own. If the range is yours, open the prefix and press **Claim as ours** (needs
+`ipam.manage`): after you confirm, the prefix is one your organization declared,
+treated exactly like a public prefix you added — scannable when someone asks,
+never automatically. The claim is your own statement; the platform does not
+verify it, and it records the claim in the prefix's change log. Do not claim a
+range you do not control. See
 [Public ranges learned from your devices](../features/active-scanning.md#public-ranges-learned-from-your-devices).
-A segment you created with the same CIDR always wins, and
-interrogation never renames or retypes it (it does still tell your segment what
-it measured about DHCP — see below).
+A prefix you added with the same CIDR is never duplicated, renamed or retyped by
+an interrogation (it does still learn what a device measured about DHCP when
+nobody had said — see below).
 
 #### Gateway and coverage
 
-Two columns say how each network is served and how well you can see it.
+The prefix's **Discovery** section says how each network is served and how well
+you can see it.
 
-**Gateway** names the device that routes the network, with its own address on
+**Gateway** names the device that routes the network, with its own address in
 it — for example *edge-router (192.0.2.1)*. The name links to that device's
 asset page, and hovering it says when an interrogation last reported it.
 
 You never type a gateway in. It is recorded when you **interrogate the router**
 (Discovery → Devices → **Interrogate**, or a schedule): a router reports its own
-address on each network it serves, and every segment where it holds that
-address gets it as its gateway — a segment you created as well as a learned
-one. The next interrogation keeps it current: a network the router stops
-reporting loses it as its gateway, and another device's gateway is never
-removed. See
+address on each network it serves, and every prefix where it holds that address
+gets it as its gateway — a prefix you added as well as a learned one. The next
+interrogation keeps it current: a network the router stops reporting loses it
+as its gateway, and another device's gateway is never removed. See
 [What interrogating a gateway records](./device-interrogation-user-guide.md#what-interrogating-a-gateway-records).
 
-A **—** in the column means **no device has reported being this network's
-gateway** (hover it for the reason). That is the case until you interrogate the
-router that serves the network, for a device type that does not report its
-networks with a prefix, and after the device that was the gateway is deleted.
-To fill it in, add the router under **Discovery → Devices** and interrogate it.
+*Gateway not recorded* means **no device has reported being this network's
+gateway**. That is the case until you interrogate the router that serves the
+network, for a device type that does not report its networks with a prefix, and
+after the device that was the gateway is deleted.
 
 When two devices both report routing a network — a high-availability pair, for
 example — the one reported most recently is shown. The platform never guesses a
-gateway from a network's addresses: a network whose router you have not
-interrogated says so, rather than naming its first address.
+gateway from a network's addresses. A redundancy group (VRRP, HSRP, …) whose
+virtual address is in the prefix is listed under **FHRP**, and a host's
+**Network** line on its asset page shows the virtual address it routes through.
 
-**Coverage** says whether one of your sensors sees the network directly:
+**Sensor coverage** says whether one of your sensors sees the network directly:
 
-| The column says | What it means |
+| It says | What it means |
 |---|---|
 | **Sensor: *name*** | That sensor is live and has recently reported an interface on this network, so it observes the network first-hand. |
 | **No sensor on this network** | No sensor of yours reaches it. Hosts here are known only from the gateway's interrogation and from traffic relayed to other networks — enough to list them, not to measure what they do. To cover it, deploy a sensor with an interface on this network (**Discovery → Sensors & Agents**). This is a fact about the network, not an error. |
-| **—** | Coverage is worked out for CIDR segments only; an IP range, domain or cloud VPC segment has nothing to show here. |
 
 A sensor that goes quiet, or stops reporting an interface on the network, stops
 covering it.
 
-#### DHCP on a segment
+#### DHCP on a prefix
 
 On a network that hands out addresses by DHCP, an IP address does not identify a
 device: it belongs to whoever holds the lease today, and tomorrow it may belong
 to something else. So on a DHCP network, Vista Platform never lets an address
 alone decide that two sightings are the same asset — a MAC address, a serial
 number or an agent id still can. On a network with fixed addresses an address is
-a perfectly good identifier, and treating every network as DHCP would leave
-those devices harder to recognise, which is why the platform wants to know which
-kind each of your networks is.
+a perfectly good identifier, which is why the platform wants to know which kind
+each of your networks is.
 
-Every segment row says what is known and **whose word it is**:
+A prefix's **DHCP** line says **DHCP**, **Static** or **Unknown**. The first
+answer anyone gives stands:
 
-| The row says | Where it came from |
-|---|---|
-| **DHCP on · measured by *device*** (or **DHCP off · measured by …**) | A device that serves the network — a UniFi controller, for example — reported it when you interrogated it (Discovery → Devices). This applies to a segment you drew yourself as well as to a learned one. |
-| **DHCP on · inferred from traffic** | A sensor watched a DHCP server hand out an address on the segment. It never says *off*: seeing no leases proves nothing. |
-| **DHCP on/off · set by you** | You chose it in the segment's form. |
-| **DHCP unknown** | Nobody has said. The platform treats an unknown network as dynamic where a device told it the network exists but not its DHCP posture (**DHCP unknown** on a learned segment), and as static for a segment nobody said anything about. |
+- **you**, in the prefix's form (**Addresses handed out by DHCP**: Yes / No /
+  Unknown);
+- **a device that serves the network** — a UniFi controller, for example —
+  when you interrogate it, and a cloud integration for a cloud network's prefixes (always
+  *No*: an instance keeps its address for its life);
+- **a sensor that watched a DHCP server** hand out an address in the prefix (it
+  never says *No*: seeing no leases proves nothing).
 
-When sources disagree the order is **you, then a device's measurement, then
-traffic**: a lower source never overwrites a higher one, and a newer answer from
-the same source replaces the older. In particular a measurement never overwrites
-what you set.
-
-To set it yourself, edit the segment and choose under **This network hands out
-addresses (DHCP)**:
-
-- **Yes** or **No** — your answer, which nothing else overrides.
-- **Automatic** — hand it back: the segment goes to the best remaining answer
-  (a device's measurement, otherwise traffic), or to **DHCP unknown** if there is
-  none. Choosing Automatic on a segment you never set changes nothing.
-
-The choice is offered for CIDR and IP-range segments only; a domain or cloud VPC
-segment cannot hold a lease.
-
-Creating, editing and deleting need the settings-update permission; the list is
-readable without it.
+A device's or sensor's answer is recorded only where nobody has said yet, so it
+never overwrites yours. Choosing **Unknown** hands the question back: the next
+measurement fills it in. While nobody has said, a prefix a device or sensor
+reported reads as dynamic, and one you added reads as static.
 
 ---
 
@@ -976,8 +976,8 @@ template engine, no wait.
 - Read **Policies → Identification rules** before turning the auto-accept
   threshold on, and watch the merge proposals the matcher raises for a while
   first. **Never** is a safe default, not a timid one.
-- Define network segments before running wide discovery: a hostname or IP is only
-  unique inside a segment, and an unsegmented organization matches them against
+- Define prefixes before running wide discovery: a hostname or IP is only
+  unique inside a prefix, and an in no prefix organization matches them against
   one tenant-wide scope.
 
 ### Asset lifecycle

@@ -85,7 +85,7 @@ function ContextSubLink({ to, icon, label, active }: { to: string; icon: string;
  */
 function InventoryNavLink({ item, active }: { item: NavSubItem; active: boolean }) {
   const lens = item.lens ? INVENTORY_LENSES.find((l) => l.key === item.lens) : undefined;
-  const icon = lens?.icon ?? 'inbox';
+  const icon = lens?.icon ?? item.icon ?? 'inbox';
   const pending = !!item.crossLink;
   return (
     <Link
@@ -111,6 +111,18 @@ function isSectionActive(section: NavSection, pathname: string): boolean {
   if (pathname === section.path) return true;
   const base = '/' + pathname.split('/')[1];
   return base === '/' + section.path.split('/')[1];
+}
+
+const INFRASTRUCTURE_HUB_CHILDREN: Readonly<Record<string, readonly string[]>> = {
+  '/inventory/manage/organization': ['business-units', 'contacts'],
+  '/inventory/manage/catalog': ['device-types', 'module-types', 'manufacturers', 'device-roles', 'platforms', 'config-contexts'],
+};
+
+function isWorkspaceItemActive(item: NavSubItem, pathname: string): boolean {
+  if (item.crossLink) return false;
+  if (pathname === item.path || pathname.startsWith(`${item.path}/`)) return true;
+  const children = INFRASTRUCTURE_HUB_CHILDREN[item.path];
+  return !!children?.some((key) => pathname === `/inventory/manage/${key}`);
 }
 
 function Sidebar() {
@@ -309,7 +321,10 @@ function Sidebar() {
                             item.lens
                               ? (pathname === '/inventory' && currentLens === item.lens)
                                 || (pathname.startsWith('/inventory/assets/') && item.lens === 'assets')
-                              : false
+                                || (pathname.startsWith('/inventory/clusters/') && item.lens === 'clusters')
+                                || (pathname.startsWith('/inventory/sites/') && item.lens === 'sites')
+                                || (pathname.startsWith('/inventory/racks/') && item.lens === 'racks')
+                              : isWorkspaceItemActive(item, pathname)
                           }
                         />
                       ))}

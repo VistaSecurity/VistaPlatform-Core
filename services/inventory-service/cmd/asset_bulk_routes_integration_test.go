@@ -107,22 +107,28 @@ func TestIntegration_AssetBulkRoutes_PermissionsAndQuerySelections(t *testing.T)
 		t.Errorf("restore: %d %v, want 200 changed 2", code, out)
 	}
 
+	payID, cardsID := uuid.New(), uuid.New()
+	for id, name := range map[uuid.UUID]string{payID: "Payments", cardsID: "Cards"} {
+		if _, err := raw.Exec(`INSERT INTO business_units(id,tenant_id,name,slug) VALUES($1,$2,$3,lower($3))`, id, tenant, name); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// A query selection: the two staging assets, confirmed as two.
 	q := `"query":"environment:staging"`
-	if code, out := post(editor, "update", `{`+q+`,"expected_count":2,"changes":{"business_unit":"Payments"}}`); code != http.StatusOK || out["matched"] != float64(2) || out["changed"] != float64(2) {
+	if code, out := post(editor, "update", `{`+q+`,"expected_count":2,"changes":{"business_unit_id":"`+payID.String()+`"}}`); code != http.StatusOK || out["matched"] != float64(2) || out["changed"] != float64(2) {
 		t.Errorf("update by query: %d %v, want 200 matched 2 changed 2", code, out)
 	}
 	var payments int
-	_ = raw.QueryRow(`SELECT COUNT(*) FROM assets WHERE tenant_id=$1 AND business_unit='Payments'`, tenant).Scan(&payments)
+	_ = raw.QueryRow(`SELECT COUNT(*) FROM assets WHERE tenant_id=$1 AND business_unit_id=$2`, tenant, payID).Scan(&payments)
 	if payments != 2 {
 		t.Errorf("%d assets in Payments, want the 2 staging ones (not %s)", payments, c)
 	}
 	// Confirmed one, the query matches two: refused, nothing changed.
-	if code, out := post(editor, "update", `{`+q+`,"expected_count":1,"changes":{"business_unit":"Cards"}}`); code != http.StatusConflict || out["count"] != float64(2) {
+	if code, out := post(editor, "update", `{`+q+`,"expected_count":1,"changes":{"business_unit_id":"`+cardsID.String()+`"}}`); code != http.StatusConflict || out["count"] != float64(2) {
 		t.Errorf("update with a stale count: %d %v, want 409 count 2", code, out)
 	}
 	var cards int
-	_ = raw.QueryRow(`SELECT COUNT(*) FROM assets WHERE tenant_id=$1 AND business_unit='Cards'`, tenant).Scan(&cards)
+	_ = raw.QueryRow(`SELECT COUNT(*) FROM assets WHERE tenant_id=$1 AND business_unit_id=$2`, tenant, cardsID).Scan(&cards)
 	if cards != 0 {
 		t.Errorf("a refused selection changed %d assets", cards)
 	}

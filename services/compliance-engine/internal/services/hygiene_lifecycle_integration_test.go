@@ -103,10 +103,10 @@ func (f *inventoryFrameworkFixture) asset(t *testing.T, tenant uuid.UUID, spec a
 	}
 	if err := f.db.QueryRow(`
 		INSERT INTO assets (tenant_id, class_key, class_path, hostname, display_name, owner_email,
-			support_group, site, asset_status, last_seen_at)
+			support_group, site_id, asset_status, last_seen_at)
 		VALUES ($1, $2, $3, $4, $4, $5, $6, $7, $8, NOW() - ($9 || ' days')::interval)
 		RETURNING id`,
-		tenant, spec.class, spec.classPath, spec.hostname, owner, group, site, spec.status,
+		tenant, spec.class, spec.classPath, spec.hostname, owner, group, testdb.EnsureSite(t, f.db, tenant, siteName(site)), spec.status,
 		spec.lastSeenDays).Scan(&id); err != nil {
 		t.Fatalf("seed asset %s: %v", spec.hostname, err)
 	}
@@ -390,4 +390,16 @@ func TestIntegration_Lifecycle_ScoresResolvedDatesOnly(t *testing.T) {
 		assertStatus(t, f.evaluate(t, tenant, "lifecycle", "LC-001"), "not_assessed",
 			"a fact past its expires_at has stopped being an answer")
 	})
+}
+
+// siteName is the seeded site column's value as a site name: a NULL site
+// (nil) is no site.
+func siteName(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	if p, ok := v.(*string); ok && p != nil {
+		return *p
+	}
+	return ""
 }

@@ -100,7 +100,20 @@ type SightingResult struct {
 func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, items []SightingItem) ([]SightingResult, error) {
 	out := make([]SightingResult, len(items))
 	// One read of the tenant's segments for the whole batch ( F4).
-	segs := s.newImportSegments(tenantID)
+	segs := s.newImportPrefixes(tenantID)
+	// A batch that filed interfaces or neighbours may have brought the far end
+	// of a parked LLDP / CDP neighbour (row 3.3): the cable resolver runs once
+	// after it.
+	resolveCables := false
+	defer func() {
+		if resolveCables && s.cableIntake != nil {
+			if n, err := s.cableIntake.ResolveParked(ctx, tenantID); err != nil {
+				log.Printf("[AssetService] internal sightings: cable resolver for tenant %s: %v", tenantID, err)
+			} else if n.Resolved > 0 {
+				log.Printf("[AssetService] internal sightings: %d parked neighbour(s) became proposed cables", n.Resolved)
+			}
+		}
+	}()
 	for i, item := range items {
 		sg := item.Sighting
 		if sg.TenantID != "" && sg.TenantID != tenantID.String() {
@@ -149,6 +162,7 @@ func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, 
 		approved := s.interrogationSightingApproved(segs, tenantID, sg, obs)
 
 		var reasons []string
+		tunnelCrypto := false
 		res, err := s.resolveObservationWithRepo(ctx, obs, func(repo *pgidentity.Repository, tx *sqlx.Tx, res identity.Resolution) error {
 			if err := applySightingContext(ctx, repo, tx, sg, intake, res); err != nil {
 				return err
@@ -156,6 +170,38 @@ func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, 
 			if approved {
 				if err := s.autoApproveInterrogated(ctx, tx, tenantID, obs, res); err != nil {
 					return err
+				}
+			}
+			// The device's VPN tunnels (DCIM row 4.3, vpn_intake.go), on the
+			// engine's transaction: with the asset or not at all.
+			if len(sg.Tunnels) > 0 && tunnelsRecordable(res) {
+				assetID, err := uuid.Parse(res.Asset.ID)
+				if err != nil {
+					return err
+				}
+				tr, err := UpsertObservedTunnels(ctx, tx, tenantID, assetID, sg.Tunnels, obs.Source, obs.ObservedAt)
+				if err != nil {
+					return fmt.Errorf("recording tunnels: %w", err)
+				}
+				for _, skipped := range tr.Skipped {
+					log.Printf("[AssetService] internal sightings: %s: %s", label, skipped)
+				}
+				tunnelCrypto = tunnelCrypto || len(tr.CryptoConfigurations) > 0
+			}
+			// The device's hardware parts, modules and stack (DCIM row 2.4,
+			// inventory_item_service.go), the same way: with the asset or not
+			// at all.
+			if hw := (ObservedHardware{Items: sg.InventoryItems, Modules: sg.Modules, VirtualChassis: sg.VirtualChassis}); !hw.Empty() && tunnelsRecordable(res) {
+				assetID, err := uuid.Parse(res.Asset.ID)
+				if err != nil {
+					return err
+				}
+				hr, err := UpsertObservedHardware(ctx, tx, tenantID, assetID, hw, obs.Source, obs.ObservedAt)
+				if err != nil {
+					return fmt.Errorf("recording hardware: %w", err)
+				}
+				for _, skipped := range hr.Skipped {
+					log.Printf("[AssetService] internal sightings: %s: %s", label, skipped)
 				}
 			}
 			if res.ObservationID == "" {
@@ -175,6 +221,27 @@ func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, 
 			return out, fmt.Errorf("%s: %w", label, err)
 		}
 		logIdentityDecisions(label, res)
+		// A tunnel's crypto configurations were scored on the transaction; the
+		// `crypto` producer rolls them up, as it does for a finding's.
+		if tunnelCrypto && s.onCryptoChanged != nil {
+			s.onCryptoChanged(ctx, tenantID)
+		}
+		// The device's LLDP / CDP neighbours (row 3.3, cable_intake.go), after
+		// the engine committed its interfaces. A neighbour that cannot be
+		// filed is logged; it never fails the sighting.
+		if tunnelsRecordable(res) && (len(sg.Interfaces) > 0 || len(sg.Neighbors) > 0) {
+			resolveCables = true
+			if len(sg.Neighbors) > 0 && s.cableIntake != nil {
+				if assetID, perr := uuid.Parse(res.Asset.ID); perr == nil {
+					if cr, cerr := s.cableIntake.RecordNeighbors(ctx, tenantID, assetID, sg.Neighbors, obs.Source, obs.ObservedAt); cerr != nil {
+						log.Printf("[AssetService] internal sightings: %s: neighbours not filed: %v", label, cerr)
+					} else if cr.Proposed+cr.Parked+cr.Contradictions > 0 {
+						log.Printf("[AssetService] internal sightings: %s: %d cable(s) proposed, %d confirmed, %d parked, %d contradicted",
+							label, cr.Proposed, cr.Confirmed, cr.Parked, cr.Contradictions)
+					}
+				}
+			}
+		}
 		r := res.IngestResult()
 		out[i] = SightingResult{Outcome: r.Outcome, AssetID: r.AssetID, ObservationID: r.ObservationID, ProposalID: r.ProposalID, EvidenceHeld: r.EvidenceHeld, EndpointsClosed: r.EndpointsClosed, Reasons: reasons}
 	}
@@ -288,7 +355,7 @@ const interrogationSourcePrefix = "interrogation:"
 //
 // The address evaluated is the sighting's own first address in a real segment
 // (Intake's sighting segment), else its first address, else its first name.
-func (s *AssetService) interrogationSightingApproved(segs *importSegments, tenantID uuid.UUID, sg identity.Sighting, obs identity.Observation) bool {
+func (s *AssetService) interrogationSightingApproved(segs *importPrefixes, tenantID uuid.UUID, sg identity.Sighting, obs identity.Observation) bool {
 	if sg.Source.Kind != identity.SourceMeasured || !strings.HasPrefix(sg.Source.Ref, interrogationSourcePrefix) {
 		return false
 	}
@@ -348,4 +415,20 @@ func (s *AssetService) autoApproveInterrogated(ctx context.Context, tx *sqlx.Tx,
 		return nil
 	}
 	return s.setStatusUnlessArchived(tx, tenantID, assetID, identity.StatusMonitoring, obs.Source)
+}
+
+// tunnelsRecordable reports whether a resolution names an asset a sighting's
+// tunnels may be written to — identity's recordsObservedNetwork rule for the
+// interfaces, applied to the tunnels that ride the same sighting: an asset it
+// matched, created, created provisionally, or the pending asset a conflict
+// created. Supporting evidence writes nothing (platform ADR-0003 D2).
+func tunnelsRecordable(res identity.Resolution) bool {
+	if res.Asset.Zero() || res.EvidenceHeld {
+		return false
+	}
+	switch res.Outcome {
+	case identity.OutcomeMatched, identity.OutcomeCreated, identity.OutcomeProvisional, identity.OutcomeConflict:
+		return true
+	}
+	return false
 }

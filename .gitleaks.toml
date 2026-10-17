@@ -24,6 +24,9 @@ paths = [
   '''shared/agentcreds/.*''',
   '''.*_test\.go''',
   '''.*\.test\.ts''',
+  # Synthetic vendor/API response fixtures with credential-shaped fields.
+  '''^services/device-interrogation-service/internal/services/testdata/''',
+  '''^shared/deviceinterrogation/snmpfake/fixtures\.go$''',
   # Seed and demo data: algorithm catalogue rows and synthetic findings whose
   # field names ("key_exchange", "key_exchange_algorithm") trip the generic
   # API-key rule. The seeded platform-admin password hash IS published on

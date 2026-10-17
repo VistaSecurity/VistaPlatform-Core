@@ -97,7 +97,7 @@ func TestIntegration_EndpointsFollowIdentity(t *testing.T) {
 	// applyToAsset (shared/identity/engine.go) → red.
 	t.Run("matched_scan_endpoints_come_from_the_engine", func(t *testing.T) {
 		m := newInvMatrix(t, raw)
-		m.svc.SetEnrichmentServices(NewNetworkSegmentService(m.svc.db, NewLocationService(m.svc.db)), nil)
+		m.svc.SetEnrichmentServices(nil)
 		report, err := m.svc.IngestFindingsReport(m.Tenant, m.scanAt(intakematrix.StaticAddr), identity.StatusPendingApproval)
 		if err != nil {
 			t.Fatal(err)
@@ -134,7 +134,7 @@ func TestIntegration_EndpointsFollowIdentity(t *testing.T) {
 	// supportingEndpointsAttach return false → 0 endpoints.
 	t.Run("supporting_direct_finding_attaches_its_endpoints_to_the_single_owner", func(t *testing.T) {
 		m := newInvMatrix(t, raw)
-		m.svc.SetEnrichmentServices(NewNetworkSegmentService(m.svc.db, NewLocationService(m.svc.db)), nil)
+		m.svc.SetEnrichmentServices(nil)
 		report, err := m.svc.IngestFindingsReport(m.Tenant, m.scanAt(intakematrix.TenantAddr), identity.StatusPendingApproval)
 		if err != nil {
 			t.Fatal(err)

@@ -1082,6 +1082,7 @@ func (s *ResultProcessor) recordInterrogationObservations(
 		ObservedAt:     result.CompletedAt,
 		Facts:          result.Facts,
 		Relationships:  result.Relationships,
+		Network:        result.Network,
 		DeviceIdentity: identity,
 	}
 	// Pin the SSH host key the AGENT was shown, when this device has none

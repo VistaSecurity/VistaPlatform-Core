@@ -16,10 +16,10 @@ The checklist disappears on its own once all steps are complete.
 
 ## The steps
 
-1. **Add network segments** — define the networks you want discovery to scope to.
-   (*Settings → Infrastructure → Network Segments*)
+1. **Add prefixes** — define the networks you want discovery to scope to.
+   (*Inventory → Networks*)
 2. **Add locations** — organize assets by site or cloud region.
-   (*Settings → Infrastructure → Locations*)
+   (*Settings → Organization → Sites*)
 3. **Add an agent** — register a sensor or discovery agent to start finding assets.
    (*Discovery → Sensors & Agents*)
 
@@ -36,13 +36,13 @@ can't do shows **"Ask an admin"** instead of **Set up**.
 
 | Step | Permission it needs |
 |---|---|
-| Add network segments | **View tenant settings** — the segment page is reachable with settings read access; *creating* a segment additionally needs settings update. |
+| Add prefixes | **Manage IPAM** — the same permission as **Add prefix** in Inventory → Networks, where the step links. |
 | Add locations | **View tenant settings** — same as above. |
 | Add an agent | **Create sensors** — the same permission as the **Register sensor or agent** button the step links to. |
 
 > **Already have an inventory?** You don't have to add everything by hand. You can
-> **import a spreadsheet** (CSV/XLSX) to bulk-create network segments (*Settings →
-> Infrastructure → Network Segments → Import*) or assets (*Discovery → Command
+> **import a spreadsheet** (CSV/XLSX) to bulk-create prefixes (*Discovery →
+> Command Center → Import from spreadsheet*, target **Networks**) or assets (*Discovery → Command
 > Center → Import from spreadsheet*, or the **Import** control on Inventory). See
 > [Spreadsheet Import](./spreadsheet-import.md).
 

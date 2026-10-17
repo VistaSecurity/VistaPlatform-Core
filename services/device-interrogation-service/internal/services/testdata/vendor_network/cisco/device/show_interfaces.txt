@@ -1,0 +1,37 @@
+GigabitEthernet1/0/1 is up, line protocol is up (connected)
+  Hardware is Gigabit Ethernet, address is 00b0.e1a2.c001 (bia 00b0.e1a2.c001)
+  Description: desk 4-12 PlantedCiscoSecret-7731
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+     reliability 255/255, txload 1/255, rxload 1/255
+  Encapsulation ARPA, loopback not set
+  Full-duplex, 1000Mb/s, media type is 10/100/1000BaseTX
+GigabitEthernet1/0/2 is administratively down, line protocol is down (disabled)
+  Hardware is Gigabit Ethernet, address is 00b0.e1a2.c002 (bia 00b0.e1a2.c002)
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+  Auto-duplex, Auto-speed, media type is 10/100/1000BaseTX
+GigabitEthernet1/0/47 is up, line protocol is up (connected)
+  Hardware is Gigabit Ethernet, address is 00b0.e1a2.c02f (bia 00b0.e1a2.c02f)
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+  Full-duplex, 1000Mb/s, media type is 10/100/1000BaseTX
+GigabitEthernet1/0/48 is up, line protocol is up (connected)
+  Hardware is Gigabit Ethernet, address is 00b0.e1a2.c030 (bia 00b0.e1a2.c030)
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+  Full-duplex, 1000Mb/s, media type is 10/100/1000BaseTX
+TenGigabitEthernet1/1/1 is up, line protocol is up (connected)
+  Hardware is Ten Gigabit Ethernet, address is 00b0.e1a2.c101 (bia 00b0.e1a2.c101)
+  Description: uplink to core
+  MTU 9198 bytes, BW 10000000 Kbit/sec, DLY 10 usec,
+  Full-duplex, 10Gb/s, link type is auto, media type is SFP-10GBase-SR
+Port-channel1 is up, line protocol is up (connected)
+  Hardware is EtherChannel, address is 00b0.e1a2.c0f1 (bia 00b0.e1a2.c0f1)
+  MTU 1500 bytes, BW 2000000 Kbit/sec, DLY 10 usec,
+  Full-duplex, 1000Mb/s, link type is auto, media type is N/A
+  Members in this channel: Gi1/0/47 Gi1/0/48
+Vlan10 is up, line protocol is up
+  Hardware is Ethernet SVI, address is 00b0.e1a2.c00a (bia 00b0.e1a2.c00a)
+  Internet address is 10.20.10.1/24
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,
+Vlan99 is up, line protocol is up
+  Hardware is Ethernet SVI, address is 00b0.e1a2.c063 (bia 00b0.e1a2.c063)
+  Internet address is 10.20.99.2/24
+  MTU 1500 bytes, BW 1000000 Kbit/sec, DLY 10 usec,

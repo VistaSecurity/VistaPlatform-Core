@@ -7,8 +7,8 @@
 import { describe, expect, it } from 'vitest';
 import { parse } from '@vistasecurity/primitives/query';
 import {
-  DEFAULT_MAP_VIEW, MAP_VIEWS, UNSEGMENTED_QUERY, classDrillThroughQuery, edgeSummary,
-  readMapView, segmentDrillThroughQuery, segmentKey, topologyAssetsHref,
+  DEFAULT_MAP_VIEW, MAP_VIEWS, NO_PREFIX_QUERY, classDrillThroughQuery, edgeSummary,
+  readMapView, prefixDrillThroughQuery, prefixKey, topologyAssetsHref,
   topologyEdgeHeadline, topologyTruncationNotice, treeAssetTotal,
   type TopologyEdge, type TopologyPayload,
 } from './topology-model';
@@ -49,9 +49,9 @@ describe('the view switch', () => {
 });
 
 describe('the drill-through query', () => {
-  it('scopes a class node to its segment AND its class', () => {
-    const q = classDrillThroughQuery({ segment_id: SEG }, { class_key: 'server' });
-    expect(q).toBe(`segment_id:${SEG} and class=server`);
+  it('scopes a class node to its prefix AND its class', () => {
+    const q = classDrillThroughQuery({ prefix_id: SEG }, { class_key: 'server' });
+    expect(q).toBe(`prefix_id:${SEG} and class=server`);
   });
 
   it('matches the class EXACTLY, because that is what the node counted', () => {
@@ -61,20 +61,20 @@ describe('the drill-through query', () => {
     // leaves — the classification rules assign `network_device` to anything
     // they cannot narrow, while switches and routers sit beneath it. Under the
     // subtree form a chip reading 4,167 opened a list of 12,500.
-    const q = classDrillThroughQuery({ segment_id: SEG }, { class_key: 'network_device' });
+    const q = classDrillThroughQuery({ prefix_id: SEG }, { class_key: 'network_device' });
     expect(q).toContain('class=network_device');
     expect(q).not.toContain('class:network_device');
   });
 
-  it('spells the unsegmented bucket as an ABSENCE, not as a null value', () => {
+  it('spells the no-prefix bucket as an ABSENCE, not as a null value', () => {
     // The language has no null literal, deliberately (QUERY_LANGUAGE §1):
     // absence is `exists(field)` / `not exists(field)`, which keeps SQL's
-    // `= NULL` trap off the surface. `segment_id:null` would parse as the
+    // `= NULL` trap off the surface. `prefix_id:null` would parse as the
     // bareword "null" and match nothing.
-    expect(UNSEGMENTED_QUERY).toBe('not exists(segment_id)');
-    expect(classDrillThroughQuery({ segment_id: null }, { class_key: 'server' }))
-      .toBe('not exists(segment_id) and class=server');
-    expect(segmentDrillThroughQuery({ segment_id: null })).toBe('not exists(segment_id)');
+    expect(NO_PREFIX_QUERY).toBe('not exists(prefix_id)');
+    expect(classDrillThroughQuery({ prefix_id: null }, { class_key: 'server' }))
+      .toBe('not exists(prefix_id) and class=server');
+    expect(prefixDrillThroughQuery({ prefix_id: null })).toBe('not exists(prefix_id)');
   });
 
   it('produces queries the real parser accepts', () => {
@@ -83,10 +83,10 @@ describe('the drill-through query', () => {
     // parser rather than asserting on the text is the difference between
     // pinning a format and pinning a behaviour.
     for (const q of [
-      classDrillThroughQuery({ segment_id: SEG }, { class_key: 'server' }),
-      classDrillThroughQuery({ segment_id: null }, { class_key: 'managed_database' }),
-      segmentDrillThroughQuery({ segment_id: SEG }),
-      segmentDrillThroughQuery({ segment_id: null }),
+      classDrillThroughQuery({ prefix_id: SEG }, { class_key: 'server' }),
+      classDrillThroughQuery({ prefix_id: null }, { class_key: 'managed_database' }),
+      prefixDrillThroughQuery({ prefix_id: SEG }),
+      prefixDrillThroughQuery({ prefix_id: null }),
     ]) {
       const res = parse(q);
       expect(res.ok, `${q} did not parse: ${JSON.stringify(res.ok ? null : res.errors)}`).toBe(true);
@@ -97,41 +97,42 @@ describe('the drill-through query', () => {
     // A tenant subclass key is free text. The two quoting rules agree on
     // backslash and double quote and disagree on everything else, so using the
     // wrong one produces a query the validator rejects.
-    const q = classDrillThroughQuery({ segment_id: null }, { class_key: 'my class' });
+    const q = classDrillThroughQuery({ prefix_id: null }, { class_key: 'my class' });
     expect(q).toContain('class="my class"');
     expect(parse(q).ok).toBe(true);
   });
 
   it('lands on the asset list, encoded once', () => {
-    const href = topologyAssetsHref(classDrillThroughQuery({ segment_id: SEG }, { class_key: 'server' }));
+    const href = topologyAssetsHref(classDrillThroughQuery({ prefix_id: SEG }, { class_key: 'server' }));
     expect(href.startsWith('/inventory?lens=assets&query=')).toBe(true);
     const decoded = decodeURIComponent(new URL(href, 'https://x').searchParams.get('query')!);
-    expect(decoded).toBe(`segment_id:${SEG} and class=server`);
+    expect(decoded).toBe(`prefix_id:${SEG} and class=server`);
   });
 });
 
 describe('the expansion key', () => {
-  it('keys on the segment ID, so a segment NAMED "Unsegmented" is its own row', () => {
-    // Nothing stops a tenant naming a segment "Unsegmented": the column is free
+  it('keys on the prefix ID, so a prefix NAMED "No prefix" is its own row', () => {
+    // Nothing stops a tenant naming a prefix "No prefix": the column is free
     // text. Keying on the name would make expanding one expand the other.
-    const real = segmentKey('DC-East', { segment_id: SEG });
-    const bucket = segmentKey('DC-East', { segment_id: null });
+    const real = prefixKey('DC-East', { prefix_id: SEG });
+    const bucket = prefixKey('DC-East', { prefix_id: null });
     expect(real).not.toBe(bucket);
   });
 
-  it('separates by SITE, so the same segment under two sites expands independently', () => {
-    expect(segmentKey('DC-East', { segment_id: null }))
-      .not.toBe(segmentKey('DC-West', { segment_id: null }));
+  it('separates by SITE, so the same prefix under two sites expands independently', () => {
+    expect(prefixKey('DC-East', { prefix_id: null }))
+      .not.toBe(prefixKey('DC-West', { prefix_id: null }));
   });
 });
 
 describe('truncation', () => {
   const base: TopologyPayload = {
-    sites: [{ site: 'DC-East', asset_count: 3, segments: [
-      { segment_id: SEG, segment_name: 'Core', asset_count: 3, classes: [
+    sites: [{ site: 'DC-East', asset_count: 3, prefixes: [
+      { prefix_id: SEG, prefix_name: 'Core', asset_count: 3, classes: [
         { class_key: 'server', class_path: 'hardware.computer.server', asset_count: 3 },
       ] },
     ] }],
+    clouds: [],
     edges: [],
     total_assets: 3, unassigned_assets: 0,
     total_nodes: 1, total_edges: 0, truncated: false, node_cap: 2000, edge_cap: 500,
@@ -151,20 +152,20 @@ describe('truncation', () => {
   });
 });
 
-describe('the cross-segment-link headline', () => {
+describe('the cross-prefix-link headline', () => {
   // The headline read `edges.length` — how many links were DRAWN — and printed
   // it as the estate's total. The two are the same number only until an estate
-  // is big enough to truncate, at which point a tenant with 900 cross-segment
+  // is big enough to truncate, at which point a tenant with 900 cross-prefix
   // links saw "200" in 24-point type. The number a headline states is the one a
   // reader believes, so it has to be the one the server counted.
   const edge = (i: number): TopologyEdge => ({
-    from_segment_id: `a-${i}`, from_segment_name: `A${i}`,
-    to_segment_id: `b-${i}`, to_segment_name: `B${i}`,
+    from_prefix_id: `a-${i}`, from_prefix_name: `A${i}`,
+    to_prefix_id: `b-${i}`, to_prefix_name: `B${i}`,
     count: 1, by_type: { connects_to: 1 },
   });
 
   const t = (over: Partial<TopologyPayload>): TopologyPayload => ({
-    sites: [], edges: [], total_assets: 0, unassigned_assets: 0,
+    sites: [], clouds: [], edges: [], total_assets: 0, unassigned_assets: 0,
     total_nodes: 0, total_edges: 0, truncated: false, node_cap: 2000, edge_cap: 500,
     ...over,
   });
@@ -185,14 +186,14 @@ describe('the cross-segment-link headline', () => {
   });
 
   it('singularises on exactly one', () => {
-    expect(topologyEdgeHeadline(t({ edges: [edge(1)], total_edges: 1 })).label).toBe('cross-segment link');
-    expect(topologyEdgeHeadline(t({ total_edges: 0 })).label).toBe('cross-segment links');
-    expect(topologyEdgeHeadline(t({ edges: [edge(1), edge(2)], total_edges: 2 })).label).toBe('cross-segment links');
+    expect(topologyEdgeHeadline(t({ edges: [edge(1)], total_edges: 1 })).label).toBe('cross-prefix link');
+    expect(topologyEdgeHeadline(t({ total_edges: 0 })).label).toBe('cross-prefix links');
+    expect(topologyEdgeHeadline(t({ edges: [edge(1), edge(2)], total_edges: 2 })).label).toBe('cross-prefix links');
   });
 
   it('answers zero rather than throwing with no payload', () => {
     expect(topologyEdgeHeadline(undefined)).toEqual({
-      count: 0, label: 'cross-segment links', partial: false,
+      count: 0, label: 'cross-prefix links', partial: false,
     });
   });
 });
@@ -204,9 +205,10 @@ describe('the tree total', () => {
     // a tidy picture of a subset.
     expect(treeAssetTotal({
       sites: [
-        { site: 'A', asset_count: 4, segments: [] },
-        { site: 'B', asset_count: 6, segments: [] },
+        { site: 'A', asset_count: 4, prefixes: [] },
+        { site: 'B', asset_count: 6, prefixes: [] },
       ],
+      clouds: [],
       edges: [], total_assets: 10, unassigned_assets: 0,
       total_nodes: 0, total_edges: 0, truncated: false, node_cap: 1, edge_cap: 1,
     })).toBe(10);
@@ -222,21 +224,21 @@ describe('the edge summary', () => {
     // `connects_to` (observed traffic) and `depends_on` (a declared dependency)
     // are different claims. A single "9 connections" would hide which.
     expect(edgeSummary({
-      from_segment_name: 'Core', to_segment_name: 'DMZ', count: 9,
+      from_prefix_name: 'Core', to_prefix_name: 'DMZ', count: 9,
       by_type: { connects_to: 7, depends_on: 2 },
     })).toBe('7 connections · 2 dependencies');
   });
 
   it('singularises', () => {
     expect(edgeSummary({
-      from_segment_name: 'Core', to_segment_name: 'DMZ', count: 1,
+      from_prefix_name: 'Core', to_prefix_name: 'DMZ', count: 1,
       by_type: { depends_on: 1 },
     })).toBe('1 dependency');
   });
 
   it('reads stably rather than in map-iteration order', () => {
-    const a = edgeSummary({ from_segment_name: 'a', to_segment_name: 'b', count: 3, by_type: { depends_on: 1, connects_to: 2 } });
-    const b = edgeSummary({ from_segment_name: 'a', to_segment_name: 'b', count: 3, by_type: { connects_to: 2, depends_on: 1 } });
+    const a = edgeSummary({ from_prefix_name: 'a', to_prefix_name: 'b', count: 3, by_type: { depends_on: 1, connects_to: 2 } });
+    const b = edgeSummary({ from_prefix_name: 'a', to_prefix_name: 'b', count: 3, by_type: { connects_to: 2, depends_on: 1 } });
     expect(a).toBe(b);
   });
 
@@ -244,7 +246,7 @@ describe('the edge summary', () => {
     // A relationship type added to the registry after this build must not
     // render as "undefined".
     expect(edgeSummary({
-      from_segment_name: 'a', to_segment_name: 'b', count: 2, by_type: { member_of: 2 },
+      from_prefix_name: 'a', to_prefix_name: 'b', count: 2, by_type: { member_of: 2 },
     })).toBe('2 member ofs');
   });
 });

@@ -1,0 +1,13 @@
+{
+  "items": [
+    {
+      "name": "trunk1",
+      "interfaces": [
+        "1.2",
+        "1.3"
+      ],
+      "macAddress": "00:23:e9:aa:00:21",
+      "lacp": "enabled"
+    }
+  ]
+}

@@ -39,7 +39,6 @@ export type AssetClassKey =
   | "virtual"
   | "virtual_machine"
   | "container"
-  | "cluster"
   | "hypervisor"
   | "cloud_resource"
   | "compute_instance"
@@ -50,8 +49,11 @@ export type AssetClassKey =
   | "api_gateway"
   | "cdn_distribution"
   | "serverless_function"
-  | "virtual_network"
-  | "subnet"
+  | "container_cluster"
+  | "secret_store"
+  | "dns_zone"
+  | "security_group"
+  | "cloud_account"
   | "application"
   | "web_application"
   | "database_instance"
@@ -413,18 +415,6 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     identifierPrecedence: ["agent_id", "sensor_id", "cloud_resource_id", "cmdb_sys_id", "hostname"],
     legacyAssetType: "service",
   },
-  "cluster": {
-    key: "cluster",
-    parent: "virtual",
-    path: "virtual.cluster",
-    label: "Cluster",
-    description: "A group of nodes managed as one scheduling or failover unit.",
-    icon: "Boxes",
-    cmdbCiType: "cmdb_ci_cluster",
-    cyclonedxType: "platform",
-    identifierPrecedence: ["cloud_resource_id", "cmdb_sys_id", "fqdn", "hostname"],
-    legacyAssetType: "service",
-  },
   "hypervisor": {
     key: "hypervisor",
     parent: "virtual",
@@ -545,28 +535,64 @@ export const ASSET_CLASSES: Record<AssetClassKey, AssetClass> = {
     identifierPrecedence: ["cloud_resource_id", "cmdb_sys_id"],
     legacyAssetType: "service",
   },
-  "virtual_network": {
-    key: "virtual_network",
+  "container_cluster": {
+    key: "container_cluster",
     parent: "cloud_resource",
-    path: "cloud_resource.virtual_network",
-    label: "Virtual network",
-    description: "A provider-managed network (VPC, VNet). CycloneDX has no network component type, so it is emitted as `platform`.",
-    icon: "Waypoints",
-    cmdbCiType: "cmdb_ci_network",
+    path: "cloud_resource.container_cluster",
+    label: "Container cluster",
+    description: "A provider-managed Kubernetes control plane (EKS, AKS, GKE). Holds the next generation of workloads; inventoried by its own resource id, never by the nodes' addresses (ADR-0009 D2 Tier 1).",
+    icon: "Container",
+    cmdbCiType: "cmdb_ci_kubernetes_cluster",
+    cyclonedxType: "platform",
+    identifierPrecedence: ["cloud_resource_id", "cmdb_sys_id", "fqdn"],
+    legacyAssetType: "service",
+  },
+  "secret_store": {
+    key: "secret_store",
+    parent: "cloud_resource",
+    path: "cloud_resource.secret_store",
+    label: "Secret store",
+    description: "A stored secret in a provider's secrets manager (AWS Secrets Manager, Azure Key Vault secrets, GCP Secret Manager). Its posture — rotation, the key that encrypts it — is inventoried; the secret value never is.",
+    icon: "Lock",
+    cmdbCiType: null,
+    cyclonedxType: "data",
+    identifierPrecedence: ["cloud_resource_id", "cmdb_sys_id"],
+    legacyAssetType: "service",
+  },
+  "dns_zone": {
+    key: "dns_zone",
+    parent: "cloud_resource",
+    path: "cloud_resource.dns_zone",
+    label: "DNS zone",
+    description: "A provider-hosted DNS zone (Route 53 hosted zone, Azure DNS zone, Cloud DNS managed zone). Zones name the services certificates are issued for, so a zone carries the inventory's certificate names under it as an attribute.",
+    icon: "Globe",
+    cmdbCiType: null,
     cyclonedxType: "platform",
     identifierPrecedence: ["cloud_resource_id", "cmdb_sys_id"],
     legacyAssetType: "service",
   },
-  "subnet": {
-    key: "subnet",
+  "security_group": {
+    key: "security_group",
     parent: "cloud_resource",
-    path: "cloud_resource.subnet",
-    label: "Subnet",
-    description: "A subdivision of a virtual network.",
-    icon: "Share2",
-    cmdbCiType: "cmdb_ci_ip_network",
+    path: "cloud_resource.security_group",
+    label: "Security group",
+    description: "A provider security group, network security group or firewall rule set (ADR-0009 D2, D4): the exposure boundary resources are members of (`member_of`). Membership and identity only — the rules are never collected.",
+    icon: "ShieldCheck",
+    cmdbCiType: null,
     cyclonedxType: "platform",
     identifierPrecedence: ["cloud_resource_id", "cmdb_sys_id"],
+    legacyAssetType: "service",
+  },
+  "cloud_account": {
+    key: "cloud_account",
+    parent: "cloud_resource",
+    path: "cloud_resource.cloud_account",
+    label: "Cloud Account",
+    description: "The account, subscription or project a tenant connected through a cloud integration (ADR-0009 D1). Declared, never discovered: it exists because a person added an integration for it, and every resource read through that account hangs off it with a `hosted_on` edge. `provider` and `account_id` are inherited from cloud_resource.",
+    icon: "Cloud",
+    cmdbCiType: "cmdb_ci_cloud_service_account",
+    cyclonedxType: "platform",
+    identifierPrecedence: ["cloud_resource_id"],
     legacyAssetType: "service",
   },
   "application": {
@@ -747,7 +773,6 @@ export const CLASS_TREE: AssetClassNode[] = [
     children: [
       { key: "virtual_machine", children: [] },
       { key: "container", children: [] },
-      { key: "cluster", children: [] },
       { key: "hypervisor", children: [] },
     ],
   },
@@ -762,8 +787,11 @@ export const CLASS_TREE: AssetClassNode[] = [
       { key: "api_gateway", children: [] },
       { key: "cdn_distribution", children: [] },
       { key: "serverless_function", children: [] },
-      { key: "virtual_network", children: [] },
-      { key: "subnet", children: [] },
+      { key: "container_cluster", children: [] },
+      { key: "secret_store", children: [] },
+      { key: "dns_zone", children: [] },
+      { key: "security_group", children: [] },
+      { key: "cloud_account", children: [] },
     ],
   },
   {

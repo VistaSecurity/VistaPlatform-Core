@@ -43,6 +43,7 @@ beforeEach(() => {
       case '/approvals/relationships': return ok({ relationship_proposals: [], total: 0 });
       case '/approvals/classes': return ok({ class_proposals: [], total: 0 });
       case '/approvals/merge-proposals/auto-accepted': return ok({ merges: [], window_days: 30 });
+      case '/dcim/cables': return ok({ data: [], pagination: { total: 0, limit: 100, offset: 0, next_offset: null } });
       default: throw new Error(`unmocked GET ${path}`);
     }
   });

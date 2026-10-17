@@ -2,9 +2,9 @@
 
 Already have an inventory in a spreadsheet? Import it directly instead of typing
 targets by hand. Upload a CSV or Excel file, map its columns, and the platform
-bulk-creates either **network segments** (so they can be scanned for cryptographic
+bulk-creates either **prefixes** (so they can be scanned for cryptographic
 assets) or **infrastructure assets** (configuration-item records). It's the fastest
-way to onboard an existing server list or IP-range inventory.
+way to onboard an existing server list or a network team's CIDR list.
 
 ## Overview
 
@@ -13,8 +13,7 @@ a spreadsheet exported from an ITAM/ITSM system, a network team's CIDR list, or 
 hand-maintained asset register. Spreadsheet Import lets you bring that inventory into
 Vista Platform in one step:
 
-- **Two import targets, one wizard** — choose whether each import creates *network
-  segments* (CIDRs / IP ranges / domains that Discovery scans) or *infrastructure
+- **Two import targets, one wizard** — choose whether each import creates *prefixes* (the CIDRs Discovery scans, in Inventory → Networks) or *infrastructure
   assets* (known servers/devices as CI records).
 - **CSV and Excel** — `.csv`, `.xlsx`, and `.xls` are all supported.
 - **Column mapping** — your spreadsheet's columns are auto-matched to the right fields
@@ -23,38 +22,37 @@ Vista Platform in one step:
   CIDR or a missing required field) and flagged so you can fix them. Invalid rows are
   skipped, never imported.
 - **Duplicate-safe** — rows that match something already in your inventory (by any of
-  the identifiers you mapped for assets, or by value for segments) are skipped rather
+  the identifiers you mapped for assets, or by CIDR for prefixes) are skipped rather
   than duplicated.
 - **Up to 1000 rows per import.**
 
 ## Where to find it
 
 - **Discovery → Command Center → Import from spreadsheet** — for either
-  target (network segments or infrastructure assets).
-- **Settings → Network Segments → Import** — a shortcut that imports straight into your
-  network-segment registry.
+  target (prefixes or infrastructure assets).
+- **Inventory → Import** — locked to infrastructure assets.
 
-Both entry points open the same wizard. (Importing requires the **Manage Discovery**
-permission for the Discovery entry, or **Update Settings** for the Network Segments entry.)
+Importing prefixes needs **Manage IPAM** (`ipam.manage`) — each row is created
+the way **Add prefix** creates one, so the change log, the auto-approval rule
+and the scan-scope checks behave exactly as for a prefix added by hand.
+Importing assets needs **Create assets**.
 
-## Importing network segments (scan targets)
+## Importing prefixes (scan targets)
 
 This is the common path for onboarding a list of networks you want scanned.
 
-1. Open the wizard and choose **Network segments**.
+1. Open the wizard and choose **Networks (prefixes)**.
 2. Upload your CSV/Excel file. The first row must be a header row.
-3. **Map columns** to segment fields:
-   - **Name** *(required)* — a label for the segment.
-   - **Value** *(required)* — the CIDR (`10.0.0.0/24`), IP range (`10.0.0.1-10.0.0.254`),
-     or domain (`*.example.com`).
-   - **Segment type**, **Network type**, **Environment** *(required)* — pick a column to
-     read these from, or set a single default applied to every row (handy when your whole
-     sheet is, say, all `cidr` / `private` / `production`).
-   - Optionally map **Business unit**, **Owner email**, **Description**.
+3. **Map columns** to prefix fields:
+   - **Prefix (CIDR)** *(required)* — `10.0.0.0/24` or `2001:db8:10::/64`.
+   - **Description** — a label for the prefix.
+   - **Network type**, **Environment** *(required)* — pick a column to read these
+     from, or set a single default applied to every row (handy when your whole
+     sheet is, say, all `private` / `production`).
 4. **Review** the preview. Valid and skipped (invalid) row counts are shown.
-5. Click **Import**. You'll see how many segments were created, skipped (duplicates), or
+5. Click **Import**. You'll see how many prefixes were created, skipped (duplicates), or
    failed.
-6. Run a discovery scan on the new segments from the Command Center to find cryptographic
+6. Run a discovery scan on the new prefixes from the Command Center to find cryptographic
    assets on them.
 
 ## Importing infrastructure assets (CI records)
@@ -72,10 +70,28 @@ Use this when your spreadsheet is a list of known servers/devices rather than ne
    - **Identifiers** — **FQDN**, **Hostname**, **IP address**, **MAC address** and
      **Serial number**. At least one is required per row, and the wizard auto-maps
      them from the obvious headers ("Host Name", "Service Tag", …).
+   - Optionally map **Interface name**, **Prefix length** and **VLAN** (see
+     *Interfaces* below).
    - Optionally map **Display name**, **Environment**, **Operating system**,
      **Support group**, **Business unit**, **Owner email**, **Description**.
-3. Review and import. Assets are created in `pending_approval` and appear in your
-   inventory; subsequent discovery enriches them with cryptographic detail.
+3. Review and import. The preview shows each row's interface. Assets are created
+   in `pending_approval` and appear in your inventory; subsequent discovery
+   enriches them with cryptographic detail.
+
+Not sure how to lay out the sheet? The upload step offers **Download a template
+(CSV)** — a header row whose every column maps itself, and one example row.
+
+### Interfaces
+
+A row's **IP address** and **MAC address** are on one of the machine's network
+interfaces. Map an **Interface name** column (`eth0`, `port1`, `Ethernet 2`) and
+the row creates that interface on the asset, holding the MAC and the IP — at the
+**Prefix length** you give (`24` for a `/24`), on the access **VLAN** you give —
+and it shows on the asset's **Interfaces** tab. A row with an IP or MAC but no
+interface name still records both, on one interface the platform names
+(`observed-1`); a prefix length or VLAN needs an interface name to be kept, and
+the preview says so. A prefix length outside 0–128 or a VLAN outside 1–4094 is
+flagged and the row is skipped.
 
 ### Why identifiers, and not just a hostname column
 
@@ -110,7 +126,7 @@ known by; its name is its identity.
 
 - Keep a single header row at the top; the wizard reads column names from it.
 - One record per row.
-- For segments, make sure CIDRs and IP ranges are well-formed — invalid values are
+- For prefixes, make sure CIDRs are well-formed — invalid values are
   flagged in the preview and skipped.
 - Re-importing the same file is safe: anything already present is skipped, so you can
   fix a few rows and re-upload without creating duplicates.

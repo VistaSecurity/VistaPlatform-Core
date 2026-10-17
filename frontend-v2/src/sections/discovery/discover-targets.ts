@@ -111,7 +111,7 @@ export const PLAN_UNAVAILABLE_EXPLANATION =
 
 export const DISABLED_EXPLANATION =
   'Your platform operator has turned off scanning targets outside your registered networks. ' +
-  'Register the range under Settings → Infrastructure → Network Segments if it is yours, or ask your operator.';
+  'Add the range as a prefix under Inventory → Networks if it is yours, or ask your operator.';
 
 /** An external target on the per-asset Active Scan: which asset it is. */
 export type ExternalAssetTarget = ExternalTarget & { asset_id?: string; asset_name?: string };

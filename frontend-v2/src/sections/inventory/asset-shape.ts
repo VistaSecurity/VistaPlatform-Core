@@ -68,12 +68,17 @@ export interface AssetLike {
   attributes?: Record<string, unknown> | null;
   support_group?: string | null;
   environment?: string | null;
-  business_unit?: string | null;
+  /** The assigned Business Unit (DCIM 1.1): {id, name, slug}. A bare string is accepted from older payloads. */
+  business_unit?: { id?: string; name?: string | null; slug?: string | null } | string | null;
   owner_email?: string | null;
-  site?: string | null;
+  /** The asset's Site (DCIM 2.1): {id, name, slug}. A bare string is accepted from older payloads. */
+  site?: { id?: string; name?: string | null; slug?: string | null } | string | null;
+  /** The Location inside the site: {id, name, path} where path is "Site / Hall / Cage". */
+  location?: { id?: string; name?: string | null; path?: string | null } | null;
   region?: string | null;
   zone?: string | null;
-  network_segment_name?: string | null;
+  /** The CIDR of the prefix the asset is placed in (DCIM row 1.6). */
+  prefix?: string | null;
   asset_status?: string | null;
   identity_status?: 'legacy' | 'established' | 'provisional' | 'operator_confirmed' | null;
   has_identity_conflict?: boolean;
@@ -236,12 +241,12 @@ export function assetIdentity(a: AssetLike): { primary: string; secondary: strin
   return { primary, secondary };
 }
 
-/** Location segment: environment badge + where it lives. `path` is null when
+/** Location part: environment badge + where it lives. `path` is null when
  *  nothing is known — the cell then shows '—', which reads as "unknown", not as
- *  "no segment". */
+ *  "no network". */
 export function assetLocation(a: AssetLike): { environment: string | null; path: string | null } {
-  const geo = [clean(a.site), clean(a.region)].filter(Boolean).join('/');
-  const path = [clean(a.network_segment_name) || clean(a.business_unit), geo].filter(Boolean).join(' · ');
+  const geo = [clean(siteName(a.site)), clean(a.region)].filter(Boolean).join('/');
+  const path = [clean(a.prefix) || clean(businessUnitName(a.business_unit)), geo].filter(Boolean).join(' · ');
   return { environment: clean(a.environment) || null, path: path || null };
 }
 
@@ -366,7 +371,7 @@ export function identifierProvenanceLabel(ident: { source_kind?: string | null; 
 /**
  * The marker an identifier row carries when its address is PINNED:
  * declared by an operator, or reported static by the host's own agent. A pinned
- * address still matches its owner inside a network segment flagged DHCP, so
+ * address still matches its owner inside a prefix flagged DHCP, so
  * the asset page says which of its addresses are pinned. Empty for everything
  * else — a lease the agent reported is recorded but needs no marker, because
  * it behaves exactly like an address nobody said anything about.
@@ -402,4 +407,31 @@ export function relativeSeen(iso?: string | null): string {
 export function confidenceLabel(v?: number | null): string {
   const pct = probabilityConfidencePercent(v);
   return pct === null ? '' : percentLabel(pct);
+}
+
+/** The display name of an asset's Business Unit, whatever shape the payload carries. */
+/** The site's display name from the {id, name, slug} object (or a bare string). */
+export function siteName(v: unknown): string {
+  return businessUnitName(v);
+}
+
+/** "Site › Location" for the asset header: the site name, then the location's
+ *  path inside the site (its leading site segment dropped). Empty when the asset
+ *  is not placed. */
+export function sitePlacementLabel(a: Pick<AssetLike, 'site' | 'location'>): string {
+  const site = siteName(a.site);
+  if (!site) return '';
+  const path = clean(a.location?.path);
+  if (!path) return site;
+  const prefix = `${site} / `;
+  const inner = path.startsWith(prefix) ? path.slice(prefix.length) : clean(a.location?.name) || path;
+  return `${site} › ${inner.split(' / ').join(' › ')}`;
+}
+
+export function businessUnitName(v: unknown): string {
+  if (v && typeof v === 'object') {
+    const n = (v as { name?: unknown }).name;
+    return typeof n === 'string' ? n : '';
+  }
+  return typeof v === 'string' ? v : '';
 }

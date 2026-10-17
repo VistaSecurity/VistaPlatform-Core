@@ -235,7 +235,7 @@ wants signups on a trial tier. In the Helm chart, set it via
 **Common Causes**:
 - `discovery-processor-service` is not running or crashed
 - Batch processing failed due to validation errors
-- Network space classification failed
+- Prefix classification failed
 - Inventory service API errors during asset import
 
 **Fix**:

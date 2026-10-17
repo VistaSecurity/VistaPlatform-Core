@@ -109,6 +109,9 @@ $rows = Get-NetAdapter | ForEach-Object {
     MAC       = $_.MacAddress
     Status    = $_.Status
     Virtual   = $_.Virtual
+    Mtu       = $_.MtuSize
+    Speed     = $_.ReceiveLinkSpeed
+    VlanID    = $_.VlanID
     Addresses = @(Get-NetIPAddress -InterfaceIndex $ifIndex |
                   ForEach-Object { "$($_.IPAddress)/$($_.PrefixLength)" })
     Origins   = @(Get-NetIPAddress -InterfaceIndex $ifIndex |
@@ -296,6 +299,11 @@ type winAdapter struct {
 	Status    string   `json:"Status"`
 	Virtual   bool     `json:"Virtual"`
 	Addresses []string `json:"Addresses"`
+	// Mtu is MtuSize; Speed is ReceiveLinkSpeed in bit/s (0 on a
+	// disconnected adapter); VlanID the adapter's own 802.1Q id, 0 for none.
+	Mtu    int    `json:"Mtu"`
+	Speed  uint64 `json:"Speed"`
+	VlanID int    `json:"VlanID"`
 	// Origins are Get-NetIPAddress's PrefixOrigin / SuffixOrigin per address,
 	// as strings (interpolated in the script, because ConvertTo-Json would
 	// otherwise emit the enums' integer values).
@@ -355,6 +363,13 @@ func ParseWindowsAdapters(b []byte) ([]Interface, error) {
 			// adapter; the name heuristic still runs so a container's vEthernet
 			// is caught even when the property is absent from an older build.
 			Virtual: a.Virtual || isVirtualInterface(a.Name, false),
+			MTU:     a.Mtu,
+		}
+		if a.Speed >= 1_000_000 {
+			entry.SpeedMbps = int64(a.Speed / 1_000_000)
+		}
+		if a.VlanID >= 1 && a.VlanID <= 4094 {
+			entry.VLAN = a.VlanID
 		}
 		switch strings.ToLower(strings.TrimSpace(a.Status)) {
 		case "up":

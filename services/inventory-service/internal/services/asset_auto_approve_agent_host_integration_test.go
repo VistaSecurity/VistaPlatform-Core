@@ -29,18 +29,10 @@ func newAgentHostApprovalFixture(t *testing.T) (*AssetService, *sqlx.DB, uuid.UU
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
 	tenant := testdb.NewTenant(t, raw)
 
-	segSvc := NewNetworkSegmentService(db, NewLocationService(db))
 	assetSvc := NewAssetService(db)
-	assetSvc.SetEnrichmentServices(segSvc, nil)
-	// A segment that does NOT auto-approve, so every asset created here lands
+	// A prefix that does NOT auto-approve, so every asset created here lands
 	// pending — the state the agent-host path is about.
-	if _, err := segSvc.Create(tenant, models.NetworkSegmentInput{
-		Name: "manual review", SegmentType: "cidr", Value: "198.51.100.0/24",
-		NetworkType: "private", Environment: "production",
-		AutoApproveDiscoveries: boolPtr(false),
-	}); err != nil {
-		t.Fatalf("create manual segment: %v", err)
-	}
+	declarePrefix(t, raw, tenant, map[string]any{"prefix": "198.51.100.0/24", "description": "manual review", "network_type": "private", "environment": "production"})
 	return assetSvc, db.DB, tenant
 }
 

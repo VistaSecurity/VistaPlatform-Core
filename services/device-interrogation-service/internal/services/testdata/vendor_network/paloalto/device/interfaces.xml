@@ -1,0 +1,17 @@
+<response status="success">
+  <result>
+    <ifnet>
+      <entry><name>ethernet1/1</name><zone>untrust</zone><fwd>vr:default</fwd><vsys>1</vsys><tag>0</tag><ip>198.51.100.2/24</ip><id>16</id></entry>
+      <entry><name>ae1</name><zone/><fwd>N/A</fwd><vsys>1</vsys><tag>0</tag><ip>N/A</ip><id>40</id></entry>
+      <entry><name>ae1.100</name><zone>trust</zone><fwd>vr:default</fwd><vsys>1</vsys><tag>100</tag><ip>10.30.100.1/24</ip><id>41</id></entry>
+      <entry><name>ae1.200</name><zone>corp</zone><fwd>vr:corp</fwd><vsys>1</vsys><tag>200</tag><ip>10.30.200.1/24</ip><id>42</id></entry>
+    </ifnet>
+    <hw>
+      <entry><name>ethernet1/1</name><duplex>full</duplex><type>0</type><state>up</state><mac>00:1b:17:0a:30:11</mac><speed>1000</speed><id>16</id></entry>
+      <entry><name>ethernet1/5</name><duplex>full</duplex><type>0</type><state>up</state><mac>00:1b:17:0a:30:15</mac><speed>10000</speed><id>20</id></entry>
+      <entry><name>ethernet1/6</name><duplex>full</duplex><type>0</type><state>up</state><mac>00:1b:17:0a:30:16</mac><speed>10000</speed><id>21</id></entry>
+      <entry><name>ae1</name><duplex>full</duplex><type>0</type><state>up</state><mac>00:1b:17:0a:30:a1</mac><speed>20000</speed><id>40</id>
+        <ae_member><member>ethernet1/5</member><member>ethernet1/6</member></ae_member></entry>
+    </hw>
+  </result>
+</response>

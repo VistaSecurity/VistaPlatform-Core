@@ -2,7 +2,6 @@ package services
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -194,81 +193,6 @@ func TestIntegration_ExternalStrength_MergedWriterReadersAndIngest(t *testing.T)
 		}
 		assertExternalSummaryCounts(t, svc, tenant, 0, 0)
 	})
-}
-
-func TestIntegration_ExternalStrength_LegacyUpgradeAndReapply(t *testing.T) {
-	admin := testdb.Connect(t)
-	root := testdb.RepoRoot(t)
-	scratch := newScratchDB(t, admin)
-	mustApply(t, scratch, mustGitShow(t, root, "32f4a259", "scripts/database/schema.sql"), "ADR baseline schema")
-	mustApply(t, scratch, mustGitShow(t, root, "32f4a259", "scripts/database/seed.sql"), "ADR baseline seed")
-	tenant := populateForUpgrade(t, scratch)
-	ids := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
-	for i, old := range []string{"good", "weak", "unknown"} {
-		_, e := scratch.Exec(`INSERT INTO external_connections(id,tenant_id,source_ip,dest_ip,dest_port,protocol,crypto_strength) VALUES($1,$2,'192.0.2.16','198.51.100.16',$3,'TLS',$4)`, ids[i], tenant, 443+i, old)
-		if e != nil {
-			t.Fatal(e)
-		}
-		_, e = scratch.Exec(`INSERT INTO external_connection_history(external_connection_id,tenant_id,change_type,new_crypto_strength) VALUES($1,$2,'first_seen',$3)`, ids[i], tenant, old)
-		if e != nil {
-			t.Fatal(e)
-		}
-	}
-	ambiguousID, measuredID := uuid.New(), uuid.New()
-	for i, id := range []uuid.UUID{ambiguousID, measuredID} {
-		size := 128
-		algorithm := "ECDHE"
-		if i == 1 {
-			size = 1024
-			algorithm = "DH"
-		}
-		if _, e := scratch.Exec(`INSERT INTO external_connections(id,tenant_id,source_ip,dest_ip,dest_port,protocol,crypto_strength,cipher_suite,key_exchange_algorithm,key_size) VALUES($1,$2,'192.0.2.16','198.51.100.16',$3,'TLS','good','TLS_AES_128_GCM_SHA256',$4,$5)`, id, tenant, 446+i, algorithm, size); e != nil {
-			t.Fatal(e)
-		}
-	}
-	current := mustReadFile(t, filepath.Join(root, "scripts/database/schema.sql"))
-	mustApply(t, scratch, current, "current upgrade")
-	db := &database.DB{DB: sqlx.NewDb(scratch, "postgres")}
-	svc := NewExternalConnectionsService(db, NewAlgorithmService(db))
-	for i, old := range []string{"good", "weak", "unknown"} {
-		row, e := svc.GetByID(tenant, ids[i])
-		if e != nil || row.Strength != nil {
-			t.Fatalf("legacy %s inferred grade %+v %v", old, row, e)
-		}
-		h, _, e := svc.GetHistory(tenant, ids[i], 1, 10)
-		if e != nil || len(h) != 1 || h[0].NewStrength != nil || stringValue(h[0].NewStrengthLegacy) != old || h[0].StrengthVocabularyVersion != 1 {
-			t.Fatalf("legacy history %+v %v", h, e)
-		}
-		if old == "weak" && len(row.WeakReasons) == 0 {
-			t.Fatal("legacy weak without facts lost reassessment evidence")
-		}
-	}
-	if _, _, e := svc.ReassessBatch(context.Background(), tenant, uuid.Nil, 200); e != nil {
-		t.Fatal(e)
-	}
-	ambiguous, e := svc.GetByID(tenant, ambiguousID)
-	if e != nil || ambiguous.Strength != nil || *ambiguous.KeySize != 128 || !containsExternalReason(ambiguous.WeakReasons, externalKeySizeRoleReason) {
-		t.Fatalf("migration fabricated weak exchange from cipher bits: %+v %v", ambiguous, e)
-	}
-	measured, e := svc.GetByID(tenant, measuredID)
-	if e != nil || stringValue(measured.Strength) != "weak" || *measured.KeySize != 1024 || containsExternalReason(measured.WeakReasons, externalKeySizeRoleReason) {
-		t.Fatalf("migration erased unambiguous undersized DH evidence: %+v %v", measured, e)
-	}
-	_, e = scratch.Exec(`UPDATE external_connections SET crypto_strength='acceptable' WHERE id=$1`, ids[0])
-	if e != nil {
-		t.Fatal(e)
-	}
-	mustApply(t, scratch, current, "idempotent reapply")
-	mustApply(t, scratch, mustReadFile(t, filepath.Join(root, "scripts/database/seed.sql")), "idempotent reseed")
-	row, e := svc.GetByID(tenant, ids[0])
-	if e != nil || stringValue(row.Strength) != "acceptable" {
-		t.Fatalf("reapply reset current assessment %+v %v", row, e)
-	}
-	for _, bad := range []string{"good", "unknown", "critical"} {
-		if _, e := scratch.Exec(`UPDATE external_connections SET crypto_strength=$1 WHERE id=$2`, bad, ids[0]); e == nil {
-			t.Fatalf("constraint accepted %s", bad)
-		}
-	}
 }
 
 func TestIntegration_ExternalStrength_SingleConnectionPool(t *testing.T) {

@@ -11,20 +11,20 @@ Discovery allows tenants to:
 - **Automatically process all discoveries** through one pipeline (discovery jobs, sensors and cloud alike)
 - Review what a job found, with a report of where each finding went
 - Approve or deny discovered assets
-- Automatically classify assets into network segments (see [Operational Context](./operational-context.md))
-- **Auto-approve discoveries** on network segments with auto-approve enabled — the only rule that skips the approval queue
+- Automatically classify assets into prefixes (see [Operational Context](./operational-context.md))
+- **Auto-approve discoveries** on prefixes with auto-approve enabled — the only rule that skips the approval queue
 - Link assets to parent devices (one device → many assets)
 
 **One pipeline.** Discovery jobs, sensors, cloud integrations, interrogated
 devices, uploaded captures and host inventories all flow through the same
-processing path: each discovery is placed into a network segment, the
+processing path: each discovery is placed into a prefix, the
 auto-approval rules are evaluated, and the asset is created as `monitoring` or
 `pending_approval`. Nothing is imported from a browser, and no client chooses an
 asset's approval status.
 
 **One auto-approval rule.** An asset is auto-approved only when it is on a
-network segment you defined with auto-approve enabled (Settings →
-Infrastructure). That is the whole rule, and it applies to every path into
+prefix you defined with auto-approve enabled (Inventory →
+Networks). That is the whole rule, and it applies to every path into
 inventory — scans, sensors, cloud, manual creation, spreadsheet import and CMDB
 pull. See [Asset Approval](./asset-approval.md).
 
@@ -137,20 +137,19 @@ for a **Standard** scan.
 as `job.plan` on the create response and on `GET /discovery/jobs/{id}`: the
 depth and pace, the port counts, where the job runs and why
 (`executor_resolved`, `executor_reason`), and per target its class —
-`private`, `registered_segment` (with the `segment_id` of the network segment
+`private`, `registered_prefix` (with the `prefix_id` of the prefix
 that made it yours) or `external` — the depth applied and the estimated probes.
 
 **Targets outside your networks are scanned at Standard at most.** A target
-that is neither in private address space nor inside a network segment you
+that is neither in private address space nor inside a prefix you
 registered is scanned at **Standard** even when the job asks for Thorough, and a
 custom scan probes at most 1,024 TCP ports and only the curated UDP services
 there. The rest of the job runs at the depth you asked for — a job naming one of
 your /24s and a public host scans the /24 deeply and the host at Standard. Each
 such downgrade is listed in `plan.depth_adjustments` with the reason. This is a
 guardrail for targets nobody has claimed, **not an access control**: if the range
-is yours, register it as a network segment (**Settings → Infrastructure →
-Network Segments**) and it is scanned at the depth you ask for. The job records
-which segment made each target yours.
+is yours, add it as a prefix (**Inventory → Networks**) and it is scanned at the depth you ask for. The job records
+which prefix made each target yours.
 
 **Run from Auto** picks one of your sensors when exactly one online,
 non-air-gapped sensor serves **every** target — every target is inside a network
@@ -216,7 +215,7 @@ authorization, the Standard cap on external targets, Run from Auto, the budget
 (400, 403, 404, 409, 422 `scan_target_too_large`, `scan_budget_exceeded`,
 `targets_refused`, and 429 when the tenant is at its scan allowance). It needs
 the same `discovery.create` permission. It creates **nothing**: no job, no
-sensor command, no use of your job allowance, no job-created audit entry. A
+sensor command, no use of your job allowance, no job-created audit-log record. A
 request that names `protocols` and `ports` has no plan to preview and is refused
 with a `validation_error`. The **Discover assets** wizard shows this preview
 before every scan.
@@ -426,7 +425,7 @@ each chip:
 | **Ready to confirm** | A device answered at an address on a network that uses DHCP, and no existing asset owns it | **Confirm** |
 | **Matches an asset** | Exactly one existing asset already owns an identifier of the observation (decided before every row below, so a matched row is offered as a link even where no sensor reaches it), and nothing has confirmed that device at the address recently — a probe of an address a sensor confirmed by MAC within the last day attaches to the asset itself and never reaches this table | **Link to** that asset |
 | **Several match** | More than one existing asset owns identifiers of it, or the one that does cannot take a link | none: compare the assets, link it yourself, or dismiss |
-| **Needs a network** | The address is not inside any network segment you have set up (a row with only a hardware address is Likely noise instead: no segment could cover it) | **Add network** (Settings → Network Segments) |
+| **Needs a network** | The address is not inside any prefix you have set up (a row with only a hardware address is Likely noise instead: no prefix could cover it) | **Add network** (Inventory → Networks) |
 | **Needs a sensor** | Another device advertised the name, or no sensor reaches that network | **See options**: add a sensor there, link, or dismiss |
 | **Likely noise** | Only a name, only a hardware address, no address or service, or nothing seen for 30 days | **Dismiss** |
 
@@ -455,21 +454,21 @@ Review and approve/deny discovered assets.
 - `POST /api/v2/inventory-service/assets/deny` - Deny assets
 
 **Asset Status Flow:**
-1. `pending_approval` - Unless the asset is on an auto-approve segment
+1. `pending_approval` - Unless the asset is on an auto-approve prefix
 2. `monitoring` - After approval
 3. `denied` - After denial (suppressed from rediscovery)
 
 ## How a discovery reaches your inventory
 
-Every source — a scan you ran, a sensor watching a segment, a cloud integration,
+Every source — a scan you ran, a sensor watching a prefix, a cloud integration,
 an interrogated device, an uploaded capture, a host inventory — lands in the same
 queue and is processed the same way. Nothing is imported from a browser, and no
 client gets to choose an asset's approval status.
 
 1. **The finding is recorded.** Sensors submit continuously; jobs submit when
    they finish.
-2. **It is placed.** The address is matched against the network segments you
-   have defined, which is what decides the asset's segment and whether an
+2. **It is placed.** The address is matched against the prefixes you
+   have defined, which is what decides the asset's prefix and whether an
    auto-approval rule applies.
 3. **The asset is created** as either `monitoring` (auto-approved) or
    `pending_approval`.
@@ -536,7 +535,7 @@ This is how the inventory finds devices that never open a TLS connection past
 the sensor: printers, cameras, phones, controllers, and anything else that is on
 the network but not talking to anything the crypto pipeline watches. Uploaded
 PCAP files are decoded the same way, which often makes a capture the only
-practical way to inventory a segment that cannot host a sensor.
+practical way to inventory a network that cannot host a sensor.
 
 Observation is **passive**: the sensor decodes frames the network interface
 already receives and sends nothing onto the wire. It is on by default for every
@@ -591,6 +590,22 @@ in:
 - **The manufacturer is filled in** from the MAC prefix, where the prefix is one
   the registry knows. A blank manufacturer means *not determined*, not
   "unknown brand".
+- **Its MAC and address sit on one interface.** The asset's **Interfaces** tab
+  lists the MAC and the address the device was seen with on an interface named
+  `observed-1` of type *Other*: a frame shows which address goes with which
+  MAC, but never what the device calls the port, so the platform does not make
+  a name up. The interface is renamed when a source that knows the name (the
+  device agent, an interrogation) later reports the same MAC.
+- **Each address says how it was last seen.** An address the device leased
+  over DHCP is recorded as seen by *DHCP*, one it claimed over ARP as *ARP*,
+  and one it only announced (mDNS, NetBIOS) as *Passive*. A DHCP lease is what
+  lets the platform treat the address as dynamic: on a DHCP-managed network
+  an address alone never decides which device a later sighting belongs to.
+- **A DHCP acknowledgement also describes the network.** When the sensor sees
+  a DHCP server acknowledge a lease, the network mask the server handed out
+  becomes a network (prefix) in **Inventory → Networks**, marked DHCP-managed
+  and waiting for approval like any other discovered network. Nothing else in
+  the server's reply is kept.
 - **It has no ports, no services and no certificates.** Nothing connected to it,
   so there is nothing to report. A blank crypto section on one of these devices
   means nobody looked, not that it came back clean.
@@ -604,17 +619,23 @@ Once approved, these devices sit in the inventory like any other asset — they
 can be tagged, assigned an owner, given a type, and picked up by a later
 interrogation or scan that fills in what passive observation could not see.
 
+**The sensor's own host** is recorded from the sensor's own report, not from
+frames: its interfaces appear by name on the host's **Interfaces** tab, each with
+its MAC and its addresses with their prefix length, and the interface the sensor
+captures on is named in the asset's discovery details (`capture_interfaces`).
+Container bridges and other virtual interfaces are left out.
+
 Sensor detail (**Discovery → Sensors & Agents →** a sensor **→ Health**) shows
 how many devices a sensor has seen this way over the selected period, and how
-many observations it had to shed. A non-zero shed count means the segment is
+many observations it had to shed. A non-zero shed count means the network is
 busier than the sensor is sized for, and some devices on it may be missing.
 
-## Segment classification
+## Prefix classification
 
-A discovered asset is placed into one of the **network segments** you have
-defined, by matching its address against each segment's ranges. The segment is
-what auto-approval rules read, and what the inventory facets on. Segments are
-maintained under **Settings → Infrastructure → Network Segments**; see
+A discovered asset is placed into one of the **prefixes** you have
+defined, by matching its address against each prefix's ranges. The prefix is
+what auto-approval rules read, and what the inventory facets on. Prefixes are
+maintained under **Inventory → Networks**; see
 [Operational Context](./operational-context.md).
 
 ## Discovery Job Management
@@ -661,7 +682,7 @@ control:
 
 | Run from | What happens |
 |---|---|
-| **Auto (observing sensor)** — the default | Each asset is scanned from the sensor of yours that most recently observed it. If none of your sensors has, a sensor on the same network segment is used; failing that, the platform sensor. |
+| **Auto (observing sensor)** — the default | Each asset is scanned from the sensor of yours that most recently observed it. If none of your sensors has, a sensor on the same prefix is used; failing that, the platform sensor. |
 | **Platform sensor** | Everything is scanned from inside the cluster — what every scan did before this control existed. |
 | *A named sensor* | Everything is scanned from that one sensor. |
 
@@ -749,7 +770,7 @@ See [Asset Lifecycle Management](./asset-lifecycle-management.md) for more detai
 
 1. **Start Small**: Begin with small target ranges to test discovery
 2. **Review Results**: Check the job's split on **Discovery → Discovery Jobs** — what was found versus what reached inventory
-3. **Network segments**: Define your segments before discovering, so assets are placed — and auto-approved — correctly from the first run
+3. **Prefixes**: Define your prefixes before discovering, so assets are placed — and auto-approved — correctly from the first run
 4. **Approval Workflow**: Use approval workflow for production environments
 5. **Scheduled Discovery**: Set up recurring discovery jobs for continuous monitoring
 6. **Re-validation**: Periodically re-validate existing assets to keep inventory current
@@ -802,8 +823,7 @@ See [Asset Lifecycle Management](./asset-lifecycle-management.md) for more detai
 
 ### Findings Do Not Appear in Inventory
 
-- Check **Discovery → Approvals** first: unless the address is on a network
-  segment with auto-approve enabled, the asset is waiting there by design
+- Check **Discovery → Approvals** first: unless the address is on a prefix with auto-approve enabled, the asset is waiting there by design
 - Connections to external third parties are recorded under **Inventory → 3rd
   Party**, not as assets
 - Findings with no resolvable IP address cannot be turned into an asset
@@ -817,4 +837,4 @@ See [Asset Lifecycle Management](./asset-lifecycle-management.md) for more detai
 - [Host Inventory](./host-inventory.md) — describing a host rather than scanning it
 - [Sensor & Agent Registration](./SENSOR_REGISTRATION.md) — deploying what does the discovering
 - [PCAP Ingestion](./pcap-ingestion.md) — a capture file as a discovery source
-- [Operational Context](./operational-context.md) — locations and network segments
+- [Operational Context](./operational-context.md) — locations and prefixes

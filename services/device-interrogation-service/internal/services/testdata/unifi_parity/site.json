@@ -1,0 +1,754 @@
+{
+ "_comment": "A synthesised UniFi Network controller response set for one site (DCIM row 1.5b parity): rest/networkconf, stat/device and stat/sta as the controller returns them, anonymised (documentation and private addresses, made-up serials and MAC suffixes). Planted secrets: x_passphrase / wlan_psk (wireless PSKs), x_smtp_password / x_wan_password (SMTP and PPPoE passwords).",
+ "controller_host": "unifi.example.net",
+ "controller": {
+  "controller_name": "HQ Controller"
+ },
+ "wlanconf": [
+  {
+   "_id": "wlan-corp",
+   "name": "Corp",
+   "enabled": true,
+   "security": "wpapsk",
+   "wpa_mode": "wpa2",
+   "wpa_enc": "ccmp",
+   "x_passphrase": "PlantedWlanPassphrase5521",
+   "networkconf_id": "net-lan"
+  },
+  {
+   "_id": "wlan-guest",
+   "name": "Guest",
+   "enabled": true,
+   "security": "wpapsk",
+   "wpa_mode": "wpa2",
+   "wpa_enc": "tkip",
+   "x_passphrase": "PlantedWlanPassphrase5521",
+   "vlan_enabled": true,
+   "vlan": "30"
+  }
+ ],
+ "networkconf": [
+  {
+   "_id": "net-lan",
+   "name": "Default",
+   "purpose": "corporate",
+   "enabled": true,
+   "ip_subnet": "10.20.0.1/24",
+   "dhcpd_enabled": true,
+   "dhcpd_start": "10.20.0.100",
+   "dhcpd_stop": "10.20.0.199",
+   "dhcpd_dns_1": "10.20.0.53",
+   "domain_name": "corp.example"
+  },
+  {
+   "_id": "net-iot",
+   "name": "IoT",
+   "purpose": "corporate",
+   "enabled": true,
+   "vlan_enabled": true,
+   "vlan": 20,
+   "ip_subnet": "10.20.20.1/24",
+   "dhcpd_enabled": false,
+   "x_wpa_psk": "PlantedWlanPsk7730"
+  },
+  {
+   "_id": "net-guest",
+   "name": "Guest",
+   "purpose": "guest",
+   "enabled": true,
+   "vlan_enabled": true,
+   "vlan": 30,
+   "ip_subnet": "10.20.30.1/24",
+   "dhcpd_enabled": true,
+   "dhcpd_start": "10.20.30.10",
+   "dhcpd_stop": "10.20.30.250"
+  },
+  {
+   "_id": "net-wan",
+   "name": "Internet",
+   "purpose": "wan",
+   "enabled": true,
+   "wan_type": "pppoe",
+   "wan_username": "isp-user",
+   "x_wan_password": "PlantedSmtpPassword3318"
+  },
+  {
+   "_id": "net-vpn",
+   "name": "Branch tunnel",
+   "purpose": "site-vpn",
+   "vpn_type": "ipsec-vpn",
+   "ipsec_encryption": "aes256",
+   "ipsec_hash": "sha256",
+   "x_ipsec_pre_shared_key": "PlantedWlanPassphrase5521"
+  }
+ ],
+ "devices": [
+  {
+   "_id": "dev-udm",
+   "name": "Gateway",
+   "type": "udm",
+   "model": "UDMPRO",
+   "version": "4.0.21",
+   "serial": "74ACB9100001",
+   "mac": "74:ac:b9:10:00:01",
+   "ip": "10.20.0.1",
+   "adopted": true,
+   "state": 1,
+   "uptime": 1728000,
+   "x_authkey": "PlantedWlanPassphrase5521",
+   "x_smtp_password": "PlantedSmtpPassword3318",
+   "mgmt_network_smtp": {
+    "x_password": "PlantedSmtpPassword3318"
+   },
+   "ethernet_table": [
+    {
+     "name": "eth0",
+     "mac": "74:ac:b9:10:00:01",
+     "num_port": 8
+    },
+    {
+     "name": "eth1",
+     "mac": "74:ac:b9:10:00:02",
+     "num_port": 1
+    },
+    {
+     "name": "eth8",
+     "mac": "74:ac:b9:10:00:09",
+     "num_port": 1
+    }
+   ],
+   "port_table": [
+    {
+     "port_idx": 1,
+     "name": "Port 1",
+     "ifname": "eth1",
+     "media": "GE",
+     "up": true,
+     "enable": true,
+     "speed": 1000,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 9,
+     "name": "Port 9",
+     "ifname": "eth8",
+     "media": "GE",
+     "up": true,
+     "enable": true,
+     "speed": 1000
+    }
+   ],
+   "network_table": [
+    {
+     "_id": "net-lan",
+     "name": "Default",
+     "purpose": "corporate",
+     "enabled": true,
+     "up": true,
+     "ip_subnet": "10.20.0.1/24",
+     "dhcpd_start": "10.20.0.100",
+     "dhcpd_stop": "10.20.0.199",
+     "x_radius_secret": "PlantedWlanPassphrase5521"
+    },
+    {
+     "_id": "net-iot",
+     "name": "IoT",
+     "purpose": "corporate",
+     "enabled": true,
+     "up": true,
+     "vlan": 20,
+     "ip_subnet": "10.20.20.1/24"
+    },
+    {
+     "_id": "net-guest",
+     "name": "Guest",
+     "purpose": "guest",
+     "enabled": true,
+     "up": true,
+     "vlan": 30,
+     "ip_subnet": "10.20.30.1/24"
+    }
+   ],
+   "wan1": {
+    "ifname": "eth8",
+    "name": "wan",
+    "ip": "203.0.113.10",
+    "netmask": "255.255.255.0",
+    "gateway": "203.0.113.1",
+    "mac": "74:ac:b9:10:00:09",
+    "up": true,
+    "dns": [
+     "203.0.113.53"
+    ],
+    "x_pppoe_password": "PlantedSmtpPassword3318"
+   },
+   "uplink": {
+    "uplink_mac": "74:ac:b9:10:00:01",
+    "port_idx": 9,
+    "type": "wire"
+   }
+  },
+  {
+   "_id": "dev-sw",
+   "name": "Core Switch",
+   "type": "usw",
+   "model": "US24P250",
+   "version": "6.6.65",
+   "serial": "788A20200001",
+   "mac": "78:8a:20:20:00:01",
+   "ip": "10.20.0.11",
+   "adopted": true,
+   "state": 1,
+   "uptime": 864000,
+   "x_authkey": "PlantedWlanPassphrase5521",
+   "x_vwirekey": "PlantedWlanPsk7730",
+   "x_ssh_password": "PlantedSmtpPassword3318",
+   "syslog_key": "PlantedWlanPassphrase5521",
+   "ethernet_table": [
+    {
+     "name": "eth0",
+     "mac": "78:8a:20:20:00:01",
+     "num_port": 26
+    }
+   ],
+   "port_table": [
+    {
+     "port_idx": 1,
+     "name": "Port 1",
+     "media": "GE",
+     "up": true,
+     "enable": true,
+     "speed": 1000,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "custom",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318",
+     "excluded_networkconf_ids": []
+    },
+    {
+     "port_idx": 2,
+     "name": "Port 2",
+     "media": "GE",
+     "up": true,
+     "enable": true,
+     "speed": 1000,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318",
+     "excluded_networkconf_ids": [
+      "net-iot"
+     ]
+    },
+    {
+     "port_idx": 3,
+     "name": "Port 3",
+     "media": "FE",
+     "up": true,
+     "enable": true,
+     "speed": 100,
+     "native_networkconf_id": "net-iot",
+     "tagged_vlan_mgmt": "block_all",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 4,
+     "name": "Port 4",
+     "media": "GE",
+     "up": true,
+     "enable": true,
+     "speed": 1000,
+     "native_networkconf_id": "net-iot",
+     "tagged_vlan_mgmt": "block_all",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 5,
+     "name": "Port 5",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-iot",
+     "tagged_vlan_mgmt": "block_all",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 6,
+     "name": "Port 6",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-iot",
+     "tagged_vlan_mgmt": "block_all",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 7,
+     "name": "Port 7",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-iot",
+     "tagged_vlan_mgmt": "block_all",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 8,
+     "name": "Port 8",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-iot",
+     "tagged_vlan_mgmt": "block_all",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 9,
+     "name": "Printer",
+     "media": "GE",
+     "up": true,
+     "enable": true,
+     "speed": 1000,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "block_all",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 10,
+     "name": "Port 10",
+     "media": "GE",
+     "up": false,
+     "enable": false,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318",
+     "forward": "disabled"
+    },
+    {
+     "port_idx": 11,
+     "name": "Port 11",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 12,
+     "name": "Port 12",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 13,
+     "name": "Port 13",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 14,
+     "name": "Port 14",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 15,
+     "name": "Port 15",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 16,
+     "name": "Port 16",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 17,
+     "name": "Port 17",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 18,
+     "name": "Port 18",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 19,
+     "name": "Port 19",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 20,
+     "name": "Port 20",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 21,
+     "name": "Port 21",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 22,
+     "name": "Port 22",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 23,
+     "name": "Port 23",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 24,
+     "name": "Port 24",
+     "media": "GE",
+     "up": false,
+     "enable": true,
+     "speed": 0,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318"
+    },
+    {
+     "port_idx": 25,
+     "name": "SFP+ 1",
+     "media": "SFP+",
+     "up": true,
+     "enable": true,
+     "speed": 10000,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "custom",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318",
+     "op_mode": "aggregate",
+     "aggregate_num_ports": 2,
+     "excluded_networkconf_ids": []
+    },
+    {
+     "port_idx": 26,
+     "name": "sfp+2",
+     "media": "SFP+",
+     "up": true,
+     "enable": true,
+     "speed": 10000,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto",
+     "poe_mode": "auto",
+     "poe_power": "0.00",
+     "rx_bytes": 123456,
+     "x_port_auth_key": "PlantedSmtpPassword3318",
+     "aggregated_by": 25,
+     "lag_member": true
+    }
+   ],
+   "lldp_table": [
+    {
+     "chassis_id": "74:ac:b9:10:00:01",
+     "system_name": "udm",
+     "port_id": "Port 1",
+     "local_port_name": "Port 1",
+     "local_port_idx": 1,
+     "is_wired": true
+    }
+   ],
+   "uplink": {
+    "uplink_mac": "74:ac:b9:10:00:01",
+    "uplink_device_name": "Gateway",
+    "uplink_remote_port": 1,
+    "port_idx": 1,
+    "type": "wire"
+   }
+  },
+  {
+   "_id": "dev-ap",
+   "name": "Lobby AP",
+   "type": "uap",
+   "model": "U6LR",
+   "version": "6.6.77",
+   "serial": "F492BF300001",
+   "mac": "f4:92:bf:30:00:01",
+   "ip": "10.20.0.21",
+   "adopted": true,
+   "state": 1,
+   "uptime": 432000,
+   "x_authkey": "PlantedWlanPassphrase5521",
+   "x_vwirekey": "PlantedWlanPsk7730",
+   "ethernet_table": [
+    {
+     "name": "eth0",
+     "mac": "f4:92:bf:30:00:01",
+     "num_port": 1
+    }
+   ],
+   "port_table": [
+    {
+     "port_idx": 1,
+     "name": "Port 1",
+     "media": "GE",
+     "up": true,
+     "enable": true,
+     "speed": 1000,
+     "native_networkconf_id": "net-lan",
+     "tagged_vlan_mgmt": "auto"
+    }
+   ],
+   "vap_table": [
+    {
+     "name": "ra0",
+     "radio": "ng",
+     "essid": "Corp",
+     "bssid": "f4:92:bf:30:00:02",
+     "up": true,
+     "usage": "user",
+     "x_passphrase": "PlantedWlanPassphrase5521",
+     "wlan_psk": "PlantedWlanPsk7730",
+     "num_sta": 3
+    },
+    {
+     "name": "rai0",
+     "radio": "na",
+     "essid": "Corp",
+     "bssid": "f4:92:bf:30:00:03",
+     "up": true,
+     "usage": "user",
+     "x_passphrase": "PlantedWlanPassphrase5521",
+     "wlan_psk": "PlantedWlanPsk7730"
+    },
+    {
+     "name": "ra1",
+     "radio": "ng",
+     "essid": "Guest",
+     "bssid": "f6:92:bf:30:00:02",
+     "up": true,
+     "usage": "guest",
+     "x_passphrase": "PlantedWlanPassphrase5521",
+     "wlan_psk": "PlantedWlanPsk7730"
+    },
+    {
+     "name": "rai1",
+     "radio": "na",
+     "essid": "Guest",
+     "bssid": "f6:92:bf:30:00:03",
+     "up": false,
+     "usage": "guest",
+     "x_passphrase": "PlantedWlanPassphrase5521",
+     "wlan_psk": "PlantedWlanPsk7730"
+    }
+   ],
+   "uplink": {
+    "uplink_mac": "78:8a:20:20:00:01",
+    "uplink_device_name": "Core Switch",
+    "uplink_remote_port": 2,
+    "port_idx": 1,
+    "type": "wire"
+   }
+  }
+ ],
+ "clients": [
+  {
+   "mac": "3c:22:fb:00:00:01",
+   "ip": "10.20.0.101",
+   "hostname": "laptop-01",
+   "is_wired": true,
+   "sw_mac": "78:8a:20:20:00:01",
+   "sw_port": 12,
+   "oui": "Apple",
+   "network": "Default",
+   "last_seen": 1760500000,
+   "note": "owner@example.com",
+   "fingerprint_source": 5
+  },
+  {
+   "mac": "da:a1:19:00:00:02",
+   "ip": "10.20.0.102",
+   "hostname": "phone-02",
+   "is_wired": false,
+   "ap_mac": "f4:92:bf:30:00:01",
+   "essid": "Corp",
+   "network": "Default",
+   "last_seen": 1760500001,
+   "x_passphrase": "PlantedWlanPassphrase5521"
+  },
+  {
+   "mac": "9c:8e:cd:00:00:03",
+   "ip": "10.20.20.50",
+   "hostname": "cam-03",
+   "is_wired": true,
+   "sw_mac": "78:8a:20:20:00:01",
+   "vlan": 20,
+   "network": "IoT",
+   "oui": "Amcrest",
+   "last_seen": 1760500002
+  },
+  {
+   "mac": "a4:83:e7:00:00:04",
+   "ip": "10.20.30.77",
+   "hostname": "guest-04",
+   "is_wired": false,
+   "ap_mac": "f4:92:bf:30:00:01",
+   "essid": "Guest",
+   "vlan": 30,
+   "network": "Guest",
+   "last_seen": 1760500003,
+   "wlan_psk": "PlantedWlanPsk7730"
+  },
+  {
+   "mac": "00:1b:a9:00:00:05",
+   "ip": "10.20.0.150",
+   "hostname": "printer-05",
+   "name": "Office Printer",
+   "is_wired": true,
+   "sw_mac": "78:8a:20:20:00:01",
+   "network": "Default",
+   "oui": "Brother",
+   "last_seen": 1760500004
+  }
+ ]
+}

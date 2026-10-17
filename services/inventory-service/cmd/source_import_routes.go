@@ -19,11 +19,17 @@ import (
 // fails a test rather than shipping.
 //
 // The tenant's certificate-trust decisions (/internal/trust/*) are read
-// here too, by a connector service building a connection's trust pool.
-func mountSourceImportRoutes(r gin.IRouter, h *handlers.SourceImportHandler, ci *handlers.CIExportHandler, trust *handlers.InternalTrustHandler, internalSecret string) {
+// here too, by a connector service building a connection's trust pool, and the
+// DCIM sync surface (/internal/dcim-sync/*, ADR-0010 D7) a bidirectional sync
+// connector reads and writes synced objects through, and the DCIM import
+// surface (/internal/dcim-import/*, SYNC_MODEL §6) an import-only connector
+// (Device42) writes imported objects through.
+func mountSourceImportRoutes(r gin.IRouter, h *handlers.SourceImportHandler, ci *handlers.CIExportHandler, trust *handlers.InternalTrustHandler, dsync *handlers.DCIMSyncHandler, dimport *handlers.DCIMImportHandler, internalSecret string) {
 	internal := r.Group("/api/v1")
 	internal.Use(handlers.RequireSignedServiceCall(internalSecret))
 	handlers.RegisterSourceImportRoutes(internal, h)
 	handlers.RegisterCIExportRoutes(internal, ci)
 	handlers.RegisterInternalTrustRoutes(internal, trust)
+	handlers.RegisterDCIMSyncRoutes(internal, dsync)
+	handlers.RegisterDCIMImportRoutes(internal, dimport)
 }

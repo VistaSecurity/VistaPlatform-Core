@@ -259,50 +259,14 @@ func TestIntegration_PlatformLicense_Constraints(t *testing.T) {
 	}
 }
 
-// TestIntegration_Schema_LicenceModelV2Migration applies schema.sql over the
-// state the previous release left — per-tenant rows written by the old token
-// seeder, beside operator exceptions — and asserts the POST-MIGRATIONS block
-// removes the seeder's rows and nothing else. Then checks the trial changes.
-func TestIntegration_Schema_LicenceModelV2Migration(t *testing.T) {
+// TestIntegration_Schema_TenantsHaveNoBlanketTrial: the licence model v2
+// (edition-licensing spec PR 1) keeps trials in the trial store, so a fresh
+// install's tenants table stamps no trial on its own. (The half that applied
+// schema.sql over the previous release's per-tenant edition-token rows and
+// 'trial' column default retired with the migration block, asset-inventory
+// ADR-0010 D11.)
+func TestIntegration_Schema_TenantsHaveNoBlanketTrial(t *testing.T) {
 	db := testdb.ScratchDatabase(t)
-	tenant := testdb.NewTenant(t, db)
-
-	seeded := func(key, reason string, from string) {
-		mustExec(t, db, `
-			INSERT INTO tenant_entitlements (tenant_id, item_id, override_value, reason, effective_from, expires_at)
-			SELECT $1, id, '{"enabled": true}'::jsonb, $2, `+from+`, now() + interval '300 days'
-			FROM billable_items WHERE key = $3`, tenant, reason, key)
-	}
-	// Exactly what the old seeder wrote, two days running.
-	seeded("custom_policies", "edition token: acme-corp-20260101 (Acme Corp)", "date_trunc('day', now())")
-	seeded("custom_policies", "edition token: acme-corp-20260101 (Acme Corp)", "date_trunc('day', now()) - interval '1 day'")
-	seeded("sso_saml", "edition token: acme-corp-20260101 (Acme Corp)", "date_trunc('day', now())")
-	// A platform admin's own rows, including one whose reason merely mentions
-	// the phrase further in.
-	seeded("cbom_signing", "sales add-on", "now() - interval '1 hour'")
-	seeded("cmdb_sync", "contractor: no edition token: access", "now() - interval '1 hour'")
-
-	// The previous release's column default. A fresh apply already has
-	// 'active' from CREATE TABLE, which proves nothing about an upgraded
-	// database, where CREATE TABLE IF NOT EXISTS is a no-op — only the
-	// POST-MIGRATIONS ALTER can change it there.
-	mustExec(t, db, `ALTER TABLE tenants ALTER COLUMN payment_status SET DEFAULT 'trial'`)
-
-	testdb.ForceApplySchema(t, db)
-
-	var edition, operator int
-	if err := db.QueryRow(`SELECT
-		COUNT(*) FILTER (WHERE reason LIKE 'edition token:%'),
-		COUNT(*) FILTER (WHERE reason NOT LIKE 'edition token:%')
-		FROM tenant_entitlements WHERE tenant_id = $1`, tenant).Scan(&edition, &operator); err != nil {
-		t.Fatalf("count rows: %v", err)
-	}
-	if edition != 0 {
-		t.Errorf("%d edition-token row(s) survived the migration", edition)
-	}
-	if operator != 2 {
-		t.Errorf("operator exception rows after migration = %d, want 2 — the cleanup deleted something it did not write", operator)
-	}
 
 	// No blanket trial: the column has no default, and a tenant on a non-trial
 	// tier gets no trial end.
@@ -331,6 +295,6 @@ func TestIntegration_Schema_LicenceModelV2Migration(t *testing.T) {
 		t.Fatalf("read payment_status: %v", err)
 	}
 	if status != "active" {
-		t.Errorf("a tenant created without a payment status has %q, want \"active\" — the upgraded column default is still 'trial'", status)
+		t.Errorf("a tenant created without a payment status has %q, want \"active\" — the column default is 'trial'", status)
 	}
 }

@@ -59,3 +59,25 @@ func TestCosign_ArgumentsCredentialsAndFailure(t *testing.T) {
 		t.Fatalf("failure not surfaced: %v", err)
 	}
 }
+
+// ExtraEnv reaches the subprocess: the trust bundle passes SSL_CERT_FILE this
+// way so cosign verifies a chart mirror signed by a private CA. Drop the
+// append in Verify and this goes red.
+func TestCosign_ExtraEnvReachesTheSubprocess(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "record")
+	bin := filepath.Join(dir, "cosign")
+	script := "#!/bin/sh\necho \"SSL_CERT_FILE=$SSL_CERT_FILE\" > " + record + "\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := Cosign{Binary: bin, IdentityRegexp: `^https://github\.com/VistaSecurity/.*$`, TempDir: t.TempDir(),
+		ExtraEnv: []string{"SSL_CERT_FILE=/tmp/ca-bundle-123.pem"}}
+	if err := c.Verify(context.Background(), "harbor.example/vp/vistaplatform:4.6.0"); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(record)
+	if got := strings.TrimSpace(string(raw)); got != "SSL_CERT_FILE=/tmp/ca-bundle-123.pem" {
+		t.Fatalf("subprocess env: %q", got)
+	}
+}

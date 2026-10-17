@@ -66,6 +66,9 @@ type InterrogationObservations struct {
 	DeviceIdentity *di.DeviceIdentity
 	Facts          []di.FactObservation
 	Relationships  []di.RelationshipObservation
+	// Network is the device's own interfaces, addresses, VLANs and ARP cache
+	// (DCIM row 1.5), filed through the identity engine rather than as facts.
+	Network *di.NetworkObservation
 	// Producer is the shared/facts producer key these facts are written under.
 	// Empty means device-interrogation, which is what every vendor collector
 	// is. The host-inventory path passes `device-agent`, because that is what
@@ -87,7 +90,7 @@ func (o InterrogationObservations) producer() string {
 
 // Empty reports whether there is nothing to persist.
 func (o InterrogationObservations) Empty() bool {
-	return o.DeviceIdentity == nil && len(o.Facts) == 0 && len(o.Relationships) == 0
+	return o.DeviceIdentity == nil && len(o.Facts) == 0 && len(o.Relationships) == 0 && o.Network.Empty()
 }
 
 // ObservationSink writes an interrogation's facts, identity and relationships
@@ -206,6 +209,7 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 		DeviceIdentity: obs.DeviceIdentity,
 		Facts:          obs.Facts,
 		Relationships:  obs.Relationships,
+		Network:        obs.Network,
 	}
 	di.Sanitize(wrapped)
 
@@ -225,17 +229,32 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 	selfDue := only.due(selfPeerKey)
 	pass := newPassPeers(ctx, s, tenantID, source, at)
 
+	// A controller's account of the interfaces and networks of the devices it
+	// manages rides on each one's sighting, for the identity engine to record
+	// as interfaces, addresses, prefixes and VLANs (DCIM row 1.5b,
+	// unifi_network_sighting.go).
+	ctx = withSubjectNetworks(ctx, subjectNetworks(wrapped.Facts))
+	asPrefixes := networksMeasuredAsPrefixes(wrapped.Facts)
+
 	// The device's networks must exist as cidr segments BEFORE peers are
 	// resolved, so a peer's address resolves into its segment, and the DHCP
 	// posture the device measured is the segment's stored posture by the time
 	// inventory-service's Intake reads it. That stored posture is the ONLY way
 	// a run's DHCP answer reaches identity: there is no per-run overlay
 	// ( item 7), so an operator's static marking is never overridden.
+	//
+	// Only the device's OWN networks: a subject-bound net.vlans (a UniFi
+	// site's, carried on its gateway) is recorded as prefixes by that
+	// subject's sighting. A UniFi run still writes its segments from the
+	// controller's own copy until row 1.6 retires them: on a tenant's first
+	// run they are the only network a peer's address can resolve into, and
+	// under enforced admission nothing is admitted without one
+	// (unifi_network_sighting.go).
 	for _, f := range wrapped.Facts {
-		if !selfDue || f.Key != facts.KeyNetVlans {
+		if !selfDue || f.Key != facts.KeyNetVlans || !f.Subject.IsZero() {
 			continue
 		}
-		if err := s.ensureVLANSegments(ctx, tenantID, assetID, f.Value); err != nil {
+		if err := s.ensureVLANPrefixes(ctx, tenantID, assetID, f.Value); err != nil {
 			return fmt.Errorf("vlan segments: %w", err)
 		}
 	}
@@ -274,6 +293,16 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 		}
 	}
 
+	// The device's own interfaces, addresses and VLANs go through the identity
+	// engine as a sighting, and its ARP cache is recorded as supporting
+	// evidence (DCIM row 1.5; snmp_network.go). Not facts.
+	if selfDue && !obs.Network.Empty() {
+		if err := s.persistNetwork(ctx, tenantID, assetID, source, at, obs.Network); err != nil {
+			errs = append(errs, err)
+			pass.fail(selfPeerKey)
+		}
+	}
+
 	// Facts, grouped by the asset they are ABOUT. An interrogation is not
 	// always about one asset: a UniFi controller reports the interfaces, uptime
 	// and serial of every device it manages, and attributing a switch's port
@@ -291,6 +320,11 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 		if !only.due(key) {
 			continue
 		}
+		if asPrefixes && f.Key == facts.KeyNetVlans && f.Subject.IsZero() {
+			// The controller's copy of networks recorded as prefixes: read by
+			// the gateway claims above, not a fact.
+			continue
+		}
 		if !f.Subject.IsZero() {
 			resolved, resolveErr := pass.resolve(ctx, f.Subject)
 			if resolveErr != nil {
@@ -306,6 +340,11 @@ func (s *ObservationSink) persist(ctx context.Context, tenantID, assetID uuid.UU
 				continue
 			}
 			subject = resolved
+		}
+		if isSubjectNetworkFact(f) {
+			// Resolving the subject was the point: its interfaces and networks
+			// travelled on that sighting. Not stored as a fact (row 1.5b).
+			continue
 		}
 		bySubject[subject] = append(bySubject[subject], pgidentity.Fact{
 			Key:        f.Key,
@@ -858,18 +897,6 @@ const (
 	dhcpUnknown  dhcpPosture = "unknown"
 )
 
-// segmentSourceInterrogation is the provenance a learned segment carries in
-// `metadata.source`. The producing device is named beside it
-// (`source_device_type`, `source_asset_id`) rather than in it, so the value a
-// reader matches on does not change with the vendor.
-const segmentSourceInterrogation = "interrogation"
-
-// segmentSourceLegacyUniFi is what learned segments were labelled before any
-// vendor but UniFi could produce one. Rows carrying it are still ours to
-// refresh; no backfill rewrites them, the next interrogation of the same
-// network relabels them.
-const segmentSourceLegacyUniFi = "unifi"
-
 type vlanSegmentSpec struct {
 	CIDR        string
 	Name        string
@@ -877,9 +904,10 @@ type vlanSegmentSpec struct {
 	NetworkType string
 }
 
-// vlanSegmentSpecs extracts cidr segments from a net.vlans fact.
+// vlanSegmentSpecs extracts the networks a net.vlans fact declares, as
+// prefixes (DCIM row 1.6).
 //
-// Any entry with a usable prefix is a segment, whichever vendor emitted it: a
+// Any entry with a usable prefix is a network, whichever vendor emitted it: a
 // UniFi network, a FortiGate VLAN subinterface and an F5 self-IP all describe
 // the same thing, a network the device has an address on. An entry without a
 // prefix (a Cisco VLAN database row: id and name) is not a scope, and neither
@@ -901,7 +929,7 @@ func vlanSegmentSpecs(value any) []vlanSegmentSpec {
 			continue
 		}
 		// Stored in the form ScopeForAddress compares against: it unmaps every
-		// address, so a segment kept as ::ffff:10.0.0.0/120 would contain none.
+		// address, so a prefix kept as ::ffff:10.0.0.0/120 would contain none.
 		prefix, ok := sharednetwork.UnmapPrefix(prefix)
 		if !ok || !segmentablePrefix(prefix) {
 			continue
@@ -930,7 +958,7 @@ func vlanSegmentSpecs(value any) []vlanSegmentSpec {
 // segmentablePrefix reports whether a masked, unmapped prefix describes a network of
 // hosts. A host route (/32, /128) is one address, a default route is every
 // address, and loopback, link-local and multicast space are not networks a
-// tenant's devices are placed in — a segment over any of them would scope
+// tenant's devices are placed in — a prefix over any of them would scope
 // identities by something that is not where the host was standing.
 func segmentablePrefix(p netip.Prefix) bool {
 	a := p.Addr()
@@ -941,54 +969,24 @@ func segmentablePrefix(p netip.Prefix) bool {
 		!a.IsMulticast() && !a.IsLinkLocalMulticast() && !a.IsInterfaceLocalMulticast()
 }
 
-// vlanSegmentMetadata is what a learned segment records about itself.
+// ensureVLANPrefixes records the networks a device's net.vlans fact declares
+// as measured global-VRF prefixes (DCIM row 1.6: they were learned network
+// segments), and states the DHCP posture the device measured on each.
 //
-// It deliberately does NOT carry `dynamic`. The effective DHCP flag has three
-// possible authors — an operator, a device that measured it, traffic that
-// implied it — with a precedence between them, and that rule lives in exactly
-// one place (pgidentity.RecordSegmentPosture). Writing the key here as well
-// would be a second author outside the rule, able to overwrite an operator's
-// answer with a measurement on any owned row. [ensureVLANSegments] states the
-// posture through the shared helper after the row exists, and only when the
-// device ANSWERED: an unknown posture is recorded as `dhcp: unknown` and
-// nothing else. How identity treats an unknown is the reader's decision, and
-// it is the conservative one in both places that read it:
-// [vlanSegmentSpec.leaseScope] for this run, and ScopeForAddress
-// (shared/identity/postgres) for every run after it.
-func vlanSegmentMetadata(spec vlanSegmentSpec, deviceType, assetID string) map[string]any {
-	meta := map[string]any{
-		"source":          segmentSourceInterrogation,
-		"source_asset_id": assetID,
-		"dhcp":            string(spec.DHCP),
-	}
-	if deviceType != "" {
-		meta["source_device_type"] = deviceType
-	}
-	return meta
-}
-
-// ensureVLANSegments creates, or refreshes, the cidr segments a device's
-// net.vlans fact declares.
+// Its ROWS are its own only when it created them: the INSERT does nothing on a
+// CIDR the tenant already has a prefix for, so a person's prefix keeps its
+// description, type and settings. A new one arrives `pending` with
+// `source_kind = 'measured'` and the device as `source_ref` — learned, so it
+// scopes identities but is never a claim of ownership for scanning until a
+// person claims it (shared/identity/dispatchguard prefixScopeSQL).
 //
-// Its ROWS are its own only when it created them. The INSERT does nothing on a
-// CIDR that already exists, so an operator-declared segment keeps its name,
-// type and metadata; the UPDATE refreshes only rows a previous interrogation
-// created — under the current label or the legacy `unifi` one.
-//
-// The DHCP POSTURE is different, and it is written to the matching segment
-// whatever created it ( C2). A controller that answered "this network
-// hands out addresses" has measured a fact about the network, and an operator
-// who drew the same CIDR by hand did not measure it — leaving their segment
-// silent about DHCP is how every home network ended up with addresses still
-// voting on identity. It goes through pgidentity.RecordSegmentPosture, which
-// owns the precedence: the measurement never overwrites an operator's answer,
-// it is recorded beside it and takes over if the operator withdraws theirs.
-//
-// An unknown posture never overwrites a known one: a UniFi controller that
-// measured DHCP on a network and a firewall that routes the same network
-// without knowing are not in disagreement, and the row keeps the answer.
-// An unknown posture is not stated at all.
-func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID, assetID uuid.UUID, value any) error {
+// The DHCP POSTURE is written to the matching prefix whatever created it, when
+// nobody has said yet ( C2; pgidentity.RecordPrefixPosture): a controller
+// that answered "this network hands out addresses" has measured a fact about
+// the network. An unknown posture is not stated at all — how identity treats a
+// prefix nobody has stated a posture for is the reader's decision, and the
+// conservative one (shared/identity/postgres ScopeForAddress).
+func (s *ObservationSink) ensureVLANPrefixes(ctx context.Context, tenantID, assetID uuid.UUID, value any) error {
 	if s.db == nil {
 		return nil
 	}
@@ -996,64 +994,38 @@ func (s *ObservationSink) ensureVLANSegments(ctx context.Context, tenantID, asse
 	if len(specs) == 0 {
 		return nil
 	}
+	sourceRef := "interrogation:" + assetID.String()
 	return shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		// The device the networks were learned from. Both interrogation paths
-		// (in-cluster and agent) hand the sink the interrogated asset, so this
-		// is read here once rather than threaded through each of them.
-		var deviceType string
-		if err := tx.QueryRowContext(ctx, `
-			SELECT coalesce(metadata->>'device_type', '')
-			FROM public.assets WHERE tenant_id = $1 AND id = $2`,
-			tenantID, assetID).Scan(&deviceType); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("read source device type: %w", err)
-		}
 		for _, spec := range specs {
-			metadata, err := json.Marshal(vlanSegmentMetadata(spec, deviceType, assetID.String()))
-			if err != nil {
-				return err
-			}
+			// ON CONFLICT DO NOTHING with no target covers the partial
+			// identity index (tenant, VRF, prefix) WHERE status <> 'rejected'.
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO public.network_segments
-					(tenant_id, name, segment_type, value, network_type, environment, is_active, metadata)
-				VALUES ($1, $2, 'cidr', $3, $4, 'production'::public.environment_type, true, $5::jsonb)
-				ON CONFLICT (tenant_id, value, coalesce(cloud_network_ref, ''::text)) DO NOTHING`,
-				tenantID, spec.Name, spec.CIDR, spec.NetworkType, string(metadata)); err != nil {
-				return fmt.Errorf("insert vlan segment %s: %w", spec.CIDR, err)
-			}
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE public.network_segments
-				SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
-				    updated_at = now()
-				WHERE tenant_id = $1 AND value = $2 AND segment_type = 'cidr'
-				  AND metadata->>'source' IN ($4, $5)
-				  AND coalesce(cloud_network_ref, '') = ''
-				  AND NOT ($6::boolean AND metadata ? 'dynamic')`,
-				tenantID, spec.CIDR, string(metadata),
-				segmentSourceInterrogation, segmentSourceLegacyUniFi,
-				spec.DHCP == dhcpUnknown); err != nil {
-				return fmt.Errorf("update vlan segment %s: %w", spec.CIDR, err)
+				INSERT INTO public.prefixes
+					(tenant_id, prefix, network_type, description, source_kind, source_ref, status,
+					 first_seen_at, last_seen_at, observation_count)
+				VALUES ($1, $2::cidr, $3, $4, 'measured', $5, 'pending', now(), now(), 1)
+				ON CONFLICT DO NOTHING`,
+				tenantID, spec.CIDR, spec.NetworkType, spec.Name, sourceRef); err != nil {
+				return fmt.Errorf("record network %s: %w", spec.CIDR, err)
 			}
 			if spec.DHCP == dhcpUnknown {
 				continue
 			}
-			var segmentID string
+			var prefixID string
 			if err := tx.QueryRowContext(ctx, `
-				SELECT id::text FROM public.network_segments
-				WHERE tenant_id = $1 AND value = $2 AND segment_type = 'cidr'
+				SELECT id::text FROM public.prefixes
+				WHERE tenant_id = $1 AND vrf_id IS NULL AND prefix = $2::cidr AND status <> 'rejected'
 				  AND coalesce(cloud_network_ref, '') = ''`,
-				tenantID, spec.CIDR).Scan(&segmentID); err != nil {
+				tenantID, spec.CIDR).Scan(&prefixID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					// The value is taken by a segment of another type (the
-					// unique index ignores type). Identity never consults
-					// such a segment by address, so there is no posture to state.
+					// The CIDR belongs to a cloud subnet's prefix: identity
+					// never scopes a LAN address by it.
 					continue
 				}
-				return fmt.Errorf("find vlan segment %s: %w", spec.CIDR, err)
+				return fmt.Errorf("find network %s: %w", spec.CIDR, err)
 			}
-			if _, err := pgidentity.RecordSegmentPosture(ctx, tx, tenantID.String(), segmentID,
-				pgidentity.PostureMeasured, spec.DHCP == dhcpEnabled,
-				pgidentity.PostureEvidence{SourceAssetID: assetID.String(), ObservedAt: time.Now()}); err != nil {
-				return fmt.Errorf("record dhcp posture for vlan segment %s: %w", spec.CIDR, err)
+			if _, err := pgidentity.RecordPrefixPosture(ctx, tx, tenantID.String(), prefixID, spec.DHCP == dhcpEnabled); err != nil {
+				return fmt.Errorf("record dhcp posture for network %s: %w", spec.CIDR, err)
 			}
 		}
 		return nil

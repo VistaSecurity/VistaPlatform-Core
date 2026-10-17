@@ -25,7 +25,7 @@ func newPlannedPickupFixture(t *testing.T) (*identityPickupFixture, uuid.UUID) {
 	t.Helper()
 	f := newIdentityPickupFixture(t)
 	f.exec(t, `UPDATE agent_addresses SET address='10.188.0.4' WHERE sensor_id=$1`, f.sensor)
-	f.exec(t, `UPDATE network_segments SET value='10.188.0.0/24' WHERE id=$1`, f.segment)
+	f.exec(t, `UPDATE prefixes SET prefix='10.188.0.0/24' WHERE id=$1`, f.segment)
 	f.exec(t, `UPDATE tenant_admin_settings SET config=$2::jsonb WHERE tenant_id=$1`, f.tenant, plannedPickupPolicy)
 	asset := uuid.New()
 	f.exec(t, `INSERT INTO assets(id,tenant_id,hostname,primary_address,class_key,class_path,asset_status) VALUES($1,$2,'planned','10.188.0.20','server','hardware.computer.server','monitoring')`, asset, f.tenant)
@@ -98,7 +98,7 @@ func TestIntegration_PlannedCommandPickup_RefusedPlanStaysPending(t *testing.T) 
 			f.exec(t, `UPDATE tenant_admin_settings SET config=jsonb_set(config,'{discovery_auto_scan,enabled}','false') WHERE tenant_id=$1`, f.tenant)
 		}},
 		{name: "segment sensitive", mutate: func(t *testing.T, f *identityPickupFixture, _ uuid.UUID) {
-			f.exec(t, `UPDATE network_segments SET metadata='{"sensitive":true}' WHERE id=$1`, f.segment)
+			f.exec(t, `UPDATE prefixes SET sensitive=true WHERE id=$1`, f.segment)
 		}},
 		{name: "port withdrawn from the policy", mutate: func(t *testing.T, f *identityPickupFixture, _ uuid.UUID) {
 			f.exec(t, `UPDATE tenant_admin_settings SET config=jsonb_set(config,'{discovery_auto_scan,ports}','[8443]') WHERE tenant_id=$1`, f.tenant)

@@ -31,6 +31,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -78,8 +79,10 @@ type SecurityGroupRef struct {
 	Name string `json:"name,omitempty"`
 }
 
-// NetworkInterface is one ENI of an instance, projected onto the shape
-// `net.interfaces` declares: a name, a MAC, and the addresses on it.
+// NetworkInterface is one ENI of an instance, projected: its id (the
+// interface's name), MAC, private addresses, attachment state, subnet and VPC,
+// and its public association. It becomes an observed `virtual` interface on
+// the instance (DCIM row 1.5f); nothing else of the ENI is read.
 type NetworkInterface struct {
 	Name      string   `json:"name"`
 	MAC       string   `json:"mac,omitempty"`
@@ -87,6 +90,11 @@ type NetworkInterface struct {
 	State     string   `json:"state,omitempty"`
 	SubnetID  string   `json:"subnet_id,omitempty"`
 	VPCID     string   `json:"vpc_id,omitempty"`
+	// PublicIP is the public address AWS translates onto the ENI's primary
+	// private address (its association), "" when it has none. It is the
+	// NAT-outside side: recorded on the instance, never as an interface
+	// address the ENI is configured with (DCIM row 1.5f).
+	PublicIP string `json:"public_ip,omitempty"`
 }
 
 // Instance is an EC2 instance, projected.
@@ -265,25 +273,65 @@ func IsIPDerivedPrivateDNSName(name string) bool {
 // after termination, and inventorying one would create an asset for a machine
 // that no longer exists and cannot be re-observed.
 func ListInstances(ctx context.Context, api EC2API, region string) ([]Instance, error) {
-	var out []Instance
+	live, _, err := ListInstancesWithTerminated(ctx, api, region)
+	return live, err
+}
+
+// ListInstancesWithTerminated is ListInstances that also hands back the
+// terminated instances AWS still shows, separately. They are never
+// inventoried — but an instance that IS already in the inventory and now
+// reads `terminated` is the provider stating why it is about to disappear,
+// which the lifecycle records as the reason it went stale (asset-inventory
+// ADR-0009 D6).
+func ListInstancesWithTerminated(ctx context.Context, api EC2API, region string) (live, terminated []Instance, err error) {
 	p := ec2.NewDescribeInstancesPaginator(api, &ec2.DescribeInstancesInput{})
 	for p.HasMorePages() {
 		page, err := p.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("describe EC2 instances in %s: %w", region, err)
+			return nil, nil, fmt.Errorf("describe EC2 instances in %s: %w", region, err)
 		}
 		for _, res := range page.Reservations {
 			owner := aws.ToString(res.OwnerId)
 			for i := range res.Instances {
 				inst := projectInstance(res.Instances[i], region, owner)
-				if inst.InstanceID == "" || inst.State == string(ec2types.InstanceStateNameTerminated) {
+				if inst.InstanceID == "" {
 					continue
 				}
-				out = append(out, inst)
+				if inst.State == string(ec2types.InstanceStateNameTerminated) {
+					terminated = append(terminated, inst)
+					continue
+				}
+				live = append(live, inst)
 			}
 		}
 	}
-	return out, nil
+	return live, terminated, nil
+}
+
+// RegionAPI is the one EC2 call region discovery needs.
+type RegionAPI interface {
+	DescribeRegions(ctx context.Context, in *ec2.DescribeRegionsInput, opts ...func(*ec2.Options)) (*ec2.DescribeRegionsOutput, error)
+}
+
+// ListEnabledRegions returns the regions the account can use: every region
+// AWS lists without AllRegions, i.e. the default regions plus the opt-in
+// regions the account has opted into (asset-inventory ADR-0009 D3: the
+// account is the scope, and the regions are discovered, not typed). Sorted.
+func ListEnabledRegions(ctx context.Context, api RegionAPI) ([]string, error) {
+	out, err := api.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
+	if err != nil {
+		return nil, fmt.Errorf("describe regions: %w", err)
+	}
+	var regions []string
+	for _, r := range out.Regions {
+		name := strings.TrimSpace(aws.ToString(r.RegionName))
+		if name == "" || aws.ToString(r.OptInStatus) == "not-opted-in" {
+			continue
+		}
+		regions = append(regions, name)
+	}
+	sort.Strings(regions)
+	return regions, nil
 }
 
 // ListVPCs enumerates every VPC in one region.
@@ -410,6 +458,9 @@ func projectInstance(in ec2types.Instance, region, ownerID string) Instance {
 		if a := aws.ToString(ni.PrivateIpAddress); a != "" {
 			iface.Addresses = append(iface.Addresses, a)
 			addAddr(a)
+		}
+		if ni.Association != nil {
+			iface.PublicIP = strings.TrimSpace(aws.ToString(ni.Association.PublicIp))
 		}
 		for _, pa := range ni.PrivateIpAddresses {
 			a := aws.ToString(pa.PrivateIpAddress)

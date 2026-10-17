@@ -810,7 +810,7 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
   return (
     <PermissionGate permission={TENANT_PERMISSIONS.sensors.update} fallback={<div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '12px 0' }}>You don't have permission to manage this sensor's configuration.</div>}>
       <SectionLabel icon="sliders-horizontal">Network interfaces</SectionLabel>
-      <div style={{ fontSize: 10.5, color: 'var(--app-t3)', margin: '2px 0 4px' }}>Select the interfaces the sensor should monitor, then Save NICs to send the change.</div>
+      <div style={{ fontSize: 10.5, color: 'var(--app-t3)', margin: '2px 0 4px' }}>Select the interfaces the sensor should monitor, then Save interfaces to send the change.</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {allIfaces.length === 0 && <div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '6px 0' }}>No interfaces detected yet. Run "Detect" or add one by name.</div>}
         {allIfaces.map((iface) => {
@@ -832,7 +832,7 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
         <button className="ui-btn accent sm" disabled={!nicsDirty || saveNics.isPending} onClick={() => saveNics.mutate()} style={{ opacity: !nicsDirty || saveNics.isPending ? 0.6 : 1 }}>
-          <Icon name="check" size={13} />{saveNics.isPending ? 'Saving…' : 'Save NICs'}
+          <Icon name="check" size={13} />{saveNics.isPending ? 'Saving…' : 'Save interfaces'}
         </button>
         {nicsDirty && <span style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>Queues an update command — the sensor applies it on its next check-in.</span>}
         {saveNics.isError && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{(saveNics.error as Error).message}</span>}

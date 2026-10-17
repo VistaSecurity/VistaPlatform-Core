@@ -21,12 +21,17 @@ const navLensKeys = (inventory.groups ?? [])
   .map((i) => i.lens!);
 
 describe('the Inventory nav registry', () => {
-  it('has the three ADR-0006 D1 groups, in order', () => {
-    expect((inventory.groups ?? []).map((g) => g.label)).toEqual(['Assets', 'Cryptography', 'Lifecycle']);
+  it('organizes the DCIM workspace around operator jobs', () => {
+    expect((inventory.groups ?? []).map((g) => g.label)).toEqual([
+      'Assets', 'Facilities', 'Network & Connectivity', 'Compute',
+      'Organization', 'Catalog & Data', 'Cryptography', 'Lifecycle',
+    ]);
   });
 
-  it('opens with the Assets group: All assets, Map, Software', () => {
-    expect(inventory.groups![0].items.map((i) => i.label)).toEqual(['All assets', 'Map', 'Software']);
+  it('opens with the asset lists, then gives facilities and connectivity their own homes', () => {
+    expect(inventory.groups![0].items.map((i) => i.label)).toEqual(['All assets', 'Software', 'Cloud resources']);
+    expect(inventory.groups![1].items.map((i) => i.label)).toEqual(['Map', 'Sites & locations', 'Racks']);
+    expect(inventory.groups![2].items.map((i) => i.label)).toEqual(['Networks & IPAM', 'VLANs', 'Circuits', 'Cabling', 'Wireless', 'VPN tunnels']);
   });
 
   it('keeps every crypto lens, grouped under one label', () => {
@@ -34,6 +39,8 @@ describe('the Inventory nav registry', () => {
     // crypto reads as a module" — losing one here would quietly delete a page.
     const crypto = inventory.groups!.find((g) => g.label === 'Cryptography')!.items.map((i) => i.lens);
     expect(crypto).toEqual(['certificate', 'keys', 'configuration', 'tls', 'ssh', 'data-protection', 'connections']);
+    const connectivity = inventory.groups!.find((g) => g.label === 'Network & Connectivity')!.items.map((i) => i.lens);
+    expect(connectivity).toContain('tunnels');
   });
 
   it('links Pending OUT to Discovery → Approvals rather than repeating the queue', () => {
@@ -68,13 +75,9 @@ describe('nav ↔ lens registry parity', () => {
     }
   });
 
-  it('puts each lens in the nav group its registry entry declares', () => {
-    const groupOf: Record<string, string> = { Assets: 'assets', Cryptography: 'cryptography', Lifecycle: 'lifecycle' };
-    for (const g of inventory.groups ?? []) {
-      for (const item of g.items) {
-        if (!item.lens) continue;
-        expect(findLens(item.lens).group).toBe(groupOf[g.label!]);
-      }
+  it('keeps the lens registry valid while allowing the rail to use richer DCIM groupings', () => {
+    for (const item of (inventory.groups ?? []).flatMap((g) => g.items)) {
+      if (item.lens) expect(findLens(item.lens).key).toBe(item.lens);
     }
   });
 

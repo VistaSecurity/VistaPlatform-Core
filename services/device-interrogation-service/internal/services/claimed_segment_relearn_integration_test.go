@@ -1,15 +1,15 @@
 package services
 
 // Re-interrogating a firewall must not clobber a person's claim on a range it
-// reported ( D8, R4). ensureVLANSegments refreshes the rows it learned
-// with `metadata || <its own keys>`, which leaves every other key alone — the
-// claim among them. This pins that against the real sink, under RLS, and
-// against the real ownership reader, so a refresh rewritten as a whole-blob
-// replace (or one that started writing the claim key) fails here.
+// reported ( D8, R4; DCIM row 1.6: the claim is the prefix's source set to
+// declared). ensureVLANPrefixes inserts a learned prefix only where none
+// exists and writes a DHCP posture only where nobody has said, so the claim
+// stays. Pinned against the real sink, under RLS, and against the real
+// ownership reader.
 //
 // It also pins what happens when the firewall stops reporting the range:
 // nothing. The learned row is never deleted by interrogation, so the claim
-// stands until a person revokes it or deletes the segment.
+// stands until a person changes it or deletes the prefix.
 
 import (
 	"database/sql"
@@ -29,14 +29,13 @@ func TestIntegration_ClaimedLearnedSegment_SurvivesReinterrogation(t *testing.T)
 	dmz := map[string]any{"id": 210, "name": "dmz", "subnet": "93.184.219.0/28", "gateway": "93.184.219.1"}
 
 	persistVLANs(t, sink, tenant, firewall, []map[string]any{dmz})
-	if got, ok := segmentByCIDR(t, db, tenant, "93.184.219.0/28"); !ok || got.NetworkType != "public" || got.Metadata["source"] != "interrogation" {
-		t.Fatalf("learned segment = %+v (found %v), want a learned public segment", got, ok)
+	if got, ok := segmentByCIDR(t, db, tenant, "93.184.219.0/28"); !ok || got.NetworkType != "public" || got.SourceKind != "measured" {
+		t.Fatalf("learned prefix = %+v (found %v), want a learned public prefix", got, ok)
 	}
 
-	// The claim, as inventory-service's claim action writes it.
-	if _, err := db.Exec(`UPDATE network_segments SET metadata = metadata || jsonb_build_object($3::text,
-		'{"by":"00000000-0000-0000-0000-000000000001","by_name":"Ada Admin","at":"2026-10-01T12:00:00Z"}'::jsonb)
-		WHERE tenant_id = $1 AND value = $2`, tenant, "93.184.219.0/28", dispatchguard.SegmentClaimKey); err != nil {
+	// The claim, as Inventory → Networks writes it: the prefix's source set to
+	// declared (recorded in its change log).
+	if _, err := db.Exec(`UPDATE prefixes SET source_kind = 'declared' WHERE tenant_id = $1 AND prefix = $2::cidr`, tenant, "93.184.219.0/28"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -60,9 +59,8 @@ func TestIntegration_ClaimedLearnedSegment_SurvivesReinterrogation(t *testing.T)
 	relearned := map[string]any{"id": 210, "name": "dmz-renamed-on-device", "subnet": "93.184.219.0/28", "gateway": "93.184.219.1", "dhcp_enabled": false}
 	persistVLANs(t, sink, tenant, firewall, []map[string]any{relearned})
 	got, _ := segmentByCIDR(t, db, tenant, "93.184.219.0/28")
-	claim, _ := got.Metadata[dispatchguard.SegmentClaimKey].(map[string]any)
-	if claim["by"] != "00000000-0000-0000-0000-000000000001" || got.Metadata["source"] != "interrogation" || got.Metadata["dhcp"] != "disabled" {
-		t.Fatalf("after re-interrogation metadata = %v, want the claim kept beside the refreshed learned keys", got.Metadata)
+	if got.SourceKind != "declared" || got.DHCP == nil || *got.DHCP {
+		t.Fatalf("after re-interrogation = %+v, want the claim kept and the measured posture recorded", got)
 	}
 	if !inScope() {
 		t.Fatal("re-interrogation withdrew the claim's ownership")
@@ -70,7 +68,7 @@ func TestIntegration_ClaimedLearnedSegment_SurvivesReinterrogation(t *testing.T)
 
 	// The firewall stops reporting the range: the row, and the claim, stay.
 	persistVLANs(t, sink, tenant, firewall, []map[string]any{{"id": 100, "name": "lan", "subnet": "10.44.0.0/24"}})
-	if got, ok := segmentByCIDR(t, db, tenant, "93.184.219.0/28"); !ok || got.Metadata[dispatchguard.SegmentClaimKey] == nil {
+	if got, ok := segmentByCIDR(t, db, tenant, "93.184.219.0/28"); !ok || got.SourceKind != "declared" {
 		t.Fatalf("after the device stopped reporting the range: %+v (found %v), want the claimed row unchanged", got, ok)
 	}
 	if !inScope() {

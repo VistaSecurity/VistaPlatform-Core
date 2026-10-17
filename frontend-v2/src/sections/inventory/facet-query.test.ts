@@ -102,15 +102,15 @@ describe('facetsToQuery', () => {
     const env = facetsToQuery(facets({ environment: [UNSET_BUCKET] }));
     expect(env).toBe('not exists(environment)');
     assertValid(env);
-    const segment = facetsToQuery(facets({ segment: ['Unsegmented'] }));
-    expect(segment).toBe('not exists(segment_id)');
-    assertValid(segment);
-    const named = facetsToQuery(facets({ segment: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'] }));
-    expect(named).toBe('segment_id:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    const prefix = facetsToQuery(facets({ prefix: [UNSET_BUCKET] }));
+    expect(prefix).toBe('not exists(prefix_id)');
+    assertValid(prefix);
+    const named = facetsToQuery(facets({ prefix: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'] }));
+    expect(named).toBe('prefix_id:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
     assertValid(named);
-    // A human segment NAME is what the old facet buckets emitted, and it is
-    // not a uuid — that click is the 400.
-    expect(() => assertValid('segment_id:DMZ')).toThrow(/invalid query|type_mismatch|uuid/i);
+    // The bucket's LABEL is the CIDR; the key the click writes is the id. A
+    // CIDR in prefix_id is not a uuid — that click would be the 400.
+    expect(() => assertValid('prefix_id:10.0.0.0/24')).toThrow(/invalid query|type_mismatch|uuid/i);
   });
 
   it('ORs unset with a real value on the same field', () => {
@@ -173,7 +173,7 @@ describe('queryToFacets', () => {
       status: ['monitoring'],
       environment: ['production', 'staging'],
       site: ['dc-1'],
-      segment: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
+      prefix: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'],
       owner: ['ops@example.com'],
       business_unit: ['Payments'],
       tag: ['pci', 'tier=gold'],

@@ -39,41 +39,9 @@
       },
       {
         "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "admin_state": "up",
-            "mac": "00:1b:17:00:00:01",
-            "name": "Gi1/0/1",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "admin_state": "down",
-            "name": "Gi1/0/2",
-            "speed": 100,
-            "state": "down"
-          },
-          {
-            "admin_state": "up",
-            "name": "Vl1",
-            "state": "up"
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "net.neighbors",
         "source_kind": "measured",
         "value": [
-          {
-            "local_port": "Gi1/0/1",
-            "protocol": "lldp",
-            "remote_mac": "00:1b:17:00:00:aa",
-            "remote_name": "dist-sw-1.corp.example.test",
-            "remote_port": "Gi1/0/24"
-          },
           {
             "local_port": "ifIndex 1",
             "protocol": "arp",
@@ -167,17 +135,27 @@
           },
           {
             "confidence": 1,
-            "kind": "mac_address",
-            "value": "00:1b:17:00:00:01"
-          },
-          {
-            "confidence": 1,
             "kind": "fqdn",
             "source": {
               "kind": "inferred",
               "ref": "asset:{{DEVICE_ASSET_ID}}"
             },
             "value": "access-sw-1.corp.example.test"
+          },
+          {
+            "confidence": 1,
+            "kind": "serial_number",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "FOC2432L0AB"
+          },
+          {
+            "confidence": 1,
+            "interface": "GigabitEthernet1/0/1",
+            "kind": "mac_address",
+            "value": "00:1b:17:00:00:01"
           }
         ],
         "source_kind": "measured",
@@ -227,41 +205,9 @@
       },
       {
         "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "admin_state": "up",
-            "mac": "00:1b:17:00:00:01",
-            "name": "Gi1/0/1",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "admin_state": "down",
-            "name": "Gi1/0/2",
-            "speed": 100,
-            "state": "down"
-          },
-          {
-            "admin_state": "up",
-            "name": "Vl1",
-            "state": "up"
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "net.neighbors",
         "source_kind": "measured",
         "value": [
-          {
-            "local_port": "Gi1/0/1",
-            "protocol": "lldp",
-            "remote_mac": "00:1b:17:00:00:aa",
-            "remote_name": "dist-sw-1.corp.example.test",
-            "remote_port": "Gi1/0/24"
-          },
           {
             "local_port": "ifIndex 1",
             "protocol": "arp",

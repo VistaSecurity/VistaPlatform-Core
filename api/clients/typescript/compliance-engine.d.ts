@@ -1986,7 +1986,7 @@ export interface components {
             };
             asset?: components["schemas"]["FindingAsset"];
         };
-        /** @description A single change-history entry for a finding (models.ComplianceFindingHistory). */
+        /** @description A single entry in a finding's change history (models.ComplianceFindingHistory). */
         ComplianceFindingHistory: {
             /** Format: uuid */
             id: string;
@@ -3140,7 +3140,7 @@ export interface components {
             id: string;
             /** Format: uuid */
             tenant_id: string;
-            /** @description What the ticket is ABOUT. Eleven creatable values, one per finding producer plus certificate / operational / general; see the TicketCategoryFilter parameter. Deliberately NOT pinned as an enum on the RESPONSE: a client that hard-fails on an unrecognised category would break against a server one release newer than itself, and pre-split rows carry `remediation`. The write path is where the vocabulary is closed. */
+            /** @description What the ticket is ABOUT. Twelve creatable values, one per finding producer plus certificate / operational / general; see the TicketCategoryFilter parameter. Deliberately NOT pinned as an enum on the RESPONSE: a client that hard-fails on an unrecognised category would break against a server one release newer than itself, and pre-split rows carry `remediation`. The write path is where the vocabulary is closed. */
             category: string;
             title: string;
             description?: string | null;
@@ -3542,7 +3542,7 @@ export interface components {
          *     CMDB hygiene as one undifferentiated bucket. It stays here so the rows
          *     written before the split can still be found; `POST /tickets` rejects it.
          */
-        TicketCategoryFilter: "compliance" | "certificate" | "crypto" | "pqc" | "vulnerability" | "lifecycle" | "inventory" | "configuration" | "drift" | "operational" | "general" | "remediation";
+        TicketCategoryFilter: "compliance" | "certificate" | "crypto" | "pqc" | "vulnerability" | "lifecycle" | "inventory" | "configuration" | "drift" | "topology" | "operational" | "general" | "remediation";
         TicketStatusFilter: "open" | "in_progress" | "resolved" | "closed";
         TicketPriorityFilter: "low" | "medium" | "high" | "critical";
         TicketSeverityFilter: string;

@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assessmentLimitations, assessmentLimitText, configurationEvidence, cryptoEvidence, cveCount, cveList, driftEvidence, eolEvidence,
-  hygieneEvidence, isHttpURL, kindFeedsRisk, kindLabel, producerLabel, subjectAssetID,
+  hygieneEvidence, isHttpURL, kindFeedsRisk, kindLabel, producerLabel, subjectAssetID, topologyEvidence,
 } from './producer-evidence';
 import type { ComplianceFinding } from './model';
 
@@ -457,12 +457,12 @@ describe('driftEvidence', () => {
       producer: 'drift',
       evidence: {
         window_days: 30,
-        baseline: { classes_in_segment: ['server'], segment_assets_before_window: 12 },
+        baseline: { classes_in_prefix: ['server'], prefix_assets_before_window: 12 },
         observed: { class: 'printer', class_label: 'Printer', assets_in_window: 3 },
       },
     }));
-    expect(newClass!.baseline).toContainEqual({ label: 'Classes in segment', value: 'server' });
-    expect(newClass!.baseline).toContainEqual({ label: 'Segment assets before window', value: '12' });
+    expect(newClass!.baseline).toContainEqual({ label: 'Classes in prefix', value: 'server' });
+    expect(newClass!.baseline).toContainEqual({ label: 'Prefix assets before window', value: '12' });
     expect(newClass!.observed).toContainEqual({ label: 'Class label', value: 'Printer' });
 
     const newIssuer = driftEvidence(finding({
@@ -611,5 +611,29 @@ describe('cryptoEvidence', () => {
     expect(e!.components).toEqual([{ code: 'RC4', role: null, riskScore: null, strength: null, deprecationStatus: null }]);
     expect(e!.riskFactors).toEqual(['a real one']);
     expect(e!.vulnerableAlgorithms).toEqual([]);
+  });
+});
+
+describe('topologyEvidence (cable drift, DCIM row 3.3)', () => {
+  it('reads each contradicted port with the cable of record and what the neighbour reports', () => {
+    const rows = topologyEvidence(finding({
+      producer: 'topology', kind: 'cable_drift',
+      evidence: { contradictions: [
+        { local_interface: 'Ethernet1/1', cable_id: 'c1', cable_far: [{ interface: 'GigabitEthernet0/1' }],
+          observed: { protocol: 'lldp', interface: 'GigabitEthernet1/0/1', system_name: 'core-sw-1' } },
+        { local_interface: 'Ethernet1/2', cable_id: 'c2', cable_far: [{ interface: 'eth0' }], far_port_cabled_elsewhere: true,
+          observed: { protocol: 'cdp', system_name: 'edge-1', port_id: 'Gi0/0' } },
+      ] },
+    }));
+    expect(rows).toEqual([
+      { localInterface: 'Ethernet1/1', cableId: 'c1', recorded: ['GigabitEthernet0/1'], observed: 'GigabitEthernet1/0/1', protocol: 'lldp', farPortCabledElsewhere: false },
+      { localInterface: 'Ethernet1/2', cableId: 'c2', recorded: ['eth0'], observed: 'edge-1 Gi0/0', protocol: 'cdp', farPortCabledElsewhere: true },
+    ]);
+  });
+
+  it('answers null for a document with nothing a person could act on, never a blank row', () => {
+    expect(topologyEvidence(finding({ evidence: {} }))).toBeNull();
+    expect(topologyEvidence(finding({ evidence: { contradictions: 'nope' } }))).toBeNull();
+    expect(topologyEvidence(finding({ evidence: { contradictions: [{ cable_id: 'x' }, null] } }))).toBeNull();
   });
 });

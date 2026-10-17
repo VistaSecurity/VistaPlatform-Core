@@ -17,15 +17,15 @@ import { useNetworkMap } from './relationship-queries';
 import { CLASS_GROUP_STYLES } from './map-model';
 import { classLabel } from './asset-shape';
 import { ExplodedDevice } from './network-map-exploded';
-import { SEGMENTS_SETTINGS_PATH } from '../settings/auto-scan-not-scanned';
-import { GATEWAY_NOT_RECORDED, GATEWAY_NOT_RECORDED_TITLE, gatewayAddress, gatewayName } from './segment-gateway';
-import { GatewayLink } from './segment-gateway-view';
+import { NETWORKS_LENS_HREF } from './lenses';
+import { GATEWAY_NOT_RECORDED, GATEWAY_NOT_RECORDED_TITLE, gatewayAddress, gatewayName } from './prefix-gateway';
+import { GatewayLink } from './prefix-gateway-view';
 import {
   HOLLOW_TONES, NETWORK_VIEWS, NETWORK_VIEW_LABEL, TONE_COLOR, TONE_LABEL, ZOOM_LABEL,
-  arcPath, assetIcon, assetTone, badgeCount, cryptoTraits, defaultPrefs, emptySegmentCount,
+  arcPath, assetIcon, assetTone, badgeCount, cryptoTraits, defaultPrefs, emptyPrefixCount,
   groupCounts, groupSites, hasCrypto, legendTones, networkTruncationNotice, parsePrefs, splitArc,
   toneCounts, visibleAssets,
-  type ColourMode, type NetworkMapAsset, type NetworkMapPrefs, type SegmentGateway, type SiteGroup, type Tone, type Tray,
+  type ColourMode, type NetworkMapAsset, type NetworkMapPrefs, type PrefixGateway, type SiteGroup, type Tone, type Tray,
   type TraitTone, type Zoom,
 } from './network-map-model';
 
@@ -190,7 +190,7 @@ function TraySummary({ assets, mode }: { assets: readonly NetworkMapAsset[]; mod
 /** The gateway line on a network: the device that reported routing it,
  *  linking to its asset page. Never guessed (D3): when no device has reported
  *  it the line says so, rather than naming the `.1`. */
-function GatewayNote({ gateway }: { gateway: SegmentGateway | null }) {
+function GatewayNote({ gateway }: { gateway: PrefixGateway | null }) {
   if (gateway) {
     return (
       <span data-testid="network-map-gateway" style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, maxWidth: '100%', fontSize: 11, color: 'var(--app-t3)' }}>
@@ -219,7 +219,7 @@ function TrayBox({ tray, ctx, compact }: { tray: Tray; ctx: Ctx; compact?: boole
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
         {tray.detail && <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{tray.detail}</span>}
-        {tray.segmentId && !compact && <GatewayNote gateway={tray.gateway} />}
+        {tray.prefixId && !compact && <GatewayNote gateway={tray.gateway} />}
       </div>
       {ctx.zoom === 1 ? <TraySummary assets={tray.assets} mode={ctx.mode} /> : <Tiles assets={tray.assets} ctx={ctx} />}
     </div>
@@ -375,7 +375,7 @@ function CircuitView({ sites, ctx }: { sites: SiteGroup[]; ctx: Ctx }) {
                   <div style={{ display: 'flex', alignItems: 'baseline', gap: 9, borderBottom: `2px solid ${trunk}`, padding: '0 4px 4px', flexWrap: 'wrap' }}>
                     <span style={{ fontSize: 12.5, fontWeight: 650, color: 'var(--app-t1)' }}>{t.name}</span>
                     {t.detail && <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{t.detail}</span>}
-                    {t.segmentId && <GatewayNote gateway={t.gateway} />}
+                    {t.prefixId && <GatewayNote gateway={t.gateway} />}
                     <span style={{ fontSize: 11.5, color: 'var(--app-t3)', marginLeft: 'auto' }}>{t.assets.length}</span>
                   </div>
                   {ctx.zoom === 1 ? (
@@ -662,7 +662,7 @@ export function NetworkMapView() {
     },
   };
   const truncation = networkTruncationNotice(map);
-  const emptyNetworks = emptySegmentCount(map);
+  const emptyNetworks = emptyPrefixCount(map);
 
   return (
     <div data-testid="network-map-view" style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '4px 26px 30px' }}>
@@ -741,8 +741,8 @@ export function NetworkMapView() {
 
       {emptyNetworks > 0 && !focusedSite && (
         <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 14 }}>
-          {emptyNetworks} active network{emptyNetworks === 1 ? ' has' : 's have'} no devices on it and {emptyNetworks === 1 ? 'is' : 'are'} not drawn.{' '}
-          <Link to={SEGMENTS_SETTINGS_PATH} style={{ color: 'var(--accent)' }}>Network segments</Link>
+          {emptyNetworks} prefix{emptyNetworks === 1 ? ' has' : 'es have'} no devices in it and {emptyNetworks === 1 ? 'is' : 'are'} not drawn.{' '}
+          <Link to={NETWORKS_LENS_HREF} style={{ color: 'var(--accent)' }}>Networks</Link>
         </div>
       )}
 

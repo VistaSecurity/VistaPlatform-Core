@@ -205,8 +205,8 @@ func TestIntegration_PlanJob_RunsInUnitsEndToEnd(t *testing.T) {
 
 	// The tenant marks one address sensitive after creating the job: it must
 	// be refused at dispatch, per address, before any packet.
-	if _, err := f.db.Exec(`INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment, is_active, metadata)
-		VALUES ($1, 'fragile', 'cidr', $2, 'private', 'production', true, '{"sensitive": "true"}')`, f.tenant, excluded+"/32"); err != nil {
+	if _, err := f.db.Exec(`INSERT INTO prefixes (tenant_id, description, prefix, network_type, environment, sensitive)
+		VALUES ($1, 'fragile', $2, 'private', 'production', true)`, f.tenant, excluded+"/32"); err != nil {
 		t.Fatal(err)
 	}
 

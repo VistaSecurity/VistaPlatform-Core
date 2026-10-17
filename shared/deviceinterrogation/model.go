@@ -155,6 +155,12 @@ type InterrogateResult struct {
 	// uplink, an LLDP neighbour (ADR-0003). Every type is one of the canonical
 	// ten in shared/relationships.
 	Relationships []RelationshipObservation `json:"relationships,omitempty"`
+	// Network is the interrogated device's own interfaces, addresses, VLANs
+	// and ARP cache (DCIM row 1.5): the posture that has a model of its own and
+	// is filed through the identity engine, NOT as facts. Nil when the
+	// collector measured none, or is not yet a row-1.5 adapter (those still
+	// emit net.interfaces).
+	Network *NetworkObservation `json:"network,omitempty"`
 	// Warnings are the sub-failures the collector survived — an endpoint the
 	// account may not read, a command this version lacks, a table cut at its
 	// bound. The rest of the result is still returned; these say what it is

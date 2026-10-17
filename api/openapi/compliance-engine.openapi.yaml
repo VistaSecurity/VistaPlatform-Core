@@ -3310,7 +3310,7 @@ components:
         written before the split can still be found; `POST /tickets` rejects it.
       schema:
         type: string
-        enum: [compliance, certificate, crypto, pqc, vulnerability, lifecycle, inventory, configuration, drift, operational, general, remediation]
+        enum: [compliance, certificate, crypto, pqc, vulnerability, lifecycle, inventory, configuration, drift, topology, operational, general, remediation]
     TicketStatusFilter:
       name: status
       in: query
@@ -4256,7 +4256,7 @@ components:
     ComplianceFindingHistory:
       type: object
       additionalProperties: false
-      description: A single change-history entry for a finding (models.ComplianceFindingHistory).
+      description: A single entry in a finding's change history (models.ComplianceFindingHistory).
       required:
         - id
         - finding_id
@@ -6735,7 +6735,7 @@ components:
         category:
           type: string
           description: >
-            What the ticket is ABOUT. Eleven creatable values, one per finding
+            What the ticket is ABOUT. Twelve creatable values, one per finding
             producer plus certificate / operational / general; see the
             TicketCategoryFilter parameter. Deliberately NOT pinned as an enum
             on the RESPONSE: a client that hard-fails on an unrecognised

@@ -67,6 +67,7 @@ func (*F5Interrogator) Interrogate(ctx context.Context, device DeviceInfo, creds
 		return nil, err
 	}
 	result.DeviceIdentity = f5Identity(result.DeviceInfo)
+	result.setNetworkManagementAddress(device)
 	return result, nil
 }
 

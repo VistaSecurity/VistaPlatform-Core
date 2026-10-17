@@ -1694,7 +1694,7 @@ export interface components {
              * @description sso_providers row id. Present for tenant sso methods.
              */
             provider_id?: string;
-            /** @description Tenant-chosen provider name; the URL segment for the authorize endpoint. Present for tenant sso methods. */
+            /** @description Tenant-chosen provider name; the URL path part for the authorize endpoint. Present for tenant sso methods. */
             provider_name?: string;
         };
         AuthMethodsResponse: {
@@ -1713,7 +1713,7 @@ export interface components {
             sso_providers?: {
                 /** @description Provider type (google, microsoft, azure). */
                 provider: string;
-                /** @description The authorize URL segment for this provider. */
+                /** @description The authorize URL path part for this provider. */
                 provider_name: string;
             }[];
         };

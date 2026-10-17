@@ -98,7 +98,7 @@ else, capital W included.
 `last_seen > now-14d` is "seen in the last two weeks". There is no shorthand for
 either, because a shorthand would read both ways.
 
-**`crypto:(…)` and `cert:(…)` include crypto that is not on a network port.**
+**`crypto:(…)` and `cert:(…)` include crypto that is not on a listening port.**
 Not every piece of cryptography an asset uses sits behind a socket — an
 encrypted cloud volume, a database at rest, a signing configuration. Those
 belong to the asset without belonging to any one of its endpoints, and asking an

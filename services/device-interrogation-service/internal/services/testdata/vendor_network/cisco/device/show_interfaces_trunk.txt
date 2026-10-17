@@ -1,0 +1,17 @@
+
+Port        Mode             Encapsulation  Status        Native vlan
+Gi1/0/47    on               802.1q         trunking      1
+Gi1/0/48    on               802.1q         trunking      1
+Te1/1/1     on               802.1q         trunking      99
+Po1         on               802.1q         trunking      99
+
+Port        Vlans allowed on trunk
+Gi1/0/47    1-4094
+Gi1/0/48    1-4094
+Te1/1/1     10,20,99
+Po1         10,20,30,
+            99
+
+Port        Vlans allowed and active in management domain
+Te1/1/1     10,20,99
+Po1         10,20,30,99

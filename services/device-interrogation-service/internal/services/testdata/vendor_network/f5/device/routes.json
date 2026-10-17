@@ -1,0 +1,44 @@
+{
+  "routes": [
+    {
+      "path_suffix": "/mgmt/shared/authn/login",
+      "method": "POST",
+      "body": "{\"token\":{\"token\":\"FAKE-TOKEN\"}}"
+    },
+    {
+      "path_suffix": "/mgmt/tm/sys/version",
+      "body_file": "sys_version.json"
+    },
+    {
+      "path_suffix": "/mgmt/tm/sys/hardware",
+      "body_file": "sys_hardware.json"
+    },
+    {
+      "path_suffix": "/mgmt/tm/net/interface",
+      "body_file": "net_interface.json"
+    },
+    {
+      "path_suffix": "/mgmt/tm/net/trunk",
+      "body_file": "net_trunk.json"
+    },
+    {
+      "path_suffix": "/mgmt/tm/net/vlan",
+      "body_file": "net_vlan.json"
+    },
+    {
+      "path_suffix": "/mgmt/tm/net/self",
+      "body_file": "net_self.json"
+    },
+    {
+      "path_suffix": "/mgmt/tm/net/route-domain",
+      "body_file": "net_route_domain.json"
+    },
+    {
+      "path_suffix": "/mgmt/tm/net/arp",
+      "body_file": "net_arp.json"
+    }
+  ],
+  "default": {
+    "body": "{\"items\":[]}"
+  }
+}

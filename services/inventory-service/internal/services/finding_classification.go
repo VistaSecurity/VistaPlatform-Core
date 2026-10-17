@@ -4,7 +4,7 @@ package services
 // ( WP3, F2).
 //
 // discovery-processor-service used to classify every sensor discovery itself
-// — an HMAC round trip per row to network-segments/classify-asset — evaluate
+// — an HMAC round trip per row to a classify route — evaluate
 // the tenant's auto-approval rules against that answer, route third-party rows
 // to external_connections through its own writer, and send the rest here with
 // the status it had decided. This service then classified the same finding a
@@ -12,7 +12,7 @@ package services
 // classifiers that could disagree, and two writers of one table.
 //
 // Now the processor imports every row and this file answers both questions,
-// once per finding, from the import request's one segment read (WP2):
+// once per finding, from the import request's one prefix read (WP2):
 // classifyFindingIn is the ownership, and pipelineApproval evaluates the
 // tenant's rules against it. The rules need nothing the processor has and this
 // service lacks — the finding's address, hostname, confidence, first-seen time,
@@ -33,56 +33,61 @@ import (
 // classifyFindingIn is the one ownership classification of an ingested
 // finding:
 //
-//   - a cloud-API resource that names its provider and region is classified by
-//     the cloud segment it lives in (FindOrCreateCloudSegment) — `internal` —
-//     because its address, when it has one, cannot say whose it is;
-//   - everything else by address and hostname over the request's segment set:
-//     `internal` in a registered segment, `unknown` for an unmatched internal
-//     candidate (private or CGNAT), `third_party` otherwise.
+//   - a cloud-API resource that names its provider and region is the tenant's
+//     own cloud resource — `internal`, type `cloud` — because its address, when
+//     it has one, cannot say whose it is. A prefix never decides its approval;
+//     its account does (ADR-0009 D5);
+//   - everything else by address over the request's prefix set (DCIM row
+//     1.6): `internal` in one of the tenant's prefixes, `unknown` for an
+//     unmatched internal candidate (private or CGNAT), `third_party`
+//     otherwise.
 //
-// Type is the matched segment's network_type, else the address class, else
-// public. With no segment service wired (unit tests, a stripped-down build)
-// ownership is "unknown", which keeps every finding on the managed path — the
-// answer classifyAsset has always given there.
-func (s *AssetService) classifyFindingIn(segs *importSegments, tenantID uuid.UUID, f IngestFinding, effectiveIP *string) approval.Classification {
-	if s.networkSegmentService == nil {
-		return approval.Classification{Ownership: "unknown", Type: addressNetworkType(effectiveIP)}
+// The prefix the address is in (longest match) is recorded on the
+// classification, so auto-approval reads its rule first. Type is the prefix's
+// network type, else the address class, else public. A failed read keeps the
+// finding managed: ownership "unknown".
+func (s *AssetService) classifyFindingIn(segs *importPrefixes, tenantID uuid.UUID, f IngestFinding, effectiveIP *string) approval.Classification {
+	if isCloudAPIFinding(f) && rawDataString(f.RawData, "cloud_provider") != "" && rawDataString(f.RawData, "cloud_region") != "" {
+		cls := approval.Classification{Ownership: "internal", Type: "cloud"}
+		s.applyPrefix(segs, tenantID, &cls, effectiveIP)
+		return cls
 	}
-	if isCloudAPIFinding(f) {
-		provider := rawDataString(f.RawData, "cloud_provider")
-		region := rawDataString(f.RawData, "cloud_region")
-		if provider != "" && region != "" {
-			env := rawDataString(f.RawData, "environment")
-			if env == "" {
-				env = "production"
-			}
-			seg, err := segs.cloudSegment(provider, region, rawDataString(f.RawData, "vpc_id"), env)
-			if err != nil {
-				log.Printf("[AssetService] classify: cloud segment for %s/%s failed (classifying by address): %v", provider, region, err)
-			} else if seg != nil {
-				id, name := seg.ID, seg.Name
-				return approval.Classification{Ownership: "internal", Type: seg.NetworkType, SegmentID: &id, SegmentName: &name}
-			}
-		}
-	}
-	set, err := segs.segmentSet()
+	set, err := s.prefixSetIn(segs, tenantID)
 	if err != nil {
-		// The answer classifyAsset gives on a failed read: keep it managed.
-		log.Printf("[AssetService] classify: segment read for tenant %s failed: %v", tenantID, err)
+		log.Printf("[AssetService] classify: prefix read for tenant %s failed: %v", tenantID, err)
 		return approval.Classification{Ownership: "unknown", Type: addressNetworkType(effectiveIP)}
 	}
-	cls := approval.Classification{Ownership: set.Classify(effectiveIP, f.Hostname), Type: addressNetworkType(effectiveIP)}
-	if seg := set.Match(effectiveIP, f.Hostname); seg != nil {
-		id, name := seg.ID, seg.Name
-		cls.SegmentID, cls.SegmentName = &id, &name
-		if seg.NetworkType != "" {
-			cls.Type = seg.NetworkType
-		}
+	if set == nil {
+		// No database wired (unit tests): keep every finding managed.
+		return approval.Classification{Ownership: "unknown", Type: addressNetworkType(effectiveIP)}
+	}
+	p := set.Match(effectiveIP)
+	cls := approval.Classification{Ownership: set.Classify(effectiveIP), Type: classificationType(p, effectiveIP)}
+	if p != nil {
+		id := p.ID
+		cls.PrefixID = &id
 	}
 	return cls
 }
 
-// addressNetworkType is the network_type of an address with no segment: the
+// applyPrefix records the IPAM prefix the address falls in (DCIM row 1.4) on
+// a classification decided otherwise. A failed read leaves it unrecorded and
+// says so.
+func (s *AssetService) applyPrefix(segs *importPrefixes, tenantID uuid.UUID, cls *approval.Classification, ip *string) {
+	if ip == nil || *ip == "" {
+		return
+	}
+	set, err := s.prefixSetFor(segs, tenantID)
+	if err != nil {
+		log.Printf("[AssetService] classify: prefix read for tenant %s failed: %v", tenantID, err)
+		return
+	}
+	if p := set.Match(*ip); p != nil {
+		cls.Apply(p)
+	}
+}
+
+// addressNetworkType is the network_type of an address with no prefix: the
 // address class, and public for no address at all.
 func addressNetworkType(ip *string) string {
 	if ip == nil || *ip == "" {
@@ -118,6 +123,9 @@ func (s *AssetService) pipelineApproval(tenantID uuid.UUID) approvalDecider {
 		rules  []*approval.Rule
 		loaded bool
 	)
+	// A cloud listing is offered to the rules with its ACCOUNT on the
+	// observation, so an account-level rule (ADR-0009 D5) can decide it.
+	accounts := s.newCloudAccountResolver(tenantID)
 	return func(f IngestFinding, cls approval.Classification) findingApproval {
 		pending := findingApproval{status: "pending_approval"}
 		if s.db == nil {
@@ -135,7 +143,9 @@ func (s *AssetService) pipelineApproval(tenantID uuid.UUID) approvalDecider {
 		if len(rules) == 0 {
 			return pending
 		}
-		ok, ruleID, err := svc.EvaluateAutoApprovalWithRules(rules, pipelineApprovalInput(tenantID, f), &cls)
+		in := pipelineApprovalInput(tenantID, f)
+		_, in.CloudAccountID = accounts.account(f)
+		ok, ruleID, err := svc.EvaluateAutoApprovalWithRules(rules, in, &cls)
 		if err != nil {
 			log.Printf("[AssetService] auto-approval evaluation for %s failed: %v", findingLabel(f), err)
 		}

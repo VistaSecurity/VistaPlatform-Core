@@ -330,7 +330,7 @@ describe('preview', () => {
     await pick('Thorough');
     await vi.waitFor(() => expect(panel()).toContain('1 target is outside your registered networks, so it will be scanned at Standard depth.'), { timeout: 2000 });
     expect(panel()).toContain('93.184.216.34');
-    expect(panel()).toContain('Network Segments');
+    expect(panel()).toContain('Inventory → Networks');
   });
 
   it('when targets need confirming, Start asks first — and only "Scan anyway" confirms', async () => {

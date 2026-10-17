@@ -278,17 +278,22 @@ func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
 			})
 		}
 
-		// --- member_of: the AP uplinks through the switch ------------------
-		assertCollectorEdge(t, db, tenant, collectorEdge{
-			from: apID, to: switchID, typ: "member_of", sourceRef: ref, label: "AP uplink",
-		})
+		// --- the AP's WIRED uplink is a cable end, not a member_of edge -----
+		//
+		// DCIM row 3.3: member_of is kept for controller membership only; the
+		// uplink rides the AP's sighting as an LLDP neighbour, which
+		// inventory-service proposes as a cable (cable_intake.go).
+		var uplinkEdges int
+		if err := db.QueryRow(`SELECT count(*) FROM asset_relationships
+			WHERE tenant_id = $1 AND from_asset_id = $2 AND to_asset_id = $3 AND type = 'member_of'`,
+			tenant, apID, switchID).Scan(&uplinkEdges); err != nil || uplinkEdges != 0 {
+			t.Errorf("the AP's wired uplink still wrote %d member_of edge(s) to the switch (%v)", uplinkEdges, err)
+		}
 
 		// --- connects_to: the LLDP neighbour -------------------------------
 		//
-		// UniFi reports both an LLDP neighbour and an uplink for the same
-		// physical link, so the uplink's member_of and the LLDP connects_to
-		// land between the same pair. The connects_to is the one asserted: it
-		// is what draws the neighbour on the map as a link, not a container.
+		// The connects_to is what draws the neighbour on the map as a link;
+		// the cable (row 3.3) is what records which ports it joins.
 		assertCollectorEdge(t, db, tenant, collectorEdge{
 			from: switchID, to: neighbourID, typ: "connects_to", sourceRef: ref, label: "LLDP neighbour",
 		})
@@ -325,8 +330,8 @@ func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
 		if err := rows.Err(); err != nil {
 			t.Fatalf("rows: %v", err)
 		}
-		if seen < 5 {
-			t.Errorf("%d edges written, want at least the two adoptions, the AP uplink, the LLDP link and the client link", seen)
+		if seen < 4 {
+			t.Errorf("%d edges written, want at least the two adoptions, the LLDP link and the client link (the AP's wired uplink is a cable, row 3.3)", seen)
 		}
 
 		// --- UniFi client joined the hex .local CI by MAC and promoted linux-2
@@ -347,34 +352,29 @@ func TestIntegration_UniFiCollector_DrawsEdgesThroughTheEngine(t *testing.T) {
 		})
 
 		var dyn sql.NullBool
-		var src, srcType, srcAsset, dhcp sql.NullString
+		var sourceKind string
 		if err := db.QueryRow(`
-			SELECT (metadata->>'dynamic')::boolean, metadata->>'source',
-			       metadata->>'source_device_type', metadata->>'source_asset_id', metadata->>'dhcp'
-			FROM network_segments
-			WHERE tenant_id = $1 AND value = '192.0.2.0/24' AND segment_type = 'cidr'`,
-			tenant).Scan(&dyn, &src, &srcType, &srcAsset, &dhcp); err != nil {
-			t.Fatalf("DHCP LAN segment: %v", err)
+			SELECT dhcp_managed, source_kind FROM prefixes
+			WHERE tenant_id = $1 AND vrf_id IS NULL AND prefix = '192.0.2.0/24'`,
+			tenant).Scan(&dyn, &sourceKind); err != nil {
+			t.Fatalf("DHCP LAN prefix: %v", err)
 		}
-		if !dyn.Valid || !dyn.Bool || dhcp.String != "enabled" {
-			t.Errorf("DHCP LAN metadata.dynamic = %v dhcp = %q, want true/enabled so lease IPs cannot vote", dyn, dhcp.String)
+		if !dyn.Valid || !dyn.Bool {
+			t.Errorf("DHCP LAN dhcp_managed = %v, want true so lease IPs cannot vote", dyn)
 		}
-		// Provenance names the device, through the real in-cluster path: the
-		// controller Discovery → Devices created, not a hard-coded vendor.
-		if src.String != "interrogation" || srcType.String != "unifi" || srcAsset.String != run.controller.String() {
-			t.Errorf("DHCP LAN provenance = %q/%q/%q, want interrogation/unifi/%s", src.String, srcType.String, srcAsset.String, run.controller)
+		if sourceKind != "measured" {
+			t.Errorf("DHCP LAN provenance = %q, want measured (learned from the controller)", sourceKind)
 		}
 
 		var iotDyn sql.NullBool
 		if err := db.QueryRow(`
-			SELECT (metadata->>'dynamic')::boolean
-			FROM network_segments
-			WHERE tenant_id = $1 AND value = '198.51.100.0/24' AND segment_type = 'cidr'`,
+			SELECT dhcp_managed FROM prefixes
+			WHERE tenant_id = $1 AND vrf_id IS NULL AND prefix = '198.51.100.0/24'`,
 			tenant).Scan(&iotDyn); err != nil {
-			t.Fatalf("static VLAN segment: %v", err)
+			t.Fatalf("static VLAN prefix: %v", err)
 		}
 		if !iotDyn.Valid || iotDyn.Bool {
-			t.Errorf("static VLAN metadata.dynamic = %v, want false", iotDyn)
+			t.Errorf("static VLAN dhcp_managed = %v, want false", iotDyn)
 		}
 
 		// --- and nothing the controller volunteered came with them ----------
@@ -517,15 +517,23 @@ func assertDeviceFacts(t *testing.T, db *sql.DB, tenant, asset uuid.UUID, source
 			t.Errorf("asset %s %s = %q, want %q", asset, key, got, want)
 		}
 	}
-	var interfaces int
+	// The device's interfaces are interface rows on ITS asset (DCIM row
+	// 1.5b), no longer a net.interfaces fact.
+	var facts, interfaces int
 	if err := db.QueryRow(`
 		SELECT count(*) FROM asset_facts
 		WHERE tenant_id = $1 AND asset_id = $2 AND key = 'net.interfaces' AND source_ref = $3`,
-		tenant, asset, sourceRef).Scan(&interfaces); err != nil {
+		tenant, asset, sourceRef).Scan(&facts); err != nil {
 		t.Fatalf("net.interfaces lookup: %v", err)
 	}
-	if interfaces != 1 {
-		t.Errorf("asset %s has %d net.interfaces facts from %s, want 1", asset, interfaces, sourceRef)
+	if facts != 0 {
+		t.Errorf("asset %s has %d net.interfaces facts from %s; the UniFi path records interfaces instead", asset, facts, sourceRef)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM interfaces WHERE tenant_id = $1 AND asset_id = $2`, tenant, asset).Scan(&interfaces); err != nil {
+		t.Fatalf("interfaces lookup: %v", err)
+	}
+	if interfaces == 0 {
+		t.Errorf("asset %s holds no interfaces from the controller's port table", asset)
 	}
 }
 

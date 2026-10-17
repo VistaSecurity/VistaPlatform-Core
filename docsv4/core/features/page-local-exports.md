@@ -35,7 +35,7 @@ Whatever the page is showing — the columns the active lens shows. Switch lense
 (Certificates → Keys → Configuration → Data Protection → 3rd Party → …) and the
 next click exports the new layout. Certificates export issuers and expiry, keys
 export sizes and fingerprints, configurations export cipher suites and
-algorithms, Stale exports class, segment, status and last seen.
+algorithms, Stale exports class, network, status and last seen.
 
 The filename names the view and the date — for example
 `vista-inventory-certificates-2026-09-16.csv`.

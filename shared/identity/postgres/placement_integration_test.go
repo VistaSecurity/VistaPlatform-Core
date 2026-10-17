@@ -19,10 +19,10 @@ func TestIntegration_SegmentPlacement(t *testing.T) {
 	repo := pgrepo.New(db)
 	ctx := context.Background()
 	location, segment := uuid.NewString(), uuid.NewString()
-	if _, err := db.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'North','site');`, location, tenant); err != nil {
+	if _, err := db.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,'North',regexp_replace(lower('North'),'[^a-z0-9]+','-','g')) RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,'North',regexp_replace(lower('North'),'[^a-z0-9]+','-','g') FROM s`, location, tenant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,location_id) VALUES($1,$2,'North','cidr','192.0.2.0/24','production',$3)`, segment, tenant, location); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,scope_kind,scope_id,source_kind,status) VALUES($1,$2,'North','192.0.2.0/24','production','location',$3,'declared','active')`, segment, tenant, location); err != nil {
 		t.Fatal(err)
 	}
 	source := identity.Source{Kind: identity.SourceMeasured, Ref: "placement-test"}
@@ -44,25 +44,31 @@ func TestIntegration_SegmentPlacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = db.Exec(`UPDATE assets SET site=$2 WHERE id=$1`, ref.ID, tc.site); err != nil {
-				t.Fatal(err)
+			if tc.site != "" {
+				// A site of its own the segment's location is not in.
+				if _, err = db.Exec(`INSERT INTO sites(tenant_id,name,slug) VALUES($1,$2,lower($2)) ON CONFLICT DO NOTHING`, tc.tenant, tc.site); err != nil {
+					t.Fatal(err)
+				}
+				if _, err = db.Exec(`UPDATE assets SET site_id=(SELECT id FROM sites WHERE tenant_id=assets.tenant_id AND name=$2) WHERE id=$1`, ref.ID, tc.site); err != nil {
+					t.Fatal(err)
+				}
 			}
 			preservedLocation := ""
 			if tc.conflictingLocation {
 				preservedLocation = uuid.NewString()
-				if _, err = db.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'Curated','site')`, preservedLocation, tc.tenant); err != nil {
+				if _, err = db.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,'Elsewhere','elsewhere') RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,'Curated','curated' FROM s`, preservedLocation, tc.tenant); err != nil {
 					t.Fatal(err)
 				}
-				if _, err = db.Exec(`UPDATE assets SET location_id=$2 WHERE id=$1`, ref.ID, preservedLocation); err != nil {
+				if _, err = db.Exec(`UPDATE assets SET location_id=$2, site_id=(SELECT site_id FROM locations WHERE id=$2) WHERE id=$1`, ref.ID, preservedLocation); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if tc.conflictingSegment {
 				different := uuid.NewString()
-				if _, err = db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Other','cidr','203.0.113.0/24','production')`, different, tc.tenant); err != nil {
+				if _, err = db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Other','203.0.113.0/24','production','declared','active')`, different, tc.tenant); err != nil {
 					t.Fatal(err)
 				}
-				if _, err = db.Exec(`UPDATE assets SET network_segment_id=$2 WHERE id=$1`, ref.ID, different); err != nil {
+				if _, err = db.Exec(`UPDATE assets SET prefix_id=$2 WHERE id=$1`, ref.ID, different); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -91,14 +97,14 @@ func TestIntegration_SegmentPlacement(t *testing.T) {
 			// An outer rollback must undo placement and its audit together.
 			var site, loc, class, name string
 			var n int
-			if err = db.QueryRow(`SELECT coalesce(site,''),coalesce(location_id::text,''),class_key,hostname FROM assets WHERE id=$1`, ref.ID).Scan(&site, &loc, &class, &name); err != nil {
+			if err = db.QueryRow(`SELECT coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),''),coalesce(location_id::text,''),class_key,hostname FROM assets WHERE id=$1`, ref.ID).Scan(&site, &loc, &class, &name); err != nil {
 				t.Fatal(err)
 			}
 			if tc.want {
 				if site != "North" || loc != location {
 					t.Fatalf("placement %s %s", site, loc)
 				}
-			} else if site != tc.site || loc != preservedLocation {
+			} else if wantSite := map[bool]string{true: "Elsewhere", false: tc.site}[tc.conflictingLocation]; site != wantSite || loc != preservedLocation {
 				t.Fatalf("overwrote placement %s %s", site, loc)
 			}
 			expectedName := "server.example.test"
@@ -136,8 +142,8 @@ func TestIntegration_SegmentPlacement(t *testing.T) {
 // segment's (located or not, with history), and one that already states an
 // environment keeps it — the segment never overrules a stated value.
 //
-// MUTATION: drop the a.network_segment_id fallback from projectSegmentLocation's
-// segment join and "fill" goes red; drop its disagreeing-site guard and
+// MUTATION: drop the a.prefix_id fallback from projectSegmentLocation's
+// prefix join and "fill" goes red; drop its disagreeing-site guard and
 // "curated" is overwritten; drop the `currentEnv == ""` guard and
 // "stated-environment" is overwritten; make the locations join INNER again and
 // "segment-without-location" loses its environment.
@@ -148,13 +154,13 @@ func TestIntegration_InheritSegmentLocation(t *testing.T) {
 	repo := pgrepo.New(db)
 	ctx := context.Background()
 	location, located, bare := uuid.NewString(), uuid.NewString(), uuid.NewString()
-	if _, err := db.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'South','site')`, location, tenant); err != nil {
+	if _, err := db.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,'South',regexp_replace(lower('South'),'[^a-z0-9]+','-','g')) RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,'South',regexp_replace(lower('South'),'[^a-z0-9]+','-','g') FROM s`, location, tenant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,location_id) VALUES($1,$2,'South','cidr','198.18.0.0/24','production',$3)`, located, tenant, location); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,scope_kind,scope_id,source_kind,status) VALUES($1,$2,'South','198.18.0.0/24','production','location',$3,'declared','active')`, located, tenant, location); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Bare','cidr','198.18.1.0/24','production')`, bare, tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Bare','198.18.1.0/24','production','declared','active')`, bare, tenant); err != nil {
 		t.Fatal(err)
 	}
 	source := identity.Source{Kind: identity.SourceMeasured, Ref: "inherit-test"}
@@ -176,7 +182,12 @@ func TestIntegration_InheritSegmentLocation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err = db.Exec(`UPDATE assets SET site=NULLIF($2,''), environment=NULLIF($3,'')::environment_type WHERE id=$1`, ref.ID, tc.site, tc.env); err != nil {
+			if tc.site != "" {
+				if _, err = db.Exec(`INSERT INTO sites(tenant_id,name,slug) VALUES($1,$2,lower($2)) ON CONFLICT DO NOTHING`, tenant, tc.site); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err = db.Exec(`UPDATE assets SET site_id=(SELECT id FROM sites WHERE tenant_id=assets.tenant_id AND name=$2), environment=NULLIF($3,'')::environment_type WHERE id=$1`, ref.ID, tc.site, tc.env); err != nil {
 				t.Fatal(err)
 			}
 			if err := repo.InheritSegmentLocation(ctx, ref, source); err != nil {
@@ -184,7 +195,7 @@ func TestIntegration_InheritSegmentLocation(t *testing.T) {
 			}
 			var site, loc, env string
 			var n int
-			if err = db.QueryRow(`SELECT coalesce(site,''),coalesce(location_id::text,''),coalesce(environment::text,'') FROM assets WHERE id=$1`, ref.ID).Scan(&site, &loc, &env); err != nil {
+			if err = db.QueryRow(`SELECT coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),''),coalesce(location_id::text,''),coalesce(environment::text,'') FROM assets WHERE id=$1`, ref.ID).Scan(&site, &loc, &env); err != nil {
 				t.Fatal(err)
 			}
 			if site != tc.wantSite || loc != tc.wantLoc {
@@ -193,7 +204,7 @@ func TestIntegration_InheritSegmentLocation(t *testing.T) {
 			if env != tc.wantEnv {
 				t.Fatalf("environment %q, want %q", env, tc.wantEnv)
 			}
-			if err = db.QueryRow(`SELECT count(*) FROM asset_history WHERE asset_id=$1 AND changes_json ? 'location_id' AND changes_json->>'network_segment_id'=$2`, ref.ID, located).Scan(&n); err != nil {
+			if err = db.QueryRow(`SELECT count(*) FROM asset_history WHERE asset_id=$1 AND changes_json ? 'location_id' AND changes_json->>'prefix_id'=$2`, ref.ID, located).Scan(&n); err != nil {
 				t.Fatal(err)
 			}
 			if want := map[bool]int{true: 1, false: 0}[tc.wantLoc != ""]; n != want {
@@ -203,7 +214,7 @@ func TestIntegration_InheritSegmentLocation(t *testing.T) {
 			if segmentForRow == "" {
 				segmentForRow = located
 			}
-			if err = db.QueryRow(`SELECT count(*) FROM asset_history WHERE asset_id=$1 AND changes_json->'environment'->>'to'=$2 AND changes_json->>'network_segment_id'=$3`, ref.ID, tc.wantEnv, segmentForRow).Scan(&n); err != nil {
+			if err = db.QueryRow(`SELECT count(*) FROM asset_history WHERE asset_id=$1 AND changes_json->'environment'->>'to'=$2 AND changes_json->>'prefix_id'=$3`, ref.ID, tc.wantEnv, segmentForRow).Scan(&n); err != nil {
 				t.Fatal(err)
 			}
 			if want := map[bool]int{true: 1, false: 0}[tc.wantEnvRow]; n != want {

@@ -21,6 +21,7 @@ import {
   type OutcomeTone,
   type ResourceTypeOutcome,
 } from './cloud-outcomes';
+import { CloudOutcomeGrid } from './cloud-outcome-grid';
 import { collectionWarningsView, warningReasonLabel, type CollectionWarningsView } from './collection-warnings';
 
 type Job = deviceInterrogationComponents['schemas']['InterrogationJob'];
@@ -354,6 +355,9 @@ export function JobDetailModal({ job, onClose }: { job: Job | null; onClose: () 
                   {banner.body}
                 </div>
               )}
+              <div style={{ marginBottom: 10 }}>
+                <CloudOutcomeGrid types={resourceTypes} />
+              </div>
               <ResourceTypes types={resourceTypes} />
             </Section>
           )}

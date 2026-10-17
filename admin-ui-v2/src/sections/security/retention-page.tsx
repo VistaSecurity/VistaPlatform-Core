@@ -56,6 +56,72 @@ export function retentionFormError(f: Pick<RetForm, 'hot_storage_days' | 'total_
   return null;
 }
 
+/** The event type that marks the inventory change log's own policy. The
+ *  database function that drops expired `object_changes` partitions reads it
+ *  (and falls back to the longest general policy when none is active). */
+export const CHANGE_LOG_EVENT_TYPE = 'inventory.change_log';
+export const CHANGE_LOG_POLICY_NAME = 'Inventory change log';
+
+/** The body that saves the change log's retention as a policy of its own. */
+export function changeLogPolicyInput(days: number): RetentionPolicyInput {
+  return {
+    policy_name: CHANGE_LOG_POLICY_NAME,
+    event_type: CHANGE_LOG_EVENT_TYPE,
+    compliance_framework: null,
+    // Nothing is archived for this policy; the hot window only has to satisfy
+    // the rule that total is not shorter than hot.
+    hot_storage_days: Math.min(30, days),
+    total_retention_days: days,
+    is_active: true,
+  };
+}
+
+/** Why the change-log days cannot be saved, or null. */
+export function changeLogDaysError(days: number): string | null {
+  if (!Number.isInteger(days) || days < 1) return 'Retention must be a whole number of days, at least 1.';
+  return null;
+}
+
+/**
+ * Inventory change log retention (DCIM BUILD_PLAN row 5.2): how long the
+ * inventory's "who changed what" record (Inventory → Changes) is kept. Months
+ * older than this are dropped whole by the nightly partition job. Without a
+ * setting the change log follows the general audit retention above.
+ */
+export function ChangeLogRetentionCard({ policies, mut }: { policies: RetentionPolicy[]; mut: ReturnType<typeof useRetentionMutations> }) {
+  const existing = policies.find((p) => p.event_type === CHANGE_LOG_EVENT_TYPE) ?? null;
+  const [days, setDays] = useState<number>(existing?.total_retention_days ?? 365);
+  const error = changeLogDaysError(days);
+  const unchanged = !!existing && existing.is_active && existing.total_retention_days === days;
+  const save = () => {
+    const opts = {
+      onSuccess: () => toast.success('Change log retention saved'),
+      onError: (e: unknown) => toast.error(errMsg(e)),
+    };
+    if (existing) mut.update.mutate({ id: existing.id, body: changeLogPolicyInput(days) }, opts);
+    else mut.create.mutate(changeLogPolicyInput(days), opts);
+  };
+  return (
+    <div className="op-panel" data-testid="change-log-retention" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 14, color: 'var(--op-t1)' }}>Inventory change log retention</div>
+      <div style={{ fontSize: 12, color: 'var(--op-t2)' }}>
+        How long the inventory change log (Inventory → Changes) keeps its records, for all tenants. Whole months older than this are deleted.
+        {existing && !existing.is_active ? ' The saved policy is inactive, so the general audit retention applies.' : ''}
+        {!existing ? ' No setting yet: the change log follows the longest general audit retention.' : ''}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <input aria-label="Change log retention (days)" type="number" min={1} step={1} value={days}
+          onChange={(e) => setDays(parseInt(e.target.value) || 0)} style={{ ...modalInputStyle, width: 120, borderColor: error ? 'var(--danger)' : 'var(--op-border2)' }} />
+        <span style={{ fontSize: 12, color: 'var(--op-t3)' }}>days</span>
+        <PlatformPermissionGate permission={PLATFORM_PERMISSIONS.platform.auditManage}>
+          <button className="op-btn primary sm" data-testid="change-log-retention-save" disabled={!!error || unchanged || mut.create.isPending || mut.update.isPending} onClick={save}>Save</button>
+        </PlatformPermissionGate>
+      </div>
+      {error && <div role="alert" style={{ fontSize: 11.5, color: 'var(--danger)' }}>{error}</div>}
+    </div>
+  );
+}
+
 export function RetentionModal({ policy, onClose, mut }: { policy: RetentionPolicy | null; onClose: () => void; mut: ReturnType<typeof useRetentionMutations> }) {
   const editing = !!policy;
   const [form, setForm] = useState<RetForm>(() => policy ? {
@@ -122,6 +188,8 @@ export function RetentionPage() {
         <Globe size={15} style={{ color: 'var(--op-accent)', flex: 'none' }} />
         Retention policies are platform-global — they apply to audit logs across all tenants.
       </div>
+
+      {!isLoading && !isError && <ChangeLogRetentionCard key={list.find((p) => p.event_type === CHANGE_LOG_EVENT_TYPE)?.updated_at ?? 'none'} policies={list} mut={mut} />}
 
       <div className="op-panel" style={{ overflow: 'hidden' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '13px 16px', borderBottom: '1px solid var(--op-border)' }}>

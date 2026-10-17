@@ -383,10 +383,18 @@ func TestCiscoCollectOps_EmitsTheOpsSet(t *testing.T) {
 		}
 	}
 
-	for _, key := range []string{factNetInterfaces, factNetVlans, factNetNeighbors} {
-		if !hasFact(result, key) {
-			t.Errorf("no %s fact reached the result; facts: %v", key, factKeys(result))
+	if !hasFact(result, factNetNeighbors) {
+		t.Errorf("no %s fact reached the result; facts: %v", factNetNeighbors, factKeys(result))
+	}
+	// DCIM row 1.5c: interfaces and VLANs are objects (result.Network), and
+	// the facts they replaced are no longer written.
+	for _, key := range []string{factNetInterfaces, factNetVlans} {
+		if hasFact(result, key) {
+			t.Errorf("the retired %s fact is still emitted", key)
 		}
+	}
+	if result.Network == nil || len(result.Network.Interfaces) == 0 || len(result.Network.VLANs) == 0 || len(result.Network.ARP) == 0 {
+		t.Errorf("no network observation (interfaces, VLANs, ARP) reached the result: %+v", result.Network)
 	}
 
 	// CDP, LLDP and ARP land in ONE net.neighbors fact — asset_facts is unique
@@ -400,8 +408,20 @@ func TestCiscoCollectOps_EmitsTheOpsSet(t *testing.T) {
 	for _, entry := range neighbors {
 		counts[entry["protocol"].(string)]++
 	}
-	if counts["cdp"] != 2 || counts["lldp"] != 2 || counts["arp"] != 3 {
-		t.Errorf("neighbour protocols = %v, want 2 cdp / 2 lldp / 3 arp", counts)
+	if counts["cdp"] != 0 || counts["lldp"] != 0 || counts["arp"] != 3 {
+		t.Errorf("net.neighbors protocols = %v, want the 3 ARP rows only (CDP / LLDP are cable ends now)", counts)
+	}
+	// CDP and LLDP are cable ends on the network observation (DCIM row 3.3),
+	// local ports named the way the interface table names them.
+	ends := map[string]int{}
+	for _, n := range result.Network.Neighbors {
+		ends[n.Protocol]++
+		if n.LocalInterface == "" || strings.HasPrefix(n.LocalInterface, "Gi") && !strings.HasPrefix(n.LocalInterface, "GigabitEthernet") {
+			t.Errorf("neighbour local port not canonical: %+v", n)
+		}
+	}
+	if ends["cdp"] != 2 || ends["lldp"] != 2 {
+		t.Errorf("network neighbours = %v, want 2 cdp / 2 lldp: %+v", ends, result.Network.Neighbors)
 	}
 
 	if edges := relationshipsOfType(result, relTypeConnectsTo); len(edges) != 4 {

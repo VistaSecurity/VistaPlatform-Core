@@ -509,7 +509,7 @@ func TestIntegration_ObservationSink_RetainsWeakPeerFactsAndEdges(t *testing.T) 
 	self := subjectAsset(t, owner, tenant, "controller")
 	target := subjectAsset(t, owner, tenant, "verified-target")
 	oldSeen := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
-	if _, err := owner.Exec(`UPDATE assets SET last_seen_at=$3,class_key='unknown_host',class_source_kind='declared',site='Operator site' WHERE tenant_id=$1 AND id=$2`, tenant, target, oldSeen); err != nil {
+	if _, err := owner.Exec(`UPDATE assets SET last_seen_at=$3,class_key='unknown_host',class_source_kind='declared',site_id=$4 WHERE tenant_id=$1 AND id=$2`, tenant, target, oldSeen, testdb.EnsureSite(t, owner, tenant, "Operator site")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := owner.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}')`, tenant); err != nil {
@@ -582,7 +582,7 @@ func TestIntegration_ObservationSink_RetainsWeakPeerFactsAndEdges(t *testing.T) 
 	if err := owner.QueryRow(`SELECT observed_at FROM asset_facts WHERE tenant_id=$1 AND asset_id=$2 AND key='hw.model'`, tenant, target).Scan(&factTime); err != nil {
 		t.Fatal(err)
 	}
-	if err := owner.QueryRow(`SELECT last_seen_at,class_key,site FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, target).Scan(&assetSeen, &class, &site); err != nil {
+	if err := owner.QueryRow(`SELECT last_seen_at,class_key,`+testdb.SiteNameSQL+` FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, target).Scan(&assetSeen, &class, &site); err != nil {
 		t.Fatal(err)
 	}
 	if !factTime.Equal(seen) || !assetSeen.Equal(oldSeen) || class != "unknown_host" || site != "Operator site" {
@@ -600,7 +600,7 @@ func TestIntegration_ObservationSink_UsesControllerProofWithoutTrustingAdvertise
 	owner := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, owner)
 	tenant := testdb.NewTenant(t, owner)
-	if _, err := owner.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata) VALUES($1,'DHCP LAN','cidr','192.0.2.0/24','private','production',true,'{"dynamic":true}')`, tenant); err != nil {
+	if _, err := owner.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,dhcp_managed,source_kind,status) VALUES($1,'DHCP LAN','192.0.2.0/24'::cidr,'private','production',true,'declared','active')`, tenant); err != nil {
 		t.Fatal(err)
 	}
 	sink := NewObservationSink(testdb.ConnectAsAppRole(t, owner))
@@ -634,7 +634,7 @@ func TestIntegration_ObservationSink_SegmentPreparationFailureStopsPeers(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = owner.Exec(`DROP FUNCTION IF EXISTS ` + name + `() CASCADE`) })
-	if _, err := owner.Exec(`CREATE TRIGGER ` + name + ` BEFORE INSERT ON network_segments FOR EACH ROW EXECUTE FUNCTION ` + name + `() `); err != nil {
+	if _, err := owner.Exec(`CREATE TRIGGER ` + name + ` BEFORE INSERT ON prefixes FOR EACH ROW EXECUTE FUNCTION ` + name + `() `); err != nil {
 		t.Fatal(err)
 	}
 	peer := di.PeerRef{Identifiers: []di.PeerIdentifier{{Kind: di.IdentifierMACAddress, Value: "00:1a:2b:3c:4d:5e"}, {Kind: di.IdentifierIPAddress, Value: "192.0.2.20"}}}

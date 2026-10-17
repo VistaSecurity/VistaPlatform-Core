@@ -283,9 +283,9 @@ func factorLabel(name string, value float64) string {
 	case FeatureClassConflict:
 		return "unrelated asset classes"
 	case FeatureSegmentMatch:
-		return "same network segment"
+		return "same prefix"
 	case FeatureSegmentConflict:
-		return "different network segments"
+		return "different prefixes"
 	case FeatureRecency:
 		return fmt.Sprintf("seen %s apart", recencyPhrase(value))
 	case FeatureSourceSame:

@@ -4,6 +4,7 @@
 // locked page is worse than no link, and RBAC-hiding is NOT edition-hiding — a
 // Tenant Admin holds `settings.read` on a Core install too, so `permission`
 // alone leaves Enterprise-only pages advertised and reachable.
+import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { defaultFeatures, type FeaturesMap } from '@vistasecurity/primitives/features';
 import { PROFILE_NAV, SETTINGS_NAV, settingsPageMeta, visibleProfileNav, visibleSettingsNav } from './nav';
@@ -47,8 +48,8 @@ describe('visibleSettingsNav', () => {
     // section rather than the entry would take consumption-against-limits away
     // from every free install.
     const sections = visibleSettingsNav(defaultFeatures);
-    const account = sections.find((s) => s.section === 'Account');
-    expect(account, 'the Account section must survive on Core').toBeTruthy();
+    const account = sections.find((s) => s.section === 'Plan & Usage');
+    expect(account, 'the Plan & Usage section must survive on Core').toBeTruthy();
     expect(account!.items.map((i) => i.key)).toEqual(['billing', 'usage']);
   });
 
@@ -63,7 +64,7 @@ describe('visibleSettingsNav', () => {
     expect(keys).toContain('members');
     expect(keys).toContain('roles');
     expect(keys).toContain('frameworks');
-    expect(keys).toContain('audit');
+    expect(keys).not.toContain('audit');
   });
 
   it('drops a section left empty by gating, rather than showing a bare header', () => {
@@ -154,7 +155,7 @@ describe('settingsPageMeta', () => {
     const meta = settingsPageMeta('custom-policies');
     expect(meta.feature).toBe('custom_policies');
     expect(meta.lock?.title).toBeTruthy();
-    expect(meta.section).toBe('Policies');
+    expect(meta.section).toBe('Policies & Trust');
   });
 
   it('Billing account is not a lock page: the billing calls are gated inside it', () => {
@@ -166,7 +167,7 @@ describe('settingsPageMeta', () => {
     const meta = settingsPageMeta('billing');
     expect(meta.feature).toBeUndefined();
     expect(meta.lock).toBeUndefined();
-    expect(meta.section).toBe('Account');
+    expect(meta.section).toBe('Plan & Usage');
   });
 
   it('gates Roles & Permissions on users.manage, matching the backend route', () => {
@@ -224,6 +225,28 @@ describe('settingsPageMeta', () => {
   });
 });
 
+describe('operational workspace ownership', () => {
+  it('keeps every moved page out of the Settings drawer and gives it a stable destination', () => {
+    const moved = SETTINGS_NAV.flatMap((section) => section.items).filter((item) => item.workspacePath);
+    const visible = keysOf(visibleSettingsNav(allOn, () => true));
+    expect(moved.length).toBeGreaterThan(10);
+    for (const item of moved) {
+      expect(visible).not.toContain(item.key);
+      expect(item.workspacePath).toMatch(/^\/(inventory\/manage|risk-compliance|remediation)\//);
+    }
+  });
+
+  it('preserves contextual tools as real pages instead of discarding their managers', () => {
+    expect(settingsPageMeta('classes').workspacePath).toBe('/inventory/manage/classes');
+    expect(settingsPageMeta('saved-filters').workspacePath).toBe('/inventory/manage/saved-filters');
+  });
+
+  it('redirects legacy Settings pages before mounting their old drawer content', () => {
+    const src = readFileSync(new URL('./settings-page.tsx', import.meta.url), 'utf8');
+    expect(src).toContain('if (meta.workspacePath) return <Navigate to={meta.workspacePath} replace />');
+  });
+});
+
 // slice 1. Trusted CAs is Core (D1) and is the home of every trust
 // decision, so it must be in the rail on every edition, beside the other pages
 // that explain how the inventory is decided. The page is readable with
@@ -232,10 +255,10 @@ describe('settingsPageMeta', () => {
 // controls inside the page carry that permission instead
 // (pages-trusted-cas.jsdom.test.tsx).
 describe('Trusted CAs entry', () => {
-  it('is a built Core page under Policies, readable with assets.read', () => {
+  it('is a built Core page under Policies & Trust, readable with assets.read', () => {
     const meta = settingsPageMeta('trusted-cas');
     expect(meta.label).toBe('Trusted CAs');
-    expect(meta.section).toBe('Policies');
+    expect(meta.section).toBe('Policies & Trust');
     expect(meta.built).toBe(true);
     expect(meta.permission).toBe('assets.read');
     expect(meta.feature).toBeUndefined();
@@ -252,8 +275,69 @@ describe('Trusted CAs entry', () => {
 
 describe('visibleSettingsNav — permissions', () => {
   it('drops a page whose permission the viewer lacks, and keeps it when they hold it', () => {
-    const gated = SETTINGS_NAV.flatMap((s) => s.items).find((i) => i.built && i.permission && !i.feature)!;
+    const gated = SETTINGS_NAV.flatMap((s) => s.items).find((i) => i.built && i.permission && !i.feature && !i.workspacePath)!;
     expect(keysOf(visibleSettingsNav(allOn, () => true))).toContain(gated.key);
     expect(keysOf(visibleSettingsNav(allOn, (p) => p !== gated.permission))).not.toContain(gated.key);
+  });
+});
+
+describe('Business Units (DCIM 1.1)', () => {
+  it('is a built Infrastructure page gated on dcim.read, not a Settings entry', () => {
+    const meta = settingsPageMeta('business-units');
+    expect(meta.label).toBe('Business Units');
+    expect(meta.built).toBe(true);
+    expect(meta.permission).toBe('dcim.read');
+    expect(meta.feature).toBeUndefined();
+    expect(meta.workspacePath).toBe('/inventory/manage/business-units');
+    expect(keysOf(visibleSettingsNav(defaultFeatures))).not.toContain('business-units');
+  });
+
+  it('has a route: settings-page.tsx renders the page for its key', () => {
+    const src = readFileSync(new URL('./settings-page.tsx', import.meta.url), 'utf8');
+    expect(src).toContain("case 'business-units': return <BusinessUnitsPage");
+  });
+});
+
+describe('Sites (DCIM 2.1)', () => {
+  it('is a built Infrastructure page gated on dcim.read, and Locations is gone', () => {
+    const meta = settingsPageMeta('sites');
+    expect(meta.label).toBe('Sites');
+    expect(meta.built).toBe(true);
+    expect(meta.permission).toBe('dcim.read');
+    expect(meta.workspacePath).toBe('/inventory/manage/sites');
+    expect(keysOf(visibleSettingsNav(defaultFeatures))).not.toContain('sites');
+    expect(keysOf(visibleSettingsNav(defaultFeatures))).not.toContain('locations');
+  });
+
+  it('has a route: settings-page.tsx renders the page for its key', () => {
+    const src = readFileSync(new URL('./settings-page.tsx', import.meta.url), 'utf8');
+    expect(src).toContain("case 'sites': return <SitesPage");
+  });
+});
+
+describe('Device catalogue (DCIM 2.2)', () => {
+  const pages: [string, string, string][] = [
+    ['device-types', 'Device Types', 'DeviceTypesPage'],
+    ['manufacturers', 'Manufacturers', 'ManufacturersPage'],
+    ['device-roles', 'Device Roles', 'DeviceRolesPage'],
+    ['platforms', 'Platforms (OS)', 'PlatformsPage'],
+  ];
+  it('has a built workspace page per catalog, gated on dcim.read, on every edition', () => {
+    const infra = SETTINGS_NAV.find((s) => s.section === 'Infrastructure')!.items.map((i) => i.key);
+    for (const [key, label] of pages) {
+      const meta = settingsPageMeta(key);
+      expect(meta.label).toBe(label);
+      expect(meta.built).toBe(true);
+      expect(meta.permission).toBe('dcim.read');
+      expect(meta.feature).toBeUndefined();
+      expect(infra).toContain(key);
+      expect(meta.workspacePath).toBe(`/inventory/manage/${key}`);
+      expect(keysOf(visibleSettingsNav(defaultFeatures))).not.toContain(key);
+    }
+  });
+
+  it('has a route: settings-page.tsx renders each page for its key', () => {
+    const src = readFileSync(new URL('./settings-page.tsx', import.meta.url), 'utf8');
+    for (const [key, , component] of pages) expect(src).toContain(`case '${key}': return <${component}`);
   });
 });

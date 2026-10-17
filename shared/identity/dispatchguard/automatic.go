@@ -71,7 +71,7 @@ func LoadAutomaticScope(tx Queryer, tenantID string) (*AutomaticScope, error) {
 		return nil, ErrPaused
 	}
 	var segmentRaw []byte
-	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('value',value,'network_type',network_type,'learned',`+learnedSegmentSQL+`,'imported',`+connectionImportedSegmentSQL+`,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, tenantID).Scan(&segmentRaw); err != nil {
+	if err := tx.QueryRow(prefixScopeSQL, tenantID).Scan(&segmentRaw); err != nil {
 		return nil, err
 	}
 	var segments []struct {
@@ -96,9 +96,9 @@ func LoadAutomaticScope(tx Queryer, tenantID string) (*AutomaticScope, error) {
 		}
 		if seg.Blocked {
 			excluded = append(excluded, prefix)
-		} else if SegmentPrefixGrantsOwnership(prefix, seg.NetworkType, seg.Learned, true) {
+		} else if SegmentPrefixGrantsOwnership(prefix, PrefixNetworkType(seg.NetworkType, prefix), seg.Learned, true) {
 			allowed = append(allowed, prefix)
-			if SegmentDeclaresAutomaticScope(prefix, seg.NetworkType, seg.Learned, seg.Imported) {
+			if SegmentDeclaresAutomaticScope(prefix, PrefixNetworkType(seg.NetworkType, prefix), seg.Learned, seg.Imported) {
 				declared = append(declared, prefix)
 			}
 		}

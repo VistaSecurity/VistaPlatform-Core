@@ -156,7 +156,7 @@ describe('groupByDirection', () => {
 });
 
 describe('isDecidable — where Accept/Reject may be offered', () => {
-  it('is true for a pending edge whose ends are both monitored', () => {
+  it('is true for an edge awaiting approval whose ends are both monitored', () => {
     // The same predicate the server's proposal queue applies. Offering the
     // buttons anywhere else would put a control on the page the API refuses.
     expect(isDecidable(edge({ status: 'pending', peer: peer({ asset_status: 'monitoring' }) }), 'monitoring')).toBe(true);

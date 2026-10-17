@@ -161,8 +161,12 @@ export function countBySource(
   proposals: { source?: string | null; source_kind?: string | null }[],
   relationshipProposals: { source_ref?: string | null; source_kind?: string | null }[] = [],
   classProposals: { source?: string | null }[] = [],
+  cableProposals: unknown[] = [],
 ): Record<ApprovalSource, number> {
   const out = Object.fromEntries(APPROVAL_SOURCES.map((s) => [s, 0])) as Record<ApprovalSource, number>;
+  // A proposed cable is an LLDP / CDP neighbour a device reported: measured on
+  // the network, so `discovered` (DCIM row 3.3).
+  out[SOURCE_OF_CABLE_PROPOSAL] += cableProposals.length;
   for (const a of assets) out[sourceOfAsset(a)] += 1;
   for (const p of proposals) out[sourceOfProposal(p)] += 1;
   // Every row kind is counted. The chips claim to describe the queue, and a row
@@ -172,6 +176,10 @@ export function countBySource(
   for (const c of classProposals) out[sourceOfClassProposal(c)] += 1;
   return out;
 }
+
+/** The source of every proposed cable (DCIM row 3.3): a device's neighbour
+ *  table, i.e. the network itself. */
+export const SOURCE_OF_CABLE_PROPOSAL: ApprovalSource = 'discovered';
 
 /** Keeps the rows whose source is selected. An EMPTY selection means "all" —
  *  not "none", which would render an empty queue as if the work were done. */

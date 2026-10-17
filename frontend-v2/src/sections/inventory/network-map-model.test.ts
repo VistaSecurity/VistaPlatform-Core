@@ -4,14 +4,14 @@ import { describe, expect, it } from 'vitest';
 import { LEVEL_MIN } from '../../components/ui/risk';
 import {
   DEVICES_ZOOM_BELOW, arcPath, assetIcon, assetTone, badgeCount, cryptoTraits, defaultPrefs,
-  emptySegmentCount, groupSites, networkTruncationNotice, parsePrefs, splitArc, toneCounts,
+  emptyPrefixCount, groupSites, networkTruncationNotice, parsePrefs, splitArc, toneCounts,
   visibleAssets,
   type NetworkMap, type NetworkMapAsset, type NetworkMapComponent,
 } from './network-map-model';
 
-const SEG_A = '00000000-0000-4000-8000-00000000000a';
-const SEG_B = '00000000-0000-4000-8000-00000000000b';
-const SEG_EMPTY = '00000000-0000-4000-8000-0000000000ee';
+const PFX_A = '00000000-0000-4000-8000-00000000000a';
+const PFX_B = '00000000-0000-4000-8000-00000000000b';
+const PFX_EMPTY = '00000000-0000-4000-8000-0000000000ee';
 
 let n = 0;
 function asset(over: Partial<NetworkMapAsset> = {}): NetworkMapAsset {
@@ -22,7 +22,7 @@ function asset(over: Partial<NetworkMapAsset> = {}): NetworkMapAsset {
     class_key: 'server',
     asset_status: 'monitoring',
     site: 'Head office',
-    segment_id: SEG_A,
+    prefix_id: PFX_A,
     risk_score: 0,
     risk_assessed: false,
     service_count: 0,
@@ -39,10 +39,10 @@ function withCrypto(over: Partial<NetworkMapAsset> = {}, crypto: Partial<Network
 
 function map(assets: NetworkMapAsset[], over: Partial<NetworkMap> = {}): NetworkMap {
   return {
-    segments: [
-      { segment_id: SEG_A, name: 'Office LAN', value: '10.0.0.0/24', segment_type: 'cidr', gateway: null },
-      { segment_id: SEG_B, name: 'Servers', value: '10.0.1.0/24', segment_type: 'cidr', gateway: null },
-      { segment_id: SEG_EMPTY, name: 'Guest', value: '10.0.9.0/24', segment_type: 'cidr', gateway: null },
+    prefixes: [
+      { prefix_id: PFX_A, prefix: '10.0.0.0/24', description: 'Office LAN', vlan_vid: null, vlan_name: null, gateway: null, fhrp_group: null },
+      { prefix_id: PFX_B, prefix: '10.0.1.0/24', description: 'Servers', vlan_vid: null, vlan_name: null, gateway: null, fhrp_group: null },
+      { prefix_id: PFX_EMPTY, prefix: '10.0.9.0/24', description: 'Guest', vlan_vid: null, vlan_name: null, gateway: null, fhrp_group: null },
     ],
     assets,
     total_assets: assets.length,
@@ -57,10 +57,10 @@ const comp = (over: Partial<NetworkMapComponent>): NetworkMapComponent => ({
 });
 
 describe('grouping (D2)', () => {
-  it('places assets by site, then by their ASSIGNED segment', () => {
-    const a = asset({ segment_id: SEG_A });
-    const b = asset({ segment_id: SEG_B });
-    const b2 = asset({ segment_id: SEG_B });
+  it('places assets by site, then by their prefix', () => {
+    const a = asset({ prefix_id: PFX_A });
+    const b = asset({ prefix_id: PFX_B });
+    const b2 = asset({ prefix_id: PFX_B });
     const [site] = groupSites(map([a, b, b2]), [a, b, b2]);
     expect(site.name).toBe('Head office');
     // Biggest tray first.
@@ -71,30 +71,30 @@ describe('grouping (D2)', () => {
   it('never infers a network from the address', () => {
     // The address says 10.0.1.x, the data says Office LAN. The map shows what
     // the data says — correcting it silently would hide the thing to fix.
-    const a = asset({ segment_id: SEG_A, address: '10.0.1.7' });
+    const a = asset({ prefix_id: PFX_A, address: '10.0.1.7' });
     const [site] = groupSites(map([a]), [a]);
     expect(site.trays[0].name).toBe('Office LAN');
   });
 
-  it('puts an unsegmented asset in an explicit Unsegmented tray, last', () => {
-    const lone = asset({ segment_id: null });
-    const x = asset({ segment_id: SEG_A });
+  it('puts an asset in no prefix in an explicit No prefix tray, last', () => {
+    const lone = asset({ prefix_id: null });
+    const x = asset({ prefix_id: PFX_A });
     const [site] = groupSites(map([lone, x]), [lone, x]);
-    expect(site.trays.map((t) => t.name)).toEqual(['Office LAN', 'Unsegmented']);
-    expect(site.trays[1].segmentId).toBeNull();
+    expect(site.trays.map((t) => t.name)).toEqual(['Office LAN', 'No prefix']);
+    expect(site.trays[1].prefixId).toBeNull();
   });
 
-  it('keeps an asset on an inactive segment in its own tray, not Unsegmented', () => {
-    const gone = asset({ segment_id: '00000000-0000-4000-8000-0000000000ff' });
+  it('keeps an asset in a retired prefix in its own tray, not No prefix', () => {
+    const gone = asset({ prefix_id: '00000000-0000-4000-8000-0000000000ff' });
     const [site] = groupSites(map([gone]), [gone]);
-    expect(site.trays[0].name).toBe('Inactive network');
-    expect(site.trays[0].segmentId).not.toBeNull();
+    expect(site.trays[0].name).toBe('Retired network');
+    expect(site.trays[0].prefixId).not.toBeNull();
   });
 
   it('groups a siteless cloud resource under its account, one tray per region', () => {
-    const e1 = asset({ site: 'Unassigned', segment_id: null, cloud_account: '1234', cloud_region: 'us-east-1' });
-    const w1 = asset({ site: 'Unassigned', segment_id: null, cloud_account: '1234', cloud_region: 'eu-west-1' });
-    const e2 = asset({ site: 'Unassigned', segment_id: null, cloud_account: '1234', cloud_region: 'us-east-1' });
+    const e1 = asset({ site: 'Unassigned', prefix_id: null, cloud_account: '1234', cloud_region: 'us-east-1' });
+    const w1 = asset({ site: 'Unassigned', prefix_id: null, cloud_account: '1234', cloud_region: 'eu-west-1' });
+    const e2 = asset({ site: 'Unassigned', prefix_id: null, cloud_account: '1234', cloud_region: 'us-east-1' });
     const [site] = groupSites(map([e1, w1, e2]), [e1, w1, e2]);
     expect(site.kind).toBe('cloud');
     expect(site.name).toBe('Cloud account 1234');
@@ -102,8 +102,8 @@ describe('grouping (D2)', () => {
   });
 
   it('keeps two cloud accounts apart', () => {
-    const a = asset({ site: 'Unassigned', segment_id: null, cloud_account: '111' });
-    const b = asset({ site: 'Unassigned', segment_id: null, cloud_account: '222' });
+    const a = asset({ site: 'Unassigned', prefix_id: null, cloud_account: '111' });
+    const b = asset({ site: 'Unassigned', prefix_id: null, cloud_account: '222' });
     expect(groupSites(map([a, b]), [a, b]).map((s) => s.name).sort()).toEqual(['Cloud account 111', 'Cloud account 222']);
   });
 
@@ -117,10 +117,10 @@ describe('grouping (D2)', () => {
     expect(sites[2].kind).toBe('unassigned');
   });
 
-  it('counts active segments nothing sits in, rather than drawing them', () => {
-    const a = asset({ segment_id: SEG_A });
-    const b = asset({ segment_id: SEG_B });
-    expect(emptySegmentCount(map([a, b]))).toBe(1);
+  it('counts live prefixes nothing sits in, rather than drawing them', () => {
+    const a = asset({ prefix_id: PFX_A });
+    const b = asset({ prefix_id: PFX_B });
+    expect(emptyPrefixCount(map([a, b]))).toBe(1);
   });
 
   it('filters to devices with crypto when asked', () => {

@@ -232,20 +232,28 @@ func TestFoldProtocol(t *testing.T) {
 	}
 }
 
-// protocolEnumBaseline is the value list the `protocol_type` enum shipped with,
-// frozen. It is history, not configuration: every database created before an
-// ALTER was ever added to schema.sql has exactly these values and no others, so
-// the list can never legitimately change. Do not "update" it when adding a
-// protocol — add the value to CREATE TYPE and an ALTER, which is precisely what
+// protocolEnumBaseline is the value list of the `protocol_type` enum in the
+// 5.0.0 baseline schema (asset-inventory ADR-0010 D11): every 5.0 install is
+// created with exactly these values. 5.0.0 is a fresh install, so the 4.x
+// ALTERs that carried QUIC and PPTP to older databases were folded into the
+// CREATE TYPE and this list re-frozen with them.
+//
+// Until 5.0.0 ships, a new protocol is added to CREATE TYPE AND to this list
+// (no ALTER: there is no migration block in the 5.0 cycle). Once 5.0.0 ships
+// the list is history, not configuration: every 5.0 database has exactly these
+// values, so it can never legitimately change again — a new protocol then goes
+// into CREATE TYPE and an ALTER, which is precisely what
 // TestProtocolEnum_AdditionsCarryAnAlterType checks.
 var protocolEnumBaseline = []string{
 	"TLS", "SSH", "IPSec", "VPN", "Database", "API", "SMB", "Kerberos",
+	"QUIC", "PPTP", "IKE",
 	"Modbus", "DNP3", "MMS", "ICCP", "IEC62351", "OPC_UA",
 	"EtherNet_IP", "BACnet", "BACnet_SC", "HART_IP", "S7",
 }
 
-// alterEnumRe pulls the values out of the POST-MIGRATIONS
-// `ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS '<v>'` statements.
+// alterEnumRe pulls the values out of
+// `ALTER TYPE public.protocol_type ADD VALUE IF NOT EXISTS '<v>'` statements
+// (none in the 5.0.0 baseline; the migration block returns after 5.0.0 ships).
 var alterEnumRe = regexp.MustCompile(`ALTER TYPE public\.protocol_type ADD VALUE IF NOT EXISTS '([^']+)'`)
 
 // TestProtocolEnum_AdditionsCarryAnAlterType closes a failure mode that is

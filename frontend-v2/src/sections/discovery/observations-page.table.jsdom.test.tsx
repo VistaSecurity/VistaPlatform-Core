@@ -233,18 +233,18 @@ describe('what this needs', () => {
     expect(needs.textContent).toContain('A real device answered at this address, but this network uses DHCP');
     expect(needs.textContent).toContain('Its ssh host key (SHA256:abcd…wxyz) will recognise it next time.');
     const stable = [...needs.querySelectorAll('a')].find((a) => a.textContent === 'Treat this network as stable…')!;
-    expect(stable.getAttribute('href')).toBe('/settings/segments');
+    expect(stable.getAttribute('href')).toBe('/inventory?lens=networks');
     expect(needs.textContent).toContain('Future scans can then create and approve assets there directly');
     // No review date, no reminder, no expiry: the owner ruled them out.
     expect(needs.querySelector('input[type="date"], input[type="datetime-local"], input[type="number"]')).toBeNull();
     expect(needs.textContent).not.toMatch(/review date|remind|expir|re-?evaluat/i);
   });
 
-  it('sends a row outside every network to the segment settings', async () => {
+  it('sends a row outside every network to Inventory → Networks', async () => {
     page.rows = [obs('n1', { network_name: null, needs: 'needs_network', suggested_action: 'add_network', explanation_code: 'network_not_configured' })];
     await render();
     const add = [...row('n1').querySelectorAll('a')].find((a) => a.textContent === 'Add network');
-    expect(add?.getAttribute('href')).toBe('/settings/segments');
+    expect(add?.getAttribute('href')).toBe('/inventory?lens=networks');
     const needs = (await expand('n1')).querySelector('[aria-label="What this needs"]')!;
     expect(needs.textContent).toContain('This address is not inside any network you have set up.');
     expect(needs.textContent).toContain('that covers 192.0.2.2');

@@ -284,14 +284,14 @@ export function PostureOverview() {
                         <span className="mono" style={{ fontSize: 10, color: 'var(--app-t3)' }}>{row.count}</span>
                       </div>
                     </td>
-                    {row.cells.map((cell, ci) => (
+                    {row.cells.map((cell, colIdx) => (
                       // Three cell states: a fail count, a green check
                       // for assessed-and-clean, and a muted dash for a control
                       // that was never assessed. The last one deliberately gets
                       // no heat colour and no tick — it is an absence of
                       // information, not a clean result and not a severity.
-                      <td key={ci} onClick={() => cell.fail && nav(`/risk-compliance/findings?lens=control&fw=${cols[ci].fwId}&control=${cols[ci].id}`)} className="mcell"
-                        title={cell.notAssessed ? `${cols[ci].name} · ${NOT_ASSESSED_LABEL} — ${notAssessedReasonText(cell.notAssessedReason)}` : undefined}
+                      <td key={colIdx} onClick={() => cell.fail && nav(`/risk-compliance/findings?lens=control&fw=${cols[colIdx].fwId}&control=${cols[colIdx].id}`)} className="mcell"
+                        title={cell.notAssessed ? `${cols[colIdx].name} · ${NOT_ASSESSED_LABEL} — ${notAssessedReasonText(cell.notAssessedReason)}` : undefined}
                         style={{ height: 38, width: 58, textAlign: 'center', borderBottom: '1px solid var(--app-border)', borderLeft: '1px solid var(--app-border)', background: cell.notAssessed ? 'var(--app-panel2)' : heatColor(cell.ratio), cursor: cell.fail ? 'pointer' : 'default' }}>
                         {cell.notAssessed
                           ? <span className="mono" style={{ fontSize: 12, color: 'var(--app-t3)', opacity: 0.7 }}>—</span>

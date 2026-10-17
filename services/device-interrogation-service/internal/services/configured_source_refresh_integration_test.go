@@ -32,7 +32,7 @@ func TestIntegration_SourceRefreshAtomicReplayAndCompletion(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active) VALUES($1,$2,'Refresh network','cidr','192.0.2.0/24','production',true)`, uuid.New(), tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Refresh network','192.0.2.0/24'::cidr,'production','declared','active')`, uuid.New(), tenant); err != nil {
 		t.Fatal(err)
 	}
 	other := testdb.NewTenant(t, db)
@@ -185,7 +185,7 @@ func TestIntegration_SourceRefreshNoGuessingAndBlockedCredentials(t *testing.T) 
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active) VALUES($1,$2,'Refresh network','cidr','192.0.2.0/24','production',true)`, uuid.New(), tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Refresh network','192.0.2.0/24'::cidr,'production','declared','active')`, uuid.New(), tenant); err != nil {
 		t.Fatal(err)
 	}
 	devices := NewDeviceServiceWithKey(db, testMasterKey)
@@ -242,7 +242,7 @@ func TestIntegration_SourceRefreshCloudAndExecutorOwnership(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active) VALUES($1,$2,'Refresh network','cidr','192.0.2.0/24','production',true)`, uuid.New(), tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Refresh network','192.0.2.0/24'::cidr,'production','declared','active')`, uuid.New(), tenant); err != nil {
 		t.Fatal(err)
 	}
 	other := testdb.NewTenant(t, db)
@@ -358,7 +358,7 @@ func TestIntegration_SourceRefreshTargetPolicy(t *testing.T) {
 	tenant := testdb.NewTenant(t, db)
 	service := NewConfiguredSourceRefresh(db, NewJobQueueService(db, db, nil), NewDeviceServiceWithKey(db, testMasterKey), nil)
 	segment := uuid.New()
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active) VALUES($1,$2,'Policy network','cidr','192.0.2.0/24','production',true)`, segment, tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Policy network','192.0.2.0/24'::cidr,'production','declared','active')`, segment, tenant); err != nil {
 		t.Fatal(err)
 	}
 	device := models.Device{ID: uuid.New(), TenantID: tenant, DeviceType: "unifi", ClassKey: "network_controller", ManagementURL: strptr("https://192.0.2.2")}
@@ -399,7 +399,7 @@ func TestIntegration_SourceRefreshTargetPolicy(t *testing.T) {
 	if _, err := db.Exec(`UPDATE tenant_admin_settings SET config='{}' WHERE tenant_id=$1;`, tenant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE network_segments SET metadata='{"active_probes_disabled":true}' WHERE id=$1`, segment); err != nil {
+	if _, err := db.Exec(`UPDATE prefixes SET active_probes_disabled=true WHERE id=$1`, segment); err != nil {
 		t.Fatal(err)
 	}
 	device.ManagementURL = strptr("https://192.0.2.2")
@@ -416,7 +416,7 @@ func TestIntegration_SourceRefreshRechecksPolicyAtClaim(t *testing.T) {
 	tenant := testdb.NewTenant(t, db)
 	devices := NewDeviceServiceWithKey(db, testMasterKey)
 	queue := NewJobQueueService(db, db, nil)
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active) VALUES($1,$2,'Claim network','cidr','192.0.2.0/24','production',true)`, uuid.New(), tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Claim network','192.0.2.0/24'::cidr,'production','declared','active')`, uuid.New(), tenant); err != nil {
 		t.Fatal(err)
 	}
 	device, err := devices.CreateDevice(context.Background(), tenant, models.CreateDeviceRequest{DeviceType: "unifi", ManagementURL: strptr("https://192.0.2.2"), PlatformReinterrogationAllowed: boolPtr(true)})

@@ -79,6 +79,7 @@ func Sanitize(result *InterrogateResult) {
 		sanitizePeer(&result.Relationships[i].Peer)
 	}
 	sanitizeIdentity(result.DeviceIdentity)
+	sanitizeNetwork(result.Network)
 	// Warnings are free text built from whatever a device answered — a vendor
 	// error body, a Go *url.Error carrying the request URL. Their fields have
 	// innocent names, so the value-shaped rules apply (see SanitizeWarnings).

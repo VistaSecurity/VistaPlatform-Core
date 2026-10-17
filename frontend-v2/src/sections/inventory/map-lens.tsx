@@ -43,6 +43,11 @@ import { closesOnKey, closesOnOutsidePointer, downloadText, mapExportFilename, t
 import { QueryEditor } from './query-editor';
 import { useAssetsQuery, AssetQueryError } from './asset-queries';
 import { assetIdentity, classLabel } from './asset-shape';
+import {
+  CABLE_EDGE_COLOR, CABLE_EDGE_WIDTH, buildMapCablePaths, cablePathState, cablePathSummary, cablingLayerOn,
+  isCableEdgeId, physicalPathTarget, type MapCablePath,
+} from './map-cabling-model';
+import { CablingLegend, EdgeActionsMenu, MapTraceModal, cableDash, type MapTraceTarget } from './map-cabling';
 
 const MIN_DEPTH = 1;
 const MAX_DEPTH = 3;
@@ -253,8 +258,8 @@ function VirtualList<T>({ items, rowHeight, height, render, empty }: {
 
 // -------------------------------------------------------------- controls --
 
-function Toggle({ on, onClick, icon, label, title }: {
-  on: boolean; onClick: () => void; icon: string; label: string; title: string;
+function Toggle({ on, onClick, icon, label, title, disabled, testId }: {
+  on: boolean; onClick: () => void; icon: string; label: string; title: string; disabled?: boolean; testId?: string;
 }) {
   return (
     <button
@@ -262,7 +267,9 @@ function Toggle({ on, onClick, icon, label, title }: {
       onClick={onClick}
       title={title}
       aria-pressed={on}
-      style={{ fontSize: 12 }}
+      disabled={disabled}
+      data-testid={testId}
+      style={{ fontSize: 12, opacity: disabled ? 0.55 : 1 }}
     >
       <Icon name={icon} size={12} />{label}
     </button>
@@ -459,11 +466,12 @@ function AssetPicker({ query, onQueryChange, q, selectedId, onPick }: {
 
 // ---------------------------------------------------------- side panel ----
 
-function NodePanel({ node, edges, onClose, onFocus, fullScreen }: {
+function NodePanel({ node, edges, onClose, onFocus, onShowPath, fullScreen }: {
   node: MapNode;
   edges: MapEdge[];
   onClose: () => void;
   onFocus: (id: string) => void;
+  onShowPath: (t: MapTraceTarget) => void;
   fullScreen: boolean;
 }) {
   const style = CLASS_GROUP_STYLES[node.group];
@@ -571,11 +579,32 @@ function NodePanel({ node, edges, onClose, onFocus, fullScreen }: {
               <span style={{ fontSize: 10.5, color: 'var(--app-t3)' }} title={SOURCE_KIND_HELP[e.sourceKind]}>
                 {SOURCE_KIND_LABEL[e.sourceKind]}
               </span>
+              <PhysicalPathButton edge={e} onShowPath={onShowPath} />
             </div>
           )}
         />
       </div>
     </aside>
+  );
+}
+
+/** The keyboard route to "Show physical path": the same action the canvas
+ *  menu offers, on each relationship row of the side panel. */
+function PhysicalPathButton({ edge, onShowPath }: { edge: MapEdge; onShowPath: (t: MapTraceTarget) => void }) {
+  const target = physicalPathTarget(edge);
+  return (
+    <button
+      type="button"
+      className="ui-btn sm ghost"
+      data-testid="map-panel-physical-path"
+      disabled={!target.enabled}
+      aria-label={target.enabled ? `Show physical path from ${target.interfaceName}` : `Show physical path — unavailable: ${target.reason}`}
+      title={target.enabled ? `Show physical path from ${target.interfaceName}` : target.reason}
+      onClick={() => { if (target.enabled) onShowPath({ interfaceId: target.interfaceId, interfaceName: target.interfaceName }); }}
+      style={{ padding: '2px 5px', opacity: target.enabled ? 1 : 0.4 }}
+    >
+      <Icon name="route" size={11} />
+    </button>
   );
 }
 
@@ -600,6 +629,12 @@ function AssetMapViewInner(props: AssetMapViewProps) {
   const [impactOn, setImpactOn] = useState(false);
   const [impactDirection, setImpactDirection] = useState<'downstream' | 'upstream'>('downstream');
   const [hoverEdge, setHoverEdge] = useState<{ edge: MapEdge; x: number; y: number } | null>(null);
+  const [hoverCable, setHoverCable] = useState<{ cable: MapCablePath; x: number; y: number } | null>(null);
+  // The cabling layer (DCIM row 3.6). `null` until the person touches it: on
+  // when the neighbourhood has any cable run, off and disabled when it has none.
+  const [cablingChoice, setCablingChoice] = useState<boolean | null>(null);
+  const [edgeMenu, setEdgeMenu] = useState<{ edge: MapEdge; x: number; y: number } | null>(null);
+  const [traceTarget, setTraceTarget] = useState<MapTraceTarget | null>(null);
 
   const heldDepth = useDebouncedValue(depth, 220);
   const nbh = useAssetNeighbourhood(assetId, { depth: heldDepth, includePending });
@@ -634,6 +669,14 @@ function AssetMapViewInner(props: AssetMapViewProps) {
   );
 
   const handles = HANDLE_SIDES[direction];
+
+  // The physical runs between nodes that are drawn. Not part of the layout
+  // input: a cable does not move a box, so toggling the layer re-lays nothing.
+  const cablePaths = useMemo(
+    () => buildMapCablePaths(nbh.data, new Set(graph.nodes.map((n) => n.id))),
+    [nbh.data, graph.nodes],
+  );
+  const cablingOn = cablingLayerOn(cablingChoice, cablePaths.length);
 
   const baseNodes = useMemo<Node<AssetNodeData>[]>(() => graph.nodes.flatMap((n) => {
     const position = layout.positions[n.id];
@@ -690,8 +733,9 @@ function AssetMapViewInner(props: AssetMapViewProps) {
     // relationships between the same pair of assets are two lines rather than
     // one line with a hidden twin. Computed over the WHOLE edge list, because
     // an offset only means anything relative to the other edges of its pair.
-    const offsets = parallelEdgeOffsets(graph.edges);
-    return graph.edges.flatMap((e) => {
+    const drawnCables = cablingOn ? cablePaths : [];
+    const offsets = parallelEdgeOffsets([...graph.edges, ...drawnCables]);
+    const logical: Edge[] = graph.edges.flatMap((e) => {
     // An end the pending layout has no position for is not on the canvas yet.
     if (!layout.positions[e.source] || !layout.positions[e.target]) return [];
     const dimmed = !!overlay
@@ -722,9 +766,32 @@ function AssetMapViewInner(props: AssetMapViewProps) {
       markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14, color: e.pending ? 'var(--warn)' : 'var(--app-border2)' },
     };
     });
-  }, [graph, overlay, layout]);
+    // The physical layer: thick, in the cable colour, no arrowhead (a cable has
+    // no direction), dashed while it is a proposal. Same offset geometry, so a
+    // cable beside the relationship it carries is two lines, not one.
+    const physical: Edge[] = drawnCables.flatMap((c) => {
+      if (!layout.positions[c.source] || !layout.positions[c.target]) return [];
+      return {
+        id: c.id,
+        type: 'offset',
+        data: { offset: offsets[c.id] ?? 0, cable: true },
+        source: c.source,
+        target: c.target,
+        label: c.label,
+        animated: false,
+        style: {
+          stroke: CABLE_EDGE_COLOR,
+          strokeWidth: CABLE_EDGE_WIDTH,
+          strokeDasharray: cableDash(c.pending),
+          opacity: c.notConnected ? 0.6 : 1,
+        },
+      };
+    });
+    return [...logical, ...physical];
+  }, [graph, overlay, layout, cablePaths, cablingOn]);
 
   const edgeById = useMemo(() => new Map(graph.edges.map((e) => [e.id, e])), [graph.edges]);
+  const cableById = useMemo(() => new Map(cablePaths.map((c) => [c.id, c])), [cablePaths]);
   const selectedNode = useMemo(() => graph.nodes.find((n) => n.id === selectedId) ?? null, [graph.nodes, selectedId]);
   const legend = useMemo(() => legendFor(graph), [graph]);
   // Assets and STORED edges only: the banner's "of N" comes from the server's
@@ -757,12 +824,34 @@ function AssetMapViewInner(props: AssetMapViewProps) {
   if (assetId !== lastAssetId) {
     setLastAssetId(assetId);
     setSelectedId(null);
+    setEdgeMenu(null);
+    setCablingChoice(null);
   }
 
   const onEdgeEnter = useCallback((ev: ReactMouseEvent, edge: Edge) => {
+    if (isCableEdgeId(edge.id)) {
+      const cable = cableById.get(edge.id);
+      if (cable) setHoverCable({ cable, x: ev.clientX, y: ev.clientY });
+      return;
+    }
     const model = edgeById.get(edge.id);
     if (model) setHoverEdge({ edge: model, x: ev.clientX, y: ev.clientY });
-  }, [edgeById]);
+  }, [edgeById, cableById]);
+
+  // A cable opens its trace; a relationship opens its menu ("Show physical path").
+  const onEdgeClick = useCallback((ev: ReactMouseEvent, edge: Edge) => {
+    setHoverEdge(null);
+    setHoverCable(null);
+    if (isCableEdgeId(edge.id)) {
+      const cable = cableById.get(edge.id);
+      if (cable) setTraceTarget({ interfaceId: cable.fromInterfaceId, interfaceName: cable.fromInterfaceName, cableId: cable.cableId });
+      return;
+    }
+    const model = edgeById.get(edge.id);
+    if (model) setEdgeMenu({ edge: model, x: ev.clientX, y: ev.clientY });
+  }, [edgeById, cableById]);
+  const closeEdgeMenu = useCallback(() => setEdgeMenu(null), []);
+  const showPath = useCallback((t: MapTraceTarget) => { setEdgeMenu(null); setTraceTarget(t); }, []);
 
   // The KEYBOARD path into the side panel. React Flow already makes each node a
   // tab stop and handles Enter / Space / Escape on it, but it reports the
@@ -806,6 +895,15 @@ function AssetMapViewInner(props: AssetMapViewProps) {
           on={includePending} icon="inbox" label="Pending"
           title="Include relationships nobody has confirmed yet. They draw dashed."
           onClick={() => props.onIncludePendingChange(!includePending)}
+        />
+        <Toggle
+          on={cablingOn} icon="cable" label="Physical cabling"
+          disabled={state !== 'graph' || cablePaths.length === 0}
+          testId="map-cabling-toggle"
+          title={cablePaths.length === 0
+            ? 'No cables run between the assets on this map. Cables are connected on an asset\'s Ports tab.'
+            : 'Draw the cables between these assets — thick lines, dashed while proposed. Click one for its path.'}
+          onClick={() => setCablingChoice(!cablingOn)}
         />
         <Toggle
           on={impactOn} icon="zap" label="Show impact of focus"
@@ -907,9 +1005,10 @@ function AssetMapViewInner(props: AssetMapViewProps) {
               maxZoom={2}
               proOptions={{ hideAttribution: false }}
               onNodeClick={(_, n) => setSelectedId(n.id)}
-              onPaneClick={() => { setSelectedId(null); setHoverEdge(null); }}
+              onPaneClick={() => { setSelectedId(null); setHoverEdge(null); setHoverCable(null); setEdgeMenu(null); }}
               onEdgeMouseEnter={onEdgeEnter}
-              onEdgeMouseLeave={() => setHoverEdge(null)}
+              onEdgeMouseLeave={() => { setHoverEdge(null); setHoverCable(null); }}
+              onEdgeClick={onEdgeClick}
             >
               <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="var(--app-border)" />
               <Controls showInteractive={false} />
@@ -934,6 +1033,7 @@ function AssetMapViewInner(props: AssetMapViewProps) {
                       <span className="mono" style={{ color: 'var(--app-t3)' }}>{count}</span>
                     </span>
                   ))}
+                  {cablingOn && <CablingLegend pending={cablePaths.some((c) => c.pending)} />}
                 </div>
               </Panel>
               {state === 'empty' && (
@@ -1013,10 +1113,36 @@ function AssetMapViewInner(props: AssetMapViewProps) {
             edges={graph.edges}
             onClose={() => setSelectedId(null)}
             onFocus={props.onFocus}
+            onShowPath={showPath}
             fullScreen={fullScreen}
           />
         )}
       </div>
+
+      {hoverCable && (
+        <div
+          data-testid="map-cable-tooltip"
+          style={{
+            position: 'fixed', left: hoverCable.x + 14, top: hoverCable.y + 14, zIndex: 40,
+            pointerEvents: 'none', maxWidth: 290, padding: '8px 11px', borderRadius: 10,
+            border: '1px solid var(--app-border2)', background: 'var(--app-panel)', boxShadow: 'var(--app-shadow)',
+          }}
+        >
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--app-t1)' }}>
+            {hoverCable.cable.cableLabel ? `Cable ${hoverCable.cable.cableLabel}` : 'Cable'} · <span className="mono">{hoverCable.cable.label}</span>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 2, lineHeight: 1.5 }}>
+            {cablePathSummary(hoverCable.cable)}
+            <br />
+            <span style={{ color: hoverCable.cable.pending || hoverCable.cable.notConnected ? 'var(--warn)' : undefined }}>{cablePathState(hoverCable.cable)}</span>
+            <br />Click for the full path.
+          </div>
+        </div>
+      )}
+      {edgeMenu && (
+        <EdgeActionsMenu edge={edgeMenu.edge} x={edgeMenu.x} y={edgeMenu.y} onShowPath={showPath} onClose={closeEdgeMenu} />
+      )}
+      {traceTarget && <MapTraceModal target={traceTarget} onClose={() => setTraceTarget(null)} />}
     </div>
   );
 }

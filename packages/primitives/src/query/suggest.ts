@@ -162,7 +162,7 @@ function headCompletions(a: Analysis, cat: Catalog): Completion[] {
   // a key is typed. They rank below the fields they stand in for, except when
   // the user has typed the prefix itself.
   if (tgt !== null) {
-    for (const ns of ['attr', 'fact', 'id', 'tag']) {
+    for (const ns of ['attr', 'fact', 'id', 'tag', 'cf']) {
       if (!cat.fields(a.target).some((f) => f.name.startsWith(ns + '.') || f.name === ns)) continue;
       const score = match(written, ns + '.');
       if (score === 0) continue;
@@ -226,6 +226,8 @@ function namespaceHelp(ns: string): string {
       return 'a registered fact key';
     case 'id':
       return 'an identifier kind; id.any matches any kind';
+    case 'cf':
+      return 'a custom field';
     default:
       return 'a tenant tag key';
   }
@@ -268,7 +270,7 @@ function operatorHelp(op: string, t: FieldType): string {
       case 'class':
         return 'this class and everything under it';
       case 'inet':
-        return 'equal, or inside this CIDR block';
+        return 'equal, or inside this prefix (CIDR)';
       case 'keyword[]':
         return 'the array contains this';
       default:

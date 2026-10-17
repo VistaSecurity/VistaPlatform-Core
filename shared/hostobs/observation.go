@@ -52,6 +52,8 @@ const (
 	MaxCapabilities = 16
 	// MaxDHCPParams bounds the DHCP parameter-request-list fingerprint.
 	MaxDHCPParams = 64
+	// MaxInterfaces bounds a self-report's interface table.
+	MaxInterfaces = 16
 )
 
 // Why this package emits no `net.neighbors` fact.
@@ -136,6 +138,18 @@ type HostObservation struct {
 	// order, bounded by MaxAddresses.
 	Addresses []netip.Addr `json:"addresses,omitempty"`
 
+	// Interfaces travel ONLY on a self-report (AgentID set): the host's own
+	// interface table, each NIC with its name, MAC and configured addresses,
+	// and the interface(s) the sensor captures on flagged. A passive frame
+	// never knows which interface carried a value (the platform files those
+	// on a synthetic interface, DCIM row 1.4); a host describing itself does.
+	// Finalize drops the list when AgentID is empty, drops unnamed entries,
+	// bounds it by MaxInterfaces (and each entry's addresses by
+	// MaxAddresses), and derives the `capture_interfaces` attribute from the
+	// Capture flags. MAC filtering (locally administered, virtual-router,
+	// EUI-64) is the identification engine's, not this package's.
+	Interfaces []Interface `json:"interfaces,omitempty"`
+
 	// Hostnames are short names (no dot) the subject answers to.
 	Hostnames []string `json:"hostnames,omitempty"`
 
@@ -188,6 +202,24 @@ type HostObservation struct {
 	Facts map[string]any `json:"facts,omitempty"`
 }
 
+// Interface is one NIC of a self-reporting host (see HostObservation.Interfaces).
+type Interface struct {
+	// Name as the host's OS spells it ("eth0", "Ethernet 2").
+	Name string `json:"name"`
+	// MAC is the interface's hardware address, lowercase colon-separated.
+	MAC string `json:"mac,omitempty"`
+	// Addresses are the addresses configured on it, in CIDR form with the
+	// configured length ("192.0.2.10/24"); a bare address means the length is
+	// unknown.
+	Addresses []string `json:"addresses,omitempty"`
+	// Capture says the sensor captures on this interface.
+	Capture bool `json:"capture,omitempty"`
+}
+
+// AttrCaptureInterfaces is the attribute naming a self-reporting sensor's
+// capture interface(s), derived by Finalize from Interface.Capture.
+const AttrCaptureInterfaces = "capture_interfaces"
+
 // Finalize normalises, bounds and derives. Every decoder ends with it, and
 // [Coalesce] re-runs it on the merged result, so the invariants hold in one
 // place rather than seven.
@@ -205,6 +237,10 @@ func (o *HostObservation) Finalize() {
 	}
 
 	o.OtherMACs = o.stableOtherMACs()
+	o.Interfaces = o.boundInterfaces()
+	if capture := o.captureInterfaces(); len(capture) > 0 {
+		o.setAttr(AttrCaptureInterfaces, capture)
+	}
 
 	o.Addresses = boundAddrs(o.Addresses, MaxAddresses)
 	o.Hostnames = boundStrings(o.Hostnames, MaxHostnames)
@@ -245,6 +281,79 @@ func (o *HostObservation) stableOtherMACs() []string {
 		out = append(out, mac)
 		if len(out) == MaxOtherMACs {
 			break
+		}
+	}
+	return out
+}
+
+// boundInterfaces applies Interfaces' contract: self-reports only, named,
+// de-duplicated by name, bounded.
+func (o *HostObservation) boundInterfaces() []Interface {
+	if o.AgentID == "" || len(o.Interfaces) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []Interface
+	for _, raw := range o.Interfaces {
+		name := boundIdentifier(raw.Name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		ifc := Interface{Name: name, MAC: NormalizeMAC(raw.MAC), Capture: raw.Capture}
+		addrSeen := map[string]bool{}
+		for _, a := range raw.Addresses {
+			v, ok := canonicalInterfaceAddress(a)
+			if !ok || addrSeen[v] {
+				continue
+			}
+			addrSeen[v] = true
+			ifc.Addresses = append(ifc.Addresses, v)
+			if len(ifc.Addresses) == MaxAddresses {
+				break
+			}
+		}
+		out = append(out, ifc)
+		if len(out) == MaxInterfaces {
+			break
+		}
+	}
+	return out
+}
+
+// canonicalInterfaceAddress spells a configured address as CIDR (or a bare
+// address when no length was given), refusing what no host is: unspecified,
+// loopback, multicast.
+func canonicalInterfaceAddress(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if p, err := netip.ParsePrefix(raw); err == nil {
+		a := p.Addr().Unmap().WithZone("")
+		if !usableHostAddr(a) || p.Bits() > a.BitLen() {
+			return "", false
+		}
+		return netip.PrefixFrom(a, p.Bits()).String(), true
+	}
+	a, err := netip.ParseAddr(raw)
+	if err != nil {
+		return "", false
+	}
+	a = a.Unmap().WithZone("")
+	if !usableHostAddr(a) {
+		return "", false
+	}
+	return a.String(), true
+}
+
+func usableHostAddr(a netip.Addr) bool {
+	return a.IsValid() && !a.IsUnspecified() && !a.IsLoopback() && !a.IsMulticast()
+}
+
+// captureInterfaces names the interfaces flagged Capture, in report order.
+func (o *HostObservation) captureInterfaces() []string {
+	var out []string
+	for _, ifc := range o.Interfaces {
+		if ifc.Capture {
+			out = append(out, ifc.Name)
 		}
 	}
 	return out

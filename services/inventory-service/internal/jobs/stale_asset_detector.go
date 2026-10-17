@@ -220,6 +220,16 @@ func (j *StaleAssetDetector) tenantsToProcess() ([]uuid.UUID, error) {
 
 // processTenant processes stale assets for a single tenant
 func (j *StaleAssetDetector) processTenant(ctx context.Context, tenantID uuid.UUID) error {
+	// Cloud disappearance first (asset-inventory ADR-0009 D6), and whatever
+	// the auto-archive switch says: it only moves a resource its own
+	// provider's listing no longer returns to stale, with the reason, and
+	// never archives — archiving below still follows the tenant's policy.
+	if moved, err := j.lifecycleService.SweepCloudDisappearance(ctx, tenantID, time.Now().UTC()); err != nil {
+		j.logger.Printf("ERROR: cloud disappearance sweep for tenant %s: %v", tenantID, err)
+	} else if len(moved) > 0 {
+		j.logger.Printf("Cloud lifecycle: %d resources changed for tenant %s", len(moved), tenantID)
+	}
+
 	policy, err := j.lifecycleService.GetLifecyclePolicy(tenantID)
 	if err != nil {
 		j.logger.Printf("ERROR: Failed to get policy for tenant %s: %v", tenantID, err)
@@ -268,7 +278,10 @@ func (j *StaleAssetDetector) processTenant(ctx context.Context, tenantID uuid.UU
 	// Update statuses
 	var lastErr error
 	if len(warningAssets) > 0 {
-		if err := j.lifecycleService.UpdateStaleStatus(tenantID, warningAssets, "warning", uuid.Nil); err != nil {
+		// `stale`, not "warning": assets_stale_status_check admits only
+		// active / stale / archived, so the old "warning" write failed the
+		// CHECK on every sweep and no asset ever entered the warning state.
+		if err := j.lifecycleService.UpdateStaleStatus(tenantID, warningAssets, "stale", uuid.Nil); err != nil {
 			j.logger.Printf("ERROR: Failed to update warning status for tenant %s: %v", tenantID, err)
 			lastErr = err
 		} else {

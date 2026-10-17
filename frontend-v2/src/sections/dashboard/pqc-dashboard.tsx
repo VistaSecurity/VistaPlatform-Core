@@ -25,6 +25,7 @@ import {
 } from './pqc-dashboard-metrics';
 import { hygieneScore } from './inventory-health';
 import { useFrameworksAvailable, usePqcProgress } from '../../lib/shared-queries';
+import { useVpnList } from '../inventory/vpn/vpn-queries';
 
 /**
  * The PQC Readiness framework's materialized score.
@@ -43,6 +44,12 @@ function usePqcFramework() {
 export function PqcDashboardPage() {
   const pqcQ = usePqcProgress();
   const fwQ = usePqcFramework();
+  // VPN tunnels (DCIM row 4.3): their IKE groups are classical key agreement,
+  // classified by the same denylist. Their crypto configurations are already in
+  // the counts above; this tile names the tunnels themselves.
+  const tunnelsQ = useVpnList('tunnels', { limit: 500 });
+  const tunnelRows = tunnelsQ.data?.rows ?? [];
+  const tunnelsNeeding = tunnelRows.filter((t) => t.pqc_status === 'needs_migration').length;
 
   const head = pqcHeadline(pqcQ.isError ? null : pqcQ.data);
   const categories = pqcCategories(pqcQ.isError ? null : pqcQ.data);
@@ -160,6 +167,11 @@ export function PqcDashboardPage() {
               <StatTile
                 value={head.unclassified} label="Not yet assessed" sub="no algorithm data resolved"
                 icon="circle-help" tone="var(--app-t3)" href={PQC_CONFIGURATIONS_ROUTE} error={pqcQ.isError}
+              />
+              <StatTile
+                value={tunnelsQ.data ? tunnelsNeeding : null} label="Tunnels needing migration"
+                sub={tunnelsQ.data ? `of ${tunnelsQ.data.total.toLocaleString()} VPN ${tunnelsQ.data.total === 1 ? 'tunnel' : 'tunnels'}${tunnelsQ.data.total > tunnelRows.length ? ` (first ${tunnelRows.length})` : ''}` : 'VPN tunnels'}
+                icon="shield" tone="var(--warn-strong)" href="/inventory?lens=tunnels" error={tunnelsQ.isError}
               />
               <StatTile
                 value={fw && fw.present ? fw.score : null} label="PQC Readiness score" sub={fw?.activated ? 'framework activated' : 'preview — not activated'}

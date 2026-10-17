@@ -115,11 +115,13 @@ func TestIntegration_SensorHeartbeatCarriesThirdPartyConsent(t *testing.T) {
 
 	segment := func(tenantID uuid.UUID, value, networkType, metadata string, active bool) {
 		t.Helper()
-		if _, err := admin.Exec(`INSERT INTO public.network_segments
-			(tenant_id, name, segment_type, value, network_type, environment, is_active, metadata)
-			VALUES ($1, $2, 'cidr', $3, $4, 'production', $5, $6::jsonb)`,
-			tenantID, "seg-"+value, value, networkType, active, metadata); err != nil {
-			t.Fatalf("seeding segment %s: %v", value, err)
+		if _, err := admin.Exec(`INSERT INTO public.prefixes
+			(tenant_id, description, prefix, network_type, environment, status, source_kind, sensitive, active_probes_disabled)
+			VALUES ($1, $2, $3, $4, 'production', CASE WHEN $5 THEN 'active' ELSE 'archived' END,
+			CASE WHEN $6::jsonb->>'source' IN ('interrogation', 'unifi') THEN 'measured' ELSE 'declared' END,
+			coalesce(($6::jsonb->>'sensitive')::boolean, false), coalesce(($6::jsonb->>'active_probes_disabled')::boolean, false))`,
+			tenantID, "prefix-"+value, value, networkType, active, metadata); err != nil {
+			t.Fatalf("seeding prefix %s: %v", value, err)
 		}
 	}
 	segment(tenant, "203.0.113.0/24", "public", `{}`, true)                             // declared public: owned

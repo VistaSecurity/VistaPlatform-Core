@@ -25,6 +25,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/handlers"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identitytest/intakematrix"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
@@ -107,7 +108,7 @@ func TestIntegration_SightingRoute_SignedCallResolvesThroughTheEngine(t *testing
 	if class != "router" {
 		t.Errorf("class = %q, want the sighting's class hint router", class)
 	}
-	if err := raw.QueryRow(`SELECT coalesce(address_assignment,'') FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind='ip_address' AND value=$3`,
+	if err := raw.QueryRow(`SELECT coalesce(address_assignment,'') FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND asset_id=$2 AND kind='ip_address' AND value=$3`,
 		tenant, first[0].AssetID, addr).Scan(&assignment); err != nil {
 		t.Fatal(err)
 	}
@@ -141,11 +142,10 @@ func TestIntegration_SightingRoute_WritesWhatTheResolutionOwes(t *testing.T) {
 	testdb.ApplySchemaAndSeed(t, raw)
 	tenant := testdb.NewTenant(t, raw)
 	location := uuid.New()
-	if _, err := raw.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'HQ','site')`, location, tenant); err != nil {
+	if _, err := raw.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,'HQ',regexp_replace(lower('HQ'),'[^a-z0-9]+','-','g')) RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,'HQ',regexp_replace(lower('HQ'),'[^a-z0-9]+','-','g') FROM s`, location, tenant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,location_id)
-		VALUES($1,'HQ LAN','cidr','10.92.0.0/24','private','production',true,$2)`, tenant, location); err != nil {
+	if _, err := raw.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,scope_kind,scope_id,source_kind,status) VALUES($1,'HQ LAN','10.92.0.0/24'::cidr,'private','production','location',$2,'declared','active')`, tenant, location); err != nil {
 		t.Fatal(err)
 	}
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
@@ -165,7 +165,7 @@ func TestIntegration_SightingRoute_WritesWhatTheResolutionOwes(t *testing.T) {
 		t.Fatalf("results %+v err %v", results, err)
 	}
 	var names, site string
-	if err := raw.QueryRow(`SELECT coalesce(attributes->'synthetic_names','null')::text, coalesce(site,'') FROM assets WHERE tenant_id=$1 AND id=$2`,
+	if err := raw.QueryRow(`SELECT coalesce(attributes->'synthetic_names','null')::text, coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),'') FROM assets WHERE tenant_id=$1 AND id=$2`,
 		tenant, results[0].AssetID).Scan(&names, &site); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +251,7 @@ func TestIntegration_SightingRoute_TargetedDeclaration(t *testing.T) {
 		t.Fatalf("targeted edit = %+v, want matched on the named asset %s", got[0], device)
 	}
 	var assignment, owner string
-	if err := raw.QueryRow(`SELECT asset_id::text, coalesce(address_assignment,'') FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address' AND value='10.93.0.5'`,
+	if err := raw.QueryRow(`SELECT asset_id::text, coalesce(address_assignment,'') FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='ip_address' AND value='10.93.0.5'`,
 		tenant).Scan(&owner, &assignment); err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestIntegration_SightingRoute_TargetedDeclaration(t *testing.T) {
 		t.Errorf("serial owned by another asset = %+v, want conflict with a proposal", got[1])
 	}
 	var serialOwner string
-	if err := raw.QueryRow(`SELECT asset_id::text FROM asset_identifiers WHERE tenant_id=$1 AND kind='serial_number' AND value='OTHER-SERIAL'`, tenant).Scan(&serialOwner); err != nil || serialOwner != other {
+	if err := raw.QueryRow(`SELECT asset_id::text FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='serial_number' AND value='OTHER-SERIAL'`, tenant).Scan(&serialOwner); err != nil || serialOwner != other {
 		t.Errorf("the conflicting serial moved to %s (%v); a refused declaration writes nothing", serialOwner, err)
 	}
 	if got[2].Outcome != "rejected" || got[2].Reasons[0] != services.SightingReasonUnknownTarget {
@@ -294,12 +294,11 @@ func TestIntegration_SightingRoute_HearsayPeerInheritsItsSegmentsSite(t *testing
 	testdb.ApplySchemaAndSeed(t, raw)
 	tenant := testdb.NewTenant(t, raw)
 	location := uuid.New()
-	if _, err := raw.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'Branch','site')`, location, tenant); err != nil {
+	if _, err := raw.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,'Branch',regexp_replace(lower('Branch'),'[^a-z0-9]+','-','g')) RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,'Branch',regexp_replace(lower('Branch'),'[^a-z0-9]+','-','g') FROM s`, location, tenant); err != nil {
 		t.Fatal(err)
 	}
 	var segment string
-	if err := raw.QueryRow(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,location_id)
-		VALUES($1,'Branch LAN','cidr','10.94.0.0/24','private','production',true,$2) RETURNING id::text`, tenant, location).Scan(&segment); err != nil {
+	if err := raw.QueryRow(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,scope_kind,scope_id,source_kind,status) VALUES($1,'Branch LAN','10.94.0.0/24'::cidr,'private','production','location',$2,'declared','active') RETURNING id::text`, tenant, location).Scan(&segment); err != nil {
 		t.Fatal(err)
 	}
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
@@ -339,7 +338,7 @@ func TestIntegration_SightingRoute_HearsayPeerInheritsItsSegmentsSite(t *testing
 	}
 	placement := func(asset string) (seg, loc, site string) {
 		t.Helper()
-		if err := raw.QueryRow(`SELECT coalesce(network_segment_id::text,''),coalesce(location_id::text,''),coalesce(site,'') FROM assets WHERE tenant_id=$1 AND id=$2`,
+		if err := raw.QueryRow(`SELECT coalesce(prefix_id::text,''),coalesce(location_id::text,''),coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),'') FROM assets WHERE tenant_id=$1 AND id=$2`,
 			tenant, asset).Scan(&seg, &loc, &site); err != nil {
 			t.Fatal(err)
 		}
@@ -357,7 +356,7 @@ func TestIntegration_SightingRoute_HearsayPeerInheritsItsSegmentsSite(t *testing
 
 	// 2. The live state before the fix: in the segment, no location, no site.
 	// The next sighting heals it.
-	if _, err := raw.Exec(`UPDATE assets SET location_id=NULL, site=NULL WHERE tenant_id=$1 AND id=$2`, tenant, created.AssetID); err != nil {
+	if _, err := raw.Exec(`UPDATE assets SET location_id=NULL, site_id=NULL WHERE tenant_id=$1 AND id=$2`, tenant, created.AssetID); err != nil {
 		t.Fatal(err)
 	}
 	if again := post(); again.AssetID != created.AssetID {
@@ -368,7 +367,10 @@ func TestIntegration_SightingRoute_HearsayPeerInheritsItsSegmentsSite(t *testing
 	}
 
 	// 3. A site somebody stated wins over the segment's.
-	if _, err := raw.Exec(`UPDATE assets SET location_id=NULL, site='Curated' WHERE tenant_id=$1 AND id=$2`, tenant, created.AssetID); err != nil {
+	if _, err := raw.Exec(`INSERT INTO sites(tenant_id,name,slug) VALUES($1,'Curated','curated') ON CONFLICT DO NOTHING`, tenant); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE assets SET location_id=NULL, site_id=(SELECT id FROM sites WHERE tenant_id=$1 AND name='Curated') WHERE tenant_id=$1 AND id=$2`, tenant, created.AssetID); err != nil {
 		t.Fatal(err)
 	}
 	post()

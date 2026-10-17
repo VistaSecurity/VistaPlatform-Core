@@ -71,7 +71,7 @@ func acmCertificateEntry() map[string]interface{} {
 func newCloudRoutingAssetService(db *database.DB) *AssetService {
 	svc := NewAssetService(db)
 	svc.SetExternalConnectionsService(NewExternalConnectionsService(db, NewAlgorithmService(db)))
-	svc.SetEnrichmentServices(NewNetworkSegmentService(db, NewLocationService(db)), nil)
+	svc.SetEnrichmentServices(nil)
 	return svc
 }
 

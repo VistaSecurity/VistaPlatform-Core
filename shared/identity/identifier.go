@@ -346,6 +346,16 @@ type Identifier struct {
 	// that carries it.
 	KeyAlgorithm string `json:"key_algorithm,omitempty"`
 
+	// Interface is the name of the interface a `mac_address` or `ip_address`
+	// was observed on, as the source spelled it, and empty when the source
+	// did not say (a passive sighting never knows). It is context, not
+	// identity: [Identifier.Key] ignores it. The repository uses it to file
+	// the value under the asset's interfaces (ADR-0010 D3, DCIM row 1.4) —
+	// see [PlanInterfaces] — and canonicalises it there with
+	// shared/dcim/ifnames, so `Gi1/0/1` and `GigabitEthernet1/0/1` are one
+	// interface.
+	Interface string `json:"interface,omitempty"`
+
 	// Source and SeenAt are provenance, set by the engine.
 	Source Source    `json:"source,omitzero"`
 	SeenAt time.Time `json:"seen_at,omitzero"`
@@ -596,6 +606,12 @@ func (i Identifier) Normalized() (Identifier, error) {
 		out.KeyAlgorithm = NormalizeSSHKeyAlgorithm(i.KeyAlgorithm)
 	} else {
 		out.KeyAlgorithm = ""
+	}
+	if i.Kind == KindMACAddress || i.Kind == KindIPAddress {
+		out.Interface = CanonicalInterfaceName(i.Interface)
+	} else {
+		// Only the two interface-borne kinds are filed under an interface.
+		out.Interface = ""
 	}
 	return out, nil
 }

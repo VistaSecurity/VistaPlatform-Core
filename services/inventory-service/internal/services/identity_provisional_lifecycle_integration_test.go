@@ -81,8 +81,8 @@ func newProvisionalFixture(t *testing.T) *provisionalFixture {
 		segA: uuid.New(), segB: uuid.New(), sensorA: uuid.New(), sensorB: uuid.New(),
 		now: time.Now().UTC().Truncate(time.Microsecond),
 	}
-	f.exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'VLAN A','cidr',$3,true,'production')`, f.segA, tenant, provSegmentACIDR)
-	f.exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'VLAN B','cidr',$3,true,'production')`, f.segB, tenant, provSegmentBCIDR)
+	f.exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'VLAN A',$3::cidr,'production','declared','active')`, f.segA, tenant, provSegmentACIDR)
+	f.exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'VLAN B',$3::cidr,'production','declared','active')`, f.segB, tenant, provSegmentBCIDR)
 	f.enrollSensor(f.sensorA, tenant, "sensor-a", provSensorAAddr)
 	f.enrollSensor(f.sensorB, tenant, "sensor-b", provSensorBAddr)
 	f.exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"},"identity_enrichment":{"enabled":true}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant)
@@ -207,7 +207,7 @@ func (f *provisionalFixture) assetCount() int {
 func (f *provisionalFixture) assetStatuses(assetID string) (identityStatus, assetStatus, segment string) {
 	f.t.Helper()
 	var seg sql.NullString
-	if err := f.raw.QueryRow(`SELECT identity_status,asset_status,network_segment_id::text FROM assets WHERE tenant_id=$1 AND id=$2`, f.tenant, assetID).
+	if err := f.raw.QueryRow(`SELECT identity_status,asset_status,prefix_id::text FROM assets WHERE tenant_id=$1 AND id=$2`, f.tenant, assetID).
 		Scan(&identityStatus, &assetStatus, &seg); err != nil {
 		f.t.Fatal(err)
 	}
@@ -425,12 +425,12 @@ func testProvisionalBackfill(t *testing.T) {
 	ctx := context.Background()
 	f.exec(`UPDATE tenant_admin_settings SET config=jsonb_set(config,'{identity_enrichment,enabled}','false') WHERE tenant_id=$1`, f.tenant)
 
-	// One retained observation on an unambiguous segment, and one on a segment
-	// a second active segment overlaps.
+	// One retained observation on an unambiguous prefix, and one on a prefix
+	// that names no single place (a cloud subnet's: a CIDR is not unique
+	// across VPCs).
 	eligible := f.retainBlockedObservation(f.relayedAdvert(f.sensorA, "legacy-advert", f.now.Add(-2*time.Hour)))
-	contestedSegment, overlapping := uuid.New(), uuid.New()
-	f.exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'VLAN C','cidr','203.0.113.0/24',true,'production')`, contestedSegment, f.tenant)
-	f.exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'VLAN C overlap','cidr','203.0.113.0/25',true,'production')`, overlapping, f.tenant)
+	contestedSegment := uuid.New()
+	f.exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status,cloud_network_ref) VALUES($1,$2,'VLAN C','203.0.113.0/24'::cidr,'production','declared','active','vpc-c')`, contestedSegment, f.tenant)
 	contested := f.retainBlockedObservation(f.relayedAdvertOn(contestedSegment, "contested-printer", "203.0.113.7", f.sensorA, "contested-advert", f.now.Add(-2*time.Hour)))
 
 	coordinator := &identityenrichment.Coordinator{
@@ -489,9 +489,10 @@ func testProvisionalBackfill(t *testing.T) {
 		t.Fatalf("a repeated sweep re-resolved the refused row inside its interval: %v→%v", contestedMaterialized.Time, contestedUnchanged.Time)
 	}
 
-	// The operator resolves the overlap, and the re-check interval elapses. The
-	// evidence has not changed by one byte; the ANSWER has.
-	f.exec(`UPDATE network_segments SET is_active=false WHERE tenant_id=$1 AND id=$2`, f.tenant, overlapping)
+	// The operator resolves the ambiguity (the prefix is on-premises after
+	// all), and the re-check interval elapses. The evidence has not changed by
+	// one byte; the ANSWER has.
+	f.exec(`UPDATE prefixes SET cloud_network_ref=NULL WHERE tenant_id=$1 AND id=$2`, f.tenant, contestedSegment)
 	f.exec(`UPDATE identity_observations SET materialized_at=now()-interval '7 hours' WHERE tenant_id=$1 AND id=$2`, f.tenant, contested)
 	if err := coordinator.Sweep(ctx, f.tenant); err != nil {
 		t.Fatal(err)

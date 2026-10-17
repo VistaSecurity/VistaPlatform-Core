@@ -198,7 +198,10 @@ describe('Spreadsheet import', () => {
   it('gates the launcher and the submit on the target resource, not on discovery', () => {
     const go = 'services/inventory-service/cmd/main.go';
     routeRequires(go, '/inventory-service/infrastructure-assets/bulk"', 'PermissionAssetsCreate');
-    routeRequires(go, '/inventory-service/network-segments/bulk"', 'PermissionSettingsUpdate');
+    // The networks target creates IPAM prefixes one row at a time (DCIM row
+    // 1.6); POST /ipam/prefixes is ipam.manage (the `manage` middleware).
+    routeRequires('services/inventory-service/cmd/ipam_routes.go', 'g.POST("/prefixes"', 'manage');
+    routeRequires('services/inventory-service/cmd/ipam_routes.go', 'manage :=', 'PermissionIpamManage');
     // Launcher on the command center is assets.create; "Discover assets" beside
     // it keeps discovery.create.
     const cc = read(`${FE}sections/discovery/command-center.tsx`);
@@ -207,7 +210,7 @@ describe('Spreadsheet import', () => {
     // The modal picks its submit gate from the chosen target.
     const modal = read(`${FE}sections/discovery/import-modal.tsx`);
     expect(modal).toContain(
-      "target === 'assets' ? TENANT_PERMISSIONS.assets.create : TENANT_PERMISSIONS.settings.update",
+      "target === 'assets' ? TENANT_PERMISSIONS.assets.create : TENANT_PERMISSIONS.ipam.manage",
     );
   });
 });

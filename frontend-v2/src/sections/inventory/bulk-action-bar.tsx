@@ -5,6 +5,7 @@
 // Every action goes to the server as a SELECTION (asset-selection.ts): ticked
 // rows, or a query plus the count the person confirmed. A control the person
 // lacks the permission for is not rendered — the server checks again.
+import { flattenTree, useBusinessUnits } from '../settings/business-units-queries';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { invalidateAssetDetail } from './asset-queries';
@@ -277,7 +278,6 @@ export function BulkActionBar({ selection, onChange, seen, onScanStarted }: {
 type FieldMode = 'keep' | 'set' | 'clear';
 const TEXT_FIELDS = [
   { key: 'owner_email', label: 'Owner email', placeholder: 'owner@example.com' },
-  { key: 'business_unit', label: 'Business unit', placeholder: 'Payments' },
   { key: 'support_group', label: 'Support group', placeholder: 'Network Ops' },
 ] as const;
 const ENVIRONMENTS = ['production', 'staging', 'development', 'test'] as const;
@@ -297,7 +297,7 @@ export function parseTagPairs(text: string): Record<string, string> {
 /** The edit form's state → the API's changes, or null when it changes nothing. */
 export function buildChanges(modes: Record<string, FieldMode>, values: Record<string, string>, addTags: string, removeTags: string): BulkChanges | null {
   const ch: Record<string, unknown> = {};
-  for (const key of ['owner_email', 'business_unit', 'support_group', 'environment']) {
+  for (const key of ['owner_email', 'business_unit_id', 'support_group', 'environment']) {
     if (modes[key] === 'clear') ch[key] = '';
     else if (modes[key] === 'set' && (values[key] ?? '').trim()) ch[key] = values[key].trim();
   }
@@ -319,6 +319,7 @@ function EditFieldsDialog({ count, busy, error, onClose, onApply }: {
   const [values, setValues] = useState<Record<string, string>>({});
   const [addTags, setAddTags] = useState('');
   const [removeTags, setRemoveTags] = useState('');
+  const businessUnits = useBusinessUnits();
   const changes = buildChanges(modes, values, addTags, removeTags);
   const mode = (k: string) => modes[k] ?? 'keep';
   const modeSelect = (k: string, label: string) => (
@@ -356,6 +357,15 @@ function EditFieldsDialog({ count, busy, error, onClose, onApply }: {
           </div>
         </ModalField>
       ))}
+      <ModalField label="Business unit">
+        <div style={{ display: 'flex', gap: 8 }}>
+          {modeSelect('business_unit_id', 'Business unit')}
+          <ModalSelect aria-label="Business unit" disabled={mode('business_unit_id') !== 'set'} value={values.business_unit_id ?? ''} onChange={(e) => setValues((v) => ({ ...v, business_unit_id: e.target.value }))}>
+            <option value="">Choose…</option>
+            {flattenTree(businessUnits.data ?? []).map(({ unit, depth }) => <option key={unit.id} value={unit.id}>{`${'\u00a0\u00a0'.repeat(depth)}${unit.name}`}</option>)}
+          </ModalSelect>
+        </div>
+      </ModalField>
       <ModalField label="Environment">
         <div style={{ display: 'flex', gap: 8 }}>
           {modeSelect('environment', 'Environment')}

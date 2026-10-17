@@ -12,38 +12,36 @@ import (
 )
 
 // ProjectSegmentLocation fills missing placement (location, site and
-// environment) from the segment the caller resolved. It never selects a competing segment or replaces a person's
-// populated location. Call only for a settled identity, inside its unit of work.
-func (r *Repository) ProjectSegmentLocation(ctx context.Context, asset identity.AssetRef, segment string, source identity.Source) error {
+// environment) from the prefix the caller resolved (the observation's scope).
+// It never selects a competing prefix or replaces a person's populated
+// location. Call only for a settled identity, inside its unit of work.
+func (r *Repository) ProjectSegmentLocation(ctx context.Context, asset identity.AssetRef, prefix string, source identity.Source) error {
 	// Tenant/default scopes have no location.
-	if _, err := uuid.Parse(segment); err != nil {
+	if _, err := uuid.Parse(prefix); err != nil {
 		return nil
 	}
-	return r.projectSegmentLocation(ctx, asset, segment, source)
+	return r.projectSegmentLocation(ctx, asset, prefix, source)
 }
 
-// InheritSegmentLocation fills missing placement from the segment the asset is
-// ALREADY assigned to (assets.network_segment_id), whoever assigned it: the
-// segment's location_id and site, and its environment.
+// InheritSegmentLocation fills missing placement from the prefix the asset is
+// ALREADY scoped within (assets.prefix_id), whoever set it: the prefix's
+// location (scope_kind = 'location'), that location's site, and its environment.
 //
 // It is the hearsay-safe half of [Repository.ProjectSegmentLocation]: it never
-// takes a segment from the observation, so a peer a controller described
-// cannot move an asset into a segment or a location. It only keeps an asset's
-// placement consistent with its own segment. An asset in a located segment
-// that names no site is drawn twice on the network map — once under the
-// segment's site, once under "Unassigned" — which is what this closes.
+// takes a prefix from the observation, so a peer a controller described
+// cannot move an asset into a prefix or a location. It only keeps an asset's
+// placement consistent with its own prefix. An asset in a located prefix that
+// names no site is drawn twice on the network map — once under the prefix's
+// site, once under "Unassigned" — which is what this closes.
 //
-// Environment follows the same rule, for the same reason. A segment is the one
-// place the tenant states what an address range is for, and an asset in a
-// production segment with no environment of its own fell outside every
-// environment filter — the default "Production" CBOM scope first of all — even
-// though the connector or sensor that placed it had already told us which
-// segment it was in. Imports fill the segment's environment on the way in and
-// the asset's never; this is where the asset catches up.
+// Environment follows the same rule, for the same reason: a prefix is where
+// the tenant states what an address range is for, and an asset in a
+// production prefix with no environment of its own fell outside every
+// environment filter — the default "Production" CBOM scope first of all.
 //
 // The same never-overwrite rules apply: a location_id or site that disagrees
-// with the segment's location (an operator's, a CMDB's) is left alone, as is
-// any environment already recorded; an inactive segment or no segment at all
+// with the prefix's location (an operator's, a CMDB's) is left alone, as is any
+// environment already recorded; a rejected or archived prefix, or none at all,
 // writes nothing. Call only for a settled identity (not a conflict), inside its
 // unit of work.
 func (r *Repository) InheritSegmentLocation(ctx context.Context, asset identity.AssetRef, source identity.Source) error {
@@ -51,51 +49,53 @@ func (r *Repository) InheritSegmentLocation(ctx context.Context, asset identity.
 }
 
 // projectSegmentLocation is the one placement writer behind both methods.
-// segment == "" means the asset's own network_segment_id.
+// prefix == "" means the asset's own prefix_id.
 //
-// Location and environment are decided independently: a segment with no
+// Location and environment are decided independently: a prefix with no
 // location still lends its environment, and a site the asset disagrees on
 // blocks the location fill without blocking the environment one.
-func (r *Repository) projectSegmentLocation(ctx context.Context, asset identity.AssetRef, segment string, source identity.Source) error {
+func (r *Repository) projectSegmentLocation(ctx context.Context, asset identity.AssetRef, prefix string, source identity.Source) error {
 	return r.RunInTx(ctx, asset.TenantID, func(bound *Repository) error {
-		var currentLocation, currentSite, currentEnv, segmentID, location, site, segmentEnv string
+		var currentLocation, currentSite, currentEnv, prefixID, location, site, prefixEnv string
 		err := bound.Tx().QueryRowContext(ctx, `
-   SELECT coalesce(a.location_id::text,''),coalesce(a.site,''),coalesce(a.environment::text,''),
-          ns.id::text,coalesce(l.id::text,''),coalesce(l.name,''),coalesce(ns.environment::text,'')
+   SELECT coalesce(a.location_id::text,''),coalesce(a.site_id::text,''),coalesce(a.environment::text,''),
+          p.id::text,coalesce(l.id::text,''),coalesce(l.site_id::text,''),coalesce(p.environment,'')
    FROM public.assets a
-   JOIN public.network_segments ns ON ns.id=coalesce(nullif($3::text,'')::uuid,a.network_segment_id) AND ns.tenant_id=a.tenant_id AND ns.is_active
-   LEFT JOIN public.locations l ON l.id=ns.location_id AND l.tenant_id=a.tenant_id
+   JOIN public.prefixes p ON p.id=coalesce(nullif($3::text,'')::uuid,a.prefix_id) AND p.tenant_id=a.tenant_id
+        AND p.status NOT IN ('rejected','archived')
+   LEFT JOIN public.locations l ON p.scope_kind='location' AND l.id=p.scope_id AND l.tenant_id=a.tenant_id
    WHERE a.id=$2::uuid AND a.tenant_id=$1::uuid AND a.deleted_at IS NULL
-     AND (a.network_segment_id IS NULL OR a.network_segment_id=ns.id)
-   FOR UPDATE OF a`, asset.TenantID, asset.ID, segment).Scan(&currentLocation, &currentSite, &currentEnv, &segmentID, &location, &site, &segmentEnv)
+     AND (a.prefix_id IS NULL OR a.prefix_id=p.id)
+   FOR UPDATE OF a`, asset.TenantID, asset.ID, prefix).Scan(&currentLocation, &currentSite, &currentEnv, &prefixID, &location, &site, &prefixEnv)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
-			return fmt.Errorf("read segment placement: %w", err)
+			return fmt.Errorf("read prefix placement: %w", err)
 		}
 		changes := map[string]any{}
 		sets := []string{}
 		args := []any{asset.TenantID, asset.ID}
-		// Location: only from a located segment, never over a disagreeing
-		// location or site.
-		if location != "" && (currentLocation == "" || currentLocation == location) &&
-			(strings.TrimSpace(currentSite) == "" || currentSite == site) {
+		// Location: only from a located prefix, never over a disagreeing
+		// location or site. The site is the location's own site (DCIM row
+		// 2.1), so the pair the asset ends up with always agrees.
+		if location != "" && site != "" && (currentLocation == "" || currentLocation == location) &&
+			(currentSite == "" || currentSite == site) {
 			if currentLocation == "" {
 				changes["location_id"] = map[string]string{"from": "", "to": location}
 			}
-			if strings.TrimSpace(currentSite) == "" && site != "" {
-				changes["site"] = map[string]string{"from": currentSite, "to": site}
+			if currentSite == "" {
+				changes["site_id"] = map[string]string{"from": "", "to": site}
 			}
 			if len(changes) > 0 {
 				args = append(args, location, site)
-				sets = append(sets, fmt.Sprintf("location_id=$%d::uuid,site=$%d", len(args)-1, len(args)))
+				sets = append(sets, fmt.Sprintf("location_id=$%d::uuid,site_id=$%d::uuid", len(args)-1, len(args)))
 			}
 		}
 		// Environment: only where the asset records none.
-		if currentEnv == "" && segmentEnv != "" {
-			changes["environment"] = map[string]string{"from": "", "to": segmentEnv}
-			args = append(args, segmentEnv)
+		if currentEnv == "" && prefixEnv != "" {
+			changes["environment"] = map[string]string{"from": "", "to": prefixEnv}
+			args = append(args, prefixEnv)
 			sets = append(sets, fmt.Sprintf("environment=$%d::environment_type", len(args)))
 		}
 		if len(sets) == 0 {
@@ -103,9 +103,9 @@ func (r *Repository) projectSegmentLocation(ctx context.Context, asset identity.
 		}
 		_, err = bound.Tx().ExecContext(ctx, `UPDATE public.assets SET `+strings.Join(sets, ",")+`,updated_at=now() WHERE tenant_id=$1::uuid AND id=$2::uuid`, args...)
 		if err != nil {
-			return fmt.Errorf("project segment placement: %w", err)
+			return fmt.Errorf("project prefix placement: %w", err)
 		}
-		changes["network_segment_id"] = segmentID
+		changes["prefix_id"] = prefixID
 		return bound.RecordHistory(ctx, identity.HistoryEntry{TenantID: asset.TenantID, AssetID: asset.ID, Action: identity.ActionUpdated, Source: source, Changes: changes})
 	})
 }

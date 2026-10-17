@@ -243,6 +243,12 @@ func vendorPipelineHop3Claims(t *testing.T, vendor string, s hop3Summary) []pipe
 			// P-06,: the key-size floor is for asymmetric keys.
 			{What: "F5 AES-256 VIP is not flagged as a weak key size",
 				Got: hasFactor(secure, "Weak key size"), Want: false},
+			// The VIPs sit on a public (documentation) range the tenant never
+			// declared. The F5's self IP teaches a PREFIX there (row 1.5c), and
+			// ingest's ownership classification reads prefixes (row 1.6) — a
+			// learned prefix makes an address the tenant's exactly as a learned
+			// segment did — so the VIP's finding lands on its virtual server,
+			// not on the interrogated device.
 			{What: "F5 VIP certificate is on its virtual server",
 				Got: hasCertificateOn(s, "asset[hostname=vs_web_443,ip_address=198.51.100.10]"), Want: true},
 			{What: "F5 virtual servers keep their class", Got: assetClass(s, "asset[hostname=vs_web_443,ip_address=198.51.100.10]"), Want: "load_balancer"},

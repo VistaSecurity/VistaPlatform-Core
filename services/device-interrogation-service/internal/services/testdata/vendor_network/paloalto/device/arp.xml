@@ -1,0 +1,11 @@
+<response status="success">
+  <result>
+    <max>2500</max><total>4</total><timeout>1800</timeout><dp>dp0</dp>
+    <entries>
+      <entry><status>  c  </status><ip>198.51.100.1</ip><mac>00:00:5e:00:53:01</mac><ttl>1777</ttl><interface>ethernet1/1</interface><port>ethernet1/1</port></entry>
+      <entry><status>  c  </status><ip>10.30.100.50</ip><mac>00:50:56:bb:01:50</mac><ttl>900</ttl><interface>ae1.100</interface><port>ae1</port></entry>
+      <entry><status>  c  </status><ip>10.30.200.9</ip><mac>00:50:56:bb:02:09</mac><ttl>900</ttl><interface>ae1.200</interface><port>ae1</port></entry>
+      <entry><status>  i  </status><ip>10.30.100.77</ip><mac>(incomplete)</mac><ttl>0</ttl><interface>ae1.100</interface><port>ae1</port></entry>
+    </entries>
+  </result>
+</response>

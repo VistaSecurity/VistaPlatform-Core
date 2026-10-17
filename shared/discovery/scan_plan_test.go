@@ -103,7 +103,7 @@ func TestBuildScanPlan_ExternalCapIsPerTarget(t *testing.T) {
 	plan, err := BuildScanPlan(spec, nil, []PlanTargetInput{
 		{Target: "10.20.30.0/24", Class: ClassPrivate},
 		{Target: "93.184.216.34", Class: ClassExternal},
-		{Target: "93.184.217.0/28", Class: ClassRegisteredSegment, SegmentID: "seg-1"},
+		{Target: "93.184.217.0/28", Class: ClassRegisteredPrefix, PrefixID: "seg-1"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -118,8 +118,8 @@ func TestBuildScanPlan_ExternalCapIsPerTarget(t *testing.T) {
 	if external.Depth != DepthStandard || external.TCPPortCount != StandardPorts().Len() || external.UDPPortCount != 11 {
 		t.Errorf("external host = %+v, want capped to standard", external)
 	}
-	if registered.Depth != DepthThorough || registered.SegmentID != "seg-1" || registered.TCPPortCount != 65535 {
-		t.Errorf("registered segment = %+v, want thorough and its segment id", registered)
+	if registered.Depth != DepthThorough || registered.PrefixID != "seg-1" || registered.TCPPortCount != 65535 {
+		t.Errorf("declared prefix = %+v, want thorough and its segment id", registered)
 	}
 	if len(plan.DepthAdjustments) != 1 {
 		t.Fatalf("adjustments = %+v, want exactly the external one", plan.DepthAdjustments)

@@ -49,12 +49,12 @@ type AssetSummary struct {
 	// guess. Empty means the store did not say; treat that as [IdentityLegacy].
 	IdentityStatus string `json:"identity_status,omitempty"`
 
-	// NetworkSegment is the segment the asset belongs to, empty when it is in
-	// none. It is what a scoped identifier (`hostname`, `ip_address`)
-	// identifies WITHIN, so two records agreeing on a hostname while
-	// disagreeing about the segment are probably two things — every segment
-	// has a `db01`.
-	NetworkSegment string `json:"network_segment_id,omitempty"`
+	// NetworkSegment is the prefix the asset's identity is scoped within
+	// (`assets.prefix_id`), empty when it is in none. It is what a scoped
+	// identifier (`hostname`, `ip_address`) identifies WITHIN, so two records
+	// agreeing on a hostname while disagreeing about the prefix are probably
+	// two things — every network has a `db01`.
+	NetworkSegment string `json:"prefix_id,omitempty"`
 
 	// LastSeenAt is the asset's last sighting. Zero means unknown.
 	LastSeenAt time.Time `json:"last_seen_at,omitzero"`
@@ -116,7 +116,7 @@ type NewAsset struct {
 	// sets [IdentityProvisional] here and nowhere else: establishing an
 	// identity is `LinkObservation`'s job, after the admission decision.
 	IdentityStatus  string  `json:"identity_status,omitempty"`
-	NetworkSegment  string  `json:"network_segment_id,omitempty"`
+	NetworkSegment  string  `json:"prefix_id,omitempty"`
 	DiscoveryMethod string  `json:"discovery_method,omitempty"`
 	Confidence      float64 `json:"confidence"`
 	Source          Source  `json:"source"`
@@ -756,7 +756,7 @@ type Repository interface {
 	// to ask before it can produce a hostname or ip_address identifier: WHERE
 	// was I standing?
 	//
-	// It returns the id of the tenant's network segment the address falls
+	// It returns the id of the tenant's prefix the address falls
 	// inside, and [ScopeTenantDefault] when it falls inside none — including
 	// when the tenant has configured no segments at all, which is every fresh
 	// tenant. It never returns an empty scope: "no segment" is an answer about
@@ -802,15 +802,15 @@ type Repository interface {
 	//     coin flip that decides an asset's identity.
 	ScopeForAddress(ctx context.Context, tenantID string, addr netip.Addr, cloudNetworkRef string) (scope string, dynamic bool, err error)
 
-	// SegmentSnapshot returns the tenant's active `cidr`, `ip_range` and
-	// `domain` segments in one read, each with its STORED effective DHCP
-	// posture ([NetworkSegment.Dynamic]), in the store's stable creation order.
+	// SegmentSnapshot returns the tenant's live global-VRF prefixes in one
+	// read, each with its STORED DHCP posture ([NetworkSegment.Dynamic]), in
+	// the store's stable creation order.
 	//
 	// It is the bulk form of [Repository.ScopeForAddress], for [Intake]: a
 	// sighting with three addresses and two names is scoped against one
 	// snapshot rather than five lookups, and both implementations answer
 	// ScopeForAddress through [SegmentSnapshot.ScopeForAddress] so the two
-	// forms cannot disagree. A tenant with no segments returns an empty
+	// forms cannot disagree. A tenant with no prefixes returns an empty
 	// snapshot and no error.
 	SegmentSnapshot(ctx context.Context, tenantID string) (SegmentSnapshot, error)
 

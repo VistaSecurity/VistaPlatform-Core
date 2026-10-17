@@ -1,7 +1,8 @@
 package services
 
-// Cloud enumeration — compute instances, virtual networks, subnets and security
-// groups on AWS, Azure and GCP (BUILD_PLAN 2.4, ADR-0004 D1 item 6).
+// Cloud enumeration — compute instances, their network interfaces, virtual
+// networks, subnets and security groups on AWS, Azure and GCP (BUILD_PLAN
+// 2.4, ADR-0004 D1 item 6; DCIM row 1.5f).
 //
 // What this adds to cloud discovery, and what it deliberately does not:
 //
@@ -19,26 +20,30 @@ package services
 // codebase has already paid for twice. `inventoryOnlyDeviceTypes`
 // (cloud_discovery_service.go) is what keeps them out of that path.
 //
-// **Containment is `contains`, one direction only.** ADR-0003 D2 defines
-// `contains` as "virtual network → subnet, cluster → node" — container to
-// contained — so a VPC contains its subnets and a subnet contains its
-// instances. `member_of` is NOT also emitted: the reverse of a type is a LABEL
-// (`contained_by`), never a second edge, and emitting both would give one fact
-// two spellings and double every traversal.
+// **Networks are IPAM, not assets (DCIM row 1.5f, asset-inventory ADR-0009
+// amendment).** A VPC / VNet / GCP network is a container prefix and each of
+// its subnets a prefix, all carrying `cloud_network_ref` = the network's
+// provider id; an instance's ENI / NIC is an observed `virtual` interface and
+// its private addresses are `ip_addresses` on it. Which subnet an instance is
+// in is therefore prefix containment of its address — there is no VPC or
+// subnet asset and no `contains` edge VPC → subnet → instance any more. All of
+// it travels on sightings through the intake seam (identity.ObservedInterface /
+// ObservedPrefix, shared/identity/observed_network.go); nothing here writes an
+// interface, address or prefix itself.
 //
-// **No `hosted_on`.** ADR-0003 offers "cloud resource → account or region" for
-// it, and this platform models neither an account nor a region as an asset. An
-// edge needs two assets; inventing an "account" asset to hang one off would be
-// a node nothing else in the product knows about. The account and the region
-// are recorded where they belong — as the `cloud.account_id` and `cloud.region`
-// facts on the resource itself.
+// **`hosted_on` → the account asset.** The account became an asset in
+// asset-inventory ADR-0009 D1 (declared when the integration is added; see
+// cloud_account.go), and every resource recorded through upsertDeviceAssetWith
+// — enumerated ones included — gets the measured `hosted_on` edge to it there.
+// The region is still not an asset (a region is a place, not a thing anybody
+// owns): it stays the `cloud.region` fact, beside `cloud.account_id`.
 //
-// **Security groups are not assets.** They are membership, recorded as the
-// `cloud.security_groups` fact on the resource that is in them (and, for GCP,
-// computed from firewall targeting). A security group is a policy object, not a
-// configuration item: it has no address, no lifecycle a CMDB tracks, and making
-// one an asset would put a rule set in the inventory the product exists to keep
-// rule sets out of.
+// **Security groups are assets (asset-inventory ADR-0009 D2, DCIM row 4.6).**
+// A group, NSG or GCP firewall rule is recorded as a `security_group` asset
+// before the instances, and each instance in it gets a measured `member_of`
+// edge to it (cloud_tier1.go). Identity and membership only: the rules
+// themselves are never retrieved into a struct that has a field for them. The
+// `cloud.security_groups` membership fact is still written on the member.
 
 import (
 	"context"
@@ -59,29 +64,28 @@ import (
 	gcpclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/gcp"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
-	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/cloudaccount"
+	"github.com/vistasecurity/vistaplatform/shared/dcim"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/probeconsent"
-	"github.com/vistasecurity/vistaplatform/shared/relationships"
 )
 
 // Device types the enumeration emits. Each one has a row in
 // shared/assetclass's device_type table; a type with no row would be classed
 // `cloud_resource`, which is true but coarse, and the class is what the
-// Inventory lenses facet on.
+// Inventory lenses facet on. Networks and subnets have no device type: they
+// are prefixes, not assets (row 1.5f).
 const (
 	DeviceTypeAWSEC2Instance     = "aws_ec2_instance"
-	DeviceTypeAWSVPC             = "aws_vpc"
-	DeviceTypeAWSSubnet          = "aws_subnet"
 	DeviceTypeAzureVM            = "azure_vm"
-	DeviceTypeAzureVNet          = "azure_virtual_network"
-	DeviceTypeAzureSubnet        = "azure_subnet"
 	DeviceTypeGCPComputeInstance = "gcp_compute_instance"
-	DeviceTypeGCPNetwork         = "gcp_network"
-	DeviceTypeGCPSubnetwork      = "gcp_subnetwork"
 )
+
+// cloudPrefixNetworkType is `prefixes.network_type` for every prefix a cloud
+// enumeration records.
+const cloudPrefixNetworkType = "cloud"
 
 // Enumeration is NOT gated on a `resource_types` entry, and that is a decision
 // rather than an omission.
@@ -89,7 +93,7 @@ const (
 // `resource_types` selects which CRYPTO collectors run — load balancers, KMS,
 // buckets — and each of those is an independent posture question an operator
 // might reasonably want on its own. The inventory is not: an account's
-// instances, networks and subnets are the frame everything else hangs on, and a
+// instances and networks are the frame everything else hangs on, and a
 // discovery run that found a TLS listener on a machine it did not inventory is
 // half an answer. So enumeration runs on every cloud job for an integration
 // that has it on, and the single switch is the integration's
@@ -102,8 +106,10 @@ const (
 
 // CloudEnumerationCounts is what one enumeration pass found, for the job result.
 //
-// SecurityGroups counts DISTINCT groups observed as membership, not assets:
-// there is no security-group asset (see the file comment). It is still reported
+// Networks and Subnets count the VPCs / VNets / networks and their subnets the
+// run read — recorded as prefixes, not assets, since row 1.5f. SecurityGroups
+// counts DISTINCT groups observed as membership, not assets: there is no
+// security-group asset (see the file comment). Both are still reported
 // because "this run saw 14 security groups" is what tells an operator the
 // membership fact is populated.
 type CloudEnumerationCounts struct {
@@ -113,10 +119,11 @@ type CloudEnumerationCounts struct {
 	SecurityGroups int `json:"security_groups"`
 }
 
-// Total is the number of ASSETS the enumeration recorded. Security groups are
-// excluded because they are not assets.
+// Total is the number of ASSETS the enumeration recorded: the instances.
+// Networks and subnets are prefixes and security groups are membership, so
+// neither counts.
 func (c CloudEnumerationCounts) Total() int {
-	return c.Instances + c.Networks + c.Subnets
+	return c.Instances
 }
 
 // Empty reports whether nothing at all was enumerated, so the job result can
@@ -125,7 +132,7 @@ func (c CloudEnumerationCounts) Empty() bool {
 	return c.Instances == 0 && c.Networks == 0 && c.Subnets == 0 && c.SecurityGroups == 0
 }
 
-// cloudEnumResource is one resource an enumeration found, in a
+// cloudEnumResource is one compute instance an enumeration found, in a
 // provider-independent shape.
 //
 // The provider builders produce these from their own projections and nothing
@@ -142,50 +149,115 @@ type cloudEnumResource struct {
 	DisplayName string
 	Hostname    string
 	IPAddress   string
-	// ParentID is the ResourceID of the container: the VPC of a subnet, the
-	// subnet of an instance. Empty means the container was not enumerated (a
-	// shared VPC owned by another account, an instance with no subnet), and no
-	// edge is written rather than one pointing at nothing.
-	ParentID string
-	// SegmentCIDR, on a subnet, is the prefix a `cidr` network segment is
-	// created or matched for. It is what makes an instance's private address
-	// resolve to a scope (ADR-0002 D3).
-	SegmentCIDR string
 	// CloudNetworkRef is the VPC / VNet / GCP network this resource sits in,
-	// as the provider's canonical resource id. On a subnet it is the same as
-	// ParentID; on an instance it is its subnet's parent, which ParentID does
-	// not carry.
-	//
-	// It is the segment's identity, not a decoration: two VPCs with the same
-	// CIDR are two address spaces, and a segment keyed on the CIDR alone made
-	// two instances at one private address resolve to one scope and then to one
-	// ASSET. `network_segments` is unique on
-	// (tenant_id, value, coalesce(cloud_network_ref, '')) for this reason.
+	// as the provider's canonical resource id: which ADDRESS SPACE its
+	// private addresses are in. Every prefix the enumeration records carries
+	// the same value (cloudNetwork.NetworkRef), so the identity scope of an
+	// instance's address is its subnet's prefix whether the address was
+	// reported by this enumeration or by an agent inside the instance — and
+	// two VPCs with the same CIDR stay two address spaces.
 	CloudNetworkRef string
-	Facts           map[string]any
-	Attributes      map[string]any
-	Tags            map[string]interface{}
-	Metadata        map[string]interface{}
+	// Interfaces are the instance's ENIs / NICs as observed `virtual`
+	// interfaces with their private addresses, and Prefixes the prefixes of
+	// the networks and subnets those interfaces sit in (DCIM row 1.5f). They
+	// ride on the instance's sighting; the engine records them.
+	Interfaces []identity.ObservedInterface
+	Prefixes   []identity.ObservedPrefix
+	Facts      map[string]any
+	Attributes map[string]any
+	Tags       map[string]interface{}
+	Metadata   map[string]interface{}
+	// MemberOf are the canonical resource ids of the security groups the
+	// resource is in: each becomes a `member_of` edge to that group's asset
+	// when the group is in the inventory (ADR-0009 D4).
+	MemberOf []string
+}
+
+// cloudNetwork is one VPC / VNet / GCP network, or one subnet of one, as the
+// enumeration read it: the prefixes it becomes.
+type cloudNetwork struct {
+	// ResourceID is the provider's canonical id of this network or subnet.
+	ResourceID string
+	// NetworkRef is the id of the VPC / VNet / GCP network it belongs to — its
+	// own ResourceID for a network, its parent's for a subnet. It is the
+	// prefix's `cloud_network_ref` (see cloudEnumResource.CloudNetworkRef).
+	NetworkRef string
+	// Account is the account / subscription / project the network is in, as
+	// the provider states it; Region its region ("" for a global GCP network).
+	Account string
+	Region  string
+	Name    string
+	// CIDRs are the address ranges: a VPC's CIDR blocks, a subnet's prefix.
+	CIDRs []string
+}
+
+// prefixes are the network's address ranges as observed prefixes.
+//
+// `dhcp_managed` is stated FALSE, deliberately: a cloud subnet hands the SAME address to the
+// SAME instance for that instance's whole life, which is not the lease churn
+// the dynamic-address rule exists for. A learned prefix nobody has stated a
+// posture on reads as dynamic (row 1.4), and that would stop every instance's
+// address from deciding anything — the address is precisely how an agent
+// installed inside the instance, or the sensor seeing it on the wire, reaches
+// the same asset. The honest qualifier: the address is stable for an
+// instance's life, NOT across instances; a freed address handed to the next
+// instance carries a different `cloud_resource_id`, and the singleton guard
+// turns that into a merge proposal (ADR-0002 D3 erratum).
+//
+// A range too broad to be anybody's (probeconsent.TooBroadToClaim) is not
+// recorded: a prefix is a consent and approval scope (row 1.6), held to the
+// rule every scope write is.
+//
+// The prefixes carry no scope here; recordNetworkPrefixes scopes each to its
+// region's location under the account's site (DCIM row 2.1) once it holds the
+// account's transaction.
+func (n cloudNetwork) prefixes() []identity.ObservedPrefix {
+	notDHCP := false
+	var out []identity.ObservedPrefix
+	for _, raw := range n.CIDRs {
+		p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err != nil {
+			log.Printf("[cloud enumeration] %s: %q is not a CIDR prefix; not recorded", n.ResourceID, raw)
+			continue
+		}
+		if probeconsent.TooBroadToClaim(p) {
+			log.Printf("[cloud enumeration] %s: %s is too broad to record as a prefix; skipped", n.ResourceID, raw)
+			continue
+		}
+		f := notDHCP
+		out = append(out, identity.ObservedPrefix{
+			Prefix:          p.Masked().String(),
+			NetworkType:     cloudPrefixNetworkType,
+			CloudNetworkRef: n.NetworkRef,
+			DHCPManaged:     &f,
+		})
+	}
+	return out
 }
 
 // cloudEnumerationPlan is one provider's whole enumeration, built before
 // anything is written.
 //
-// Built-then-recorded rather than written as it goes, because the subnets have
-// to exist as network segments BEFORE any instance is resolved: the scope an
-// instance's private address identifies within is looked up at observation
-// time, and an instance resolved before its subnet's segment exists would be
-// scoped to the tenant default and then never re-scoped (the next observation
-// MATCHES the asset that exists and never takes the create path again).
+// Built-then-recorded rather than written as it goes, because the prefixes
+// have to exist BEFORE any instance is resolved: the scope an instance's
+// private address identifies within is looked up at observation time, and an
+// instance resolved before its subnet's prefix exists would be scoped to the
+// tenant default and then never re-scoped.
 type cloudEnumerationPlan struct {
 	Provider  string
 	Vendor    string
-	Networks  []cloudEnumResource
-	Subnets   []cloudEnumResource
+	Networks  []cloudNetwork
+	Subnets   []cloudNetwork
 	Instances []cloudEnumResource
 	// SecurityGroupIDs are the distinct groups seen, for the count. The groups
 	// themselves are membership facts on the resources, not rows.
 	SecurityGroupIDs map[string]bool
+	// Terminal are resources the provider still lists in a terminal state
+	// (ADR-0009 D6). Never created; an existing asset gets the state.
+	Terminal []cloudTerminalResource
+	// SecurityGroups are the groups as ASSETS (ADR-0009 D2), recorded before
+	// the instances so each instance's `member_of` edge finds its group.
+	SecurityGroups []cloudEnumResource
 }
 
 func (p cloudEnumerationPlan) counts() CloudEnumerationCounts {
@@ -195,6 +267,91 @@ func (p cloudEnumerationPlan) counts() CloudEnumerationCounts {
 		Subnets:        len(p.Subnets),
 		SecurityGroups: len(p.SecurityGroupIDs),
 	}
+}
+
+// networkPrefixesByAccount groups every network's and subnet's prefixes by the
+// account they are in, networks first, each prefix once.
+func (p cloudEnumerationPlan) networkPrefixesByAccount() (map[string][]identity.ObservedPrefix, []string) {
+	out := map[string][]identity.ObservedPrefix{}
+	var order []string
+	seen := map[string]bool{}
+	for _, group := range [][]cloudNetwork{p.Networks, p.Subnets} {
+		for _, n := range group {
+			account := strings.TrimSpace(n.Account)
+			for _, pr := range n.prefixes() {
+				key := account + "|" + pr.CloudNetworkRef + "|" + pr.Prefix
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				if _, ok := out[account]; !ok {
+					order = append(order, account)
+				}
+				out[account] = append(out[account], pr)
+			}
+		}
+	}
+	return out, order
+}
+
+// prefixRegions maps each network prefix (keyed as networkPrefixesByAccount
+// dedupes them: account|network ref|prefix) to the region its network or
+// subnet is in. The first statement wins, networks before subnets, as there.
+func (p cloudEnumerationPlan) prefixRegions() map[string]string {
+	out := map[string]string{}
+	for _, group := range [][]cloudNetwork{p.Networks, p.Subnets} {
+		for _, n := range group {
+			region := strings.TrimSpace(n.Region)
+			if region == "" {
+				continue
+			}
+			account := strings.TrimSpace(n.Account)
+			for _, pr := range n.prefixes() {
+				key := account + "|" + pr.CloudNetworkRef + "|" + pr.Prefix
+				if _, ok := out[key]; !ok {
+					out[key] = region
+				}
+			}
+		}
+	}
+	return out
+}
+
+// scopeToRegions places the account's prefixes in their regions' locations
+// under the account's site (DCIM row 2.1, ADR-0009 D1), creating the site and
+// the locations as needed, inside the caller's transaction. A prefix whose
+// network names no region stays unscoped.
+func scopeToRegions(ctx context.Context, r *pgidentity.Repository, tenantID uuid.UUID, accountAsset, provider, account, stated string, prefixes []identity.ObservedPrefix, regions map[string]string) ([]identity.ObservedPrefix, error) {
+	assetID, err := uuid.Parse(accountAsset)
+	if err != nil {
+		return prefixes, err
+	}
+	var name string
+	if err := r.Tx().QueryRowContext(ctx, `SELECT coalesce(display_name, '') FROM public.assets WHERE tenant_id = $1 AND id = $2`, tenantID, assetID).Scan(&name); err != nil {
+		return prefixes, err
+	}
+	siteID, err := cloudaccount.EnsureSite(ctx, r, tenantID, assetID, provider, account, name)
+	if err != nil {
+		return prefixes, err
+	}
+	locations := map[string]uuid.UUID{}
+	out := make([]identity.ObservedPrefix, len(prefixes))
+	for i, pr := range prefixes {
+		out[i] = pr
+		region := regions[stated+"|"+pr.CloudNetworkRef+"|"+pr.Prefix]
+		if region == "" {
+			continue
+		}
+		loc, ok := locations[region]
+		if !ok {
+			if loc, err = cloudaccount.EnsureRegionLocation(ctx, r, tenantID, siteID, provider, region); err != nil {
+				return prefixes, err
+			}
+			locations[region] = loc
+		}
+		out[i].ScopeKind, out[i].ScopeID = string(dcim.ObjectKindLocation), loc.String()
+	}
+	return out, nil
 }
 
 // CloudDiscoveryResult is one cloud discovery run's whole output: the resources
@@ -235,7 +392,7 @@ func (s *CloudDiscoveryService) DiscoverResourceEvidence(
 	// per-resource because it is one row per run, and here rather than in
 	// `DiscoverResources` because the single-resource callers come through this
 	// function too.
-	ctx = context.WithValue(ctx, cloudScopeKey{}, s.resolveCloudScope(ctx, tenantID, integrationID, cloudProvider))
+	ctx = s.beginCloudRun(ctx, tenantID, integrationID, cloudProvider)
 	defer func() {
 		run.mu.Lock()
 		out.Identity = run.summary
@@ -268,8 +425,18 @@ func (s *CloudDiscoveryService) DiscoverResourceEvidence(
 	return out, nil
 }
 
-// DiscoverResources also enumerates configured compute/network inventory.
+// DiscoverResources is one cloud discovery run over one account: the regions
+// first (AWS: discovered from the account when the request names none), then
+// every selected resource type in every region — the crypto / at-rest
+// collectors and the enumeration listings alike, one selection
+// (asset-inventory ADR-0009 D3) — and finally the run's lifecycle evidence:
+// the provider's terminal states and the listings it completed (D6).
 func (s *CloudDiscoveryService) DiscoverResources(ctx context.Context, tenantID, integrationID uuid.UUID, cloudProvider string, resourceTypes, regions, resourceGroups []string) (*CloudDiscoveryResult, error) {
+	// One run, one account sync, one scope and one rule cache for both halves.
+	ctx = s.beginCloudRun(ctx, tenantID, integrationID, cloudProvider)
+	if cloudProvider == "aws" && len(regions) == 0 {
+		regions = s.discoverAWSRegions(ctx, integrationID)
+	}
 	out, err := s.DiscoverResourceEvidence(ctx, tenantID, integrationID, cloudProvider, resourceTypes, regions, resourceGroups)
 	if err != nil {
 		return nil, err
@@ -277,7 +444,14 @@ func (s *CloudDiscoveryService) DiscoverResources(ctx context.Context, tenantID,
 	run := &cloudRunEvidence{summary: out.Identity, retained: out.Retained}
 	ctx = context.WithValue(ctx, cloudRunKey{}, run)
 	defer func() { run.mu.Lock(); out.Identity = run.summary; out.Retained = run.retained; run.mu.Unlock() }()
-	var recordErr error
+	vendor := map[string]string{"aws": "AWS", "azure": "Azure", "gcp": "GCP"}[cloudProvider]
+	defer s.recordEnumerationCoverage(ctx, tenantID, vendor)
+
+	sel := selectEnumeration(resourceTypes)
+	if !sel.any() {
+		out.EnumerationSkipped = "no compute, network or security-group listing was selected for this run"
+		return out, nil
+	}
 
 	settings, err := loadCloudIntegrationSettings(ctx, s.bypassDB, tenantID, integrationID)
 	if err != nil {
@@ -288,12 +462,8 @@ func (s *CloudDiscoveryService) DiscoverResources(ctx context.Context, tenantID,
 		log.Printf("[cloud enumeration] %s: %s", cloudProvider, out.EnumerationSkipped)
 		return out, nil
 	}
-	if !settings.EnumerateCompute {
-		out.EnumerationSkipped = "enumerate_compute is off for this integration"
-		return out, nil
-	}
 
-	enumerated, counts, err := s.enumerate(ctx, tenantID, integrationID, cloudProvider, settings.Environment, regions)
+	enumerated, counts, err := s.enumerate(ctx, tenantID, integrationID, cloudProvider, settings.Environment, regions, sel)
 	if err != nil {
 		// Same reasoning: enumeration is additive. Losing it must not lose the
 		// crypto findings the same run produced.
@@ -304,7 +474,7 @@ func (s *CloudDiscoveryService) DiscoverResources(ctx context.Context, tenantID,
 	out.Devices = append(out.Devices, enumerated...)
 	out.Enumeration = counts
 	run.mu.Lock()
-	recordErr = run.failure
+	recordErr := run.failure
 	run.mu.Unlock()
 	if recordErr != nil {
 		return nil, fmt.Errorf("persist cloud enumeration: %w", recordErr)
@@ -318,6 +488,7 @@ func (s *CloudDiscoveryService) enumerate(
 	tenantID, integrationID uuid.UUID,
 	cloudProvider, environment string,
 	regions []string,
+	sel cloudEnumerationSelection,
 ) ([]models.Device, CloudEnumerationCounts, error) {
 	var (
 		plan cloudEnumerationPlan
@@ -328,19 +499,19 @@ func (s *CloudDiscoveryService) enumerate(
 		var client *awsclient.Client
 		client, err = awsclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey)
 		if err == nil {
-			plan, err = s.enumerateAWS(ctx, client, regions)
+			plan, err = s.enumerateAWS(ctx, client, regions, sel)
 		}
 	case "azure":
 		var client *azureclient.Client
 		client, err = azureclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey, s.azureOptions...)
 		if err == nil {
-			plan, err = s.enumerateAzure(ctx, client)
+			plan, err = s.enumerateAzure(ctx, client, sel)
 		}
 	case "gcp":
 		var client *gcpclient.Client
 		client, err = gcpclient.NewClient(ctx, s.bypassDB, integrationID, s.masterKey, s.gcpOptions...)
 		if err == nil {
-			plan, err = s.enumerateGCP(ctx, client)
+			plan, err = s.enumerateGCP(ctx, client, sel)
 		}
 	default:
 		return nil, CloudEnumerationCounts{}, fmt.Errorf("unknown cloud provider: %s", cloudProvider)
@@ -348,6 +519,18 @@ func (s *CloudDiscoveryService) enumerate(
 	if err != nil {
 		return nil, CloudEnumerationCounts{}, err
 	}
+	if !sel.Groups {
+		// Listed only to name the instances' groups; the groups themselves
+		// were not asked for as assets.
+		plan.SecurityGroups = nil
+	}
+	if !sel.Networks {
+		// Listed only to place the instances; each instance still carries the
+		// prefixes it sits in. The account's network inventory was not asked
+		// for, so it is not recorded on its own.
+		plan.Networks, plan.Subnets = nil, nil
+	}
+	s.recordTerminalStates(ctx, tenantID, plan.Vendor, plan.Terminal)
 	return s.recordEnumeration(ctx, tenantID, integrationID, environment, plan)
 }
 
@@ -355,8 +538,10 @@ func (s *CloudDiscoveryService) enumerate(
 // Recording
 // ---------------------------------------------------------------------------
 
-// recordEnumeration writes a plan: segments first, then networks, subnets and
-// instances through the identification engine, then the containment edges.
+// recordEnumeration writes a plan: the account's network prefixes first, then
+// the instances
+// through the identification engine, each carrying its interfaces, addresses
+// and the prefixes it sits in.
 //
 // The returned devices carry ASSET ids (upsertDeviceAsset rewrites Device.ID),
 // which is what the caller's job result and the Devices page read.
@@ -367,61 +552,176 @@ func (s *CloudDiscoveryService) recordEnumeration(
 	plan cloudEnumerationPlan,
 ) ([]models.Device, CloudEnumerationCounts, error) {
 	counts := plan.counts()
-	if counts.Total() == 0 {
+	if counts.Empty() {
 		return nil, counts, nil
 	}
 
-	// 1. Segments, from the subnets' CIDRs. Failures are logged, never fatal: a
-	//    segment we could not create costs an instance its scope, which makes
-	//    its address unable to VOTE on identity — it does not make the instance
+	// 1. Prefixes, before any instance resolves, so its addresses are scoped by
+	//    them. Failures are logged, never fatal: a prefix we could not record
+	//    costs an instance its scope until the next run, which makes its
+	//    address unable to VOTE on identity — it does not make the instance
 	//    unrecordable, because `cloud_resource_id` decides on its own.
-	s.ensureSubnetSegments(ctx, tenantID, plan, environment)
+	s.recordNetworkPrefixes(ctx, tenantID, plan)
 
-	// 2. The resources, containers first so an edge's far end already exists.
-	assetByResource := make(map[string]uuid.UUID, counts.Total())
-	devices := make([]models.Device, 0, counts.Total())
-	record := func(group []cloudEnumResource) {
-		for i := range group {
-			res := group[i]
-			device, err := s.recordCloudResource(ctx, tenantID, integrationID, plan.Vendor, res)
-			if err != nil {
-				// One contested or unwritable resource must not lose the rest
-				// of the run. A contested one already has a merge proposal
-				// waiting in Approvals, which is the actionable half.
-				log.Printf("[cloud enumeration] %s %s not recorded: %v", res.DeviceType, res.ResourceID, err)
-				continue
-			}
-			assetByResource[res.ResourceID] = device.ID
-			devices = append(devices, *device)
+	// 2. The security groups, before the instances that are members of them.
+	devices := make([]models.Device, 0, len(plan.SecurityGroups)+len(plan.Instances))
+	for _, sg := range plan.SecurityGroups {
+		device, err := s.recordCloudResource(ctx, tenantID, integrationID, plan.Vendor, sg)
+		if err != nil {
+			log.Printf("[cloud enumeration] security group %s not recorded: %v", sg.ResourceID, err)
+			continue
 		}
-	}
-	record(plan.Networks)
-	record(plan.Subnets)
-	record(plan.Instances)
-
-	// 3. Containment edges, once both ends are known assets.
-	edges := 0
-	for _, group := range [][]cloudEnumResource{plan.Subnets, plan.Instances} {
-		for _, res := range group {
-			if res.ParentID == "" {
-				continue
-			}
-			parent, okParent := assetByResource[res.ParentID]
-			child, okChild := assetByResource[res.ResourceID]
-			if !okParent || !okChild {
-				continue
-			}
-			if err := s.writeContainsEdge(ctx, tenantID, plan.Provider, parent, child); err != nil {
-				log.Printf("[cloud enumeration] contains edge %s -> %s not written: %v", res.ParentID, res.ResourceID, err)
-				continue
-			}
-			edges++
-		}
+		devices = append(devices, *device)
 	}
 
-	log.Printf("[cloud enumeration] %s: %d instances, %d networks, %d subnets, %d security groups, %d containment edges",
-		plan.Provider, counts.Instances, counts.Networks, counts.Subnets, counts.SecurityGroups, edges)
+	// 3. The instances.
+	for i := range plan.Instances {
+		res := plan.Instances[i]
+		device, err := s.recordCloudResource(ctx, tenantID, integrationID, plan.Vendor, res)
+		if err != nil {
+			// One contested or unwritable resource must not lose the rest
+			// of the run. A contested one already has a merge proposal
+			// waiting in Approvals, which is the actionable half.
+			log.Printf("[cloud enumeration] %s %s not recorded: %v", res.DeviceType, res.ResourceID, err)
+			continue
+		}
+		devices = append(devices, *device)
+	}
+
+	log.Printf("[cloud enumeration] %s: %d instances, %d networks, %d subnets, %d security groups",
+		plan.Provider, counts.Instances, counts.Networks, counts.Subnets, counts.SecurityGroups)
 	return devices, counts, nil
+}
+
+// recordNetworkPrefixes records every network's and subnet's prefixes on the
+// account they belong to, as one measured sighting of the account per account
+// (DCIM row 1.5f).
+//
+// Why on the ACCOUNT: a prefix is not a property of any instance — an empty
+// subnet is still a subnet — and the seam records prefixes only beside an
+// asset an observation resolved to. The account is the asset the provider's
+// listing is about, and it already exists: it is declared when the
+// integration is added (cloud_account.go). Each instance's sighting also
+// carries the prefixes it sits in, so an instance never depends on this step
+// having run; this step is what records the networks nothing runs in.
+//
+// An account with no asset is skipped, not created: an account is declared by
+// a person adding an integration, never discovered (ADR-0009 D1), and a
+// listing must not mint one.
+func (s *CloudDiscoveryService) recordNetworkPrefixes(ctx context.Context, tenantID uuid.UUID, plan cloudEnumerationPlan) {
+	byAccount, order := plan.networkPrefixesByAccount()
+	if len(order) == 0 {
+		return
+	}
+	regions := plan.prefixRegions()
+	scope, _ := ctx.Value(cloudScopeKey{}).(cloudScope)
+	repo := s.devices.Repo()
+	now := time.Now().UTC()
+	for _, stated := range order {
+		account := firstNonEmpty(stated, scope.AccountID)
+		if _, ok := cloudNetworkSighting(tenantID, plan.Provider, plan.Vendor, account, byAccount[stated], now); !ok {
+			log.Printf("[cloud enumeration] %s: %d prefixes name no account; recorded only with the instances in them",
+				plan.Provider, len(byAccount[stated]))
+			continue
+		}
+		var assetID string
+		prefixes := byAccount[stated]
+		if err := repo.RunInTx(ctx, tenantID.String(), func(r *pgidentity.Repository) error {
+			var err error
+			assetID, err = cloudaccount.FindAsset(ctx, r, tenantID.String(), plan.Provider, account)
+			if err != nil || assetID == "" {
+				return err
+			}
+			// The account's site and its regions' locations, and each
+			// prefix's scope in them (DCIM row 2.1).
+			prefixes, err = scopeToRegions(ctx, r, tenantID, assetID, plan.Provider, account, stated, prefixes, regions)
+			return err
+		}); err != nil {
+			log.Printf("[cloud enumeration] %s account %s: lookup failed; its prefixes wait for the next run: %v", plan.Provider, account, err)
+			continue
+		}
+		if assetID == "" {
+			log.Printf("[cloud enumeration] %s account %s is not an asset (no integration declares it); its prefixes are recorded only with the instances in them",
+				plan.Provider, account)
+			continue
+		}
+		sighting, _ := cloudNetworkSighting(tenantID, plan.Provider, plan.Vendor, account, prefixes, now)
+		res, err := s.devices.resolveSighting(ctx, sighting, nil)
+		if err != nil {
+			log.Printf("[cloud enumeration] %s account %s: prefixes not recorded: %v", plan.Provider, account, err)
+			continue
+		}
+		if res.Asset.ID != assetID {
+			log.Printf("[cloud enumeration] %s account %s: the network listing resolved to %q (outcome %s), not the account asset %s",
+				plan.Provider, account, res.Asset.ID, res.Outcome, assetID)
+		}
+	}
+}
+
+// cloudNetworkSighting is the account's sighting that carries its networks'
+// prefixes: the account's own identifier and nothing else that could match or
+// mint an asset. ok is false when the account cannot be named.
+func cloudNetworkSighting(tenantID uuid.UUID, provider, vendor, account string, prefixes []identity.ObservedPrefix, at time.Time) (identity.Sighting, bool) {
+	rid := cloudaccount.ResourceID(provider, account)
+	if rid == "" || len(prefixes) == 0 {
+		return identity.Sighting{}, false
+	}
+	return identity.Sighting{
+		TenantID: tenantID.String(),
+		Source:   cloudSource(stringPtr(vendor)),
+		// The provider's API answering about the account's own networks: the
+		// same authoritative listing every enumerated resource is.
+		Channel:     identity.ChannelAPI,
+		ObservedAt:  at,
+		ReceiptID:   "cloud-networks:" + rid + ":" + at.Format(time.RFC3339Nano),
+		ClassHint:   cloudaccount.ClassKey,
+		Confidence:  1,
+		Ownership:   identity.OwnershipInternal,
+		Identifiers: []identity.SightedIdentifier{{Kind: identity.KindCloudResourceID, Value: rid}},
+		Prefixes:    prefixes,
+	}, true
+}
+
+// enumeratedDevice is the device record one enumerated instance is resolved
+// as — the shape recordCloudResource hands upsertDeviceAssetWith.
+func enumeratedDevice(tenantID, integrationID uuid.UUID, vendor string, res cloudEnumResource, now time.Time) models.Device {
+	metadata := map[string]interface{}{}
+	for k, v := range res.Metadata {
+		metadata[k] = v
+	}
+	metadata["cloud_resource_id"] = res.ResourceID
+	return models.Device{
+		ID:              uuid.New(),
+		TenantID:        tenantID,
+		DeviceType:      res.DeviceType,
+		Vendor:          stringPtr(vendor),
+		Hostname:        stringPtr(res.Hostname),
+		IPAddress:       stringPtr(res.IPAddress),
+		DiscoveryMethod: "cloud_api",
+		CredentialID:    &integrationID,
+		// "discovered", never "connected". The provider's API was read; nothing
+		// connected to the resource, and nothing tested whether it could be.
+		// normalizeConnectionStatus maps this onto `unknown`, which is the one of
+		// the four permitted values that means "we have not measured this" — and
+		// which the Devices page renders in neutral grey rather than green.
+		ConnectionStatus: "discovered",
+		Metadata:         models.JSONB(metadata),
+		Tags:             models.JSONB(res.Tags),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+}
+
+// withEnumeratedNetwork puts an enumerated resource's interfaces and prefixes
+// on its sighting: the one place the cloud collectors' network projection
+// reaches the intake seam.
+func withEnumeratedNetwork(s identity.Sighting, res *cloudEnumResource) identity.Sighting {
+	if res == nil {
+		return s
+	}
+	s.Interfaces = append([]identity.ObservedInterface(nil), res.Interfaces...)
+	s.Prefixes = append([]identity.ObservedPrefix(nil), res.Prefixes...)
+	return s
 }
 
 // recordCloudResource resolves one enumerated resource to an asset and writes
@@ -440,36 +740,21 @@ func (s *CloudDiscoveryService) recordCloudResource(
 	if strings.TrimSpace(res.ResourceID) == "" {
 		return nil, fmt.Errorf("resource carries no cloud_resource_id; not recorded under a weaker identifier")
 	}
-	metadata := map[string]interface{}{}
-	for k, v := range res.Metadata {
-		metadata[k] = v
-	}
-	metadata["cloud_resource_id"] = res.ResourceID
-
-	device := models.Device{
-		ID:              uuid.New(),
-		TenantID:        tenantID,
-		DeviceType:      res.DeviceType,
-		Vendor:          stringPtr(vendor),
-		Hostname:        stringPtr(res.Hostname),
-		IPAddress:       stringPtr(res.IPAddress),
-		DiscoveryMethod: "cloud_api",
-		CredentialID:    &integrationID,
-		// "discovered", never "connected". The provider's API was read; nothing
-		// connected to the resource, and nothing tested whether it could be.
-		// normalizeConnectionStatus maps this onto `unknown`, which is the one of
-		// the four permitted values that means "we have not measured this" — and
-		// which the Devices page renders in neutral grey rather than green.
-		ConnectionStatus: "discovered",
-		Metadata:         models.JSONB(metadata),
-		Tags:             models.JSONB(res.Tags),
-		CreatedAt:        time.Now(),
-		UpdatedAt:        time.Now(),
-	}
+	device := enumeratedDevice(tenantID, integrationID, vendor, res, time.Now())
 
 	classKey := DeviceTypeClassKey(res.DeviceType)
-	factRows := cloudFactRows(res.Facts, cloudSource(device.Vendor), time.Now().UTC())
-	attrs := filterClassAttributes(classKey, res.Attributes, res.DeviceType)
+	scope, _ := ctx.Value(cloudScopeKey{}).(cloudScope)
+	listing, _ := res.Facts[facts.KeyCloudListing].(string)
+	values := map[string]any{}
+	for k, v := range res.Facts {
+		values[k] = v
+	}
+	for k, v := range cloudListingFacts(scope, firstNonEmpty(listing, cloudListingFrom(ctx)), "") {
+		values[k] = v
+	}
+	factRows := cloudFactRows(values, cloudSource(device.Vendor), time.Now().UTC())
+	attrs := filterClassAttributes(classKey, mergeAttributes(res.Attributes, cloudProviderTypeAttr(res.DeviceType)), res.DeviceType)
+	source := cloudSource(device.Vendor)
 
 	ctx = context.WithValue(ctx, cloudEnumerationContextKey{}, &res)
 	err := s.upsertDeviceAssetWith(ctx, &device, res.ResourceID, res.CloudNetworkRef, func(r *pgidentity.Repository, assetID uuid.UUID) error {
@@ -479,12 +764,35 @@ func (s *CloudDiscoveryService) recordCloudResource(
 				return fmt.Errorf("writing cloud facts: %w", err)
 			}
 		}
+		if classKey == string(assetclass.KeyDnsZone) {
+			zone, _ := res.Attributes["zone_name"].(string)
+			names, err := dnsZoneCertificateNames(ctx, r, tenantID, zone)
+			if err != nil {
+				return fmt.Errorf("certificate names under %s: %w", zone, err)
+			}
+			if len(names) > 0 {
+				if attrs == nil {
+					attrs = map[string]any{}
+				}
+				attrs["certificate_names"] = names
+			}
+		}
 		if len(attrs) > 0 {
 			if err := mergeAssetAttributes(ctx, r.Tx(), tenantID, assetID, attrs); err != nil {
 				return fmt.Errorf("writing class attributes: %w", err)
 			}
 		}
-		return nil
+		// The account + region mirrored as a cluster, the instance one of its
+		// VMs (DCIM row 4.2; ADR-0010 D8) — for NetBox sync fidelity only.
+		if provider, account, region, ok := cloudMirrorKey(classKey, res.Facts); ok {
+			err := r.MirrorCloudCluster(ctx, ref, provider, account, region)
+			if errors.Is(err, pgidentity.ErrUnknownClusterType) {
+				log.Printf("[cloud enumeration] %s: no %q cluster type; the account+region is not mirrored: %v", res.ResourceID, provider, err)
+			} else if err != nil {
+				return fmt.Errorf("mirroring the account and region as a cluster: %w", err)
+			}
+		}
+		return linkMemberOf(ctx, r, tenantID, assetID, res.MemberOf, source, time.Now().UTC())
 	})
 	if err != nil {
 		return nil, err
@@ -492,36 +800,18 @@ func (s *CloudDiscoveryService) recordCloudResource(
 	return &device, nil
 }
 
-// writeContainsEdge writes one `contains` edge, container → contained.
-func (s *CloudDiscoveryService) writeContainsEdge(ctx context.Context, tenantID uuid.UUID, provider string, from, to uuid.UUID) error {
-	// Repo() is the existing accessor for exactly this — the writes that are not
-	// a resolution — and borrowing it keeps ONE repository per service rather
-	// than a second handle that could disagree about which connection it is on.
-	repo := s.devices.Repo()
-	source := cloudSource(stringPtr(provider))
-	return repo.RunInTx(ctx, tenantID.String(), func(r *pgidentity.Repository) error {
-		status, statusErr := r.EdgeStatusFor(ctx, tenantID.String(), source.Kind, from.String(), to.String())
-		if statusErr != nil {
-			return statusErr
-		}
-		edgeErr := r.UpsertRelationship(ctx, tenantID.String(), pgidentity.Edge{
-			FromAssetID: from.String(),
-			ToAssetID:   to.String(),
-			Type:        string(relationships.Contains),
-			SourceKind:  source.Kind,
-			SourceRef:   source.Ref,
-			Status:      status,
-			ObservedAt:  time.Now().UTC(),
-		})
-		if errors.Is(edgeErr, pgidentity.ErrSelfEdge) {
-			// Both ends resolved to one asset. Meaningless rather than wrong —
-			// it means two resources matched the same identity — and dropped
-			// with a line saying so.
-			log.Printf("[cloud enumeration] contains edge resolved to itself (%s); dropped", from)
-			return nil
-		}
-		return edgeErr
-	})
+// cloudMirrorKey is the cloud account + region an enumerated compute instance
+// is mirrored into as a cluster member (DCIM row 4.2): its provider, account
+// and region facts. ok is false for anything but a compute instance, or when
+// any of the three is unknown — a mirror keyed on a guess would merge two
+// accounts' regions.
+func cloudMirrorKey(classKey string, values map[string]any) (provider, account, region string, ok bool) {
+	if classKey != string(assetclass.KeyComputeInstance) {
+		return "", "", "", false
+	}
+	str := func(k string) string { v, _ := values[k].(string); return strings.TrimSpace(v) }
+	provider, account, region = strings.ToLower(str(facts.KeyCloudProvider)), str(facts.KeyCloudAccountID), str(facts.KeyCloudRegion)
+	return provider, account, region, provider != "" && account != "" && region != ""
 }
 
 // cloudFactRows turns a key→value map into fact rows with the collector's
@@ -624,162 +914,126 @@ func mergeAssetAttributes(ctx context.Context, tx *sql.Tx, tenantID, assetID uui
 }
 
 // ---------------------------------------------------------------------------
-// Network segments
+// Interfaces and prefixes (DCIM row 1.5f)
 // ---------------------------------------------------------------------------
 
-// ensureSubnetSegments creates a `cidr` network segment for every enumerated
-// subnet that does not already have one.
+// cloudNIC is one ENI / NIC of an instance in a provider-independent shape,
+// before it becomes an observed interface.
+type cloudNIC struct {
+	// Name is the provider's name for it: the ENI id on AWS (`eni-…`), the
+	// NIC's resource name on Azure, `nic0` on GCP.
+	Name string
+	MAC  string
+	// State is the provider's attachment state, mapped by nicOperStatus.
+	State string
+	// Addresses are its private addresses, primary first.
+	Addresses []string
+	// Subnet is the subnet it sits in, as the plan indexes subnets (the
+	// subnet's provider id); "" when the provider does not say.
+	Subnet string
+}
+
+// cloudInterfaces projects an instance's NICs onto observed interfaces: type
+// `virtual`, the NIC's MAC, its private addresses with source `cloud` and the
+// length of the subnet they sit in. A NIC with no name is dropped (the intake
+// would drop it too: an interface needs a name).
 //
-// Why a segment per SUBNET and not per VPC: `ScopeForAddress` — the one lookup
-// every intake uses to answer "which segment is this address in" — consults
-// only `cidr` and `ip_range` segments, because neither a `domain` nor a
-// `cloud_vpc` segment can be decided from an address. `FindOrCreateCloudSegment`
-// creates the `cloud_vpc` kind, valued by the VPC id, and no address is ever
-// inside "vpc-0123". A subnet's CIDR is the finest prefix the provider states
-// and is what an instance's private address actually falls in.
-//
-// `dynamic` is false: a cloud subnet hands the SAME address to the SAME
-// instance for that instance's whole life, which is not the DHCP-lease churn
-// within one host's session that the dynamic flag was written for. Marking it
-// dynamic would stop an instance's address deciding anything, and the address is
-// precisely how an agent installed inside the instance, or the sensor seeing it
-// on the wire, reaches the same asset.
-//
-// The honest qualifier: the address is stable for an instance's life, NOT
-// across instances. A freed address is handed to the next instance launched
-// into the subnet, and that reuse is what the limitation below is about. `false`
-// is the deliberate choice here, with its cost stated rather than assumed away.
-//
-// **A CIDR is not unique in a cloud account, and the segment is keyed
-// accordingly.** Two VPCs built from one Terraform module both get 10.0.0.0/16
-// and their subnets both get 10.0.1.0/24. `network_segments` used to be unique
-// on (tenant, value), so those two subnets SHARED one segment — and two
-// instances at 10.0.1.20 then shared a scope, and `ip_address` matched them
-// into ONE asset, silently, with no merge proposal. (A `cloud_resource_id` the
-// engine has never seen owns nothing, so it cannot decide; being higher in the
-// precedence list buys nothing when the value is new.)
-//
-// The key is now (tenant, value, coalesce(cloud_network_ref, ”)) and the
-// segment carries the VPC / VNet / network resource id, so those are two
-// segments, two scopes, two assets — and `ScopeForAddress` takes the network
-// the observation was made in, so an instance resolves within its own VPC.
-//
-// **The residual, which is real and is NOT silent.** Address REUSE inside ONE
-// subnet — EC2 hands a freed private address to the next instance launched —
-// is the same CIDR in the same VPC, so it is legitimately one segment. There
-// the new instance carries a `cloud_resource_id` the matched asset disagrees
-// with, and the engine's singleton guard (ADR-0002 D3 erratum,
-// [identity.Kind.Singleton]) turns that into ADR-0002 D3's outcome three: the
-// new instance becomes its own pending asset and a merge proposal asks a human
-// whether it is the machine that used to answer to that address. Which is the
-// honest answer — from the outside, an address that changed hands and a machine
-// that was rebuilt look identical.
-func (s *CloudDiscoveryService) ensureSubnetSegments(ctx context.Context, tenantID uuid.UUID, plan cloudEnumerationPlan, environment string) {
-	env := normalizeSegmentEnvironment(environment)
-	for _, subnet := range plan.Subnets {
-		cidr := strings.TrimSpace(subnet.SegmentCIDR)
-		if cidr == "" {
-			continue
-		}
-		prefix, err := netip.ParsePrefix(cidr)
-		if err != nil {
-			// A value ScopeForAddress could not parse would match nothing and
-			// sit in the table forever. Not stored.
-			log.Printf("[cloud enumeration] subnet %s: %q is not a CIDR prefix; no segment created", subnet.ResourceID, cidr)
-			continue
-		}
-		// A cloud-discovered segment is a segment like any other to scan scope
-		// and probe consent, so it is held to the rule every segment write is:
-		// nothing too broad to be anybody's (probeconsent.TooBroadToClaim —
-		// /0, IPv4 shorter than /8, IPv6 shorter than /16). A provider reporting
-		// one is logged and skipped, not stored.
-		if probeconsent.TooBroadToClaim(prefix) {
-			log.Printf("[cloud enumeration] subnet %s: %s is too broad to record as a network segment; skipped", subnet.ResourceID, cidr)
-			continue
-		}
-		name := subnet.DisplayName
+// Nothing else crosses: a NIC's attachment ids, its owner, its description and
+// its public address are not interface posture. The public address is the
+// NAT-outside side and is recorded on the instance (natOutsideAddresses).
+func cloudInterfaces(nics []cloudNIC, subnetLen map[string]int) []identity.ObservedInterface {
+	var out []identity.ObservedInterface
+	for _, nic := range nics {
+		name := strings.TrimSpace(nic.Name)
 		if name == "" {
-			name = cidr
+			continue
 		}
-		if err := s.ensureCIDRSegment(ctx, tenantID, cidr, name, env, plan.Provider, subnet); err != nil {
-			log.Printf("[cloud enumeration] subnet %s: segment for %s not created: %v", subnet.ResourceID, cidr, err)
+		ifc := identity.ObservedInterface{
+			Name:       name,
+			Type:       string(dcim.InterfaceTypeVirtual),
+			MAC:        strings.ToLower(strings.TrimSpace(nic.MAC)),
+			OperStatus: nicOperStatus(nic.State),
 		}
+		for _, a := range nic.Addresses {
+			if a = strings.TrimSpace(a); a == "" {
+				continue
+			}
+			ifc.Addresses = append(ifc.Addresses, identity.ObservedAddress{
+				Address:   a,
+				PrefixLen: subnetLen[strings.ToLower(nic.Subnet)],
+				Source:    "cloud",
+			})
+		}
+		out = append(out, ifc)
 	}
+	return out
 }
 
-// ensureCIDRSegment inserts one `cidr` segment, or leaves an existing one
-// exactly as it is.
-//
-// ON CONFLICT DO NOTHING rather than an upsert: a segment with this CIDR may be
-// the operator's own, with their environment, their location and their
-// auto-approval settings on it. Overwriting those because a cloud run saw the
-// same prefix would silently change which discoveries auto-approve.
-func (s *CloudDiscoveryService) ensureCIDRSegment(
-	ctx context.Context,
-	tenantID uuid.UUID,
-	cidr, name, environment, provider string,
-	subnet cloudEnumResource,
-) error {
-	// NULL rather than '' for a subnet whose VPC was not enumerated: the column
-	// is nullable, the unique index coalesces, and a literal '' would claim the
-	// segment belongs to a network called "".
-	var networkRef any
-	if v := strings.TrimSpace(subnet.CloudNetworkRef); v != "" {
-		networkRef = v
-	}
-	metadata := map[string]interface{}{
-		// ScopeForAddress reads this key; false is the value it defaults to,
-		// written explicitly so the row states its own answer.
-		"dynamic": false,
-		// Provenance. `network_segments` has no source column, and a segment an
-		// operator drew and a segment a cloud run derived are different things
-		// to anyone later deciding whether it is safe to edit.
-		"source":          "cloud_discovery",
-		"cloud_provider":  provider,
-		"cloud_subnet_id": subnet.ResourceID,
-	}
-	if subnet.ParentID != "" {
-		metadata["cloud_vpc_id"] = subnet.ParentID
-	}
-	raw, err := json.Marshal(metadata)
-	if err != nil {
-		return err
-	}
-	return shareddatabase.WithTenantTx(ctx, s.db, tenantID, func(tx *sql.Tx) error {
-		// The conflict target is the EXPRESSION the unique index is built on,
-		// not the bare columns: uniqueness is
-		// (tenant_id, value, coalesce(cloud_network_ref, '')), so two VPCs
-		// sharing a CIDR are two rows rather than one silently reused.
-		_, execErr := tx.ExecContext(ctx, `
-			INSERT INTO public.network_segments
-				(tenant_id, name, segment_type, value, network_type, environment, is_active, metadata, cloud_network_ref)
-			VALUES ($1, $2, 'cidr', $3, 'cloud', $4::public.environment_type, true, $5::jsonb, $6)
-			ON CONFLICT (tenant_id, value, coalesce(cloud_network_ref, ''::text)) DO NOTHING`,
-			tenantID, name, cidr, environment, string(raw), networkRef)
-		return execErr
-	})
-}
-
-// normalizeSegmentEnvironment maps an integration's free-text environment onto
-// the `environment_type` enum, defaulting to `production`.
-//
-// The default matches inventory-service's own cloud-segment path
-// (asset_service.go), which has defaulted to `production` since the column was
-// added. Two spellings of the same default would be worse than one that is
-// occasionally wrong, and the operator can change a segment's environment.
-func normalizeSegmentEnvironment(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "production", "prod":
-		return "production"
-	case "staging", "stage":
-		return "staging"
-	case "development", "dev":
-		return "development"
-	case "test", "testing", "qa":
-		return "test"
+// nicOperStatus maps a provider's NIC attachment state onto an interface's
+// operational status. An ENI that is `in-use` is attached and carrying the
+// instance's traffic; `available` is detached. Anything else — attaching,
+// detaching, a state this code has not seen — is `unknown`, and no state at
+// all is left unsaid rather than guessed.
+func nicOperStatus(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "":
+		return ""
+	case "in-use", "attached", "succeeded":
+		return "up"
+	case "available", "detached":
+		return "down"
 	default:
-		return "production"
+		return "unknown"
 	}
+}
+
+// subnetPrefixLengths indexes each subnet's prefix length by its id
+// (case-folded), for the length an instance's address is configured with.
+func subnetPrefixLengths(subnets []cloudNetwork) map[string]int {
+	out := map[string]int{}
+	for _, sn := range subnets {
+		for _, c := range sn.CIDRs {
+			if p, err := netip.ParsePrefix(strings.TrimSpace(c)); err == nil {
+				out[strings.ToLower(sn.ResourceID)] = p.Bits()
+				break
+			}
+		}
+	}
+	return out
+}
+
+// instancePrefixes are the prefixes an instance sits in: its network's and
+// those of the subnets its NICs are in. They ride on the instance's sighting
+// so an instance never resolves before the prefixes that scope its addresses
+// exist, whatever happened to the account's network sighting.
+func instancePrefixes(networkRef string, nics []cloudNIC, networks, subnets []cloudNetwork) []identity.ObservedPrefix {
+	want := map[string]bool{}
+	for _, nic := range nics {
+		if v := strings.ToLower(strings.TrimSpace(nic.Subnet)); v != "" {
+			want[v] = true
+		}
+	}
+	var out []identity.ObservedPrefix
+	seen := map[string]bool{}
+	add := func(n cloudNetwork) {
+		for _, p := range n.prefixes() {
+			if !seen[p.Prefix] {
+				seen[p.Prefix] = true
+				out = append(out, p)
+			}
+		}
+	}
+	for _, n := range networks {
+		if networkRef != "" && strings.EqualFold(n.ResourceID, networkRef) {
+			add(n)
+		}
+	}
+	for _, sn := range subnets {
+		if want[strings.ToLower(sn.ResourceID)] {
+			add(sn)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -787,7 +1041,11 @@ func normalizeSegmentEnvironment(v string) string {
 // ---------------------------------------------------------------------------
 
 // cloudPlacementFacts is the `cloud.*` set every enumerated resource carries.
-func cloudPlacementFacts(provider, accountID, region, resourceID, vpcID, subnetID string, groups []map[string]any) map[string]any {
+//
+// `cloud.vpc_id` and `cloud.subnet_id` are no longer written (retired in
+// standards/fact-keys.yaml by row 1.5f): which network and subnet a resource
+// is in is prefix containment of its addresses.
+func cloudPlacementFacts(provider, accountID, region, resourceID string, groups []map[string]any) map[string]any {
 	out := map[string]any{}
 	set := func(key, value string) {
 		if v := strings.TrimSpace(value); v != "" {
@@ -798,8 +1056,6 @@ func cloudPlacementFacts(provider, accountID, region, resourceID, vpcID, subnetI
 	set(facts.KeyCloudAccountID, accountID)
 	set(facts.KeyCloudRegion, region)
 	set(facts.KeyCloudResourceID, resourceID)
-	set(facts.KeyCloudVPCID, vpcID)
-	set(facts.KeyCloudSubnetID, subnetID)
 	if len(groups) > 0 {
 		out[facts.KeyCloudSecurityGroups] = groups
 	}
@@ -820,8 +1076,7 @@ func tagsToJSONB(tags map[string]string) map[string]interface{} {
 }
 
 // firstAddress returns the first address in a list, which is what goes in
-// `assets.primary_address`. The rest stay on the `net.interfaces` fact: an
-// asset has one primary address and any number of interfaces.
+// `assets.primary_address`. Every address is on the instance's interfaces.
 func firstAddress(addrs []string) string {
 	for _, a := range addrs {
 		if v := strings.TrimSpace(a); v != "" {
@@ -840,9 +1095,9 @@ func firstAddress(addrs []string) string {
 // no findings, no risk scores and no lens presence — which is also why nothing
 // here touches `shared/assetclass` or the chart-parity audit that follows a
 // change to it. Recording them on the resource is what lets Inventory → Map
-// draw account → region → VPC → subnet → instance, and hang a bucket or a CDN
-// distribution off its region, without an account or a region ever becoming a
-// node in the inventory itself.
+// group resources by account and region, and hang a bucket or a CDN
+// distribution off its region, without a region ever becoming a node in the
+// inventory itself. (The networks and subnets are prefixes since row 1.5f.)
 //
 // Enumeration already writes them (`cloudPlacementFacts`,
 // `cloudResourceAttributes`). What follows is the SAME two helpers, on the same
@@ -850,7 +1105,7 @@ func firstAddress(addrs []string) string {
 // instead — buckets, CDN distributions, key stores, load balancers, API
 // gateways. One write path, not two: a second producer of the same two values
 // is how one fact acquires two spellings, which is the mistake this file's
-// header already warns about for `member_of`.
+// header used to warn about for `member_of`.
 
 // cloudScopeKey carries one run's provider and owning account down to the
 // per-resource write.
@@ -864,6 +1119,33 @@ type cloudScope struct {
 	// `cloud.account_id` fact is written, and the map roots the resource at its
 	// region rather than under an invented account.
 	AccountID string
+	// RunAt is the run's one clock reading: every resource the run records
+	// carries it as `cloud.last_enumerated_at`, and the account's
+	// `cloud.enumeration_coverage` is stamped with it, so "present this run"
+	// is an equality rather than a race between two time.Now() calls.
+	RunAt time.Time
+}
+
+// beginCloudRun prepares a run's context: the tenant's account assets and
+// account approval rules are brought in line with its integrations
+// (CloudAccountService.SyncTenant), the run's scope is resolved once, and the
+// approval rules are cached for the run. A sync that fails is logged and the
+// run continues — resources then stay pending and unlinked, which is the
+// state they had before accounts existed, not a lost run.
+func (s *CloudDiscoveryService) beginCloudRun(ctx context.Context, tenantID, integrationID uuid.UUID, provider string) context.Context {
+	if _, begun := ctx.Value(cloudApprovalKey{}).(*cloudApprovalRules); begun {
+		// DiscoverResources begins the run before its evidence half does.
+		return ctx
+	}
+	if s.accounts != nil {
+		if _, err := s.accounts.SyncTenant(ctx, tenantID); err != nil {
+			log.Printf("[cloud account] sync for tenant %s before the run failed (resources may stay pending): %v", tenantID, err)
+		}
+	}
+	if _, ok := ctx.Value(cloudScopeKey{}).(cloudScope); !ok {
+		ctx = context.WithValue(ctx, cloudScopeKey{}, s.resolveCloudScope(ctx, tenantID, integrationID, provider))
+	}
+	return withCloudApprovalRules(ctx)
 }
 
 // resolveCloudScope reads the integration's account id once per run.
@@ -873,7 +1155,7 @@ type cloudScope struct {
 // first account, or with the integration uuid dressed up as one — produces a
 // map that looks complete and groups resources under an account nobody owns.
 func (s *CloudDiscoveryService) resolveCloudScope(ctx context.Context, tenantID, integrationID uuid.UUID, provider string) cloudScope {
-	scope := cloudScope{Provider: strings.TrimSpace(provider)}
+	scope := cloudScope{Provider: strings.TrimSpace(provider), RunAt: time.Now().UTC().Truncate(time.Microsecond)}
 	if s.bypassDB == nil {
 		return scope
 	}
@@ -918,8 +1200,8 @@ func accountIDFromARN(arn string) string {
 // the three values is present, where the account comes from, what a CloudFront
 // distribution's region is — are testable without a database.
 //
-// Only the three scoping values. VPC and subnet placement belong to the
-// enumeration path, which is the only one that has them.
+// Only the three scoping values. Network placement is prefix containment of a
+// resource's addresses (row 1.5f), which only the enumeration path records.
 func cloudScopeValues(scope cloudScope, device models.Device) (map[string]any, map[string]any) {
 	provider := strings.TrimSpace(scope.Provider)
 	// `cloudRegionForDevice` answers the literal "global" for a CloudFront
@@ -946,7 +1228,7 @@ func cloudScopeValues(scope cloudScope, device models.Device) (map[string]any, m
 	}
 	attrs := filterClassAttributes(
 		DeviceTypeClassKey(device.DeviceType),
-		cloudResourceAttributes(provider, account, region),
+		mergeAttributes(cloudResourceAttributes(provider, account, region), cloudProviderTypeAttr(device.DeviceType)),
 		device.DeviceType,
 	)
 	return values, attrs
@@ -966,6 +1248,14 @@ func (s *CloudDiscoveryService) cloudScopeExtra(ctx context.Context, device *mod
 	}
 	scope, _ := ctx.Value(cloudScopeKey{}).(cloudScope)
 	values, attrs := cloudScopeValues(scope, *device)
+	if listed := cloudListingFacts(scope, cloudListingFrom(ctx), normalizeProviderState(scope.Provider, cloudRawState(device.Metadata))); len(listed) > 0 {
+		if values == nil {
+			values = map[string]any{}
+		}
+		for k, v := range listed {
+			values[k] = v
+		}
+	}
 	if len(values) == 0 && len(attrs) == 0 {
 		return nil
 	}

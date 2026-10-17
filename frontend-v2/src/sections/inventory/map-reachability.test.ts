@@ -102,10 +102,10 @@ describe('the nav entry', () => {
     expect(entry!.label).toBe('Map');
   });
 
-  it('sits in the Assets group beside the list it is an alternative view of', () => {
+  it('sits in Facilities beside sites and racks', () => {
     const inventory = SECTIONS.find((s) => s.id === 'inventory')!;
-    const assets = (inventory.groups ?? []).find((g) => g.label === 'Assets')!;
-    expect(assets.items.map((i) => i.lens)).toContain('map');
+    const facilities = (inventory.groups ?? []).find((g) => g.label === 'Facilities')!;
+    expect(facilities.items.map((i) => i.lens)).toContain('map');
   });
 });
 
@@ -115,7 +115,7 @@ describe('the command palette', () => {
   it('offers the map', () => {
     const item = LENS_NAV_ITEMS.find((i) => i.to === '/inventory?lens=map');
     expect(item).toBeDefined();
-    expect(item!.label).toBe('Inventory · Map');
+    expect(item!.label).toBe('Infrastructure · Map');
   });
 
   it('no longer warns that it is not built yet', () => {
@@ -193,7 +193,9 @@ describe('the map lens wires its geometry and its menu', () => {
     // Without all three, an application that both `runs_on` and `connects_to`
     // its host is one visible line again, with the second edge's provenance and
     // confidence unreachable.
-    expect(lens).toContain('parallelEdgeOffsets(graph.edges)');
+    // Over the relationships AND the drawn cable runs (DCIM row 3.6): a cable
+    // beside the relationship it carries is two lines, not one.
+    expect(lens).toContain('parallelEdgeOffsets([...graph.edges, ...drawnCables])');
     expect(lens).toContain("type: 'offset'");
     expect(lens).toContain('edgeTypes={EDGE_TYPES}');
   });

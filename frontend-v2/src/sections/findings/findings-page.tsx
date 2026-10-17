@@ -34,7 +34,7 @@ import { classLabel } from '../inventory/asset-shape';
 import { DEFAULT_FINDINGS_LENS, isFindingsLens } from './lenses';
 import { FINDING_PRODUCERS } from '@vistasecurity/primitives/findings';
 import { riskLevelFromScore } from '@vistasecurity/primitives/ratings';
-import { configurationEvidence, cryptoEvidence, cveCount, cveList, driftEvidence, eolEvidence, hygieneEvidence, kindLabel, producerLabel, subjectAssetID } from './producer-evidence';
+import { configurationEvidence, cryptoEvidence, cveCount, cveList, driftEvidence, eolEvidence, hygieneEvidence, kindLabel, producerLabel, subjectAssetID, topologyEvidence } from './producer-evidence';
 import { AssessmentLimitNotice } from './assessment-limit';
 import { CryptoAssessment } from './crypto-assessment';
 import type { FindingSubjectFilter } from './queries';
@@ -710,7 +710,7 @@ export function FindingsPage() {
             {!findingsLoading && producerGroups.length === 0 && (
               complianceAll.length === 0
                 ? <EmptyState variant="all-clear" title="No open findings" message="No producer has raised a finding against your inventory. End-of-life and vulnerability checks run nightly and after an SBOM upload." />
-                : <EmptyState variant="no-results" title="No findings match" message="No findings match this segment. Try Open, or clear the producer filter." />
+                : <EmptyState variant="no-results" title="No findings match" message="No findings match this view. Try Open, or clear the producer filter." />
             )}
             {!findingsLoading && producerGroups.map((g) => (
               <div key={g.key}>
@@ -740,7 +740,7 @@ export function FindingsPage() {
             {!complianceLoading && fwGroups.length === 0 && (
               complianceAll.length === 0
                 ? <EmptyState title="No framework findings" message="License a compliance framework to see per-framework findings here." variant="first-run" />
-                : <EmptyState variant="no-results" title="No findings match" message="No findings match this segment. Try Open, or clear the framework filter." />
+                : <EmptyState variant="no-results" title="No findings match" message="No findings match this view. Try Open, or clear the framework filter." />
             )}
             {!complianceLoading && fwGroups.map((g) => {
               const meta = batchResults.find((r) => r.framework_id === g.fwId);
@@ -1218,6 +1218,35 @@ export function ProducerEvidence({ f, fw, control }: { f: ComplianceFinding; fw:
           </>
         )}
         <Citation cite={cite} fallbackID={null} />
+      </div>
+    );
+  }
+
+  if (producer === 'topology') {
+    // Each contradicted port, the cable of record beside what the neighbour
+    // table reports (DCIM row 3.3). The fix is on the asset's Interfaces tab.
+    const rows = topologyEvidence(f);
+    return (
+      <div style={{ padding: '14px 18px' }}>
+        <div className="eyebrow-app" style={{ marginBottom: 9 }}>Cabling versus neighbours</div>
+        {!rows ? (
+          <p style={{ margin: 0, fontSize: 12.5, color: 'var(--app-t2)' }}>This finding carries no port detail.</p>
+        ) : (
+          <div data-testid="topology-evidence" style={{ display: 'grid', gap: 8 }}>
+            {rows.map((r) => (
+              <div key={r.localInterface} style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                <div className="mono" style={{ color: 'var(--app-t1)', fontWeight: 600 }}>{r.localInterface}</div>
+                <div style={{ color: 'var(--app-t2)' }}>
+                  Cable of record: <span className="mono">{r.recorded.length > 0 ? r.recorded.join(', ') : 'a port that is not an interface'}</span>
+                  {r.farPortCabledElsewhere && ' (the far port\u2019s own cable)'}
+                </div>
+                <div style={{ color: 'var(--app-t2)' }}>
+                  {r.protocol ? r.protocol.toUpperCase() : 'The neighbour table'} reports: <span className="mono">{r.observed}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }

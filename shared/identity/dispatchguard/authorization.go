@@ -129,29 +129,38 @@ func authorize(tx Queryer, payload sensordispatch.Payload, sensor uuid.UUID, dns
 	if strings.Contains(class, "industrial") || strings.Contains(class, "medical") || assetclass.IsAncestor(assetclass.KeyOtDevice, class) || strings.HasPrefix(class, "ot_") {
 		return denied("sensitive device requires review")
 	}
-	var cidr, networkType string
+	// The network scope is an IPAM prefix (DCIM row 1.6): a live global-VRF
+	// prefix with no cloud network ref, not marked sensitive or
+	// active-probes-disabled, that names exactly one place — not a container,
+	// no other live prefix with the same CIDR (the rule provisional inventory
+	// applies), and no live prefix INSIDE it: a more specific prefix created
+	// since the evidence was scoped is now where its addresses belong, so the
+	// planned scope is stale. A PARENT is fine — prefixes nest by design, and
+	// refusing every prefix with a parent would refuse nearly all of them.
+	var cidr, networkType, opStatus string
 	var learned bool
-	if err := tx.QueryRow(`SELECT value,network_type,`+learnedSegmentSQL+` FROM network_segments WHERE tenant_id=$1 AND id=$2 AND is_active AND segment_type='cidr' AND COALESCE(cloud_network_ref,'')='' AND COALESCE(metadata->>'sensitive','false')<>'true' AND COALESCE(metadata->>'active_probes_disabled','false')<>'true'`, payload.TenantID, segment).Scan(&cidr, &networkType, &learned); err != nil {
+	var twins, children int
+	if err := tx.QueryRow(`SELECT p.prefix::text,COALESCE(p.network_type,''),p.source_kind IN ('measured','inferred'),p.operational_status,
+		(SELECT count(*) FROM prefixes o WHERE o.tenant_id=p.tenant_id AND o.vrf_id IS NULL AND o.id<>p.id AND o.prefix=p.prefix AND o.status NOT IN ('rejected','archived')),
+		(SELECT count(*) FROM prefixes o WHERE o.tenant_id=p.tenant_id AND o.vrf_id IS NULL AND o.prefix<<p.prefix AND o.status NOT IN ('rejected','archived'))
+		FROM prefixes p WHERE p.tenant_id=$1 AND p.id=$2 AND p.vrf_id IS NULL AND p.status NOT IN ('rejected','archived')
+		AND COALESCE(p.cloud_network_ref,'')='' AND NOT p.sensitive AND NOT p.active_probes_disabled`, payload.TenantID, segment).Scan(&cidr, &networkType, &learned, &opStatus, &twins, &children); err != nil {
 		return err
-	}
-	if networkType == "public" && learned {
-		// A public network learned from a device's VLAN data is where that
-		// device is connected — an ISP transit link, a carrier-NAT WAN — not an
-		// estate the tenant declared. It scopes identities; it never scopes a
-		// probe — unless a person has claimed it, which learnedSegmentSQL
-		// already reads as declared. See SegmentGrantsOwnership.
-		return denied("probe network scope is a learned public network")
 	}
 	prefix, err := netip.ParsePrefix(cidr)
-	if err != nil || prefix.Bits() == 0 {
+	if err != nil || prefix.Bits() == 0 || opStatus == "container" {
 		return denied("probe network scope is unresolved")
 	}
-	var overlaps bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM network_segments WHERE tenant_id=$1 AND id<>$2 AND is_active AND CASE WHEN segment_type='cidr' THEN value::cidr && $3::cidr ELSE false END)`, payload.TenantID, segment, cidr).Scan(&overlaps); err != nil {
-		return err
+	if PrefixNetworkType(networkType, prefix) == "public" && learned {
+		// A public network learned from a device is where that device is
+		// connected — an ISP transit link, a carrier-NAT WAN — not an estate
+		// the tenant declared. It scopes identities; it never scopes a probe —
+		// unless a person has claimed it (set its source to declared). See
+		// SegmentGrantsOwnership.
+		return denied("probe network scope is a learned public network")
 	}
-	if overlaps {
-		return denied("probe network scope overlaps another segment")
+	if twins > 0 || children > 0 {
+		return denied("probe network scope overlaps another prefix")
 	}
 	// The EXECUTOR — the collector this work is dispatched to — must be a live
 	// tenant collector with an interface on the target network. This is the

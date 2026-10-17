@@ -9,7 +9,7 @@ package main
 // production engine. This builds a gin router from main.go's OWN registration
 // table — every api / apiv2 registration, under its real group prefix — with a
 // stub handler, so the request below is matched exactly as the production
-// router would match it, wildcard siblings (`/network-segments/:id`, …)
+// router would match it, wildcard siblings (`/infrastructure-assets/:id`, …)
 // included. Both polarities: the deleted route 404s, and a sibling registered
 // beside it still answers, so a broken scan cannot pass vacuously.
 
@@ -51,19 +51,29 @@ func routeTableEngine(t *testing.T) *gin.Engine {
 func TestRouteClassifyAssetIsGone(t *testing.T) {
 	r := routeTableEngine(t)
 	for _, tc := range []struct {
-		path string
-		want int
+		method, path string
+		want         int
 	}{
-		{"/api/v2/inventory-service/network-segments/classify-asset", http.StatusNotFound},
-		{"/api/v1/inventory-service/network-segments/classify-asset", http.StatusNotFound},
+		{http.MethodPost, "/api/v2/inventory-service/network-segments/classify-asset", http.StatusNotFound},
+		{http.MethodPost, "/api/v1/inventory-service/network-segments/classify-asset", http.StatusNotFound},
+		// DCIM row 1.6: the segment and space routes are retired with the
+		// table; prefixes are /ipam/prefixes.
+		{http.MethodGet, "/api/v2/inventory-service/network-segments", http.StatusNotFound},
+		{http.MethodPost, "/api/v2/inventory-service/network-segments/bulk", http.StatusNotFound},
+		{http.MethodPost, "/api/v2/inventory-service/network-segments/reclassify-all", http.StatusNotFound},
+		{http.MethodGet, "/api/v2/inventory-service/network-segments/00000000-0000-0000-0000-000000000001", http.StatusNotFound},
+		{http.MethodPost, "/api/v2/inventory-service/network-segments/00000000-0000-0000-0000-000000000001/claim", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/inventory-service/network-spaces", http.StatusNotFound},
+		{http.MethodGet, "/api/v1/network-spaces", http.StatusNotFound},
+		{http.MethodGet, "/api/v2/inventory-service/network-spaces", http.StatusNotFound},
 		// Siblings that must still be mounted.
-		{"/api/v2/inventory-service/network-segments/reclassify-all", http.StatusTeapot},
-		{"/api/v1/inventory-service/discovery/jobs/00000000-0000-0000-0000-000000000001/import", http.StatusTeapot},
+		{http.MethodPost, "/api/v2/inventory-service/infrastructure-assets/enrich-all", http.StatusTeapot},
+		{http.MethodPost, "/api/v1/inventory-service/discovery/jobs/00000000-0000-0000-0000-000000000001/import", http.StatusTeapot},
 	} {
 		w := httptest.NewRecorder()
-		r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, nil))
+		r.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
 		if w.Code != tc.want {
-			t.Errorf("POST %s = %d, want %d", tc.path, w.Code, tc.want)
+			t.Errorf("%s %s = %d, want %d", tc.method, tc.path, w.Code, tc.want)
 		}
 	}
 }

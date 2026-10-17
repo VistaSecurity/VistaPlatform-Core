@@ -5,7 +5,7 @@
 import { useState, type CSSProperties, type MouseEvent } from 'react';
 import { Link } from 'react-router';
 import { Icon, Pill } from '../../components/ui';
-import { SEGMENTS_SETTINGS_PATH } from '../settings/auto-scan-not-scanned';
+import { NETWORKS_PATH } from '../settings/auto-scan-not-scanned';
 import { relTime } from './kit';
 import { ObservationActions } from './observation-actions';
 import { CollectorReachability, ObservationDetails, enrichmentExplanation } from './observation-details';
@@ -186,7 +186,7 @@ function RowActions({ o, open, expand }: { o: Observation; open: (a: DecisionAct
   const primary = !unresolved ? null
     : o.suggested_action === 'confirm' ? <button type="button" className="ui-btn sm accent" onClick={() => open('confirm')}>Confirm…</button>
     : o.suggested_action === 'link' ? <button type="button" className="ui-btn sm accent" onClick={() => open('link')}>{linkLabel(o)}…</button>
-    : o.suggested_action === 'add_network' ? <Link className="ui-btn sm" to={SEGMENTS_SETTINGS_PATH}>Add network</Link>
+    : o.suggested_action === 'add_network' ? <Link className="ui-btn sm" to={NETWORKS_PATH}>Add network</Link>
     : o.suggested_action === 'sensor_options' ? <button type="button" className="ui-btn sm" onClick={expand}>See options</button>
     : null;
   if (o.state === 'linked' && o.evidence_held) {
@@ -246,7 +246,7 @@ function ObservationExpanded({ o: listed, decision }: { o: Observation; decision
       {explanation.fix && <p style={{ margin: '0 0 6px', fontSize: 12.5 }}>{explanation.fix}</p>}
       {stable && <p style={{ margin: '0 0 6px', fontSize: 12.5 }}>{stable}</p>}
       {o.needs === 'needs_network' && <p style={{ fontSize: 12.5 }}>
-        <Link to={SEGMENTS_SETTINGS_PATH}>Add a network segment</Link>{address ? <> that covers <span className="mono">{address}</span></> : null} in Settings → Network Segments.
+        <Link to={NETWORKS_PATH}>Add a prefix</Link>{address ? <> that covers <span className="mono">{address}</span></> : null} in Inventory → Networks.
       </p>}
       {o.needs === 'needs_sensor' && <p style={{ fontSize: 12.5 }}>
         <Link to="/discovery/sensors">Install a sensor on that network</Link> from Sensors &amp; Agents — or link this to an asset you already have, or dismiss it.
@@ -256,8 +256,8 @@ function ObservationExpanded({ o: listed, decision }: { o: Observation; decision
           out, because networks do not change like that and every asset is
           already re-checked daily. */}
       {o.explanation_code === 'dynamic_address_answered' && <p style={{ fontSize: 12.5 }}>
-        <Link to={SEGMENTS_SETTINGS_PATH}>Treat this network as stable…</Link>{' '}
-        If addresses on {o.network_name ? <strong>{o.network_name}</strong> : 'this network'} do not move, set its DHCP to off in Network Segments. Future scans can then create and approve assets there directly, because an address does identify a device where addresses do not move.
+        <Link to={NETWORKS_PATH}>Treat this network as stable…</Link>{' '}
+        If addresses on {o.network_name ? <strong>{o.network_name}</strong> : 'this network'} do not move, set its DHCP to “No” on the prefix in Inventory → Networks. Future scans can then create and approve assets there directly, because an address does identify a device where addresses do not move.
       </p>}
       {o.admission_reasons.length > 0 && <>
         <h5 style={{ margin: '12px 0 4px', fontSize: 12 }}>Why it was kept</h5>

@@ -15,32 +15,31 @@ Only your own internal hosts. An address is in scope when it is:
 
 - inside a private range (RFC 1918 — `10.0.0.0/8`, `172.16.0.0/12`,
   `192.168.0.0/16` — or an IPv6 unique-local address), **or**
-- inside a network segment you registered under **Settings → Infrastructure →
-  Network Segments** whose type is **Private**, **VPN** or **Cloud** — your own
+- inside a prefix you declared under **Inventory → Networks** whose type is **Private**, **VPN** or **Cloud** — your own
   statement that the range is yours.
 
-A segment typed **Public** is not scanned automatically, even though you
+A prefix typed **Public** is not scanned automatically, even though you
 registered it. Registering a range says "this is mine"; typing it public says
 what is on it, and an unattended daily scan of a public range is the one thing
 this feature must never do. You can still scan it whenever you like from
 **Discovery** — that is a scan with a person behind it.
 
-A segment the platform **learned** from one of your devices (see
+A prefix the platform **learned** from one of your devices (see
 [Public ranges learned from your devices](#public-ranges-learned-from-your-devices))
 counts only if it is private: a learned public range is not treated as yours at
 all until someone claims it, and a claimed one is treated exactly like a public
-segment you registered — never scanned automatically.
+prefix you declared — never scanned automatically.
 
 Everything else is refused, and refused before anything else is considered:
 
 | Never scanned | Why |
 |---|---|
 | Public addresses | An unattended daily scan of an address you have not declared as an internal range of yours is a third party being port-scanned on a schedule. |
-| Segments typed **Public** | As above — the type is your own description of what is on the range. |
+| Prefixes typed **Public** | As above — the type is your own description of what is on the range. |
 | Organizations whose account is cancelled or suspended | Scanning is something we do *to* your network. When the relationship ends it stops, even if your sensors keep reporting. |
 | Assets marked third-party | The same reason, decided by the asset's own ownership field. |
 | Loopback, link-local, multicast, the unspecified address | Not hosts on your network. |
-| Carrier-grade NAT space (`100.64.0.0/10`) | Shared address space reaches other operators' customers. Register it as a network segment if it really is yours. |
+| Carrier-grade NAT space (`100.64.0.0/10`) | Shared address space reaches other operators' customers. Add it as a prefix if it really is yours. |
 | The platform's own addresses | The platform does not scan itself. |
 | Archived or denied assets | You decided they are not part of the inventory; continuing to probe them would be the platform disagreeing with you on a schedule. |
 
@@ -53,7 +52,7 @@ This page governs the scheduled sweep. A sensor also makes one narrower kind of
 active connection on its own: when it sees a TLS connection whose certificate it
 could not read (TLS 1.3 encrypts it), it can connect to that one server to read
 it. That *enrichment* goes only to your own endpoints by default — private
-addresses, registered network segments of any type, and connections you elevated —
+addresses, declared prefixes of any type, and connections you elevated —
 and reaches third parties only if you turn on **Actively enrich third-party TLS
 connections**. See
 [Certificates of third-party TLS connections](./third-party-and-external-connections.md#certificates-of-third-party-tls-connections).
@@ -100,13 +99,13 @@ your plan or for your organization.
 | **Scan on first observation** | On | Scan a new internal host as soon as it appears, instead of waiting for the next scheduled pass. |
 | **Rescan every** | 24 hours | How long a host's last automatic scan may age before it is scanned again. 1–720 hours. |
 | **Ports** | The well-known TLS and SSH ports | The ports each scan checks; the service on each is identified from what answers. At most 64. "Reset ports to the defaults" restores the built-in list. |
-| **Prefer the observing sensor** | On | Run each automatic scan from the sensor of yours that most recently observed the host, or one on the same network segment, instead of the platform sensor — so hosts only reachable from inside your network are scanned from there. Off runs every automatic scan from the platform sensor. |
+| **Prefer the observing sensor** | On | Run each automatic scan from the sensor of yours that most recently observed the host, or one on the same prefix, instead of the platform sensor — so hosts only reachable from inside your network are scanned from there. Off runs every automatic scan from the platform sensor. |
 
 **Prefer the observing sensor** decides *where* each scan runs, not whether it
 runs. With it on, a host one of your sensors has observed is scanned from that
 sensor; a host only the platform has seen is scanned from the platform sensor.
 If the observing sensor is offline when a pass runs, the host is scanned from
-another of your sensors that is online and on the same network segment. If no
+another of your sensors that is online and on the same prefix. If no
 such sensor exists, the host is skipped for the pass and stays due — it is not
 moved to the platform sensor, which may not be able to see it.
 Manual scans choose per run with **Run from** in the scan dialog (Inventory's
@@ -184,8 +183,8 @@ whose estate lives in an address range the platform does not treat as internal.
 
 | Row | Meaning | What to do |
 |---|---|---|
-| **Public addresses** | Hosts whose address is neither private nor inside a registered segment. | If the range really is yours, register it as a network segment typed Private, VPN or Cloud — the link on the row takes you there. (Claiming a public range the platform learned from a device makes it scannable when you ask, not automatically — see [Public ranges learned from your devices](#public-ranges-learned-from-your-devices).) Otherwise nothing: this is the feature refusing to scan a third party. |
-| **Carrier-grade NAT (100.64.0.0/10)** | Shared address space (RFC 6598). **Tailscale, ZeroTier and mobile carriers use this range**, so an estate built on an overlay network lands here in full. | Register the range as a network segment. That is your explicit statement that those addresses are yours; without it the platform cannot tell your overlay from another operator's subscribers. |
+| **Public addresses** | Hosts whose address is neither private nor inside a declared prefix. | If the range really is yours, add it as a prefix typed Private, VPN or Cloud — the link on the row takes you there. (Claiming a public range the platform learned from a device makes it scannable when you ask, not automatically — see [Public ranges learned from your devices](#public-ranges-learned-from-your-devices).) Otherwise nothing: this is the feature refusing to scan a third party. |
+| **Carrier-grade NAT (100.64.0.0/10)** | Shared address space (RFC 6598). **Tailscale, ZeroTier and mobile carriers use this range**, so an estate built on an overlay network lands here in full. | Add the range as a prefix. That is your explicit statement that those addresses are yours; without it the platform cannot tell your overlay from another operator's subscribers. |
 | **Excluded by your operator** | The platform's own addresses. | Nothing — the platform does not scan itself. |
 | **Link-local**, **loopback**, **multicast**, **unspecified** | Not hosts on your network. | Nothing. |
 | **Unparseable** / **zoned** | An address the inventory holds that is not a routable address (a zone identifier such as `fe80::1%eth0`, or a value that did not parse). | Look at the asset — it was recorded from somewhere other than a measured address. |
@@ -198,7 +197,7 @@ refused nothing — not that no pass has run; that is a separate line above.
 - **It will not scan from somewhere that cannot see the host.** With **Prefer
   the observing sensor** on, a host one of your sensors observed is scanned from
   that sensor. If that sensor is offline, the host is scanned from another of
-  your online sensors on the same network segment when one covers it; only when
+  your online sensors on the same prefix when one covers it; only when
   none does is it skipped for the pass and left due. It is never moved to the
   platform sensor.
   With it off, automatic scans run from the platform and reach what the platform
@@ -217,8 +216,8 @@ refused nothing — not that no pass has run; that is a separate line above.
 
 Everything above is about scans the platform runs **on its own**, and those
 never touch an address you have not declared as yours. A scan **you** start is
-different: you may scan any public IP address, CIDR block, range, hostname or URL
-you name, including ones outside every network segment you registered — a
+different: you may scan any public IP address, prefix, range, hostname or URL
+you name, including ones outside every prefix you declared — a
 partner's endpoint you are allowed to test, a SaaS login page, your own public
 estate before you have registered it. The platform does not judge why; it asks
 you to confirm.
@@ -251,7 +250,7 @@ written in it is added to the ports the scan tries.
 **What happens:**
 
 1. You start the scan. If every target is inside your private ranges or a
-   network segment you registered, it runs as it always has.
+   prefix you declared, it runs as it always has.
 2. If any target is outside them, nothing runs yet and you are asked: *"N
    targets are outside your registered networks. Only scan systems you are
    authorized to test."* The list shows each one — for a hostname, the
@@ -278,56 +277,55 @@ A scan described by **depth** through the API (`scan_depth`; see
 scans a target outside your registered networks at **Standard** at most, while
 the job's other targets get the depth asked for; the job lists each such
 downgrade. It is a guardrail for targets nobody has claimed, not an access
-control — registering the range as a network segment (or claiming a learned
+control — declaring the range as a prefix (or claiming a learned
 one, below) lifts it.
 
 ### Public ranges learned from your devices
 
 When you interrogate a firewall, router or controller (**Discovery → Devices**),
-the networks it reports become network segments marked *Learned from …* under
-**Settings → Infrastructure → Network Segments**. A learned **private** range
-counts as yours, as any private address does. A learned **public** range does
-not: a device's settings cannot show whether a public network on one of its
-interfaces is your DMZ or your internet provider's link, and guessing wrong
-would mean scanning someone else's network. Its row says *Public range · not
-treated as yours*.
+the networks it reports become prefixes in **Inventory → Networks**, pending
+your approval, whose **Scanning** line reads *Learned from a device — not
+treated as yours*. A learned **private** range counts as yours, as any private
+address does. A learned **public** range does not: a device's settings cannot
+show whether a public network on one of its interfaces is your DMZ or your
+internet provider's link, and guessing wrong would mean scanning someone else's
+network.
 
-If the range really is yours, press **Claim as mine** on its row and confirm.
-From then on it is treated exactly like a public segment you registered
-yourself:
+If the range really is yours, open the prefix, press **Claim as ours** and
+confirm. The prefix becomes one your organization declared, and from then on it
+is treated exactly like a public prefix you declared yourself:
 
 - addresses in it can be scanned when someone asks, without the
   outside-your-networks confirmation above — but never by the automatic scan;
 - your sensors treat it as yours, so they may connect to services in it to read
   certificates (see
   [Certificates of third-party TLS connections](./third-party-and-external-connections.md#certificates-of-third-party-tls-connections));
-- the limits that apply to every segment still apply: a range wider than /8
-  (IPv4) or /16 (IPv6) cannot be claimed, a segment marked sensitive or with
-  active probes disabled is still never probed, and an inactive segment grants
-  nothing.
+- the limits that apply to every prefix still apply: a range wider than /8
+  (IPv4) or /16 (IPv6) cannot be claimed, a prefix marked sensitive or with
+  active scanning turned off is still never probed, and an archived prefix
+  grants nothing.
 
 **A claim is your statement, not something the platform checks.** There is no
-proof-of-control step. Claiming needs the **`settings.update`** permission — the
-same as registering a segment — and every claim and revocation is recorded in
-your organization's audit log with who made it, when, the range and the device
-it was learned from. The row shows *Claimed by … · date*. **Do not claim a range
-you do not control**, such as your internet provider's side of a link.
+proof-of-control step. Claiming needs the **`ipam.manage`** permission — the
+same as adding a prefix — and every claim is recorded in the prefix's change
+log with who made it and when. **Do not claim a range you do not control**,
+such as your internet provider's side of a link.
 
-**Revoke claim** on the same row withdraws it; the range goes back to being
-learned, and scanning it again needs the confirmation above. Interrogating the
-device again keeps the claim, and if the device stops reporting the range, the
-segment — and the claim — stay until you revoke it or delete the segment.
+To withdraw a claim, delete the prefix (or mark it sensitive, which stops all
+scanning of it). Interrogating the device again keeps the claim: a device's
+report never turns a prefix your organization declared back into a learned
+one.
 
 ### What is never scanned, confirmed or not
 
 | Never scanned | Why |
 |---|---|
 | Loopback, link-local, multicast, the unspecified and broadcast addresses | Not hosts. Link-local includes the cloud instance-metadata service (169.254.169.254). |
-| Carrier-grade NAT (`100.64.0.0/10`) | Shared between operators. Register it as a network segment if it really is yours. |
+| Carrier-grade NAT (`100.64.0.0/10`) | Shared between operators. Add it as a prefix if it really is yours. |
 | Documentation ranges | Not routable. |
 | IPv6 forms that carry an IPv4 address — NAT64, IPv4-compatible, IPv4-mapped and translated addresses; 6to4 and Teredo addresses whose embedded IPv4 is itself never scanned | They lead to that IPv4 address. Name the IPv4 address instead. |
 | The platform's own addresses and ranges | The platform does not scan itself. |
-| Ranges you excluded, and segments marked sensitive | Your own decision, which a confirmation does not override. |
+| Ranges you excluded, and prefixes marked sensitive | Your own decision, which a confirmation does not override. |
 | A hostname that resolves to any of the above | Every address a name resolves to is checked; one refused address refuses the name. The refusal does not say which address it was. |
 | Single-label names (`web01`), and names under `.svc`, `.cluster.local`, `.internal` or `.localhost` | From the platform these resolve in the platform's own DNS, not yours. Use the full name or the address. |
 | A hostname that does not resolve | There is no address to check. |
@@ -346,18 +344,18 @@ network or at cloud metadata.
 One target outside your registered networks may name at most **4,096 addresses**
 — an IPv4 `/20` or an IPv6 `/116` — and one scan at most **16,384** such
 addresses across all its targets. Split a larger block across scans. Registering a
-block as a network segment does not lift the limit: **no** scan target, in a
-private range or a registered segment either, may name more than 4,096 addresses
+block as a prefix does not lift the limit: **no** scan target, in a
+private range or a declared prefix either, may name more than 4,096 addresses
 (and no scan more than 16,384 in all), because the scanner cannot expand more. A
 larger target is refused when you start the scan, with its address count and the
 limit, instead of being scanned in part. Your operator may set lower limits.
 
-A network segment wider than `/8` (IPv4) or `/16` (IPv6) never counts as yours,
+A prefix wider than `/8` (IPv4) or `/16` (IPv6) never counts as yours,
 whatever its type, unless it lies wholly inside private space: nobody owns that
-much of the internet, and a segment like `0.0.0.0/0` would otherwise make every
+much of the internet, and a prefix like `0.0.0.0/0` would otherwise make every
 address "registered". IPv6 blocks that carry IPv4 addresses (6to4 `2002::/16`,
 Teredo, NAT64) count by the IPv4 space they carry, so `2002::/16` — every IPv4
-address in 6to4 form — is as wide as `0.0.0.0/0`. New segments that wide cannot
+address in 6to4 form — is as wide as `0.0.0.0/0`. New prefixes that wide cannot
 be saved; addresses under one saved earlier are treated as outside your
 registered networks.
 
@@ -370,7 +368,7 @@ fits.
 An installation's operator can turn scanning outside registered networks off
 entirely (some hosted services must). You are then told so instead of being
 asked, and those targets are refused as they were before this existed; a scan
-already queued stops too. Register the range as a network segment if it is
+already queued stops too. Add the range as a prefix if it is
 yours, or ask your operator.
 
 ### Using the API
@@ -433,5 +431,5 @@ that found nothing.
 
 - [Discovery](./discovery.md) — the pipeline an automatic scan's findings join
 - [Asset Approval](./asset-approval.md) — what happens to what it finds
-- [Operational Context](./operational-context.md) — network segments, which decide what counts as yours
+- [Operational Context](./operational-context.md) — prefixes, which decide what counts as yours
 - [Assets and Crypto Configurations](./assets-and-crypto-configurations.md) — what a scan records

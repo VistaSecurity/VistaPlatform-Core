@@ -733,6 +733,7 @@ func (s *DeviceInterrogationService) persistObservations(ctx context.Context, te
 		DeviceIdentity: result.DeviceIdentity,
 		Facts:          result.Facts,
 		Relationships:  result.Relationships,
+		Network:        result.Network,
 	}
 	if obs.Empty() {
 		return nil

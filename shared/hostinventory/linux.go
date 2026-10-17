@@ -27,8 +27,10 @@ var (
 
 	linuxCmdSS          = []string{"ss", "-ltnup"}
 	linuxCmdConnections = []string{"ss", "-tnup"}
-	linuxCmdIPJ         = []string{"ip", "-j", "addr"}
-	linuxCmdArch        = []string{"uname", "-m"}
+	// `-d` adds each link's linkinfo (its kind, and a VLAN's id) to the same
+	// JSON; iproute2 has printed it alongside `-j` since JSON output exists.
+	linuxCmdIPJ  = []string{"ip", "-d", "-j", "addr"}
+	linuxCmdArch = []string{"uname", "-m"}
 )
 
 // linuxOSReleasePath is the file that names the distribution. Every systemd-era
@@ -243,7 +245,7 @@ func collectLinuxInterfaces(ctx context.Context, r Runner, rep *Report, opts Opt
 			rep.mark(SectionInterfaces, SectionOK)
 			rep.Errors = append(rep.Errors, StepError{
 				Step:    SectionInterfaces,
-				Message: fmt.Sprintf("ip -j addr unavailable (%v); used the local net.Interfaces() fallback", err),
+				Message: fmt.Sprintf("ip -d -j addr unavailable (%v); used the local net.Interfaces() fallback", err),
 			})
 			return
 		}
@@ -252,14 +254,25 @@ func collectLinuxInterfaces(ctx context.Context, r Runner, rep *Report, opts Opt
 	rep.fail(SectionInterfaces, err)
 }
 
-// ipJSONAddr mirrors the `ip -j addr` output shape. Typed rather than
+// ipJSONAddr mirrors the `ip -d -j addr` output shape. Typed rather than
 // map-walked so an unexpected field is discarded structurally.
 type ipJSONAddr struct {
 	IFName    string `json:"ifname"`
 	Address   string `json:"address"`
 	Operstate string `json:"operstate"`
 	LinkType  string `json:"link_type"`
-	AddrInfo  []struct {
+	MTU       int    `json:"mtu"`
+	// Link is the lower device of a stacked link (a VLAN's parent); Master the
+	// bond or bridge the interface is enslaved to.
+	Link     string `json:"link"`
+	Master   string `json:"master"`
+	LinkInfo *struct {
+		InfoKind string `json:"info_kind"`
+		InfoData *struct {
+			ID int `json:"id"`
+		} `json:"info_data"`
+	} `json:"linkinfo"`
+	AddrInfo []struct {
 		Local     string `json:"local"`
 		PrefixLen int    `json:"prefixlen"`
 		Family    string `json:"family"`
@@ -293,7 +306,7 @@ func linuxAssignment(dynamic bool, validLifeTime *uint64) addressAssignment {
 	}
 }
 
-// ParseIPJSON turns `ip -j addr` output into interfaces.
+// ParseIPJSON turns `ip -d -j addr` output into interfaces.
 func ParseIPJSON(b []byte) ([]Interface, error) {
 	var raw []ipJSONAddr
 	if err := json.Unmarshal(b, &raw); err != nil {
@@ -309,7 +322,24 @@ func ParseIPJSON(b []byte) ([]Interface, error) {
 			MAC:     normaliseMAC(e.Address),
 			State:   normaliseOperstate(e.Operstate),
 			Virtual: isVirtualInterface(e.IFName, e.LinkType == "loopback"),
+			MTU:     e.MTU,
 		}
+		if e.LinkInfo != nil {
+			switch kind := strings.ToLower(strings.TrimSpace(e.LinkInfo.InfoKind)); kind {
+			case "vlan":
+				entry.Kind = kind
+				entry.Parent = strings.TrimSpace(e.Link)
+				if e.LinkInfo.InfoData != nil && e.LinkInfo.InfoData.ID >= 1 && e.LinkInfo.InfoData.ID <= 4094 {
+					entry.VLAN = e.LinkInfo.InfoData.ID
+				}
+			case "bond", "team", "bridge":
+				entry.Kind = kind
+			}
+		}
+		// A bridge port's master is a bridge, not an aggregate: only a bond or
+		// team master makes this interface a LAG member, and that is known
+		// once every entry is read (below).
+		entry.LAG = strings.TrimSpace(e.Master)
 		for _, a := range e.AddrInfo {
 			if a.Local == "" {
 				continue
@@ -319,6 +349,17 @@ func ParseIPJSON(b []byte) ([]Interface, error) {
 			entry.assign(addr, linuxAssignment(a.Dynamic, a.ValidLifeTime))
 		}
 		out = append(out, entry)
+	}
+	aggregates := map[string]bool{}
+	for _, i := range out {
+		if i.Kind == "bond" || i.Kind == "team" {
+			aggregates[i.Name] = true
+		}
+	}
+	for n := range out {
+		if !aggregates[out[n].LAG] {
+			out[n].LAG = ""
+		}
 	}
 	return out, nil
 }

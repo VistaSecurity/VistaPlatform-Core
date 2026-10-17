@@ -1027,7 +1027,13 @@ func isWildcardAddress(v string) bool {
 //     controller's port table filed under the wrong switch" mistake the
 //     ObservationSink's per-subject grouping exists to prevent. It is counted
 //     as an error, not dropped silently.
-//  2. **sw.package_count is held back.** It is rewritten after the installs
+//  2. **net.interfaces is not a fact any more** (DCIM row 1.5; `retired` in
+//     standards/fact-keys.yaml). The host's interfaces travel on its sighting
+//     as identity.ObservedInterfaces (hostInventoryInterfaces) and the
+//     identity engine writes them as `interfaces` and `ip_addresses` rows;
+//     storing the same list again as a fact would be a second, stale copy of
+//     data that now has a model.
+//  3. **sw.package_count is held back.** It is rewritten after the installs
 //     land, from the rows that actually landed — see refreshPackageCount. Its
 //     PRESENCE here is what says the package step succeeded, which is the only
 //     thing that licenses the absent-install sweep, so the value is returned
@@ -1044,6 +1050,9 @@ func hostInventoryFacts(obs *di.InterrogateResult, subject di.PeerRef) (out []di
 			errs = append(errs, fmt.Sprintf(
 				"fact %s describes a different subject (%s) than the host this report is about; refused rather than attributed to the host",
 				f.Key, f.Subject.DisplayName))
+			continue
+		}
+		if f.Key == facts.KeyNetInterfaces {
 			continue
 		}
 		if f.Key == facts.KeySWPackageCount {

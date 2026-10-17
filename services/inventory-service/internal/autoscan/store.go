@@ -268,7 +268,7 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 	for id := range restrictions.SensitiveAssetIDs {
 		protectedIDs = append(protectedIDs, id.String())
 	}
-	segments, err := s.segmentPrefixes(ctx, tenantID)
+	segments, err := s.automaticPrefixes(ctx, tenantID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -282,16 +282,16 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 		importOnly bool
 	}
 	var rows []row
-	// declared: segments a person registered. An import-only asset there
+	// declared: prefixes a person declared. An import-only asset there
 	// needs no connection consent (dispatchguard.SegmentDeclaresAutomaticScope,
 	// the same reading the dispatch guard makes).
 	var declared []netip.Prefix
 	err = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-		var sensitiveSegments []string
-		if err := tx.SelectContext(ctx, &sensitiveSegments, `SELECT value FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr' AND (COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')`, tenantID); err != nil {
+		var sensitivePrefixes []string
+		if err := tx.SelectContext(ctx, &sensitivePrefixes, `SELECT prefix::text FROM prefixes WHERE tenant_id=$1 AND vrf_id IS NULL AND status NOT IN ('rejected','archived') AND (sensitive OR active_probes_disabled)`, tenantID); err != nil {
 			return err
 		}
-		excluded = append(excluded, sharedautoscan.ParsePrefixes(sensitiveSegments)...)
+		excluded = append(excluded, sharedautoscan.ParsePrefixes(sensitivePrefixes)...)
 		// The consent clause only when the tenant has an import-only asset at
 		// all; a tenant without connections never pays for it.
 		importOnlySQL := "false"
@@ -383,69 +383,75 @@ func (s *Store) scannableAssets(ctx context.Context, tenantID uuid.UUID, cutoff 
 	return targets, refusals, nil
 }
 
-// AutomaticSegmentTypes are the `network_segments.network_type` values that put
-// an address in scope for an UNATTENDED scan.
+// AutomaticPrefixTypes are the prefix network types that put an address in
+// scope for an UNATTENDED scan.
 //
-// `public` is deliberately absent. A tenant can register a public segment, and
-// it is a perfectly good thing to scan when a person asks — but the Active
+// `public` is deliberately absent. A tenant can declare a public prefix, and it
+// is a perfectly good thing to scan when a person asks — but the Active
 // Scanning page tells them "public addresses and third-party systems are never
-// probed", and a registered public segment is exactly how that sentence becomes
-// false without anyone noticing. The segment rule exists to let a tenant say
+// probed", and a declared public prefix is exactly how that sentence becomes
+// false without anyone noticing. The prefix rule exists to let a tenant say
 // "this range is mine"; `network_type: public` says the opposite about what is
 // on it. The manual Discover wizard and Active Scan are unchanged.
-var AutomaticSegmentTypes = map[string]bool{"private": true, "vpn": true, "cloud": true}
+var AutomaticPrefixTypes = map[string]bool{"private": true, "vpn": true, "cloud": true}
 
-// Segment is one registered network segment, as the eligibility rule sees it.
-type Segment struct {
+// Prefix is one live global-VRF prefix, as the eligibility rule sees it.
+// NetworkType is the prefix's own, else its address class
+// (dispatchguard.PrefixNetworkType).
+type Prefix struct {
 	Value       string `db:"value"`
 	NetworkType string `db:"network_type"`
 }
 
-// AutomaticSegmentPrefixes is the decision: which of a tenant's registered
-// segments put an address in scope for an unattended scan.
+// AutomaticPrefixes is the decision: which of a tenant's prefixes put an
+// address in scope for an unattended scan.
 //
 // The filter lives in Go rather than in the WHERE clause so it is one
 // expression with a table test behind it, including the case that matters — a
-// registered `public` segment, which is a real thing a tenant can create and
-// the one way the page's promise silently becomes false.
-func AutomaticSegmentPrefixes(segments []Segment) []netip.Prefix {
+// declared `public` prefix, which is a real thing a tenant can create and the
+// one way the page's promise silently becomes false.
+func AutomaticPrefixes(prefixes []Prefix) []netip.Prefix {
 	var values []string
-	for _, seg := range segments {
-		if !AutomaticSegmentTypes[strings.ToLower(strings.TrimSpace(seg.NetworkType))] {
+	for _, p := range prefixes {
+		if !AutomaticPrefixTypes[strings.ToLower(strings.TrimSpace(p.NetworkType))] {
 			continue
 		}
-		values = append(values, seg.Value)
+		values = append(values, p.Value)
 	}
 	return sharedautoscan.ParsePrefixes(values)
 }
 
-// segmentPrefixes returns the CIDRs of the tenant's ACTIVE registered network
-// segments that an automatic scan may treat as theirs. Only the `cidr`-shaped
-// values describe addresses; a segment can equally be a domain or a VPC id, and
-// ParsePrefixes drops those.
-func (s *Store) segmentPrefixes(ctx context.Context, tenantID uuid.UUID) ([]netip.Prefix, error) {
-	segments, err := s.Segments(ctx, tenantID)
+// automaticPrefixes returns the CIDRs of the tenant's live prefixes that an
+// automatic scan may treat as theirs.
+func (s *Store) automaticPrefixes(ctx context.Context, tenantID uuid.UUID) ([]netip.Prefix, error) {
+	prefixes, err := s.Prefixes(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	return AutomaticSegmentPrefixes(segments), nil
+	return AutomaticPrefixes(prefixes), nil
 }
 
-// Segments returns the tenant's active registered network segments with their
-// types, unfiltered. The reachability rule reads the type itself (a `cloud`
-// segment is never reachable from the platform), so it needs more than the
-// in-scope prefixes segmentPrefixes returns.
-func (s *Store) Segments(ctx context.Context, tenantID uuid.UUID) ([]Segment, error) {
-	var segments []Segment
+// Prefixes returns the tenant's live global-VRF prefixes with their network
+// types, unfiltered (DCIM row 1.6). The reachability rule reads the type itself
+// (a `cloud` prefix is never reachable from the platform), so it needs more
+// than the in-scope prefixes automaticPrefixes returns.
+func (s *Store) Prefixes(ctx context.Context, tenantID uuid.UUID) ([]Prefix, error) {
+	var prefixes []Prefix
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-		return tx.SelectContext(ctx, &segments, `
-			SELECT value, network_type FROM network_segments
-			WHERE tenant_id = $1 AND COALESCE(is_active, true) = true`, tenantID)
+		return tx.SelectContext(ctx, &prefixes, `
+			SELECT prefix::text AS value, COALESCE(network_type, '') AS network_type FROM prefixes
+			WHERE tenant_id = $1 AND vrf_id IS NULL AND status NOT IN ('rejected', 'archived')
+			ORDER BY created_at, id`, tenantID)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("read the tenant's network segments: %w", err)
+		return nil, fmt.Errorf("read the tenant's prefixes: %w", err)
 	}
-	return segments, nil
+	for i := range prefixes {
+		if p, perr := netip.ParsePrefix(prefixes[i].Value); perr == nil {
+			prefixes[i].NetworkType = dispatchguard.PrefixNetworkType(prefixes[i].NetworkType, p)
+		}
+	}
+	return prefixes, nil
 }
 
 // AddressesWithScanInFlight returns the target inputs that already have an

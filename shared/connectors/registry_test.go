@@ -368,15 +368,25 @@ func TestProducedClassesAreRealAssetClasses(t *testing.T) {
 }
 
 // The cloud connectors used to claim `serverless_function` although no
-// collector for Lambda, Azure Functions or Cloud Functions exists (review M35).
-func TestNoCloudConnectorClaimsServerlessFunctions(t *testing.T) {
+// collector for Lambda, Azure Functions or Cloud Functions existed (review
+// M35). DCIM row 4.6 built those collectors and the other Tier-1 classes on all
+// three providers (asset-inventory ADR-0009 D2), so every cloud connector now
+// claims them — device-interrogation's
+// TestRegistryProducesClassesMatchTheCloudCollectors ties each claim to a
+// collector's device type.
+func TestCloudConnectorsClaimTheTier1Classes(t *testing.T) {
 	for _, c := range ByKind(KindCloud) {
-		if slices.Contains(c.ProducesClasses, "serverless_function") {
-			t.Errorf("%s claims serverless_function; no collector produces it", c.Key)
-		}
-		for _, want := range []string{"compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "key_store", "object_storage", "managed_database"} {
+		for _, want := range []string{"compute_instance", "cloud_load_balancer", "key_store", "object_storage", "managed_database",
+			"serverless_function", "container_cluster", "secret_store", "dns_zone", "security_group"} {
 			if !slices.Contains(c.ProducesClasses, want) {
 				t.Errorf("%s does not claim %s, which every cloud collector produces", c.Key, want)
+			}
+		}
+		// Networks and subnets are IPAM prefixes since DCIM row 1.5f, not
+		// asset classes a collector produces.
+		for _, gone := range []string{"virtual_network", "subnet"} {
+			if slices.Contains(c.ProducesClasses, gone) {
+				t.Errorf("%s claims %s, which is a prefix since row 1.5f, not an asset class", c.Key, gone)
 			}
 		}
 	}

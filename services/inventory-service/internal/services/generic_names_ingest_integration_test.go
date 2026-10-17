@@ -26,6 +26,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/identityenrichment"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -61,7 +62,7 @@ func (f *provisionalFixture) mergeProposals() int {
 func (f *provisionalFixture) identifierCount(assetID string) int {
 	f.t.Helper()
 	var n int
-	if err := f.raw.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2`, f.tenant, assetID).Scan(&n); err != nil {
+	if err := f.raw.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND asset_id=$2`, f.tenant, assetID).Scan(&n); err != nil {
 		f.t.Fatal(err)
 	}
 	return n
@@ -169,7 +170,7 @@ func TestIntegration_EnrichmentDNS_MarksAGenericName(t *testing.T) {
 	}{
 		{`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,network_interfaces,reported_capabilities,reported_dns_interfaces) VALUES($1,$2,'Enrichment collector','linux','test-v1','datacenter_host','active',$3,ARRAY['eth0'],ARRAY['identity_dns_v1'],ARRAY['eth0'])`, []any{sensor, tenant, now}},
 		{`INSERT INTO agent_addresses(sensor_id,interface_name,address,prefix_length) VALUES($1,'eth0','198.51.100.4',24)`, []any{sensor}},
-		{`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Enrichment network','cidr','198.51.100.0/24','production')`, []any{segment, tenant}},
+		{`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Enrichment network','198.51.100.0/24'::cidr,'production','declared','active')`, []any{segment, tenant}},
 		{`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"},"identity_enrichment":{"enabled":true}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, []any{tenant}},
 	} {
 		if _, err := raw.Exec(q.sql, q.args...); err != nil {

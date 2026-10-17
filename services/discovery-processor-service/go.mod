@@ -15,7 +15,6 @@ require (
 	github.com/bytedance/sonic v1.15.4 // indirect
 	github.com/bytedance/sonic/loader v0.5.2 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/gin-contrib/sse v1.1.2 // indirect
 	github.com/gin-gonic/gin v1.12.0 // indirect
@@ -42,10 +41,10 @@ require (
 	github.com/ugorji/go/codec v1.3.2 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.9.2 // indirect
 	golang.org/x/arch v0.31.0 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
 

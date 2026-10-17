@@ -59,6 +59,7 @@ var ciscoAllowedCommands = []string{
 	"show crypto isakmp sa",
 	"show crypto ikev1 sa detail", // ASA: IKEv1 only, with the negotiated cipher and hash
 	"show crypto map",
+	"show crypto isakmp policy", // IOS: the ISAKMP protection suites only, never `crypto isakmp key`
 	"show running-config | include ssl cipher",
 	"show ssl",
 	"show version",
@@ -73,6 +74,14 @@ var ciscoAllowedCommands = []string{
 	"show interface ip brief", // ASA
 	"show lldp neighbors detail",
 	"show vlan brief",
+	// switch-port VLAN posture (cisco_network.go, DCIM row 1.5c). Neither
+	// carries configuration beyond VLAN ids, states and media; the Name
+	// column of `show interfaces status` (the port description) is never read.
+	"show interfaces status",
+	"show interfaces trunk",
+	// stack members (cisco_ops.go, DCIM row 2.4): switch number, role, MAC,
+	// priority, hardware version and state; asked only of a stack.
+	"show switch",
 	// telnet on the management plane (cisco_ops.go). Each is filtered to the
 	// lines that answer the question and none carries a secret: VTY
 	// `transport input` lines, the NX-OS telnet feature's state, and the
@@ -185,6 +194,11 @@ func TestCiscoCommands_EveryPlatformIsWired(t *testing.T) {
 	asked := map[string]bool{}
 	run := func(_ context.Context, command string) (string, bool, error) {
 		asked[command] = true
+		if command == "show inventory" {
+			// A two-member stack, so the stack-only `show switch` is reached.
+			return "NAME: \"Switch 1\", DESCR: \"C9300-48P\"\nPID: C9300-48P , VID: V02 , SN: FOC1\n" +
+				"NAME: \"Switch 2\", DESCR: \"C9300-48P\"\nPID: C9300-48P , VID: V02 , SN: FOC2\n", true, nil
+		}
 		return "", false, os.ErrNotExist
 	}
 	for _, osName := range []string{"", "IOS", "IOS-XE", "NX-OS", "IOS-XR", "ASA"} {

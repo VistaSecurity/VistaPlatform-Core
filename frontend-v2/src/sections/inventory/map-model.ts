@@ -23,12 +23,14 @@ import {
 /**
  * What kind of box a node is.
  *
- * `asset` is an inventory asset. The two scope kinds are GROUPING NODES the
- * client synthesises (`withCloudScopeRoots`) from the account and region each
- * asset records — they are scoping attributes, not asset classes ( D6),
- * so there is no asset behind them, nothing to open, no risk score and no
- * lifecycle status. Anything that assumes a node has an asset id must check
- * this first; `isAssetNode` is the guard.
+ * `asset` is an inventory asset. The scope kind is a GROUPING NODE the client
+ * synthesises (`withCloudScopeRoots`) from the region each asset records — a
+ * region is a place, not a thing anybody owns, so there is no asset behind it,
+ * nothing to open, no risk score and no lifecycle status. (The cloud ACCOUNT
+ * used to be a second scope kind; since asset-inventory ADR-0009 D1 it is a
+ * real `cloud_account` asset joined to its resources by stored `hosted_on`
+ * edges.) Anything that assumes a node has an asset id must check this first;
+ * `isAssetNode` is the guard.
  */
 export type MapNodeKind = 'asset' | ScopeNodeKey;
 
@@ -66,8 +68,7 @@ export interface MapNode {
   depth: number;
   isRoot: boolean;
   /** The cloud account this asset records, or undefined when it records none.
-   * A scoping attribute ( D6), carried here only so the grouping nodes
-   *  can be built from it. */
+   *  Keys the region box, so two accounts' `us-east-1` stay two boxes. */
   cloudAccount?: string;
   /** The cloud region, likewise. `global` is a legitimate value for a CDN
    *  distribution and is NOT a stand-in for "unknown". */
@@ -109,14 +110,24 @@ export interface MapEdge {
   /**
    * True when the client drew this line rather than the server storing it.
    *
-   * Only the cloud scope edges (`withCloudScopeRoots`) are synthetic. They
-   * restate an asset's recorded account and region as containment so the map
-   * has something to root a VPC or a bucket on; there is no row in
+   * Only the cloud region edges (`withCloudScopeRoots`) are synthetic. They
+   * restate an asset's recorded region as containment so the map can group a
+   * VPC or a bucket by where it is; there is no row in
    * `asset_relationships` behind them, they have no observation history, and
    * the tooltip and the exports say so. A stored edge and a derived one reading
    * identically is how a picture starts asserting more than the data does.
    */
   synthetic: boolean;
+  /**
+   * The interface the observation names at each end (LLDP's local / remote
+   * port), when the server resolved it to exactly one interface (DCIM row
+   * 3.6). Absent means no port is known — "Show physical path" is then
+   * disabled and says why.
+   */
+  fromInterfaceId?: string;
+  fromInterfaceName?: string;
+  toInterfaceId?: string;
+  toInterfaceName?: string;
 }
 
 export interface MapGraph {
@@ -145,14 +156,16 @@ export type ClassGroupKey =
   | 'service' | 'external' | 'unknown_host' | 'other';
 
 /**
- * The two grouping-node kinds.
+ * The grouping-node kind.
  *
- * NOT members of `ClassGroupKey`: that union is the class taxonomy's roots, and
- * a cloud account is not a class of asset — it is a scoping attribute rendered
- * as a box ( D6). Keeping them in a separate union is what stops a scope
- * box being counted as an asset anywhere the class groups are totalled.
+ * NOT a member of `ClassGroupKey`: that union is the class taxonomy's roots,
+ * and a region is not a class of asset — it is a place, rendered as a box.
+ * Keeping it in a separate union is what stops a scope box being counted as an
+ * asset anywhere the class groups are totalled. (The account is a class now —
+ * `cloud_resource.cloud_account`, ADR-0009 D1 — and is styled with the cloud
+ * resources it owns.)
  */
-export type ScopeNodeKey = 'cloud_account' | 'cloud_region';
+export type ScopeNodeKey = 'cloud_region';
 
 /** Anything that can style a node: a class group, or a scope kind. */
 export type NodeStyleKey = ClassGroupKey | ScopeNodeKey;
@@ -184,11 +197,10 @@ export const CLASS_GROUP_STYLES: Readonly<Record<NodeStyleKey, ClassGroupStyle>>
   // inventory exists to close, and greying it would read as "nothing to see".
   unknown_host: { label: 'Unknown host', color: 'var(--warn)', icon: 'circle-help' },
   other: { label: 'Other', color: 'var(--neutral)', icon: 'circle-dashed' },
-  // The two scope kinds are deliberately styled from the muted TEXT tokens
-  // rather than from the categorical palette. They are the frame the assets
-  // hang in, not another series, and a scope box that competed for attention
-  // with a critical asset would be reading weight into scaffolding.
-  cloud_account: { label: 'Cloud account', color: 'var(--app-t2)', icon: 'cloud' },
+  // The scope kind is deliberately styled from the muted TEXT tokens rather
+  // than from the categorical palette. It is the frame the assets hang in, not
+  // another series, and a scope box that competed for attention with a
+  // critical asset would be reading weight into scaffolding.
   cloud_region: { label: 'Cloud region', color: 'var(--app-t3)', icon: 'map-pin' },
 };
 
@@ -204,8 +216,8 @@ export const CLASS_GROUP_KEYS: readonly ClassGroupKey[] = [
   'service', 'external', 'unknown_host', 'other',
 ];
 
-/** The grouping-node kinds, in the order they nest. */
-export const SCOPE_NODE_KEYS: readonly ScopeNodeKey[] = ['cloud_account', 'cloud_region'];
+/** The grouping-node kinds. */
+export const SCOPE_NODE_KEYS: readonly ScopeNodeKey[] = ['cloud_region'];
 
 /**
  * Which group a class key belongs to.
@@ -345,6 +357,8 @@ export function buildMapGraph(nbh: Neighbourhood | undefined): MapGraph {
       lastSeenAt: e.last_seen_at,
       observationCount: e.observation_count,
       synthetic: false,
+      ...(e.from_interface_id ? { fromInterfaceId: e.from_interface_id, fromInterfaceName: e.from_interface_name } : {}),
+      ...(e.to_interface_id ? { toInterfaceId: e.to_interface_id, toInterfaceName: e.to_interface_name } : {}),
     });
   }
 
@@ -374,8 +388,6 @@ export function capGraph(graph: MapGraph, nodeCap: number, edgeCap: number): Map
 /** The id prefix every grouping node carries. Not a uuid, so it can never
  *  collide with an asset id. */
 export const SCOPE_NODE_PREFIX = 'scope:';
-
-export const cloudAccountNodeId = (account: string): string => `${SCOPE_NODE_PREFIX}cloud_account:${account}`;
 
 /**
  * A region node is keyed by ACCOUNT AND REGION, not by region alone.
@@ -436,30 +448,35 @@ function scopeEdge(source: string, target: string): MapEdge {
   };
 }
 
+/** The account's class key (ADR-0009 D1). */
+export const CLOUD_ACCOUNT_CLASS = 'cloud_account';
+
 /**
- * Hang the graph's cloud assets off account and region grouping nodes.
+ * Group the graph's cloud assets by region.
  *
- * This is what turns "what is in this VPC" into "what is in this account". The
- * two VPCs an AWS discovery produces float unrooted without it, and a bucket or
- * a CDN distribution — regional or global rather than VPC-resident — has no
- * edge at all and sits on the canvas as an isolated box.
+ * The account is no longer synthesised here: since asset-inventory ADR-0009 D1
+ * it is a real `cloud_account` asset, and every cloud resource reaches it by a
+ * STORED `hosted_on` edge the server sends like any other. What stays
+ * client-side is the region, because a region is a place, not a thing anybody
+ * owns (ADR-0001 D3) — so a bucket or a CDN distribution, which lives outside
+ * any VPC, is still drawn in the region it is in rather than floating.
  *
  * Three rules, and each one is a thing it would be easy to get wrong:
  *
- *  1. **Only the assets nothing else on the map contains get a scope parent.**
+ *  1. **Only the assets nothing else on the map contains get a region box.**
  *     A subnet inside a drawn VPC is already placed; also hanging it off the
- *     region would flatten account → region → VPC → subnet into a bush and draw
- *     the same containment twice. An asset whose container fell outside the
- *     depth window is NOT contained on this map, so it does attach — which is
- *     the right answer, because on this map it really is a root.
- *  2. **Absent is absent.** An asset recording no region gets no region box and
- *     no edge; it stays on the map exactly where it was. Nothing invents a
- *     placeholder region, because "unknown" is not a region and a box labelled
- *     `—` would be read as one. An asset recording an account but no region
- *     hangs directly off its account.
+ *     region would draw the same containment twice. `hosted_on` is not
+ *     containment — a resource in an account is still somewhere in a region —
+ *     so it does not count. An asset whose container fell outside the depth
+ *     window is NOT contained on this map, so it does attach.
+ *  2. **Absent is absent.** An asset recording no region gets no box and no
+ *     edge; it stays exactly where it was (attached, if at all, by its stored
+ *     edges). Nothing invents a placeholder region.
  *  3. **Run this AFTER `capGraph`.** The caps are about assets, and the counts
  *     the truncation banner quotes come from the server. Synthesising boxes
  *     before the cap would let scaffolding push assets out of the graph.
+ *
+ * The account asset itself is never put in a region: it is not in one.
  */
 export function withCloudScopeRoots(graph: MapGraph): MapGraph {
   const containedOnMap = new Set<string>();
@@ -491,26 +508,14 @@ export function withCloudScopeRoots(graph: MapGraph): MapGraph {
 
   for (const node of graph.nodes) {
     if (!isAssetNode(node)) continue;
-    const account = (node.cloudAccount ?? '').trim();
+    if (node.classKey === CLOUD_ACCOUNT_CLASS) continue;
     const region = (node.cloudRegion ?? '').trim();
-    if (!account && !region) continue;
+    if (!region) continue;
     if (containedOnMap.has(node.id)) continue;
 
-    const accountId = account ? cloudAccountNodeId(account) : '';
-    if (accountId) {
-      ensure(scopeNode(accountId, 'cloud_account', account, 'Cloud account', node.depth));
-    }
-
-    if (!region) {
-      // Account but no region. Attached to the account directly rather than to
-      // a fabricated "unknown region" box.
-      if (accountId) link(accountId, node.id);
-      continue;
-    }
-
+    const account = (node.cloudAccount ?? '').trim();
     const regionId = cloudRegionNodeId(account, region);
     ensure(scopeNode(regionId, 'cloud_region', region, cloudRegionSubLabel(account), node.depth));
-    if (accountId) link(accountId, regionId);
     link(regionId, node.id);
   }
 

@@ -18,7 +18,7 @@ var ErrIdentityDNSReplay = errors.New("DNS request identifier was reused with di
 
 // EnqueueIdentityDNS uses the existing authenticated sensor command path. The
 // caller must apply tenant enrichment policy and exclusions before calling.
-// This function independently enforces ownership, capability and segment reachability.
+// This function independently enforces ownership, capability and prefix reachability.
 func EnqueueIdentityDNS(ctx context.Context, tx *sql.Tx, tenant, sensor uuid.UUID, req sensordispatch.IdentityDNSRequest) (uuid.UUID, error) {
 	if err := req.Validate(); err != nil {
 		return uuid.Nil, err
@@ -41,10 +41,10 @@ func EnqueueIdentityDNS(ctx context.Context, tx *sql.Tx, tenant, sensor uuid.UUI
 		return uuid.Nil, err
 	}
 	var allowed bool
-	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sensors s JOIN network_segments n ON n.tenant_id=s.tenant_id
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sensors s JOIN prefixes n ON n.tenant_id=s.tenant_id
  WHERE s.tenant_id=$1 AND s.id=$2 AND s.deleted_at IS NULL AND s.status='active' AND NOT s.air_gapped
  AND s.last_heartbeat>now()-interval '2 minutes' AND $3=ANY(s.reported_capabilities)
- AND n.id=$4 AND n.is_active AND CASE WHEN n.segment_type='cidr' THEN n.value::cidr=$5::cidr ELSE false END
+ AND n.id=$4 AND n.vrf_id IS NULL AND n.status NOT IN ('rejected','archived') AND n.prefix=$5::cidr
  AND EXISTS(SELECT 1 FROM agent_addresses a WHERE a.sensor_id=s.id AND a.address <<=$5::cidr
  AND a.interface_name=ANY(s.reported_dns_interfaces) AND a.last_seen_at>now()-interval '5 minutes')
  AND EXISTS(SELECT 1 FROM identity_observations o WHERE o.tenant_id=$1 AND o.id=$6))`, tenant, sensor, sensordispatch.IdentityDNSCapability, req.NetworkScope, req.SegmentCIDR, req.ObservationID).Scan(&allowed)

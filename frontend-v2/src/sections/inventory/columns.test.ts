@@ -59,17 +59,17 @@ describe('classColumns', () => {
 });
 
 describe('columnsForClass', () => {
-  it('falls back to base columns plus Segment when NO class is selected', () => {
+  it('falls back to base columns plus Network when NO class is selected', () => {
     // The most useful thing to say about a heterogeneous list. There is no
     // attribute set to draw from, so inventing one would mean empty cells.
     const keys = columnsForClass(undefined).map((c) => c.key);
     expect(keys).toContain('class');
-    expect(keys).toContain('segment');
+    expect(keys).toContain('prefix');
     expect(keys.some((k) => k.startsWith('attr.'))).toBe(false);
   });
 
   it('gives a PARENT class its own (shared) attributes, not its children’s', () => {
-    // `hardware` contributes vendor/model/asset_tag and nothing class-specific,
+    // `hardware` contributes vendor/model and nothing class-specific,
     // which is right: a list mixing servers and switches has no common OS
     // column to show.
     const keys = columnsForClass('hardware').map((c) => c.attribute).filter(Boolean);

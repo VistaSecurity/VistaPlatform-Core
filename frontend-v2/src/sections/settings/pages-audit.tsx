@@ -52,7 +52,7 @@ export function AuditPage({ meta }: { meta: SettingsNavItem }) {
   ];
 
   return (
-    <SPage eyebrow="Audit" title="Audit Log" job={meta.job} maxWidth={1000}>
+    <SPage eyebrow="Risk & Compliance" title="Audit Log" job={meta.job} maxWidth={1000}>
       <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
         <div style={{ position: 'relative', flex: '0 0 240px' }}>
           <Icon name="search" size={14} style={{ position: 'absolute', left: 11, top: 10, color: 'var(--app-t3)' }} />

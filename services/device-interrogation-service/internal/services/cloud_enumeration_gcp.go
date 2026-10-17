@@ -27,40 +27,79 @@ package services
 
 import (
 	"context"
-	"log"
+	"errors"
 	"strings"
 
 	gcpclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/gcp"
-	"github.com/vistasecurity/vistaplatform/shared/facts"
 )
 
-// enumerateGCP runs the four listings and builds the plan.
-func (s *CloudDiscoveryService) enumerateGCP(ctx context.Context, client *gcpclient.Client) (cloudEnumerationPlan, error) {
-	plan := cloudEnumerationPlan{Provider: "gcp", Vendor: "GCP", SecurityGroupIDs: map[string]bool{}}
+// enumerateGCP runs the selected listings and builds the plan.
+//
+// The listings are project-wide (the aggregated forms), so each type has one
+// `global` row for the call plus one row per region its resources are in
+// (asset-inventory ADR-0009 D3). A failing listing is recorded; the others
+// still run.
+func (s *CloudDiscoveryService) enumerateGCP(ctx context.Context, client *gcpclient.Client, sel cloudEnumerationSelection) (cloudEnumerationPlan, error) {
+	outcomes := cloudOutcomesFrom(ctx)
 
-	networks, err := client.ListNetworks(ctx)
-	if err != nil {
-		return plan, err
+	var (
+		networks    []gcpclient.ComputeNetwork
+		subnetworks []gcpclient.ComputeSubnetwork
+		firewalls   []gcpclient.ComputeFirewall
+		instances   []gcpclient.ComputeInstance
+	)
+	if sel.needsNetworks() {
+		var nErr, sErr error
+		networks, nErr = client.ListNetworks(ctx)
+		subnetworks, sErr = client.ListSubnetworks(ctx)
+		err := errors.Join(nErr, sErr)
+		outcomes.Attempt(CloudTypeNetworks, cloudScopeGlobal, len(networks)+len(subnetworks), err)
+		logCloudCollectorFailure(CloudTypeNetworks, cloudScopeGlobal, err)
+		if sErr == nil {
+			per := map[string]int{}
+			for _, sn := range subnetworks {
+				per[gcpclient.ResourceShortName(sn.Region)]++
+			}
+			outcomes.AttributeRegions(CloudTypeNetworks, per)
+		}
 	}
-	subnetworks, err := client.ListSubnetworks(ctx)
-	if err != nil {
-		return plan, err
+	if sel.needsGroups() {
+		var err error
+		firewalls, err = client.ListFirewalls(ctx)
+		outcomes.Attempt(CloudTypeSecurityGroups, cloudScopeGlobal, len(firewalls), err)
+		logCloudCollectorFailure(CloudTypeSecurityGroups, cloudScopeGlobal, err)
 	}
-	firewalls, err := client.ListFirewalls(ctx)
-	if err != nil {
-		log.Printf("[cloud enumeration] gcp: %v (instances will carry no firewall membership)", err)
-		firewalls = nil
-	}
-	instances, err := client.ListInstances(ctx)
-	if err != nil {
-		return plan, err
+	if sel.Instances {
+		var err error
+		instances, err = client.ListInstances(ctx)
+		outcomes.Attempt(CloudTypeComputeInstances, cloudScopeGlobal, len(instances), err)
+		logCloudCollectorFailure(CloudTypeComputeInstances, cloudScopeGlobal, err)
+		if err == nil {
+			per := map[string]int{}
+			for _, inst := range instances {
+				per[gcpclient.ZoneRegion(inst.Zone)]++
+			}
+			outcomes.AttributeRegions(CloudTypeComputeInstances, per)
+		}
 	}
 
-	return buildGCPEnumerationPlan(client.GetProjectID(), instances, networks, subnetworks, firewalls), nil
+	plan := buildGCPEnumerationPlan(client.GetProjectID(), instances, networks, subnetworks, firewalls)
+	for i := range plan.Instances {
+		plan.Instances[i].annotateListing(CloudListingKey(CloudTypeComputeInstances, cloudScopeGlobal))
+	}
+	gcpSecurityGroups(&plan, client.GetProjectID(), firewalls)
+	return plan, nil
 }
 
 // buildGCPEnumerationPlan turns GCP's projections into the
 // provider-independent plan. Pure function of its inputs.
+//
+// Networks and subnetworks become prefixes carrying the network's resource
+// name as `cloud_network_ref` (DCIM row 1.5f) — a custom-mode network has no
+// range of its own, so only a legacy network contributes a container prefix.
+// Each instance's NICs become `virtual` interfaces (`nic0`, …) with their
+// internal addresses. GCE states no MAC for a NIC, and its external address
+// (`accessConfigs`) is not collected (see gcpclient.ComputeNetworkInterface).
 func buildGCPEnumerationPlan(
 	projectID string,
 	instances []gcpclient.ComputeInstance,
@@ -70,84 +109,47 @@ func buildGCPEnumerationPlan(
 ) cloudEnumerationPlan {
 	plan := cloudEnumerationPlan{Provider: "gcp", Vendor: "GCP", SecurityGroupIDs: map[string]bool{}}
 
-	networkName := map[string]string{}
 	for _, n := range networks {
 		id := gcpclient.ResourceName(n.SelfLink)
 		if id == "" {
 			continue
 		}
-		networkName[id] = id
-		attrs := map[string]any{}
+		var cidrs []string
 		if n.IPv4Range != "" {
 			// Only a legacy (non-subnet) network has a range of its own. A
 			// modern VPC's address space lives entirely on the subnetworks, and
 			// claiming a CIDR it does not have would be an invented fact.
-			attrs["cidr_blocks"] = []string{n.IPv4Range}
+			cidrs = []string{n.IPv4Range}
 		}
-		plan.Networks = append(plan.Networks, cloudEnumResource{
-			DeviceType:  DeviceTypeGCPNetwork,
-			ResourceID:  id,
-			DisplayName: n.Name,
-			Hostname:    n.Name,
-			// GCP networks are GLOBAL: no region. `cloud.region` is omitted
-			// rather than filled with the project's default, which the network
-			// does not have.
-			Facts: cloudPlacementFacts("gcp", projectID, "", id, id, "", nil),
-			Attributes: mergeAttributes(
-				cloudResourceAttributes("gcp", projectID, ""),
-				attrs,
-			),
-			Metadata: map[string]interface{}{
-				"resource_type":           "network",
-				"self_link":               n.SelfLink,
-				"project_id":              projectID,
-				"auto_create_subnetworks": n.AutoCreateSubnetworks,
-				"routing_mode":            gcpRoutingMode(n),
-			},
+		plan.Networks = append(plan.Networks, cloudNetwork{
+			ResourceID: id,
+			NetworkRef: id,
+			Account:    projectID,
+			// GCP networks are GLOBAL: no region.
+			Name:  n.Name,
+			CIDRs: cidrs,
 		})
 	}
 
-	subnetByLink := map[string]gcpclient.ComputeSubnetwork{}
 	for _, sn := range subnetworks {
 		id := gcpclient.ResourceName(sn.SelfLink)
 		if id == "" {
 			continue
 		}
-		subnetByLink[id] = sn
-		region := gcpclient.ResourceShortName(sn.Region)
-		parent := gcpclient.ResourceName(sn.Network)
-		if _, known := networkName[parent]; !known {
-			// A subnetwork whose network was not enumerated — a Shared VPC host
-			// project we cannot list — gets no containment edge rather than one
-			// pointing at nothing.
-			parent = ""
+		var cidrs []string
+		if c := strings.TrimSpace(sn.IPCidrRange); c != "" {
+			cidrs = []string{c}
 		}
-		plan.Subnets = append(plan.Subnets, cloudEnumResource{
-			DeviceType:      DeviceTypeGCPSubnetwork,
-			ResourceID:      id,
-			DisplayName:     sn.Name,
-			Hostname:        sn.Name,
-			ParentID:        parent,
-			SegmentCIDR:     sn.IPCidrRange,
-			CloudNetworkRef: gcpclient.ResourceName(sn.Network),
-			Facts: cloudPlacementFacts("gcp", projectID, region, id,
-				gcpclient.ResourceName(sn.Network), id, nil),
-			Attributes: mergeAttributes(
-				cloudResourceAttributes("gcp", projectID, region),
-				map[string]any{"cidr_block": sn.IPCidrRange},
-			),
-			Metadata: map[string]interface{}{
-				"resource_type":            "subnetwork",
-				"self_link":                sn.SelfLink,
-				"project_id":               projectID,
-				"region":                   region,
-				"network":                  gcpclient.ResourceName(sn.Network),
-				"ip_cidr_range":            sn.IPCidrRange,
-				"private_ip_google_access": sn.PrivateIPGoogleAccess,
-				"purpose":                  sn.Purpose,
-			},
+		plan.Subnets = append(plan.Subnets, cloudNetwork{
+			ResourceID: id,
+			NetworkRef: gcpclient.ResourceName(sn.Network),
+			Account:    projectID,
+			Region:     gcpclient.ResourceShortName(sn.Region),
+			Name:       sn.Name,
+			CIDRs:      cidrs,
 		})
 	}
+	lengths := subnetPrefixLengths(plan.Subnets)
 
 	for _, fw := range firewalls {
 		if id := gcpclient.ResourceName(fw.SelfLink); id != "" {
@@ -172,14 +174,13 @@ func buildGCPEnumerationPlan(
 		}
 
 		networkID, subnetID, addresses := gcpInstancePlacement(inst)
-		parent := ""
-		if _, known := subnetByLink[subnetID]; known {
-			parent = subnetID
-		}
-
-		factValues := cloudPlacementFacts("gcp", projectID, region, id, networkID, subnetID, groups)
-		if ifaces := gcpInterfaceFact(inst); len(ifaces) > 0 {
-			factValues[facts.KeyNetInterfaces] = ifaces
+		nics := make([]cloudNIC, 0, len(inst.NetworkInterfaces))
+		for _, ni := range inst.NetworkInterfaces {
+			nic := cloudNIC{Name: ni.Name, Subnet: gcpclient.ResourceName(ni.Subnetwork)}
+			if a := strings.TrimSpace(ni.NetworkIP); a != "" {
+				nic.Addresses = []string{a}
+			}
+			nics = append(nics, nic)
 		}
 
 		plan.Instances = append(plan.Instances, cloudEnumResource{
@@ -193,11 +194,12 @@ func buildGCPEnumerationPlan(
 			// reads.
 			Hostname:  inst.Hostname,
 			IPAddress: firstAddress(addresses),
-			ParentID:  parent,
 			// The network, not the subnetwork: which address space the
 			// instance's internal address belongs to.
 			CloudNetworkRef: networkID,
-			Facts:           factValues,
+			Interfaces:      cloudInterfaces(nics, lengths),
+			Prefixes:        instancePrefixes(networkID, nics, plan.Networks, plan.Subnets),
+			Facts:           cloudPlacementFacts("gcp", projectID, region, id, groups),
 			Attributes: mergeAttributes(
 				cloudResourceAttributes("gcp", projectID, region),
 				map[string]any{
@@ -245,27 +247,6 @@ func gcpInstancePlacement(inst gcpclient.ComputeInstance) (networkID, subnetID s
 	return networkID, subnetID, addresses
 }
 
-// gcpInterfaceFact renders an instance's NICs as the `net.interfaces` value.
-//
-// GCE states no MAC address for a NIC on the instance resource, so the `mac`
-// key is absent rather than empty — "not stated" and "stated as nothing" are
-// different facts, and the item schema makes only `name` required.
-func gcpInterfaceFact(inst gcpclient.ComputeInstance) []map[string]any {
-	out := make([]map[string]any, 0, len(inst.NetworkInterfaces))
-	for _, ni := range inst.NetworkInterfaces {
-		name := ni.Name
-		if name == "" {
-			continue
-		}
-		entry := map[string]any{"name": name}
-		if a := strings.TrimSpace(ni.NetworkIP); a != "" {
-			entry["addresses"] = []string{a}
-		}
-		out = append(out, entry)
-	}
-	return out
-}
-
 // gcpNetworkTags returns the instance's network tags — the strings firewall
 // rules select on. They are not labels and not `assets.tags`; they are the
 // input to the membership computation, recorded so an operator can see why a
@@ -284,11 +265,4 @@ func gcpNetworkTags(inst gcpclient.ComputeInstance) []string {
 		return nil
 	}
 	return out
-}
-
-func gcpRoutingMode(n gcpclient.ComputeNetwork) string {
-	if n.RoutingConfig == nil {
-		return ""
-	}
-	return n.RoutingConfig.RoutingMode
 }

@@ -117,7 +117,7 @@ export const EXPLANATIONS: Record<ExplanationCode, Explanation> = {
   },
   network_not_configured: {
     why: 'This address is not inside any network you have set up.',
-    fix: 'Add a network segment that covers it, and the platform can place this host — and others in the same range — itself.',
+    fix: 'Add a prefix that covers it, and the platform can place this host — and others in the same range — itself.',
   },
   relayed_advertisement: {
     why: 'Another device advertised this name; nothing here saw the device itself.',
@@ -337,7 +337,7 @@ export function hostLabel(o: Pick<Observation, 'evidence' | 'summary'>): { prima
 
 /**
  * The network column. `network_name` is null for the tenant default or a scope
- * that names no segment — the raw scope is an id, so it is never shown.
+ * that names no prefix — the raw scope is an id, so it is never shown.
  */
 export function networkLabel(o: Pick<Observation, 'network_name'>): string {
   return firstFilled(o.network_name ?? undefined, 'No configured network');

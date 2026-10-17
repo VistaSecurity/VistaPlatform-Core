@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
-	"strconv"
 	"strings"
 )
 
@@ -55,39 +54,6 @@ const fortinetVendor = "Fortinet"
 // keyed on product plus version.
 const fortinetOSName = "FortiOS"
 
-// fortinetInterfaceFields is the `cmdb/system/interface` allowlist: the
-// configured view.
-//
-// Absent, and named here so the next person does not have to diff two lists to
-// see it: `password` (the PPPoE password), `ppp-*`, `auth-cert`, `ike-*`,
-// `dhcp-*` option detail, and the `secondaryip` table. The last is addresses
-// rather than material, but it is a nested vendor table and copying one
-// wholesale is the mistake this file exists to avoid.
-var fortinetInterfaceFields = []string{
-	"name",      // interface name
-	"ip",        // "address netmask", space separated
-	"macaddr",   // the interface's MAC, where FortiOS reports one
-	"status",    // administrative status: "up" | "down"
-	"vlanid",    // 802.1Q tag, 0 on an untagged interface
-	"type",      // "physical" | "vlan" | "aggregate" | "tunnel" | …
-	"interface", // parent interface of a VLAN subinterface
-	"role",      // "lan" | "wan" | "dmz" | "undefined"
-	"vdom",      // virtual domain the interface belongs to
-}
-
-// fortinetMonitorInterfaceFields is the `monitor/system/interface` allowlist:
-// the running view. It is a status endpoint and carries no configuration, but
-// it is projected like everything else — an allowlist that is skipped where the
-// response "looks safe" is an allowlist nobody can rely on.
-var fortinetMonitorInterfaceFields = []string{
-	"name",
-	"link",  // operational state, boolean
-	"speed", // negotiated speed, Mbit/s
-	"mac",   // some releases report the MAC here and not in cmdb
-	"ip",    // dotted address
-	"mask",  // dotted netmask
-}
-
 // fortinetRouteFields is the `monitor/router/ipv4` allowlist, and it has ONE
 // field. The prefixes, their interfaces, their metrics and their protocols are
 // never read and never stored — only how many DISTINCT next hops there are
@@ -129,12 +95,16 @@ func (c *fortinetClient) fortinetCollectOps(ctx context.Context, result *Interro
 		result.warn("/api/v2/monitor/system/interface", err, "Interface link state not collected")
 	}
 
-	if interfaces := fortinetInterfaces(configured, running); len(interfaces) > 0 {
-		result.addFact(factNetInterfaces, interfaces, ConfidenceReported)
+	// The ARP table: evidence about the hosts on the FortiGate's networks
+	// (DCIM row 1.5c). A status endpoint; it carries no configuration.
+	arp, err := c.getMonitorResults(ctx, "/api/v2/monitor/network/arp")
+	if err != nil {
+		result.warn("/api/v2/monitor/network/arp", err, "ARP neighbours not collected")
 	}
-	if vlans := fortinetVLANs(configured); len(vlans) > 0 {
-		result.addFact(factNetVlans, vlans, ConfidenceReported)
-	}
+
+	// As objects (fortinet_network.go), no longer the net.interfaces /
+	// net.vlans facts.
+	result.setNetwork(fortinetNetwork(configured, running, arp), "/api/v2/cmdb/system/interface")
 
 	// --- routing, as one integer -----------------------------------------
 	if routes, err := c.getMonitorResults(ctx, "/api/v2/monitor/router/ipv4"); err != nil {
@@ -237,113 +207,6 @@ func (c *fortinetClient) apiRequestRaw(ctx context.Context, method, url string) 
 	return &apiResp, nil
 }
 
-// fortinetInterfaces merges the configured and running views of the interfaces
-// into the net.interfaces value.
-//
-// The two views answer different questions and an operator expects one list:
-// cmdb has the address, the tag and the ADMINISTRATIVE status, monitor has the
-// link state and the negotiated speed. Keeping the two statuses apart is the
-// point — an interface that is down because someone disabled it is a different
-// fact from one that is down because nothing is plugged in.
-func fortinetInterfaces(configured, running []map[string]interface{}) []map[string]interface{} {
-	var out []map[string]interface{}
-	byName := map[string]int{}
-
-	for _, raw := range configured {
-		projected := projectFortinet(raw, fortinetInterfaceFields)
-		name := fortinetString(projected, "name")
-		if name == "" {
-			continue
-		}
-		entry := map[string]interface{}{"name": name}
-		if mac, err := canonicalMAC(fortinetString(projected, "macaddr")); err == nil {
-			entry["mac"] = mac
-		}
-		// FortiOS states an interface address as "address netmask", space
-		// separated. An unconfigured interface reports "0.0.0.0 0.0.0.0",
-		// which is the absence of an address rather than an address of zero.
-		if addr := fortinetAddress(fortinetString(projected, "ip")); addr != "" {
-			entry["addresses"] = []interface{}{addr}
-		}
-		if vlan := fortinetInt(projected, "vlanid"); vlan > 0 {
-			entry["vlan"] = vlan
-		}
-		if status := fortinetString(projected, "status"); status != "" {
-			entry["admin_state"] = fortinetUpDown(status)
-		}
-		byName[strings.ToLower(name)] = len(out)
-		out = append(out, entry)
-	}
-
-	for _, raw := range running {
-		projected := projectFortinet(raw, fortinetMonitorInterfaceFields)
-		name := fortinetString(projected, "name")
-		if name == "" {
-			continue
-		}
-		entry := map[string]interface{}{"name": name}
-		if i, ok := byName[strings.ToLower(name)]; ok {
-			entry = out[i]
-		}
-		if link, ok := projected["link"].(bool); ok {
-			entry["state"] = fortinetUpDown(link)
-		}
-		if speed := fortinetInt(projected, "speed"); speed > 0 {
-			entry["speed"] = speed
-		}
-		if _, seen := entry["mac"]; !seen {
-			if mac, err := canonicalMAC(fortinetString(projected, "mac")); err == nil {
-				entry["mac"] = mac
-			}
-		}
-		if _, seen := entry["addresses"]; !seen {
-			if addr := cidrFromAddressAndMask(fortinetString(projected, "ip"), fortinetString(projected, "mask")); addr != "" {
-				entry["addresses"] = []interface{}{addr}
-			}
-		}
-
-		if i, ok := byName[strings.ToLower(name)]; ok {
-			out[i] = entry
-			continue
-		}
-		byName[strings.ToLower(name)] = len(out)
-		out = append(out, entry)
-	}
-
-	return out
-}
-
-// fortinetVLANs projects the tagged interfaces onto net.vlans items.
-//
-// A FortiGate has no VLAN database: a VLAN exists on it because a subinterface
-// is tagged with it, so the subinterface IS the segment declaration. Its
-// address is the firewall's own address on that network, which is the same
-// reading UniFi's `ip_subnet` gets.
-func fortinetVLANs(configured []map[string]interface{}) []map[string]interface{} {
-	var out []map[string]interface{}
-	for _, raw := range configured {
-		projected := projectFortinet(raw, fortinetInterfaceFields)
-		vlan := fortinetInt(projected, "vlanid")
-		if vlan <= 0 {
-			continue
-		}
-		entry := map[string]interface{}{"id": vlan}
-		if name := fortinetString(projected, "name"); name != "" {
-			entry["name"] = name
-		}
-		if addr := fortinetAddress(fortinetString(projected, "ip")); addr != "" {
-			if prefix, gateway := splitPrefixAndAddress(addr); prefix != "" {
-				entry["subnet"] = prefix
-				if gateway != "" {
-					entry["gateway"] = gateway
-				}
-			}
-		}
-		out = append(out, entry)
-	}
-	return out
-}
-
 // fortinetNextHopCount counts the DISTINCT next hops of the routing table, and
 // returns nothing else from it.
 //
@@ -371,22 +234,6 @@ func fortinetNextHopCount(routes []map[string]interface{}) (int, bool) {
 		}
 	}
 	return len(seen), true
-}
-
-// splitPrefixAndAddress turns "192.0.2.1/24" into its masked prefix
-// ("192.0.2.0/24") and the address it was masked from, which is the device's
-// own address on that network. The address is returned empty when it IS the
-// network address and therefore says nothing about where the device sits.
-func splitPrefixAndAddress(cidr string) (prefix, address string) {
-	parsed, err := netip.ParsePrefix(cidr)
-	if err != nil {
-		return "", ""
-	}
-	masked := parsed.Masked()
-	if parsed.Addr() == masked.Addr() {
-		return masked.String(), ""
-	}
-	return masked.String(), parsed.Addr().String()
 }
 
 // fortinetAddress turns FortiOS's "address netmask" pair into a CIDR string,
@@ -442,20 +289,4 @@ func fortinetString(m map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
-}
-
-// fortinetInt reads a numeric field. FortiOS serialises integers as JSON
-// numbers, which decode to float64, and as strings on a few older releases.
-func fortinetInt(m map[string]interface{}, key string) int {
-	switch typed := m[key].(type) {
-	case float64:
-		return int(typed)
-	case int:
-		return typed
-	case string:
-		if n, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
-			return n
-		}
-	}
-	return 0
 }

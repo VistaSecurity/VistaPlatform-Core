@@ -186,10 +186,10 @@ describe('the data-quality score', () => {
 });
 
 describe('the hero links out', () => {
-  it('keeps the heading plain: no Topology link, no "configuration items" gloss', () => {
+  it('keeps the heading plain: no Topology link, no gloss for assets', () => {
     const html = render(healthy, scored);
     expect(html).not.toContain('view=topology');
-    expect(html).not.toContain('configuration items');
+    expect(html).not.toMatch(/configuration\sitems/i);
   });
 
   it('sends a class bar to the list of exactly what it counted', () => {

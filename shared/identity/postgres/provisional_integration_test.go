@@ -3,7 +3,7 @@ package postgres_test
 // The SQL half of provisional inventory ( D1–D3) against a real Postgres.
 //
 // These cannot be unit tests. `ProvisionalScope` is a question about rows in
-// `network_segments` and an overlap between two CIDRs; `ReassignIdentifier`
+// `prefixes` (DCIM row 1.6); `ReassignIdentifier`
 // rests on the unique index of DATA_MODEL §2 holding across a single UPDATE;
 // and the allowance rule is a `count(*)` with a predicate that only a database
 // can be wrong about. An in-memory fake agreeing with all three proves that the
@@ -25,8 +25,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
-// addSegment writes a `network_segments` row and returns its id.
-func addSegment(t *testing.T, tenant, name, cidr, networkRef string, active bool) string {
+// addPrefix writes a global-VRF prefix row and returns its id.
+func addPrefix(t *testing.T, tenant, description, cidr, networkRef, opStatus, status string) string {
 	t.Helper()
 	db := testdb.Connect(t)
 	var ref any
@@ -35,22 +35,28 @@ func addSegment(t *testing.T, tenant, name, cidr, networkRef string, active bool
 	}
 	var id string
 	err := db.QueryRow(`
-		INSERT INTO public.network_segments
-			(tenant_id, name, segment_type, value, network_type, environment, is_active, cloud_network_ref)
-		VALUES ($1, $2, 'cidr', $3, 'private', 'production', $4, $5)
-		RETURNING id::text`, tenant, name, cidr, active, ref).Scan(&id)
+		INSERT INTO public.prefixes
+			(tenant_id, prefix, description, network_type, operational_status, status, source_kind, cloud_network_ref)
+		VALUES ($1, $2::cidr, $3, 'private', $4, $5, 'declared', $6)
+		RETURNING id::text`, tenant, cidr, description, opStatus, status, ref).Scan(&id)
 	if err != nil {
-		t.Fatalf("inserting segment %s: %v", name, err)
+		t.Fatalf("inserting prefix %s: %v", description, err)
 	}
 	return id
 }
 
 // TestIntegration_ProvisionalScope pins the derivation of D2.4 against
-// real segment rows: which segment is somewhere an asset may be invented.
+// real prefix rows (DCIM row 1.6): which prefix is somewhere an asset may be
+// invented.
 //
 // Both polarities. A rule that only ever says no would pass a suite that only
-// ever asks about bad segments, and would then mean no provisional asset is
+// ever asks about bad prefixes, and would then mean no provisional asset is
 // ever created on any cluster — a feature that silently does nothing.
+//
+// Prefixes nest by design, so a /24 inside a /16 is NOT ambiguous (the rule
+// the segments had, "nothing overlaps", would refuse every child prefix):
+// mutation — make provisionalPrefixScope count overlapping prefixes as twins
+// and "child of a container" goes red.
 func TestIntegration_ProvisionalScope(t *testing.T) {
 	admin := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, admin)
@@ -58,33 +64,33 @@ func TestIntegration_ProvisionalScope(t *testing.T) {
 	repo := pgrepo.New(admin)
 	ctx := context.Background()
 
-	clean := addSegment(t, tenant, "prov-clean", "10.60.1.0/24", "", true)
-	inactive := addSegment(t, tenant, "prov-inactive", "10.60.2.0/24", "", false)
-	cloud := addSegment(t, tenant, "prov-cloud", "10.60.3.0/24", "vpc-abc", true)
-	overlapped := addSegment(t, tenant, "prov-overlapped", "10.60.4.0/24", "", true)
-	addSegment(t, tenant, "prov-overlapper", "10.60.4.128/25", "", true)
+	container := addPrefix(t, tenant, "prov-container", "10.60.0.0/16", "", "container", "active")
+	clean := addPrefix(t, tenant, "prov-clean", "10.60.1.0/24", "", "active", "active")
+	archived := addPrefix(t, tenant, "prov-archived", "10.60.2.0/24", "", "active", "archived")
+	cloud := addPrefix(t, tenant, "prov-cloud", "10.60.3.0/24", "vpc-abc", "active", "active")
 
-	// A segment of ANOTHER tenant covering the same space must not make this
-	// tenant's segment ambiguous: every lookup is tenant-scoped under RLS, and
+	// A prefix of ANOTHER tenant covering the same space must not make this
+	// tenant's prefix ambiguous: every lookup is tenant-scoped under RLS, and
 	// two customers using 10.60.1.0/24 is the normal case, not a conflict.
 	otherTenant := testdb.NewTenant(t, admin).String()
-	addSegment(t, otherTenant, "prov-elsewhere", "10.60.1.0/24", "", true)
+	addPrefix(t, otherTenant, "prov-elsewhere", "10.60.1.0/24", "", "active", "active")
 
 	tests := []struct {
 		name       string
-		segment    string
+		prefix     string
 		wantOK     bool
 		wantReason string
 	}{
-		{"active cidr, nothing overlapping", clean, true, ""},
-		{"inactive", inactive, false, identity.ReasonNetworkScopeUnresolved},
-		{"unknown segment", "00000000-0000-0000-0000-000000000000", false, identity.ReasonNetworkScopeUnresolved},
+		{"child of a container", clean, true, ""},
+		{"container", container, false, identity.ReasonNetworkScopeUnresolved},
+		{"archived", archived, false, identity.ReasonNetworkScopeUnresolved},
+		{"unknown prefix", "00000000-0000-0000-0000-000000000000", false, identity.ReasonNetworkScopeUnresolved},
+		{"tenant default", identity.ScopeTenantDefault, false, identity.ReasonNetworkScopeUnresolved},
 		{"cloud network ref", cloud, false, identity.ReasonOverlappingNetworkScope},
-		{"overlapped by a narrower segment", overlapped, false, identity.ReasonOverlappingNetworkScope},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ok, reason, err := repo.ProvisionalScope(ctx, tenant, tt.segment)
+			ok, reason, err := repo.ProvisionalScope(ctx, tenant, tt.prefix)
 			if err != nil {
 				t.Fatalf("ProvisionalScope: %v", err)
 			}
@@ -95,24 +101,6 @@ func TestIntegration_ProvisionalScope(t *testing.T) {
 				t.Errorf("reason = %q, want %q", reason, tt.wantReason)
 			}
 		})
-	}
-
-	// A segment whose `value` is not a CIDR at all must not take the whole
-	// tenant's answer down with it: one malformed row used to be enough to
-	// make every lookup in the tenant return an error.
-	if _, err := admin.Exec(`
-		INSERT INTO public.network_segments
-			(tenant_id, name, segment_type, value, network_type, environment, is_active)
-		VALUES ($1, 'prov-garbage', 'cidr', 'not-a-cidr', 'private', 'production', true)`, tenant); err != nil {
-		t.Fatalf("inserting the malformed segment: %v", err)
-	}
-	ok, _, err := repo.ProvisionalScope(ctx, tenant, clean)
-	if err != nil {
-		t.Fatalf("ProvisionalScope with one unparseable segment in the tenant: %v\n"+
-			"`value` is free text; one bad row must not answer for every address in the tenant.", err)
-	}
-	if !ok {
-		t.Error("an unparseable segment made a clean one ineligible")
 	}
 }
 
@@ -151,14 +139,21 @@ func TestIntegration_ProvisionalReassignIdentifier(t *testing.T) {
 	if err := repo.ReassignIdentifier(ctx, addr, from, to); err != nil {
 		t.Fatalf("ReassignIdentifier: %v", err)
 	}
-	var rows int
+	// Row 1.4: the address is an `ip_addresses` row on an interface. The move
+	// re-assigns THAT row inside one transaction — never a second row, and no
+	// `asset_identifiers` row of the kind at all.
+	var rows, legacy int
+	if err := admin.QueryRow(`SELECT count(*) FROM public.ip_addresses
+		WHERE tenant_id=$1 AND host=$2::inet`, tenant, addr.Value).Scan(&rows); err != nil {
+		t.Fatalf("counting address rows: %v", err)
+	}
 	if err := admin.QueryRow(`SELECT count(*) FROM public.asset_identifiers
-		WHERE tenant_id=$1 AND kind='ip_address' AND value=$2`, tenant, addr.Value).Scan(&rows); err != nil {
+		WHERE tenant_id=$1 AND kind='ip_address'`, tenant).Scan(&legacy); err != nil {
 		t.Fatalf("counting identifier rows: %v", err)
 	}
-	if rows != 1 {
-		t.Fatalf("%d asset_identifiers rows for %s, want exactly 1 — a move must be one UPDATE, not "+
-			"a delete and an insert with a window in between", rows, addr.Value)
+	if rows != 1 || legacy != 0 {
+		t.Fatalf("%d ip_addresses rows and %d ip_address identifier rows for %s, want exactly 1 and 0 — "+
+			"a move re-assigns the one row", rows, legacy, addr.Value)
 	}
 	owners, err = repo.FindByIdentifier(ctx, tenant, addr.Kind, addr.Value, addr.Scope)
 	if err != nil || len(owners) != 1 || owners[0].ID != to.ID {
@@ -425,10 +420,10 @@ func TestIntegration_ProvisionalNotEligibleKeepsTheAdmissionReason(t *testing.T)
 		t.Fatalf("enabling enforce mode: %v", err)
 	}
 
-	// A segment two active segments cover: real, placeable, and not somewhere
-	// an asset may be invented (ReasonOverlappingNetworkScope).
-	segment := addSegment(t, tenant, "prov-refuse", "10.62.0.0/24", "", true)
-	addSegment(t, tenant, "prov-refuse-overlap", "10.62.0.128/25", "", true)
+	// A cloud subnet's prefix: real, placeable, and not somewhere an asset may
+	// be invented — a CIDR is not unique across VPCs
+	// (ReasonOverlappingNetworkScope).
+	segment := addPrefix(t, tenant, "prov-refuse", "10.62.0.0/24", "vpc-refuse", "active", "active")
 
 	repo := pgrepo.New(admin)
 	engine, err := identity.New(identity.Config{Repo: repo, AdmissionEnabled: true, ProvisionalInventory: true})

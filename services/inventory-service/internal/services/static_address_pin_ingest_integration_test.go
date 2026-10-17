@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // TestIntegration_StaticAddressPin_GatewayLANAddressMatchesInsideDHCPSegment:
@@ -43,7 +44,7 @@ func TestIntegration_StaticAddressPin_GatewayLANAddressMatchesInsideDHCPSegment(
 
 	// The router reported DHCP on this LAN, so the whole /24 is flagged
 	// dynamic — measured, not an operator's choice.
-	f.exec(`UPDATE network_segments SET metadata = '{"dynamic":true,"dynamic_source":"measured"}'::jsonb
+	f.exec(`UPDATE prefixes SET dhcp_managed = true
 	         WHERE tenant_id=$1 AND id=$2`, f.tenant, f.segA)
 	scope, dynamic, err := f.svc.identityRepo.ScopeForAddress(ctx, f.tenant.String(), netip.MustParseAddr(gatewayAddr), "")
 	if err != nil || scope != f.segA.String() || !dynamic {
@@ -74,7 +75,7 @@ func TestIntegration_StaticAddressPin_GatewayLANAddressMatchesInsideDHCPSegment(
 		t.Fatal(err)
 	}
 	var sourceKind, assignment string
-	if err := f.raw.QueryRow(`SELECT source_kind, coalesce(address_assignment,'') FROM asset_identifiers
+	if err := f.raw.QueryRow(`SELECT source_kind, coalesce(address_assignment,'') FROM (`+identifiersql.All+`) ident_rows
 	   WHERE tenant_id=$1 AND kind='ip_address' AND value=$2`, f.tenant, gatewayAddr).Scan(&sourceKind, &assignment); err != nil {
 		t.Fatal(err)
 	}

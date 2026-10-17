@@ -51,8 +51,8 @@ describe('the Never scanned view', () => {
     expect(checkAssetQuery(NEVER_SCANNED_QUERY).ok).toBe(true);
   });
 
-  it('is offered in the Views menu', () => {
-    const menu = read('sections/inventory/saved-views.tsx');
+  it('is offered in the Filters menu', () => {
+    const menu = read('sections/inventory/saved-filters.tsx');
     expect(menu).toMatch(/BUILTIN_VIEWS\.map\(\(v\) => \(/);
     expect(menu).toMatch(/onClick=\{\(\) => \{ onApply\(v\.query\); setOpen\(false\); \}\}/);
   });

@@ -49,14 +49,18 @@ import (
 
 type AssetService struct {
 	db                       *database.DB
-	networkSegmentService    *NetworkSegmentService        // optional: classification, tags, segment enrichment in IngestFindings
 	serviceIdentificationSvc *ServiceIdentificationService // optional: used for service hints in IngestFindings
-	certificateService       *CertificateService
-	algorithmService         *AlgorithmService
-	eventPublisher           *EventPublisherService
-	weakCryptoDetector       *WeakCryptoDetector
-	externalConnectionsSvc   *ExternalConnectionsService // optional: routes third-party findings to external_connections
-	integrationCipher        *credentials.Cipher         // protects integrations.auth_config — see newIntegrationCipher
+	// onLoadPrefixSet, when set, is called on every read of a tenant's prefix
+	// set (prefix_context.go) — a test hook that counts reads per request.
+	onLoadPrefixSet        func(uuid.UUID)
+	certificateService     *CertificateService
+	algorithmService       *AlgorithmService
+	eventPublisher         *EventPublisherService
+	weakCryptoDetector     *WeakCryptoDetector
+	externalConnectionsSvc *ExternalConnectionsService // optional: routes third-party findings to external_connections
+	integrationCipher      *credentials.Cipher         // protects integrations.auth_config — see newIntegrationCipher
+	businessUnits          *BusinessUnitService        // resolves business_unit_id / name on asset writes (DCIM 1.1)
+	sites                  *SiteService                // resolves site/location on asset writes (DCIM 2.1)
 
 	// The identification engine (ADR-0002 D3) and its Postgres storage. Built
 	// once, lazily, by identityEngine(); every intake path resolves through it
@@ -112,7 +116,15 @@ type AssetService struct {
 	// ours; the observation is the user's. FindingProducerJob.Trigger returns
 	// immediately and coalesces per tenant.
 	onCryptoChanged func(ctx context.Context, tenantID uuid.UUID)
+
+	// cableIntake files a posted sighting's LLDP / CDP neighbours as proposed
+	// cables, parked terminations and drift findings (DCIM row 3.3). Nil:
+	// neighbours are not filed.
+	cableIntake *CableIntake
 }
+
+// SetCableIntake wires the neighbour → cable intake (DCIM row 3.3).
+func (s *AssetService) SetCableIntake(c *CableIntake) { s.cableIntake = c }
 
 // OnCryptoChanged installs the post-ingest hook. See the field comment.
 func (s *AssetService) OnCryptoChanged(fn func(ctx context.Context, tenantID uuid.UUID)) {
@@ -142,6 +154,24 @@ func NewAssetService(db *database.DB) *AssetService {
 		eventPublisher:     eventPublisher,
 		weakCryptoDetector: NewWeakCryptoDetector(eventPublisher),
 		integrationCipher:  newIntegrationCipher(),
+		businessUnits:      NewBusinessUnitService(db),
+		sites:              NewSiteService(db),
+	}
+}
+
+// SetSiteService shares one SiteService (and therefore one change recorder)
+// between the Sites API and the asset write paths.
+func (s *AssetService) SetSiteService(v *SiteService) {
+	if v != nil {
+		s.sites = v
+	}
+}
+
+// SetBusinessUnitService shares one BusinessUnitService (and therefore one
+// change recorder) between the Business Units API and the asset write paths.
+func (s *AssetService) SetBusinessUnitService(b *BusinessUnitService) {
+	if b != nil {
+		s.businessUnits = b
 	}
 }
 
@@ -174,9 +204,11 @@ func newIntegrationCipher() *credentials.Cipher {
 	return cipher
 }
 
-// SetEnrichmentServices injects optional network segment and service identification services for IngestFindings enrichment, classification, and tags.
-func (s *AssetService) SetEnrichmentServices(segmentSvc *NetworkSegmentService, idSvc *ServiceIdentificationService) {
-	s.networkSegmentService = segmentSvc
+// SetEnrichmentServices injects the optional service identification service
+// for IngestFindings enrichment. Prefix context (classification, approval,
+// environment and location) needs no service: it is read from `prefixes`
+// (prefix_context.go).
+func (s *AssetService) SetEnrichmentServices(idSvc *ServiceIdentificationService) {
 	s.serviceIdentificationSvc = idSvc
 }
 
@@ -184,14 +216,6 @@ func (s *AssetService) SetEnrichmentServices(segmentSvc *NetworkSegmentService, 
 // IngestFindings can route third-party discoveries to the external_connections table.
 func (s *AssetService) SetExternalConnectionsService(svc *ExternalConnectionsService) {
 	s.externalConnectionsSvc = svc
-}
-
-// getTagsForAsset returns tags from the matching network segment when NetworkSegmentService is set; otherwise nil map.
-func (s *AssetService) getTagsForAsset(tenantID uuid.UUID, ipAddress *string, hostname *string) (map[string]interface{}, error) {
-	if s.networkSegmentService != nil {
-		return s.networkSegmentService.GetTagsForAsset(tenantID, ipAddress, hostname, []string{})
-	}
-	return make(map[string]interface{}), nil
 }
 
 // buildSuppressionKey generates the same suppression_key used in asset_suppressions
@@ -1015,7 +1039,9 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 	}
 	// One read of the tenant's segments for the whole request, shared by
 	// classification, tags, enrichment and the identity intake ( F4).
-	segs := s.newImportSegments(tenantID)
+	segs := s.newImportPrefixes(tenantID)
+	// Which cloud account each cloud finding is in, for its hosted_on edge.
+	cloudAccounts := s.newCloudAccountResolver(tenantID)
 	source := "discovery"
 	if len(findings) > 0 && findings[0].RawData != nil {
 		if v, ok := findings[0].RawData["source"].(string); ok {
@@ -1348,7 +1374,7 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 			return true, nil
 		}
 
-		res, existing, resolved, durableMaterialization, resErr := s.resolveDiscoveryObservation(segs, tenantID, f, obs, effectiveIP, ownership, status, gate)
+		res, existing, resolved, durableMaterialization, resErr := s.resolveDiscoveryObservation(segs, cloudAccounts, tenantID, f, obs, effectiveIP, ownership, status, gate)
 		if resErr != nil {
 			return result(), fmt.Errorf("failed to upsert asset: %w", resErr)
 		}
@@ -1448,6 +1474,13 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 				return nil
 			}
 
+			// A cloud provider's listing hangs off its account asset
+			// (ADR-0009 D1): the measured `hosted_on` edge, here for the
+			// resources that reach inventory only as findings.
+			if isCloudAPIFinding(f) {
+				s.linkCloudAccount(ctx, cloudAccounts, tenantID, assetID, f)
+			}
+
 			// Endpoints follow the identity decision (platform ADR-0003 D2). When
 			// the engine held this finding's evidence — supporting evidence for an
 			// established asset — it attached no socket, so nothing hangs off one
@@ -1462,43 +1495,48 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 					findingLabel(f), assetID, res.ObservationID)
 			}
 
-			// Enrich asset with network segment (environment, location) and service identification when services are wired
-			if s.networkSegmentService != nil {
+			// Enrich the asset from its prefix (environment, location,
+			// business unit; DCIM row 1.6). A cloud-API resource is placed by
+			// its listing instead: its environment is the listing's, and its
+			// prefix, when it has an address, is the identity engine's. The
+			// enriched event names the prefix only when it moved something.
+			didPrefix := false
+			if s.db != nil {
 				var cloudProvider, cloudRegion string
 				if f.RawData != nil {
 					cloudProvider, _ = f.RawData["cloud_provider"].(string)
 					cloudRegion, _ = f.RawData["cloud_region"].(string)
 				}
 				if cloudProvider != "" && cloudRegion != "" {
-					vpcID, _ := f.RawData["vpc_id"].(string)
+					// A cloud resource is placed in its stated environment and in
+					// its region's location under its account's site (DCIM row
+					// 2.1, ADR-0009 D1): its network is the prefix its address
+					// falls in (DCIM row 1.5f).
 					env, _ := f.RawData["environment"].(string)
-					if env == "" {
-						env = "production"
-					}
-					seg, err := segs.cloudSegment(cloudProvider, cloudRegion, vpcID, env)
-					if err == nil && seg != nil {
-						// RLS-scoped write over assets.
-						_ = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-							var moved bool
-							if e := tx.QueryRow(`
-								WITH prior AS (SELECT environment, location_id, network_segment_id FROM assets WHERE id = $4 AND tenant_id = $5)
-								UPDATE assets a SET environment = $1, location_id = COALESCE($2, a.location_id), network_segment_id = $3, updated_at = NOW()
-								  FROM prior p WHERE a.id = $4 AND a.tenant_id = $5
-								RETURNING p.environment IS DISTINCT FROM a.environment OR p.location_id IS DISTINCT FROM a.location_id
-								       OR p.network_segment_id IS DISTINCT FROM a.network_segment_id`,
-								seg.Environment, seg.LocationID, seg.ID, assetID, tenantID).Scan(&moved); e == nil && moved {
-								changeTracker.changed(assetID)
-							}
-							return nil
-						})
-					}
-				} else {
-					if moved, _ := s.enrichAssetInTracked(segs, tenantID, assetID, effectiveIP, f.Hostname); moved {
+					// RLS-scoped write over assets.
+					_ = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+						var moved bool
+						if e := tx.QueryRow(`
+							WITH prior AS (SELECT environment FROM assets WHERE id = $2 AND tenant_id = $3)
+							UPDATE assets a SET environment = $1::environment_type, updated_at = NOW()
+							  FROM prior p WHERE a.id = $2 AND a.tenant_id = $3
+							RETURNING p.environment IS DISTINCT FROM a.environment`,
+							cloudEnvironment(env), assetID, tenantID).Scan(&moved); e == nil && moved {
+							changeTracker.changed(assetID)
+							didPrefix = true
+						}
+						return nil
+					})
+					if moved := s.placeCloudResource(ctx, cloudAccounts, tenantID, assetID, f, cloudRegion); moved {
 						changeTracker.changed(assetID)
+						didPrefix = true
 					}
+				} else if moved, _ := s.enrichAssetFromPrefix(segs, tenantID, assetID, effectiveIP); moved {
+					changeTracker.changed(assetID)
+					didPrefix = true
 				}
 			}
-			var didSegment, didService bool
+			var didService bool
 			if s.serviceIdentificationSvc != nil && !evidenceHeld {
 				port := 0
 				if f.Port != nil {
@@ -1564,13 +1602,10 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 					changeTracker.changed(assetID)
 				}
 			}
-			if s.networkSegmentService != nil {
-				didSegment = true
-			}
-			if s.eventPublisher != nil && (didSegment || didService) {
-				es := "segment"
-				if didSegment && didService {
-					es = "segment,service_id"
+			if s.eventPublisher != nil && (didPrefix || didService) {
+				es := "prefix"
+				if didPrefix && didService {
+					es = "prefix,service_id"
 				} else if didService {
 					es = "service_id"
 				}
@@ -3342,29 +3377,10 @@ func (s *AssetService) publishLifecycleFrom(tenantID uuid.UUID, assetIDs []uuid.
 // with both ends monitored", so this exclusion is exactly what routes those
 // edges into it.
 func promoteEdgesForApprovedAssets(tx *sqlx.Tx, tenantID uuid.UUID, assetIDs []uuid.UUID) error {
-	// The `peer` join is what enforces "the other end is already approved", and
-	// it is why this is one statement rather than a loop: approving five assets
-	// that reference each other promotes the edges BETWEEN them too, because
-	// the first statement above has already set all five to monitoring.
-	_, err := tx.Exec(`
-		UPDATE asset_relationships r
-		   SET status = 'active', approved_at = NOW(), updated_at = NOW()
-		  FROM assets peer
-		 WHERE r.tenant_id = $1
-		   AND r.status = 'pending'
-		   AND r.source_kind <> 'inferred'
-		   AND (
-		        (r.from_asset_id = ANY($2) AND peer.id = r.to_asset_id)
-		     OR (r.to_asset_id   = ANY($2) AND peer.id = r.from_asset_id)
-		   )
-		   AND peer.tenant_id = $1
-		   AND peer.deleted_at IS NULL
-		   AND peer.asset_status = 'monitoring'`,
-		tenantID, pq.Array(assetIDs))
-	if err != nil {
-		return fmt.Errorf("failed to promote relationships for approved assets: %w", err)
-	}
-	return nil
+	// The statement lives in shared/identity/postgres so the cloud intake's
+	// account-level auto-approval (ADR-0009 D5) promotes edges by the SAME
+	// rule rather than a copy of it.
+	return pgidentity.PromoteEdgesForApproved(context.Background(), tx.Tx, tenantID, assetIDs)
 }
 
 // rejectEdgesForDeniedAssets rejects every edge touching a denied asset.
@@ -3384,43 +3400,33 @@ func rejectEdgesForDeniedAssets(tx *sqlx.Tx, tenantID uuid.UUID, assetIDs []uuid
 
 // evaluateAssetApproval decides a new asset's approval status server-side.
 //
-// Auto-approval has exactly one gate: the asset is on a user-defined network
-// segment with auto-approve enabled. Those segments generate the rows in
-// discovery_auto_approval_rules (ManageAutoApprovalRules); shared/approval
+// Auto-approval has one gate for an asset nobody observed: its address is in a
+// prefix with auto-approve enabled. Those prefixes generate the rows in
+// discovery_auto_approval_rules (prefix_approval_rules.go); shared/approval
 // evaluates them, and it is the same evaluation the sensor pipeline runs — one
 // implementation of the rule, not two.
 //
 // Default deny: anything that cannot be resolved to a matching, auto-approving
-// segment — no segment service wired, a lookup error, no matching segment, a
-// non-internal address — lands in Discovery → Approvals.
+// prefix — a lookup error, no matching prefix, a non-internal address — lands
+// in Discovery → Approvals.
 func (s *AssetService) evaluateAssetApproval(tenantID uuid.UUID, ipAddress, hostname *string) string {
-	const pending = "pending_approval"
-	if s.networkSegmentService == nil {
-		return pending
-	}
-	set, err := s.networkSegmentService.LoadSegmentSet(tenantID)
-	if err != nil {
-		return pending
-	}
-	return s.evaluateAssetApprovalOver(tenantID, set, ipAddress, hostname)
+	return s.evaluateAssetApprovalIn(nil, tenantID, ipAddress, hostname)
 }
 
-// evaluateAssetApprovalOver is evaluateAssetApproval's decision over a segment
-// set already read — one read answers both the segment and the ownership.
-func (s *AssetService) evaluateAssetApprovalOver(tenantID uuid.UUID, set *SegmentSet, ipAddress, hostname *string) string {
+// evaluateAssetApprovalOver is evaluateAssetApproval's decision over a prefix
+// set already read — one read answers both the prefix and the ownership. The
+// hostname places nothing: a prefix scopes addresses only.
+func (s *AssetService) evaluateAssetApprovalOver(tenantID uuid.UUID, set *PrefixSet, ipAddress, _ *string) string {
 	const pending = "pending_approval"
-	seg := set.Match(ipAddress, hostname)
-	if seg == nil {
+	p := set.Match(ipAddress)
+	if p == nil || s.db == nil {
 		return pending
 	}
-	ownership := set.Classify(ipAddress, hostname)
-	segID := seg.ID
-	segName := seg.Name
+	id := p.ID
 	classification := &approval.Classification{
-		Ownership:   ownership,
-		Type:        seg.NetworkType,
-		SegmentID:   &segID,
-		SegmentName: &segName,
+		Ownership: set.Classify(ipAddress),
+		Type:      classificationType(p, ipAddress),
+		PrefixID:  &id,
 	}
 	// Metadata is deliberately nil: no metadata means "not a cloud discovery",
 	// which is what a manually created or CMDB-pulled asset is. Confidence 1.0 —
@@ -3446,12 +3452,33 @@ func (s *AssetService) evaluateAssetApprovalOver(tenantID uuid.UUID, set *Segmen
 // pull (both via BulkCreateAssets). Callers that hold a status the server already
 // evaluated — the discovery ingestion pipeline — use createAssetWithStatus.
 func (s *AssetService) CreateAsset(tenantID uuid.UUID, input models.AssetInput) (*models.Asset, error) {
+	// Custom fields (DCIM row 5.1) are checked BEFORE the asset exists, so a
+	// refused value refuses the create rather than leaving a half-made asset.
+	ctx := context.Background()
+	if _, err := s.assetCustomFields(ctx, tenantID, uuid.Nil, input.CustomFields, true); err != nil {
+		return nil, err
+	}
 	// A handler-created asset IS manual provenance — there is no request field
 	// for it, deliberately: a client cannot claim its hand-entered asset was
 	// sensor-observed.
-	return s.createAssetFromInput(tenantID, input,
+	asset, err := s.createAssetFromInput(tenantID, input,
 		identity.Source{Kind: identity.SourceDeclared, Ref: "manual"},
 		s.evaluateAssetApproval(tenantID, input.IPAddress, input.Hostname))
+	if err != nil || asset == nil {
+		return asset, err
+	}
+	// Then written over what the row holds: a new asset gets the values and
+	// the defaults; one the identity engine matched keeps its own values for
+	// the fields this create did not name.
+	cf, err := s.assetCustomFields(ctx, tenantID, asset.ID, input.CustomFields, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.setAssetCustomFields(ctx, tenantID, asset.ID, cf); err != nil {
+		return nil, err
+	}
+	asset.CustomFields = cf
+	return asset, nil
 }
 
 // CreateAssetFromSource creates or matches ONE asset on behalf of an external
@@ -3547,6 +3574,11 @@ func (s *AssetService) createAssetResolved(tenantID uuid.UUID, input models.Asse
 		}
 		assetID = id
 		if cerr := s.applyAssetContext(tx, tenantID, assetID, input, source, res.Outcome); cerr != nil {
+			return cerr
+		}
+		// The engine wrote the declared interfaces and addresses; the source's
+		// own ids for them (NetBox's) go on the same rows (row 1.5f).
+		if cerr := stampDeclaredExternalIDs(ctxBG, tx, tenantID, assetID, input.Interfaces); cerr != nil {
 			return cerr
 		}
 		// Record only, never Promote, on this path. A declaration or an import
@@ -3654,25 +3686,12 @@ const (
 // discovery. It is applied here rather than re-derived, so the two cannot
 // disagree — EXCEPT over a conflict, where the observation waits for the human
 // who has to settle the merge whatever the rule said.
-func (s *AssetService) resolveDiscoveryObservation(segs *importSegments, tenantID uuid.UUID, f IngestFinding, obs identity.Observation, effectiveIP *string, ownership, assetStatus string, gate func(ctx context.Context, tx *sqlx.Tx, existing existingAsset) (bool, error)) (identity.Resolution, existingAsset, bool, bool, error) {
+func (s *AssetService) resolveDiscoveryObservation(segs *importPrefixes, cloudAccounts *cloudAccountResolver, tenantID uuid.UUID, f IngestFinding, obs identity.Observation, effectiveIP *string, ownership, assetStatus string, gate func(ctx context.Context, tx *sqlx.Tx, existing existingAsset) (bool, error)) (identity.Resolution, existingAsset, bool, bool, error) {
 	ctxBG := context.Background()
 
-	// Tags from the matching network segment, and the discovery-source
-	// attribution the Approvals filter buttons read. Neither is identity, so
-	// neither belongs in the observation — but both are part of the SAME fact,
-	// so they are written on the engine's transaction.
-	//
-	// Read before the transaction opens (the segment read is on its own
-	// connection) — except for a third-party finding, which the gate usually
-	// routes to external_connections without resolving; reading segments for
-	// every one of those would be work nothing uses. The rare third-party
-	// finding that IS resolved (an elevated vendor asset) reads them in the
-	// gate instead.
-	networkTagsRead := ownership != "third_party"
-	var networkTags map[string]interface{}
-	if networkTagsRead {
-		networkTags, _ = s.getTagsForAssetIn(segs, tenantID, effectiveIP, f.Hostname)
-	}
+	// The discovery-source attribution the Approvals filter buttons read. It
+	// is not identity, so it does not belong in the observation — but it is
+	// part of the SAME fact, so it is written on the engine's transaction.
 
 	var classProp classify.ClassProposal
 	// The observation as the engine will read it, class hint included.
@@ -3693,15 +3712,11 @@ func (s *AssetService) resolveDiscoveryObservation(segs *importSegments, tenantI
 		// engine is refreshed in the background.
 		classProp = s.applyClassProposal(ctx, obs, findingClassEvidence(f))
 		amended = *obs
-		if !networkTagsRead {
-			networkTags, _ = s.getTagsForAssetIn(segs, tenantID, effectiveIP, f.Hostname)
-			networkTagsRead = true
-		}
 		return true, nil
 	}
 	ctxInputFor := func() models.AssetInput {
 		in := models.AssetInput{
-			Tags:     mergeTags(models.JSONB{}, networkTags),
+			Tags:     models.JSONB{},
 			Metadata: discoverySourceMetadata(f),
 		}
 		if ownership != "" {
@@ -3710,6 +3725,14 @@ func (s *AssetService) resolveDiscoveryObservation(segs *importSegments, tenantI
 		if os := strings.TrimSpace(derefString(f.OperatingSystem)); os != "" {
 			// The OS is a class attribute now (ADR-0002 D2), not a column.
 			in.Attributes = map[string]interface{}{"operating_system": os}
+		}
+		if attrs := cloudAccounts.attributes(f); len(attrs) > 0 {
+			if in.Attributes == nil {
+				in.Attributes = map[string]interface{}{}
+			}
+			for k, v := range attrs {
+				in.Attributes[k] = v
+			}
 		}
 		if attrs := kmsKeyStoreAttributesFromFinding(f); len(attrs) > 0 {
 			// A cloud KMS key's Key Store asset shows the key's posture and
@@ -4021,9 +4044,41 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 		args = append(args, input.SupportGroup)
 		idx++
 	}
-	if input.BusinessUnit != nil {
-		setClauses = append(setClauses, fmt.Sprintf("business_unit = $%d", idx))
-		args = append(args, input.BusinessUnit)
+	// Custom fields (DCIM row 5.1): the fields named are merged over the
+	// stored ones and the result checked against the tenant's definitions —
+	// a required field left empty, or a choice outside its set, refuses the
+	// whole edit (400).
+	if input.CustomFields != nil {
+		cf, err := s.assetCustomFields(context.Background(), tenantID, assetID, input.CustomFields, false)
+		if err != nil {
+			return nil, nil, err
+		}
+		cfJSON, err := json.Marshal(cf)
+		if err != nil {
+			return nil, nil, err
+		}
+		setClauses = append(setClauses, fmt.Sprintf("custom_fields = $%d::jsonb", idx))
+		args = append(args, string(cfJSON))
+		idx++
+	}
+	// A person editing the asset may assign, change or CLEAR its Business Unit
+	// (business_unit_id "" clears it); an import-style name is resolved or
+	// created. Resolved on its own short transaction because the SET clauses
+	// are built before the write's transaction opens.
+	var buID *uuid.UUID
+	buSet := false
+	if input.BusinessUnitID != nil || (input.BusinessUnit != nil && strings.TrimSpace(*input.BusinessUnit) != "") {
+		if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
+			var e error
+			buID, buSet, e = s.businessUnits.ResolveID(context.Background(), tx, tenantID, actorUserID, input.BusinessUnitID, input.BusinessUnit, "", "", "declared", nil)
+			return e
+		}); err != nil {
+			return nil, nil, businessUnitInputError(err)
+		}
+	}
+	if buSet {
+		setClauses = append(setClauses, fmt.Sprintf("business_unit_id = $%d", idx))
+		args = append(args, buID)
 		idx++
 	}
 	if input.OwnerEmail != nil {
@@ -4096,6 +4151,16 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 		setClauses = append(setClauses, "metadata = "+base)
 	}
 
+	// Placement (DCIM row 2.1) is decided on the write's own transaction below,
+	// against the row as it stands; the no-op clause keeps an edit that only
+	// moves the asset from being taken for an empty one.
+	placementEdit := input.SiteID != nil || input.LocationID != nil || (input.Site != nil && strings.TrimSpace(*input.Site) != "")
+	if placementEdit {
+		setClauses = append(setClauses, "site_id = site_id")
+	}
+	var placedSite, placedLoc *uuid.UUID
+	placed := false
+
 	if len(setClauses) == 0 {
 		// No COLUMN to update — but the identifier pass above may still have
 		// attached or retired rows, so the report is returned either way.
@@ -4135,12 +4200,67 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 				return e
 			}
 		}
+		var priorBU *uuid.UUID
+		if buSet {
+			var cur uuid.NullUUID
+			if e := tx.QueryRowContext(ctx, `SELECT business_unit_id FROM assets WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`, tenantID, assetID).Scan(&cur); e != nil && !errors.Is(e, sql.ErrNoRows) {
+				return e
+			}
+			if cur.Valid {
+				priorBU = &cur.UUID
+			}
+		}
 		res, e := tx.Exec(query, args...)
 		if e != nil {
 			return e
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrNotFound
+		}
+		if buSet {
+			if e := s.businessUnits.RecordAssetAssignment(ctx, tx, tenantID, actorUserID, assetID, priorBU, buID); e != nil {
+				return fmt.Errorf("record business unit change: %w", e)
+			}
+		}
+		if placementEdit {
+			// A person may assign, change or clear (site_id "") the site and
+			// location; the location must be in the site
+			// (SiteService.ResolveAssetPlacement). A site NAME is resolved or
+			// created like an import's.
+			siteRef := input.SiteID
+			if siteRef == nil && input.Site != nil && strings.TrimSpace(*input.Site) != "" {
+				id, e := s.siteService().ResolveSiteByName(ctx, tx, tenantID, actorUserID, *input.Site, "declared", nil)
+				if e != nil {
+					return siteInputError(e)
+				}
+				if id != nil {
+					v := id.String()
+					siteRef = &v
+				}
+			}
+			var curSite, curLoc uuid.NullUUID
+			if e := tx.QueryRowContext(ctx, `SELECT site_id, location_id FROM assets WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`,
+				tenantID, assetID).Scan(&curSite, &curLoc); e != nil {
+				return e
+			}
+			site, loc, changed, e := ResolveAssetPlacement(ctx, tx, nullUUIDPtr(curSite), nullUUIDPtr(curLoc), siteRef, input.LocationID)
+			if e != nil {
+				return siteInputError(e)
+			}
+			if changed {
+				// A racked asset's site and location are its rack's (row 2.3).
+				if e := CheckRackConsistencyTx(ctx, tx, tenantID, assetID, site, loc); e != nil {
+					return siteInputError(e)
+				}
+				if _, e := tx.ExecContext(ctx, `UPDATE assets SET site_id = $3, location_id = $4, updated_at = now() WHERE tenant_id = $1 AND id = $2`,
+					tenantID, assetID, site, loc); e != nil {
+					return e
+				}
+				if e := s.siteService().RecordAssetPlacement(ctx, tx, tenantID, actorUserID, assetID, nullUUIDPtr(curSite), nullUUIDPtr(curLoc), site, loc); e != nil {
+					return fmt.Errorf("record placement change: %w", e)
+				}
+				placedSite, placedLoc, placed = site, loc, true
+			}
 		}
 		if input.ClassKey == "" {
 			return nil
@@ -4170,7 +4290,6 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 		"primary_address": input.IPAddress,
 		"class_key":       input.ClassKey,
 		"environment":     input.Environment,
-		"business_unit":   input.BusinessUnit,
 		"owner_email":     input.OwnerEmail,
 		"support_group":   input.SupportGroup,
 		"description":     input.Description,
@@ -4183,6 +4302,16 @@ func (s *AssetService) UpdateAsset(tenantID, assetID uuid.UUID, input models.Ass
 			continue
 		}
 		changes[k] = v
+	}
+	if buSet {
+		if buID != nil {
+			changes["business_unit_id"] = buID.String()
+		} else {
+			changes["business_unit_id"] = nil
+		}
+	}
+	if placed {
+		changes["site_id"], changes["location_id"] = uuidStr(placedSite), uuidStr(placedLoc)
 	}
 	if len(input.Attributes) > 0 {
 		changes["attributes"] = input.Attributes

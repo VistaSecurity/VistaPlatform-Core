@@ -259,7 +259,7 @@ func preparePlannedEnrichment(t *testing.T, f *dispatchFixture, sensor uuid.UUID
 		t.Fatal(err)
 	}
 	f.setTenantConfig(t, unattendedPolicy)
-	if _, err := f.raw.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'probe network','cidr','10.186.0.0/24','production')`, segment, f.tenant); err != nil {
+	if _, err := f.raw.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment) VALUES($1,$2,'probe network','10.186.0.0/24','production')`, segment, f.tenant); err != nil {
 		t.Fatal(err)
 	}
 	evidence := `{"tenant_id":"` + f.tenant.String() + `","source":{"kind":"` + string(identity.SourceMeasured) + `","ref":"sensor:` + sensor.String() + `"},"network":{"segment_id":"` + segment.String() + `"}}`

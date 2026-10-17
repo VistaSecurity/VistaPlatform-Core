@@ -578,7 +578,7 @@ func (s *UnifiedInventoryService) loadAssetTx(tx *sqlx.Tx, tenantID, assetID uui
 	query := `
 		SELECT
 			a.id, a.tenant_id, a.hostname, host(a.primary_address), ep.port, a.class_key,
-			` + assetOperatingSystemSQL + `, a.environment, a.business_unit, a.owner_email,
+			` + assetOperatingSystemSQL + `, a.environment, ` + assetBusinessUnitSQL + `, a.owner_email,
 			a.description, a.tags::text, a.metadata::text, a.asset_ownership, a.asset_status,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at

@@ -1,0 +1,46 @@
+{
+  "items": [
+    {
+      "name": "external",
+      "fullPath": "/Common/external",
+      "tag": 101,
+      "mtu": 1500,
+      "interfacesReference": {
+        "items": [
+          {
+            "name": "1.1",
+            "untagged": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "internal",
+      "fullPath": "/Common/internal",
+      "tag": 201,
+      "mtu": 9000,
+      "interfacesReference": {
+        "items": [
+          {
+            "name": "trunk1",
+            "tagged": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "servers",
+      "fullPath": "/Common/servers",
+      "tag": 301,
+      "mtu": 9000,
+      "interfacesReference": {
+        "items": [
+          {
+            "name": "trunk1",
+            "tagged": true
+          }
+        ]
+      }
+    }
+  ]
+}

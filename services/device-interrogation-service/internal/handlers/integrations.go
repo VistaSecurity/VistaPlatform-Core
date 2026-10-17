@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -37,13 +39,20 @@ type CloudIntegration struct {
 	Description     *string                `json:"description,omitempty"`
 	Tags            []string               `json:"tags,omitempty"`
 	IsEnabled       bool                   `json:"is_enabled"`
-	IsShared        bool                   `json:"is_shared,omitempty"`
-	Status          string                 `json:"status"` // pending, configured, connected, error
-	StatusMessage   *string                `json:"status_message,omitempty"`
-	LastTestedAt    *time.Time             `json:"last_tested_at,omitempty"`
-	LastTestError   *string                `json:"last_test_error,omitempty"`
-	CreatedAt       time.Time              `json:"created_at"`
-	UpdatedAt       time.Time              `json:"updated_at"`
+	// AutoApproveResources is the account-level auto-approval setting
+	// (asset-inventory ADR-0009 D5): resources this integration discovers in
+	// its account are approved automatically.
+	AutoApproveResources bool `json:"auto_approve_resources"`
+	// AccountAssetID is the `cloud_account` asset the integration's account is
+	// (ADR-0009 D1), when the account is known and declared.
+	AccountAssetID *string    `json:"account_asset_id,omitempty"`
+	IsShared       bool       `json:"is_shared,omitempty"`
+	Status         string     `json:"status"` // pending, configured, connected, error
+	StatusMessage  *string    `json:"status_message,omitempty"`
+	LastTestedAt   *time.Time `json:"last_tested_at,omitempty"`
+	LastTestError  *string    `json:"last_test_error,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // CreateIntegrationRequest represents the request to create an integration
@@ -58,6 +67,8 @@ type CreateIntegrationRequest struct {
 	Description     *string                `json:"description,omitempty"`
 	Tags            []string               `json:"tags,omitempty"`
 	IsEnabled       *bool                  `json:"is_enabled,omitempty"`
+	// AutoApproveResources defaults to true when omitted (ADR-0009 D5).
+	AutoApproveResources *bool `json:"auto_approve_resources,omitempty"`
 }
 
 // UpdateIntegrationRequest represents the request to update an integration
@@ -70,6 +81,16 @@ type UpdateIntegrationRequest struct {
 	Description     *string                `json:"description,omitempty"`
 	Tags            []string               `json:"tags,omitempty"`
 	IsEnabled       *bool                  `json:"is_enabled,omitempty"`
+	// AutoApproveResources flips the account-level auto-approval setting.
+	AutoApproveResources *bool `json:"auto_approve_resources,omitempty"`
+}
+
+// cloudAccountSyncer brings a tenant's cloud account assets and account
+// auto-approval rules in line with its integrations (ADR-0009 D1, D5). The
+// production implementation is services.CloudAccountService; nil (the
+// contract tests' stub handlers) skips the sync.
+type cloudAccountSyncer interface {
+	SyncTenant(ctx context.Context, tenantID uuid.UUID) (map[string]uuid.UUID, error)
 }
 
 // IntegrationHandlers handles cloud integration operations. It depends on the
@@ -83,6 +104,8 @@ type IntegrationHandlers struct {
 	// point Test Connection's (real) provider clients at a local server.
 	azureOptions []azureclient.Option
 	gcpOptions   []gcpclient.Option
+	// accounts is re-synced after every write to a cloud integration.
+	accounts cloudAccountSyncer
 }
 
 // NewIntegrationHandlers creates a new IntegrationHandlers backed by the SQL
@@ -93,7 +116,53 @@ func NewIntegrationHandlers(db, bypassDB *sql.DB, encryptionKey string) *Integra
 	return &IntegrationHandlers{
 		store:         newIntegrationRepository(db, bypassDB),
 		encryptionKey: encryptionKey,
+		accounts:      services.NewCloudAccountService(db, encryptionKey),
 	}
+}
+
+// syncAccounts re-derives the tenant's account assets and account rules after
+// an integration write. A failure is logged, not returned: the integration
+// write succeeded, and the next cloud run syncs again before it records
+// anything (CloudDiscoveryService.beginCloudRun).
+func (h *IntegrationHandlers) syncAccounts(ctx context.Context, tenantID uuid.UUID) {
+	if h.accounts == nil {
+		return
+	}
+	if _, err := h.accounts.SyncTenant(ctx, tenantID); err != nil {
+		log.Printf("[integrations] cloud account sync for tenant %s failed (the next run retries): %v", tenantID, err)
+	}
+}
+
+// integrationAccountID decides the account an integration is FOR, from what
+// the person supplied: the account_id field, else the provider's own config
+// key for it (an Azure subscription_id, a GCP project_id or the project in a
+// service account key). AWS states its account nowhere in the config; it is
+// learned from the first successful connection test (STS GetCallerIdentity).
+func integrationAccountID(integrationType string, accountID *string, config map[string]interface{}) string {
+	if accountID != nil && strings.TrimSpace(*accountID) != "" {
+		return strings.TrimSpace(*accountID)
+	}
+	str := func(k string) string {
+		v, _ := config[k].(string)
+		return strings.TrimSpace(v)
+	}
+	switch integrationType {
+	case "azure":
+		return str("subscription_id")
+	case "gcp":
+		if p := str("project_id"); p != "" {
+			return p
+		}
+		for _, k := range []string{"service_account_json", "service_account_key", "credentials_json"} {
+			var key struct {
+				ProjectID string `json:"project_id"`
+			}
+			if raw := str(k); raw != "" && json.Unmarshal([]byte(raw), &key) == nil && strings.TrimSpace(key.ProjectID) != "" {
+				return strings.TrimSpace(key.ProjectID)
+			}
+		}
+	}
+	return ""
 }
 
 // ListIntegrations lists all cloud integrations for the tenant
@@ -212,6 +281,16 @@ func (h *IntegrationHandlers) CreateIntegration(c *gin.Context) {
 	if req.IsEnabled != nil {
 		isEnabled = *req.IsEnabled
 	}
+	autoApprove := true
+	if req.AutoApproveResources != nil {
+		autoApprove = *req.AutoApproveResources
+	}
+	// The account the integration is for, stored on the row so every later
+	// reader (the account sync, the run's scope) reads one column rather than
+	// re-deriving it from a config whose sensitive keys are encrypted.
+	if acct := integrationAccountID(req.IntegrationType, req.AccountID, req.Config); acct != "" {
+		req.AccountID = &acct
+	}
 
 	integrationID := uuid.New()
 	now := time.Now()
@@ -229,6 +308,7 @@ func (h *IntegrationHandlers) CreateIntegration(c *gin.Context) {
 		Description:     req.Description,
 		TagsJSON:        tagsJSON,
 		IsEnabled:       isEnabled,
+		AutoApprove:     autoApprove,
 		Status:          "configured",
 		CreatedAt:       now,
 	}); err != nil {
@@ -252,23 +332,27 @@ func (h *IntegrationHandlers) CreateIntegration(c *gin.Context) {
 		}
 	}
 
+	// Declare the account and derive its auto-approval rule (ADR-0009 D1, D5).
+	h.syncAccounts(c.Request.Context(), tenantID)
+
 	c.JSON(http.StatusCreated, gin.H{
 		"integration": CloudIntegration{
-			ID:              integrationID,
-			TenantID:        tenantID,
-			IntegrationType: req.IntegrationType,
-			IntegrationName: req.IntegrationName,
-			Provider:        req.Provider,
-			Config:          maskSensitiveFields(req.Config),
-			AccountID:       req.AccountID,
-			Region:          req.Region,
-			Environment:     req.Environment,
-			Description:     req.Description,
-			Tags:            req.Tags,
-			IsEnabled:       isEnabled,
-			Status:          "configured",
-			CreatedAt:       now,
-			UpdatedAt:       now,
+			ID:                   integrationID,
+			TenantID:             tenantID,
+			IntegrationType:      req.IntegrationType,
+			IntegrationName:      req.IntegrationName,
+			Provider:             req.Provider,
+			Config:               maskSensitiveFields(req.Config),
+			AccountID:            req.AccountID,
+			Region:               req.Region,
+			Environment:          req.Environment,
+			Description:          req.Description,
+			Tags:                 req.Tags,
+			IsEnabled:            isEnabled,
+			AutoApproveResources: autoApprove,
+			Status:               "configured",
+			CreatedAt:            now,
+			UpdatedAt:            now,
 		},
 	})
 }
@@ -330,6 +414,13 @@ func (h *IntegrationHandlers) UpdateIntegration(c *gin.Context) {
 
 	if req.AccountID != nil {
 		fields["account_id"] = *req.AccountID
+	} else if acct := integrationAccountID(integrationType, nil, req.Config); acct != "" {
+		// A config edit that names the subscription / project names the
+		// account too.
+		fields["account_id"] = acct
+	}
+	if req.AutoApproveResources != nil {
+		fields["auto_approve_resources"] = *req.AutoApproveResources
 	}
 	if req.Region != nil {
 		fields["region"] = *req.Region
@@ -361,6 +452,8 @@ func (h *IntegrationHandlers) UpdateIntegration(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update integration"})
 		return
 	}
+
+	h.syncAccounts(c.Request.Context(), tenantID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Integration updated successfully"})
 }
@@ -404,6 +497,11 @@ func (h *IntegrationHandlers) DeleteIntegration(c *gin.Context) {
 				true, "")
 		}
 	}
+
+	// The account asset is NOT deleted (ADR-0009 D1): it stops being
+	// refreshed and goes stale by policy. Its auto-approval rule is
+	// deactivated when no remaining integration names the account.
+	h.syncAccounts(c.Request.Context(), tenantID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Integration deleted successfully"})
 }
@@ -467,6 +565,20 @@ func (h *IntegrationHandlers) TestConnection(c *gin.Context) {
 	}
 
 	_ = h.store.UpdateTestStatus(c.Request.Context(), tenantID, integrationID, status, statusMessage)
+
+	// AWS states its account only in the answer to GetCallerIdentity. An
+	// integration created without an account id learns it here, and the
+	// account is declared from it (ADR-0009 D1).
+	if testResult.Success && target.AccountID == "" {
+		if acct, _ := testResult.Details["account_id"].(string); strings.TrimSpace(acct) != "" {
+			if _, err := h.store.Update(c.Request.Context(), integrationID, tenantID,
+				map[string]interface{}{"account_id": strings.TrimSpace(acct)}); err != nil {
+				log.Printf("[integrations] recording account %s for integration %s failed: %v", acct, integrationID, err)
+			} else {
+				h.syncAccounts(c.Request.Context(), tenantID)
+			}
+		}
+	}
 
 	c.JSON(http.StatusOK, testResult)
 }

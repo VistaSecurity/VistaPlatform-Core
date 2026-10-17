@@ -358,7 +358,7 @@ func TestIsAncestor(t *testing.T) {
 		{KeyServer, KeyServer, true},
 		{KeyServer, KeyHardware, false},
 		{KeyVirtual, KeyServer, false},
-		{KeyCloudResource, KeySubnet, true},
+		{KeyCloudResource, KeyComputeInstance, true},
 		{"", KeyServer, false},
 		{KeyHardware, "", false},
 		{KeyHardware, "made_up", false},
@@ -456,6 +456,55 @@ func TestChildSchemasInheritTheirParents(t *testing.T) {
 			if cp.Type != p.Type {
 				t.Errorf("%s.%s: type %q disagrees with %s.%s (%q)", c.Key, name, cp.Type, c.Parent, name, p.Type)
 			}
+		}
+	}
+}
+
+// TestCloudNetworksAreNotAssetClasses pins DCIM row 1.5f (asset-inventory
+// ADR-0009 amendment): a VPC / VNet / GCP network and its subnets are IPAM
+// prefixes, so the registry carries no `virtual_network` or `subnet` leaf and
+// no device type or cloud resource type maps onto one.
+//
+// Mutation: re-add either leaf to standards/asset-classes.yaml (and
+// `make generate`) — red.
+func TestCloudNetworksAreNotAssetClasses(t *testing.T) {
+	for _, key := range []string{"virtual_network", "subnet"} {
+		if _, ok := Get(key); ok {
+			t.Errorf("class %q is registered: cloud networks and subnets are IPAM prefixes since row 1.5f, not asset classes", key)
+		}
+	}
+	for _, dt := range []string{"aws_vpc", "aws_subnet", "azure_virtual_network", "azure_subnet", "gcp_network", "gcp_subnetwork"} {
+		if got := FromDeviceType(dt); got != "" {
+			t.Errorf("FromDeviceType(%q) = %q, want no class: the enumeration records no network asset", dt, got)
+		}
+	}
+	for _, rt := range []string{"vpc", "vnet", "virtual_network", "network", "subnet", "subnetwork"} {
+		if got, _ := FromCloudResourceType(rt); got != KeyCloudResource {
+			t.Errorf("FromCloudResourceType(%q) = %q, want the coarse %q", rt, got, KeyCloudResource)
+		}
+	}
+}
+
+// TestClusterIsNotAnAssetClass pins DCIM row 4.2 (asset-inventory ADR-0010
+// D8): a cluster is the `clusters` object, so the registry carries no
+// `cluster` leaf and nothing maps a device or cloud resource type onto one.
+// (The intake guard that refuses a `cluster` class hint is pinned in
+// shared/identity.)
+//
+// Mutation: re-add the leaf to standards/asset-classes.yaml (and
+// `make generate`) — red.
+func TestClusterIsNotAnAssetClass(t *testing.T) {
+	if _, ok := Get("cluster"); ok {
+		t.Error(`class "cluster" is registered: a cluster is the clusters object since DCIM row 4.2, not an asset class`)
+	}
+	for _, c := range All {
+		if c.Key == "cluster" || strings.HasSuffix(c.Path, ".cluster") {
+			t.Errorf("class %s (%s) is a cluster class", c.Key, c.Path)
+		}
+	}
+	for _, dt := range []string{"cluster", "vsphere_cluster", "proxmox_cluster", "kubernetes_cluster"} {
+		if got := FromDeviceType(dt); got == "cluster" {
+			t.Errorf("FromDeviceType(%q) = %q", dt, got)
 		}
 	}
 }

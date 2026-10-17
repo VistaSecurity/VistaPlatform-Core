@@ -86,7 +86,7 @@ describe('the Findings page reaches every producer', () => {
     // rather than a white screen, and each is pinned in both polarities in
     // producer-evidence.test.ts. What this asserts is that the page USES them.
     const page = read('findings-page.tsx');
-    for (const reader of ['eolEvidence', 'cveList', 'configurationEvidence', 'hygieneEvidence', 'driftEvidence']) {
+    for (const reader of ['eolEvidence', 'cveList', 'configurationEvidence', 'hygieneEvidence', 'driftEvidence', 'topologyEvidence']) {
       expect(page, `findings-page.tsx does not use ${reader}`).toContain(reader);
     }
   });

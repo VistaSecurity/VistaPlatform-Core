@@ -4,7 +4,7 @@ package services
 // ingestHostObservation → the production engine (svc.identityEngine(), admission
 // enforced, provisional inventory on) → the Postgres identity repository.
 //
-// The segment is DHCP by its `network_segments.metadata.dynamic` flag, the one
+// The prefix is DHCP by its `prefixes.dhcp_managed` flag, the one
 // key ScopeForAddress reads, so the dynamic posture reaches the engine the way
 // production delivers it: as the observation's own DynamicScopes, not an engine
 // setting.
@@ -20,6 +20,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 const (
@@ -34,8 +35,7 @@ const (
 func (f *provisionalFixture) addDHCPSegment() uuid.UUID {
 	f.t.Helper()
 	id := uuid.New()
-	f.exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment,metadata)
-	 VALUES($1,$2,'Guest Wi-Fi','cidr',$3,true,'production','{"dynamic":true}'::jsonb)`, id, f.tenant, leaseSegmentCIDR)
+	f.exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,dhcp_managed,source_kind,status) VALUES($1,$2,'Guest Wi-Fi',$3::cidr,'production',true,'declared','active')`, id, f.tenant, leaseSegmentCIDR)
 	return id
 }
 
@@ -61,7 +61,7 @@ func (f *provisionalFixture) ingestARP(mac, addr string, at time.Time) identity.
 
 func (f *provisionalFixture) identifierOwner(kind, value string) (owner string, lastSeen time.Time) {
 	f.t.Helper()
-	if err := f.raw.QueryRow(`SELECT asset_id::text, last_seen_at FROM asset_identifiers WHERE tenant_id=$1 AND kind=$2 AND value=$3`,
+	if err := f.raw.QueryRow(`SELECT asset_id::text, last_seen_at FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind=$2 AND value=$3`,
 		f.tenant, kind, value).Scan(&owner, &lastSeen); err != nil {
 		f.t.Fatalf("owner of %s=%s: %v", kind, value, err)
 	}
@@ -172,8 +172,7 @@ func TestIntegration_HostObservationIngest_LeaseFollowsTheMAC(t *testing.T) {
 func TestIntegration_HostObservationIngest_AnnouncedVIPDoesNotFollowTheNode(t *testing.T) {
 	f := newProvisionalFixture(t)
 	seg := uuid.New()
-	f.exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment,metadata)
-	 VALUES($1,$2,'Lab','cidr',$3,true,'production','{}'::jsonb)`, seg, f.tenant, leaseSegmentCIDR)
+	f.exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Lab',$3::cidr,'production','declared','active')`, seg, f.tenant, leaseSegmentCIDR)
 
 	const (
 		vipAddr   = "203.0.113.230"
@@ -203,7 +202,7 @@ func TestIntegration_HostObservationIngest_AnnouncedVIPDoesNotFollowTheNode(t *t
 		t.Fatalf("setup: %d hosted_on edges from the holder to the node, want the floating-address rule's 1", edges)
 	}
 
-	f.exec(`UPDATE network_segments SET metadata='{"dynamic":true}'::jsonb WHERE tenant_id=$1 AND id=$2`, f.tenant, seg)
+	f.exec(`UPDATE prefixes SET dhcp_managed = true WHERE tenant_id=$1 AND id=$2`, f.tenant, seg)
 
 	failover := f.ingestARP(leaseMACTwo, vipAddr, t0.Add(2*time.Hour))
 	if failover.AssetID != standby.AssetID {

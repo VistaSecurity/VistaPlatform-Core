@@ -139,10 +139,20 @@ func (s *ConfiguredSourceRefresh) authorizeTargetedRefreshTx(ctx context.Context
 		}
 	}
 	// Resolve the actual configured management address, not the weak peer's
-	// observed segment. Overlapping networks require an explicit source workflow.
+	// observed prefix: the longest live global-VRF prefix containing it (DCIM
+	// row 1.6). Two prefixes sharing that CIDR require an explicit source
+	// workflow; any containing prefix marked sensitive or probes-disabled, or a
+	// cloud subnet, requires review.
 	var scopes int
 	var restricted bool
-	err = tx.QueryRowContext(ctx, `SELECT count(*),COALESCE(bool_or(COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true' OR COALESCE(cloud_network_ref,'')<>''),false) FROM network_segments WHERE tenant_id=$1 AND is_active AND CASE WHEN segment_type='cidr' THEN $2::inet <<= value::cidr ELSE false END`, tenant, address.String()).Scan(&scopes, &restricted)
+	err = tx.QueryRowContext(ctx, `WITH c AS (
+		SELECT masklen(prefix) AS ml, sensitive OR active_probes_disabled AS blocked,
+		       COALESCE(cloud_network_ref,'')<>'' AS cloud
+		  FROM prefixes
+		 WHERE tenant_id=$1 AND vrf_id IS NULL AND status NOT IN ('rejected','archived') AND prefix >>= $2::inet)
+		SELECT count(*) FILTER (WHERE ml = (SELECT max(ml) FROM c)),
+		       COALESCE(bool_or(blocked), false) OR COALESCE(bool_or(cloud) FILTER (WHERE ml = (SELECT max(ml) FROM c)), false)
+		  FROM c`, tenant, address.String()).Scan(&scopes, &restricted)
 	if err != nil {
 		return "", err
 	}

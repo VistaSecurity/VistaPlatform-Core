@@ -1,15 +1,12 @@
-// Cloud account and region as map grouping nodes ( slice D).
+// Cloud region as a map grouping node ( slice D, amended by
+// asset-inventory ADR-0009 D1).
 //
-// The thing this closes: an AWS discovery produced a correct containment
-// hierarchy — VPC contains subnet contains instance — and nothing above it, so
-// the two VPCs floated unrooted and the buckets and the CDN distribution, which
-// live outside a VPC entirely, had no edges at all. A user could ask "what is
-// in this VPC" and could not ask "what is in this account".
-//
-// Account and region are SCOPING ATTRIBUTES, not asset classes (owner decision
-// D6). They carry no crypto posture, so there is no asset row behind them —
-// which is exactly what makes them easy to get wrong here. Everything below is
-// one of three failure shapes:
+// The account used to be a second synthetic box here. It is now a real
+// `cloud_account` asset, and every cloud resource reaches it by a STORED
+// `hosted_on` edge, so the map draws it like any other asset and this file
+// only groups by REGION — a place, not a thing anybody owns, with no asset row
+// behind it. That is exactly what makes it easy to get wrong. Everything below
+// is one of three failure shapes:
 //
 //   1. a box that should not exist — a fabricated region for an asset that
 //      records none, or one account's box holding another account's resources;
@@ -21,7 +18,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Neighbourhood, Relationship } from './relationships';
 import {
-  assetNodeCount, buildMapGraph, canvasState, capGraph, cloudAccountNodeId,
+  assetNodeCount, buildMapGraph, canvasState, capGraph,
   cloudRegionNodeId, cloudRegionSubLabel, isAssetNode, legendFor, nodeAriaLabel,
   truncationNotice, withCloudScopeRoots, type MapGraph, type MapNode,
 } from './map-model';
@@ -31,12 +28,13 @@ const ACCOUNT = '123456789012';
 const OTHER_ACCOUNT = '210987654321';
 const REGION = 'us-east-1';
 
-const VPC = 'aaaaaaaa-0000-4000-8000-000000000001';
-const SUBNET = 'aaaaaaaa-0000-4000-8000-000000000002';
+const LB = 'aaaaaaaa-0000-4000-8000-000000000001';
+const KEYS = 'aaaaaaaa-0000-4000-8000-000000000002';
 const INSTANCE = 'aaaaaaaa-0000-4000-8000-000000000003';
 const BUCKET = 'aaaaaaaa-0000-4000-8000-000000000004';
 const CDN = 'aaaaaaaa-0000-4000-8000-000000000005';
 const PRINTER = 'aaaaaaaa-0000-4000-8000-000000000006';
+const ACCOUNT_ASSET = 'aaaaaaaa-0000-4000-8000-000000000007';
 
 function edge(over: Partial<Relationship> & Pick<Relationship, 'id' | 'from_asset_id' | 'to_asset_id'>): Relationship {
   return {
@@ -52,24 +50,29 @@ function edge(over: Partial<Relationship> & Pick<Relationship, 'id' | 'from_asse
   };
 }
 
-/** The shape the demo host's first AWS discovery actually produced: a VPC that
- *  contains a subnet that contains an instance, plus a bucket and a CDN
- *  distribution with no containment at all. */
+/** A cloud estate in the classes that exist after cloud subnets became IPAM
+ * prefixes and VPCs container prefixes (asset-inventory ADR-0009,
+ *  amendment): a load balancer that contains a key store that contains an
+ *  instance (generic containment chain — the map is class-agnostic about it),
+ *  plus a bucket and a CDN distribution with no containment at all. DCIM row
+ *  1.6 will add prefix grouping to the map; until then there are no VPC/subnet
+ *  asset nodes. */
+// (VPC -> subnet -> instance nesting was retired with the classes; see ADR-0009 amendment and DCIM row 1.6.)
 function awsNeighbourhood(over: Partial<Neighbourhood> = {}): Neighbourhood {
   return {
-    root_asset_id: VPC,
+    root_asset_id: LB,
     depth: 3,
     include_pending: false,
     nodes: [
-      { asset_id: VPC, display_name: 'vpc-prod', class_key: 'virtual_network', asset_status: 'monitoring', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
-      { asset_id: SUBNET, display_name: 'subnet-a', class_key: 'subnet', asset_status: 'monitoring', depth: 1, cloud_account: ACCOUNT, cloud_region: REGION },
+      { asset_id: LB, display_name: 'lb-front', class_key: 'cloud_load_balancer', asset_status: 'monitoring', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
+      { asset_id: KEYS, display_name: 'key-vault', class_key: 'key_store', asset_status: 'monitoring', depth: 1, cloud_account: ACCOUNT, cloud_region: REGION },
       { asset_id: INSTANCE, display_name: 'web-01', class_key: 'compute_instance', asset_status: 'monitoring', depth: 2, cloud_account: ACCOUNT, cloud_region: REGION },
       { asset_id: BUCKET, display_name: 'assets-bucket', class_key: 'object_storage', asset_status: 'monitoring', depth: 3, cloud_account: ACCOUNT, cloud_region: REGION },
       { asset_id: CDN, display_name: 'd123.cloudfront.net', class_key: 'cdn_distribution', asset_status: 'monitoring', depth: 3, cloud_account: ACCOUNT, cloud_region: 'global' },
     ],
     edges: [
-      edge({ id: 'e-vpc-subnet', from_asset_id: VPC, to_asset_id: SUBNET }),
-      edge({ id: 'e-subnet-instance', from_asset_id: SUBNET, to_asset_id: INSTANCE }),
+      edge({ id: 'e-lb-keys', from_asset_id: LB, to_asset_id: KEYS }),
+      edge({ id: 'e-keys-instance', from_asset_id: KEYS, to_asset_id: INSTANCE }),
     ],
     truncated: false,
     total_nodes: 5,
@@ -91,7 +94,7 @@ const hasEdge = (g: MapGraph, source: string, target: string): boolean =>
 describe('buildMapGraph carries the scoping attributes', () => {
   it('reads cloud_account and cloud_region off the payload', () => {
     const g = buildMapGraph(awsNeighbourhood());
-    expect(byId(g, VPC)?.cloudAccount).toBe(ACCOUNT);
+    expect(byId(g, LB)?.cloudAccount).toBe(ACCOUNT);
     expect(byId(g, CDN)?.cloudRegion).toBe('global');
   });
 
@@ -119,18 +122,17 @@ describe('buildMapGraph carries the scoping attributes', () => {
 });
 
 describe('withCloudScopeRoots', () => {
-  it('roots the hierarchy: account → region → VPC → subnet → instance', () => {
+  it('groups by region: region → load balancer → key store → instance, and synthesises NO account box', () => {
     const g = rooted();
-    const accountId = cloudAccountNodeId(ACCOUNT);
     const regionId = cloudRegionNodeId(ACCOUNT, REGION);
 
-    expect(byId(g, accountId)?.kind).toBe('cloud_account');
     expect(byId(g, regionId)?.kind).toBe('cloud_region');
-    expect(hasEdge(g, accountId, regionId)).toBe(true);
-    expect(hasEdge(g, regionId, VPC)).toBe(true);
+    expect(hasEdge(g, regionId, LB)).toBe(true);
+    // The account is an asset now (ADR-0009 D1); nothing fabricates a box for it.
+    expect(g.nodes.some((n) => n.id.startsWith('scope:cloud_account'))).toBe(false);
     // The stored half of the chain is untouched.
-    expect(hasEdge(g, VPC, SUBNET)).toBe(true);
-    expect(hasEdge(g, SUBNET, INSTANCE)).toBe(true);
+    expect(hasEdge(g, LB, KEYS)).toBe(true);
+    expect(hasEdge(g, KEYS, INSTANCE)).toBe(true);
   });
 
   it('hangs a bucket and a CDN distribution off their region rather than leaving them isolated', () => {
@@ -139,32 +141,49 @@ describe('withCloudScopeRoots', () => {
     // `global` is the distribution's real answer, not a stand-in for unknown,
     // so it gets its own box under the same account.
     expect(hasEdge(g, cloudRegionNodeId(ACCOUNT, 'global'), CDN)).toBe(true);
-    expect(hasEdge(g, cloudAccountNodeId(ACCOUNT), cloudRegionNodeId(ACCOUNT, 'global'))).toBe(true);
+  });
+
+  it('draws the account as the stored hosted_on edges say, and never puts it in a region', () => {
+    // The account asset arrives in the payload with its own stored edges; the
+    // region grouping leaves those alone and does not box the account itself.
+    const g = rooted(awsNeighbourhood({
+      root_asset_id: ACCOUNT_ASSET,
+      nodes: [
+        { asset_id: ACCOUNT_ASSET, display_name: 'AWS account ' + ACCOUNT, class_key: 'cloud_account', asset_status: 'monitoring', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
+        { asset_id: BUCKET, display_name: 'assets-bucket', class_key: 'object_storage', asset_status: 'monitoring', depth: 1, cloud_account: ACCOUNT, cloud_region: REGION },
+      ],
+      edges: [edge({ id: 'e-bucket-account', from_asset_id: BUCKET, to_asset_id: ACCOUNT_ASSET, type: 'hosted_on' })],
+    }));
+    expect(hasEdge(g, BUCKET, ACCOUNT_ASSET)).toBe(true);
+    expect(g.edges.find((e) => e.id === 'e-bucket-account')?.synthetic).toBe(false);
+    // hosted_on is not containment: the bucket is still grouped by its region.
+    expect(hasEdge(g, cloudRegionNodeId(ACCOUNT, REGION), BUCKET)).toBe(true);
+    expect(hasEdge(g, cloudRegionNodeId(ACCOUNT, REGION), ACCOUNT_ASSET)).toBe(false);
   });
 
   it('does NOT also hang a contained asset off its region', () => {
-    // The subnet is inside the VPC and the instance inside the subnet. Adding a
-    // region → subnet edge would draw the same containment twice and flatten
+    // The key store is inside the LB and the instance inside the key store.
+    // Adding a region → key store edge would draw the same containment twice and flatten
     // the hierarchy into a bush.
     const g = rooted();
     const regionId = cloudRegionNodeId(ACCOUNT, REGION);
-    expect(hasEdge(g, regionId, SUBNET)).toBe(false);
+    expect(hasEdge(g, regionId, KEYS)).toBe(false);
     expect(hasEdge(g, regionId, INSTANCE)).toBe(false);
   });
 
   it('DOES attach an asset whose container fell outside the depth window', () => {
-    // On this map the subnet really is a root: its VPC is not drawn. Leaving it
+    // On this map the key store really is a root: its LB is not drawn. Leaving it
     // unattached would reproduce the bug this slice exists to fix, one level
     // down.
     const g = rooted(awsNeighbourhood({
-      root_asset_id: SUBNET,
+      root_asset_id: KEYS,
       nodes: [
-        { asset_id: SUBNET, display_name: 'subnet-a', class_key: 'subnet', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
+        { asset_id: KEYS, display_name: 'key-vault', class_key: 'key_store', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
         { asset_id: INSTANCE, display_name: 'web-01', class_key: 'compute_instance', depth: 1, cloud_account: ACCOUNT, cloud_region: REGION },
       ],
-      edges: [edge({ id: 'e-subnet-instance', from_asset_id: SUBNET, to_asset_id: INSTANCE })],
+      edges: [edge({ id: 'e-keys-instance', from_asset_id: KEYS, to_asset_id: INSTANCE })],
     }));
-    expect(hasEdge(g, cloudRegionNodeId(ACCOUNT, REGION), SUBNET)).toBe(true);
+    expect(hasEdge(g, cloudRegionNodeId(ACCOUNT, REGION), KEYS)).toBe(true);
     expect(hasEdge(g, cloudRegionNodeId(ACCOUNT, REGION), INSTANCE)).toBe(false);
   });
 
@@ -183,24 +202,24 @@ describe('withCloudScopeRoots', () => {
     expect(g.nodes.every(isAssetNode)).toBe(true);
   });
 
-  it('keeps a region-less cloud asset ON the map, attached to its account', () => {
+  it('keeps a region-less cloud asset ON the map, unboxed', () => {
     // The other polarity of the rule above: absent must not mean deleted
-    // either. An asset that knows its account and not its region hangs off the
-    // account directly.
+    // either. An asset that knows its account and not its region stays where
+    // it is — attached to its account, if at all, by its stored hosted_on edge.
     const g = rooted(awsNeighbourhood({
       root_asset_id: BUCKET,
       nodes: [{ asset_id: BUCKET, display_name: 'assets-bucket', class_key: 'object_storage', depth: 0, is_root: true, cloud_account: ACCOUNT }],
       edges: [],
     }));
     expect(byId(g, BUCKET)).toBeDefined();
-    expect(hasEdge(g, cloudAccountNodeId(ACCOUNT), BUCKET)).toBe(true);
+    expect(g.nodes).toHaveLength(1);
     expect(g.nodes.filter((n) => n.kind === 'cloud_region')).toHaveLength(0);
   });
 
   it('gives an account-less asset its own region box, labelled as such', () => {
     const g = rooted(awsNeighbourhood({
       nodes: [
-        { asset_id: VPC, display_name: 'vpc-prod', class_key: 'virtual_network', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
+        { asset_id: LB, display_name: 'lb-front', class_key: 'cloud_load_balancer', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
         { asset_id: BUCKET, display_name: 'orphan-bucket', class_key: 'object_storage', depth: 1, cloud_region: REGION },
       ],
       edges: [],
@@ -211,13 +230,12 @@ describe('withCloudScopeRoots', () => {
     // And it is NOT quietly folded into the neighbouring account's box, which
     // would state an ownership nothing recorded.
     expect(hasEdge(g, cloudRegionNodeId(ACCOUNT, REGION), BUCKET)).toBe(false);
-    expect(hasEdge(g, cloudAccountNodeId(ACCOUNT), orphanRegion)).toBe(false);
   });
 
   it('keeps two accounts sharing a region name apart', () => {
     const g = rooted(awsNeighbourhood({
       nodes: [
-        { asset_id: VPC, display_name: 'vpc-a', class_key: 'virtual_network', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
+        { asset_id: LB, display_name: 'lb-a', class_key: 'cloud_load_balancer', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
         { asset_id: BUCKET, display_name: 'bucket-b', class_key: 'object_storage', depth: 1, cloud_account: OTHER_ACCOUNT, cloud_region: REGION },
       ],
       edges: [],
@@ -229,7 +247,6 @@ describe('withCloudScopeRoots', () => {
 
   it('emits one box per scope however many assets sit in it', () => {
     const g = rooted();
-    expect(g.nodes.filter((n) => n.kind === 'cloud_account')).toHaveLength(1);
     // us-east-1 and global.
     expect(g.nodes.filter((n) => n.kind === 'cloud_region')).toHaveLength(2);
   });
@@ -255,7 +272,7 @@ describe('withCloudScopeRoots', () => {
 
   it('places a scope box at the shallowest depth of what it groups', () => {
     const g = rooted();
-    expect(byId(g, cloudAccountNodeId(ACCOUNT))?.depth).toBe(0);
+    expect(byId(g, cloudRegionNodeId(ACCOUNT, REGION))?.depth).toBe(0);
     expect(byId(g, cloudRegionNodeId(ACCOUNT, 'global'))?.depth).toBe(3);
   });
 
@@ -264,7 +281,7 @@ describe('withCloudScopeRoots', () => {
     const derived = g.edges.filter((e) => e.synthetic);
     const stored = g.edges.filter((e) => !e.synthetic);
     expect(derived.length).toBeGreaterThan(0);
-    expect(stored.map((e) => e.id).sort()).toEqual(['e-subnet-instance', 'e-vpc-subnet']);
+    expect(stored.map((e) => e.id).sort()).toEqual(['e-keys-instance', 'e-lb-keys']);
     for (const e of derived) {
       // No observation history, because nothing observed it.
       expect(e.observationCount).toBe(0);
@@ -283,7 +300,7 @@ describe('withCloudScopeRoots', () => {
 describe('a scope node is not an asset, wherever the graph is counted', () => {
   it('assetNodeCount ignores the boxes', () => {
     const g = rooted();
-    expect(g.nodes.length).toBe(8); // 5 assets + 1 account + 2 regions
+    expect(g.nodes.length).toBe(7); // 5 assets + 2 regions
     expect(assetNodeCount(g)).toBe(5);
   });
 
@@ -300,12 +317,11 @@ describe('a scope node is not an asset, wherever the graph is counted', () => {
   it('the legend lists the scope kinds separately from the class groups', () => {
     const entries = legendFor(rooted());
     const cloud = entries.find((e) => e.group === 'cloud_resource');
-    // Five cloud resources, and the three boxes are NOT among them.
+    // Five cloud resources, and the two boxes are NOT among them.
     expect(cloud?.count).toBe(5);
-    expect(entries.find((e) => e.group === 'cloud_account')?.count).toBe(1);
     expect(entries.find((e) => e.group === 'cloud_region')?.count).toBe(2);
     // Scaffolding is listed after the inventory.
-    expect(entries.map((e) => e.group).slice(-2)).toEqual(['cloud_account', 'cloud_region']);
+    expect(entries.map((e) => e.group).slice(-1)).toEqual(['cloud_region']);
   });
 
   it('a lone cloud asset is still "no relationships yet"', () => {
@@ -317,7 +333,7 @@ describe('a scope node is not an asset, wherever the graph is counted', () => {
       nodes: [{ asset_id: BUCKET, display_name: 'assets-bucket', class_key: 'object_storage', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION }],
       edges: [],
     }));
-    expect(g.nodes).toHaveLength(3);
+    expect(g.nodes).toHaveLength(2);
     expect(canvasState({ isLoading: false, isError: false }, g)).toBe('empty');
   });
 
@@ -361,7 +377,7 @@ describe('the exports describe the scope boxes honestly', () => {
 
   it('Cytoscape marks a derived edge synthetic and a stored one not', () => {
     const els = toCytoscape(rooted());
-    const stored = els.elements.edges.find((e) => e.data.id === 'e-vpc-subnet');
+    const stored = els.elements.edges.find((e) => e.data.id === 'e-lb-keys');
     const derived = els.elements.edges.find((e) => String(e.data.source).startsWith('scope:'));
     expect(stored?.data.synthetic).toBe('false');
     expect(derived?.data.synthetic).toBe('true');

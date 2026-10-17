@@ -32,6 +32,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/relationships"
 )
 
@@ -177,19 +178,28 @@ type RelationshipEdge struct {
 	// Label is how the edge reads from the asset's own side: the type itself
 	// outbound, the vocabulary's reverse label inbound (`runs_on` / `runs`).
 	// Derived, never stored (ADR-0003 D1).
-	Label            string            `json:"label,omitempty"`
-	SourceKind       string            `json:"source_kind"`
-	SourceRef        string            `json:"source_ref,omitempty"`
-	Confidence       float64           `json:"confidence"`
-	Status           string            `json:"status"`
-	Attributes       map[string]any    `json:"attributes,omitempty"`
-	FirstSeenAt      time.Time         `json:"first_seen_at"`
-	LastSeenAt       time.Time         `json:"last_seen_at"`
-	ObservationCount int               `json:"observation_count"`
-	CreatedBy        *uuid.UUID        `json:"created_by,omitempty"`
-	ApprovedBy       *uuid.UUID        `json:"approved_by,omitempty"`
-	ApprovedAt       *time.Time        `json:"approved_at,omitempty"`
-	Peer             *RelationshipPeer `json:"peer,omitempty"`
+	Label            string         `json:"label,omitempty"`
+	SourceKind       string         `json:"source_kind"`
+	SourceRef        string         `json:"source_ref,omitempty"`
+	Confidence       float64        `json:"confidence"`
+	Status           string         `json:"status"`
+	Attributes       map[string]any `json:"attributes,omitempty"`
+	FirstSeenAt      time.Time      `json:"first_seen_at"`
+	LastSeenAt       time.Time      `json:"last_seen_at"`
+	ObservationCount int            `json:"observation_count"`
+	CreatedBy        *uuid.UUID     `json:"created_by,omitempty"`
+	ApprovedBy       *uuid.UUID     `json:"approved_by,omitempty"`
+	ApprovedAt       *time.Time     `json:"approved_at,omitempty"`
+	// FromInterfaceID / ToInterfaceID are the interfaces the observation names
+	// at each end (LLDP's local and remote port), resolved to the asset's
+	// interface by exact name or label. Set on the neighbourhood's edges only,
+	// and only when exactly one interface answers (DCIM row 3.6): the map's
+	// "Show physical path" traces from it.
+	FromInterfaceID   *uuid.UUID        `json:"from_interface_id,omitempty"`
+	FromInterfaceName string            `json:"from_interface_name,omitempty"`
+	ToInterfaceID     *uuid.UUID        `json:"to_interface_id,omitempty"`
+	ToInterfaceName   string            `json:"to_interface_name,omitempty"`
+	Peer              *RelationshipPeer `json:"peer,omitempty"`
 	// From / To decorate BOTH ends. Populated only on the proposal queue, where
 	// the reviewer has no asset page around them for context and has to be able
 	// to read the whole sentence.
@@ -252,6 +262,11 @@ type Neighbourhood struct {
 	TotalEdges int `json:"total_edges"`
 	NodeCap    int `json:"node_cap"`
 	EdgeCap    int `json:"edge_cap"`
+	// CablePaths are the physical cable runs between two of `nodes` (DCIM row
+	// 3.6), one per pair of interfaces, capped at EdgeCap. Not walked: a cable
+	// joins the graph only when relationships already put both ends on it.
+	CablePaths      []NeighbourhoodCablePath `json:"cable_paths"`
+	TotalCablePaths int                      `json:"total_cable_paths"`
 }
 
 // ImpactDepthCount is how many assets sit at one distance from the root.
@@ -542,6 +557,7 @@ func (s *RelationshipService) Neighbourhood(
 		IncludePending: includePending,
 		Nodes:          []NeighbourhoodNode{},
 		Edges:          []RelationshipEdge{},
+		CablePaths:     []NeighbourhoodCablePath{},
 		NodeCap:        NeighbourhoodNodeCap,
 		EdgeCap:        NeighbourhoodEdgeCap,
 	}
@@ -589,8 +605,19 @@ func (s *RelationshipService) Neighbourhood(
 		if err != nil {
 			return err
 		}
+		if err := resolveEdgeInterfaces(ctx, tx, tenantID, edges); err != nil {
+			return err
+		}
 		out.Edges, out.TotalEdges = edges, totalEdges
 		if totalEdges > len(edges) {
+			out.Truncated = true
+		}
+		cables, totalCables, err := neighbourhoodCablePaths(ctx, tx, tenantID, nodeIDs)
+		if err != nil {
+			return err
+		}
+		out.CablePaths, out.TotalCablePaths = cables, totalCables
+		if totalCables > len(cables) {
 			out.Truncated = true
 		}
 		return nil
@@ -1236,7 +1263,7 @@ func loadPeers(ctx context.Context, tx *sqlx.Tx, tenantID uuid.UUID, ids []uuid.
 		  FROM assets a
 		  LEFT JOIN LATERAL (
 		        SELECT i.kind || ':' || i.value AS label
-		          FROM asset_identifiers i
+		          FROM (`+identifiersql.All+`) i
 		         WHERE i.tenant_id = a.tenant_id AND i.asset_id = a.id
 		         ORDER BY i.confidence DESC, i.last_seen_at DESC, i.id
 		         LIMIT 1

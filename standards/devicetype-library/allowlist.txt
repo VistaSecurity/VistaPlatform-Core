@@ -1,0 +1,220 @@
+# The device-type SEED SUBSET (DCIM DATA_MODEL §10; BUILD_PLAN row 2.2).
+#
+# One pattern per line, matched (path.Match) against `<Manufacturer>/<file name
+# without extension>` under the library's device-types/ directory. Every
+# pattern must match at least one file. The matched files are copied into
+# device-types/ beside this list by
+#
+#   go run ./tools/devicetype-import -library <devicetype-library checkout> -commit <sha>
+#
+# and `make generate` renders them into scripts/database/seed.sql's
+# "device-type seed subset" region (`make audit` runs it with -check).
+#
+# Manufacturers are seeded from the library subset AND from the OUI registry's
+# canonical vendor list (shared/ouiregistry, standards/oui/vendors.yaml).
+# `alias <library manufacturer> = <OUI vendor>` names a library manufacturer
+# the OUI registry spells differently, so the two do not become two
+# manufacturers (the library name wins; the OUI name is kept in
+# external_ids.oui_vendor). `exclude-oui <vendor>` drops an OUI "vendor" that
+# is not a hardware manufacturer (a hypervisor's or container runtime's
+# locally administered prefix).
+#
+# The choice: the estate the planning documents name — Cisco
+# Catalyst 9200/9300/9500 and Nexus 9300, Arista 7050/7280, Juniper
+# EX4300/EX4400/QFX5120/SRX300, FortiGate 60F–600F, Palo Alto PA-220–PA-3400,
+# F5 BIG-IP i-series, Ubiquiti USW/UDM/U6, Dell PowerEdge R6x0/R7x0, HPE
+# DL360/DL380, Supermicro 1U/2U and APC AP7xxx/AP8xxx PDUs — the common models
+# of each family rather than every SKU variant (the -TAA, -DC, -E, -R airflow
+# twins are left to a tenant import).
+
+alias APC = American Power Conversion
+alias Arista = Arista Networks
+alias Cisco = Cisco Systems
+alias F5 = F5 Networks
+alias Juniper = Juniper Networks
+alias Supermicro = Super Micro Computer
+alias Ubiquiti = Ubiquiti Networks
+
+exclude-oui Docker
+exclude-oui Microsoft Hyper-V
+exclude-oui OpenStack
+exclude-oui Oracle VirtualBox
+exclude-oui QEMU virtual NIC
+exclude-oui Xen
+
+# Cisco Catalyst 9200 / 9300 / 9500
+Cisco/C9200-24P
+Cisco/C9200-24T
+Cisco/C9200-48P
+Cisco/C9200-48T
+Cisco/C9200L-24P-4G
+Cisco/C9200L-48P-4G
+Cisco/C9300-24P
+Cisco/C9300-24T
+Cisco/C9300-24U
+Cisco/C9300-48P
+Cisco/C9300-48T
+Cisco/C9300-48U
+Cisco/C9300L-24P-4G
+Cisco/C9300L-48P-4G
+Cisco/C9300X-48HX
+Cisco/C9500-16X
+Cisco/C9500-24Y4C
+Cisco/C9500-32C
+Cisco/C9500-40X
+Cisco/C9500-48Y4C
+# Cisco Nexus 9300
+Cisco/N9K-C93108TC-EX
+Cisco/N9K-C93108TC-FX
+Cisco/N9K-C93180YC-EX
+Cisco/N9K-C93180YC-FX
+Cisco/N9K-C93240YC-FX2
+Cisco/N9K-C9332C
+Cisco/N9K-C9336C-FX2
+Cisco/N9K-C9364C
+
+# Arista 7050 / 7280
+Arista/DCS-7050CX3-32S-F
+Arista/DCS-7050QX-32S
+Arista/DCS-7050SX-64-F
+Arista/DCS-7050SX3-48YC12-F
+Arista/DCS-7050SX3-48YC8-F
+Arista/DCS-7050TX3-48C8-F
+Arista/DCS-7280CR3-32P4-F
+Arista/DCS-7280SR-48C6-F
+Arista/DCS-7280SR2-48YC6-F
+Arista/DCS-7280SR3-48YC8-F
+Arista/DCS-7280TR-48C6-F
+
+# Juniper EX4300 / EX4400 / QFX5120 / SRX300 family
+Juniper/EX4300-24P
+Juniper/EX4300-24T
+Juniper/EX4300-32F
+Juniper/EX4300-48MP
+Juniper/EX4300-48P
+Juniper/EX4300-48T
+Juniper/EX4400-24P
+Juniper/EX4400-24T
+Juniper/EX4400-24X
+Juniper/EX4400-48F
+Juniper/EX4400-48P
+Juniper/EX4400-48T
+Juniper/QFX5120-32C-AFO
+Juniper/QFX5120-48T-AFO
+Juniper/QFX5120-48Y-AFO2
+Juniper/SRX300
+Juniper/SRX320
+Juniper/SRX340
+Juniper/SRX345
+Juniper/SRX380
+
+# Fortinet FortiGate 60F–600F
+Fortinet/FG-60F
+Fortinet/FG-61F
+Fortinet/FG-70F
+Fortinet/FG-80F
+Fortinet/FG-81F
+Fortinet/FG-100F
+Fortinet/FG-101F
+Fortinet/FG-200F
+Fortinet/FG-201F
+Fortinet/FG-400F
+Fortinet/FG-401F
+Fortinet/FG-600F
+Fortinet/FG-601F
+
+# Palo Alto Networks PA-220–PA-3400
+Palo Alto Networks/PA-220
+Palo Alto Networks/PA-410
+Palo Alto Networks/PA-440
+Palo Alto Networks/PA-450
+Palo Alto Networks/PA-460
+Palo Alto Networks/PA-820
+Palo Alto Networks/PA-850
+Palo Alto Networks/PA-1410
+Palo Alto Networks/PA-1420
+Palo Alto Networks/PA-3220
+Palo Alto Networks/PA-3250
+Palo Alto Networks/PA-3260
+Palo Alto Networks/PA-3410
+Palo Alto Networks/PA-3420
+Palo Alto Networks/PA-3430
+Palo Alto Networks/PA-3440
+
+# F5 BIG-IP i-series
+F5/BIG-IP-i2600
+F5/BIG-IP-i2800
+F5/BIG-IP-i4600
+F5/BIG-IP-i4800
+F5/BIG-IP-i5800
+
+# Ubiquiti UniFi switches, gateways, access points
+Ubiquiti/USW-24
+Ubiquiti/USW-24-PoE
+Ubiquiti/USW-48
+Ubiquiti/USW-48-PoE
+Ubiquiti/USW-Aggregation
+Ubiquiti/USW-Enterprise-24-PoE
+Ubiquiti/USW-Enterprise-48-PoE
+Ubiquiti/USW-Flex-Mini
+Ubiquiti/USW-Lite-16-PoE
+Ubiquiti/USW-Lite-8-PoE
+Ubiquiti/USW-Pro-24
+Ubiquiti/USW-Pro-24-PoE
+Ubiquiti/USW-Pro-48
+Ubiquiti/USW-Pro-48-PoE
+Ubiquiti/USW-Pro-Aggregation
+Ubiquiti/UniFi-Dream-Machine
+Ubiquiti/UniFi-Dream-Machine-Pro
+Ubiquiti/UniFi-Dream-Machine-Pro-Max
+Ubiquiti/UniFi-Dream-Machine-Pro-Special-Edition
+Ubiquiti/U6+
+Ubiquiti/U6-Enterprise
+Ubiquiti/U6-Lite
+Ubiquiti/U6-LR
+Ubiquiti/U6-Mesh
+Ubiquiti/U6-Pro
+
+# Dell PowerEdge R6x0 / R7x0
+Dell/PowerEdge-R630
+Dell/PowerEdge-R640
+Dell/PowerEdge-R650
+Dell/PowerEdge-R660
+Dell/PowerEdge-R730
+Dell/PowerEdge-R740
+Dell/PowerEdge-R740xd
+Dell/PowerEdge-R750
+Dell/PowerEdge-R750xs
+Dell/PowerEdge-R760
+
+# HPE ProLiant DL360 / DL380
+HPE/ProLiant-DL360-Gen9
+HPE/ProLiant-DL360-Gen10
+HPE/ProLiant-DL360-Gen10-Plus
+HPE/ProLiant-DL360-Gen11
+HPE/ProLiant-DL380-Gen9
+HPE/ProLiant-DL380-Gen10
+HPE/ProLiant-DL380-Gen10-Plus
+HPE/ProLiant-DL380-Gen11
+
+# Supermicro 1U / 2U
+Supermicro/SYS-1019P-WTR
+Supermicro/SYS-1029P-WTRT
+Supermicro/SYS-1029U-TR4T
+Supermicro/AS-1114S-WN10RT
+Supermicro/AS-1124US-TNRP
+Supermicro/SYS-2029U-E1CR25M
+
+# APC rack PDUs (AP7xxx / AP8xxx)
+APC/AP7900B
+APC/AP7901B
+APC/AP7902
+APC/AP7920
+APC/AP7921B
+APC/AP7941
+APC/AP7953
+APC/AP8841
+APC/AP8853
+APC/AP8858
+APC/AP8941
+APC/AP8959

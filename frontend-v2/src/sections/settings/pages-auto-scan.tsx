@@ -126,10 +126,10 @@ function NotScannedSection({ summary }: { summary: AutoScanSummary }) {
                     <span style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>{row.detail}</span>
                   </span>,
                   <span className="mono" style={{ fontSize: 12, color: 'var(--app-t2)' }}>{row.count}</span>,
-                  row.registerSegmentsHref ? (
-                    <Link to={row.registerSegmentsHref} className="ui-btn sm" style={{ textDecoration: 'none' }}>
+                  row.registerPrefixesHref ? (
+                    <Link to={row.registerPrefixesHref} className="ui-btn sm" style={{ textDecoration: 'none' }}>
                       <Icon name="network" size={13} />
-                      Register the segment to include these hosts
+                      Add the prefix to include these hosts
                     </Link>
                   ) : (
                     <span style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>Nothing to do</span>
@@ -166,7 +166,7 @@ function AutoScanForm({ policy, limits, summary }: { policy: AutoScanPolicy; lim
     <>
       <SSection
         title="What the platform scans on its own"
-        desc="Active scanning probes your own internal hosts for the cryptography they present — certificates, TLS versions, cipher suites, SSH algorithms. Only addresses inside your private ranges or your registered network segments are ever scanned; public addresses and third-party systems are never probed."
+        desc="Active scanning probes your own internal hosts for the cryptography they present — certificates, TLS versions, cipher suites, SSH algorithms. Only addresses inside your private ranges or the prefixes you declared are ever scanned; public addresses and third-party systems are never probed."
       >
         <SCard>
           <SRow

@@ -203,12 +203,12 @@ func (h *AssetBulkHandler) BulkDelete(c *gin.Context) {
 // bulkChangesBody is the field edit. A field that is absent is left alone; a
 // field sent as "" is cleared.
 type bulkChangesBody struct {
-	OwnerEmail   *string           `json:"owner_email"`
-	Environment  *string           `json:"environment"`
-	BusinessUnit *string           `json:"business_unit"`
-	SupportGroup *string           `json:"support_group"`
-	AddTags      map[string]string `json:"add_tags"`
-	RemoveTags   []string          `json:"remove_tags"`
+	OwnerEmail     *string           `json:"owner_email"`
+	Environment    *string           `json:"environment"`
+	BusinessUnitID *string           `json:"business_unit_id"`
+	SupportGroup   *string           `json:"support_group"`
+	AddTags        map[string]string `json:"add_tags"`
+	RemoveTags     []string          `json:"remove_tags"`
 }
 
 // BulkUpdate handles POST /infrastructure-assets/bulk-actions/update.
@@ -223,7 +223,7 @@ func (h *AssetBulkHandler) BulkUpdate(c *gin.Context) {
 	}
 	ch := services.BulkAssetChanges{
 		OwnerEmail: body.Changes.OwnerEmail, Environment: body.Changes.Environment,
-		BusinessUnit: body.Changes.BusinessUnit, SupportGroup: body.Changes.SupportGroup,
+		BusinessUnitID: body.Changes.BusinessUnitID, SupportGroup: body.Changes.SupportGroup,
 		AddTags: body.Changes.AddTags, RemoveTags: body.Changes.RemoveTags,
 	}
 	// Refused before the selection is resolved: an edit that changes nothing

@@ -48,6 +48,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	sharedDatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
+	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -64,16 +66,22 @@ type ownerLookups struct {
 }
 
 func (c *ownerLookups) observe(query string, args []driver.NamedValue) {
-	if strings.Join(strings.Fields(query), " ") != findByIdentifierSQL || len(args) != 4 {
-		return
+	str := func(i int) string {
+		s, _ := args[i].Value.(string)
+		return s
 	}
-	key := ""
-	for i, a := range args[1:] {
-		if i > 0 {
-			key += "|"
-		}
-		s, _ := a.Value.(string)
-		key += s
+	var key string
+	switch {
+	// Row 1.4: an address and a MAC answer from the DCIM tables through their
+	// own statements, which carry a marker rather than a copy of their text.
+	case strings.HasPrefix(strings.TrimSpace(query), pgidentity.FindAddressOwnersMarker) && len(args) == 3:
+		key = "ip_address|" + str(1) + "|" + str(2)
+	case strings.HasPrefix(strings.TrimSpace(query), pgidentity.FindMACOwnersMarker) && len(args) == 3:
+		key = "mac_address|" + str(1) + "|"
+	case strings.Join(strings.Fields(query), " ") == findByIdentifierSQL && len(args) == 4:
+		key = str(1) + "|" + str(2) + "|" + str(3)
+	default:
+		return
 	}
 	c.mu.Lock()
 	c.n[key]++
@@ -201,7 +209,7 @@ func countingDB(t *testing.T) (*sql.DB, *ownerLookups) {
 // ownerLookups keys a lookup.
 func assetIdentifierKeys(t *testing.T, db *sql.DB, tenant, asset uuid.UUID) []string {
 	t.Helper()
-	rows, err := db.Query(`SELECT kind, value, coalesce(scope, '') FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2`, tenant, asset)
+	rows, err := db.Query(`SELECT kind, value, coalesce(scope, '') FROM (`+identifiersql.All+`) ai WHERE tenant_id = $1 AND asset_id = $2`, tenant, asset)
 	if err != nil {
 		t.Fatalf("read identifiers: %v", err)
 	}

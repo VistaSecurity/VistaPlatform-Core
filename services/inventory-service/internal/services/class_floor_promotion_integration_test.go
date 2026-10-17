@@ -95,7 +95,7 @@ func classifierHistory(t *testing.T, db *database.DB, tenant, assetID uuid.UUID)
 // change these tests stand on, without waiting for the refresher.
 func freshClassifyingService(db *database.DB) *AssetService {
 	algorithms := NewAlgorithmService(db)
-	svc := &AssetService{db: db, algorithmService: algorithms, networkSegmentService: NewNetworkSegmentService(db, nil)}
+	svc := &AssetService{db: db, algorithmService: algorithms}
 	svc.SetExternalConnectionsService(NewExternalConnectionsService(db, algorithms))
 	return svc
 }

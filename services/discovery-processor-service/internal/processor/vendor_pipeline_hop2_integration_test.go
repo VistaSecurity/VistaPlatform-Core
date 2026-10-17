@@ -199,7 +199,7 @@ func processVendorBatch(t *testing.T, db *sqlx.DB, s pipelinetest.Scenario, hop1
 	out := pipelinetest.Hop2Handoff{
 		Vendor:          s.Vendor,
 		Imports:         inventory.imports,
-		LearnedSegments: hop1.LearnedSegments,
+		LearnedPrefixes: hop1.LearnedPrefixes,
 		Assets:          hop1.Assets,
 	}
 	if processErr != nil {

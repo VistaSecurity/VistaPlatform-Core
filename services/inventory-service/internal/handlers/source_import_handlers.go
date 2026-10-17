@@ -77,7 +77,7 @@ func RequireSignedServiceCall(internalSecret string) gin.HandlerFunc {
 // bodies against the spec without a database; production passes
 // *services.SourceImportService.
 type sourceImporter interface {
-	UpsertSegments(ctx context.Context, tenantID uuid.UUID, items []services.SourceSegment) ([]services.SourceSegmentResult, error)
+	UpsertPrefixes(ctx context.Context, tenantID uuid.UUID, items []services.SourcePrefix) ([]services.SourcePrefixResult, error)
 	Admission(ctx context.Context, tenantID uuid.UUID, count int) (services.SourceAdmission, error)
 	ResolveAssets(ctx context.Context, tenantID uuid.UUID, source identity.Source, items []services.SourceAssetItem) []services.SourceAssetResult
 	ClassKeyExists(ctx context.Context, tenantID uuid.UUID, key string) (bool, error)
@@ -122,27 +122,27 @@ func signedTenant(c *gin.Context) (uuid.UUID, bool) {
 	return id, true
 }
 
-// sourceSegmentsRequest is the body of POST /internal/sources/segments.
-type sourceSegmentsRequest struct {
-	Segments []services.SourceSegment `json:"segments"`
+// sourcePrefixesRequest is the body of POST /internal/sources/prefixes.
+type sourcePrefixesRequest struct {
+	Prefixes []services.SourcePrefix `json:"prefixes"`
 }
 
-// UpsertSegments — POST /inventory-service/internal/sources/segments
-func (h *SourceImportHandler) UpsertSegments(c *gin.Context) {
+// UpsertPrefixes — POST /inventory-service/internal/sources/prefixes
+func (h *SourceImportHandler) UpsertPrefixes(c *gin.Context) {
 	tenantID, ok := signedTenant(c)
 	if !ok {
 		return
 	}
-	var req sourceSegmentsRequest
+	var req sourcePrefixesRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if len(req.Segments) == 0 || len(req.Segments) > services.MaxSourceBatch {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "segments must hold between 1 and " + strconv.Itoa(services.MaxSourceBatch) + " items"})
+	if len(req.Prefixes) == 0 || len(req.Prefixes) > services.MaxSourceBatch {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "prefixes must hold between 1 and " + strconv.Itoa(services.MaxSourceBatch) + " items"})
 		return
 	}
-	results, err := h.svc.UpsertSegments(c.Request.Context(), tenantID, req.Segments)
+	results, err := h.svc.UpsertPrefixes(c.Request.Context(), tenantID, req.Prefixes)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -213,6 +213,7 @@ type sourceAssetWire struct {
 	Description          *string                `json:"description,omitempty"`
 	Environment          *string                `json:"environment,omitempty"`
 	BusinessUnit         *string                `json:"business_unit,omitempty"`
+	BusinessUnitExternal *sourceBUExternal      `json:"business_unit_external,omitempty"`
 	OwnerEmail           *string                `json:"owner_email,omitempty"`
 	SupportGroup         *string                `json:"support_group,omitempty"`
 	OperatingSystem      *string                `json:"operating_system,omitempty"`
@@ -224,9 +225,52 @@ type sourceAssetWire struct {
 	ObservedAt           *time.Time             `json:"observed_at,omitempty"`
 	Facts                []services.SourceFact  `json:"facts,omitempty"`
 	ClaimDiscoverySource string                 `json:"claim_discovery_source,omitempty"`
+	// Interfaces are the interfaces the source declares on the asset (DCIM row
+	// 1.5f), each with the source's own id for it and for each address —
+	// stamped into `external_ids.<producer>` on the rows the engine writes.
+	Interfaces []sourceInterfaceWire `json:"interfaces,omitempty"`
 }
 
-func (w sourceAssetWire) item() services.SourceAssetItem {
+// sourceInterfaceWire is one declared interface on the wire: an allowlist of
+// the interface fields a source may state.
+type sourceInterfaceWire struct {
+	Name         string              `json:"name"`
+	Type         string              `json:"type,omitempty"`
+	MACAddress   string              `json:"mac_address,omitempty"`
+	MTU          *int                `json:"mtu,omitempty"`
+	Enabled      *bool               `json:"enabled,omitempty"`
+	Mode         string              `json:"mode,omitempty"`
+	UntaggedVLAN int                 `json:"untagged_vlan,omitempty"`
+	ExternalID   string              `json:"external_id,omitempty"`
+	Addresses    []sourceAddressWire `json:"addresses,omitempty"`
+}
+
+// sourceAddressWire is one address on a declared interface.
+type sourceAddressWire struct {
+	Address    string `json:"address"`
+	VRF        string `json:"vrf,omitempty"`
+	ExternalID string `json:"external_id,omitempty"`
+}
+
+// externalIDs is {producer: id}, or nil when either is empty.
+func externalIDs(producer, id string) map[string]string {
+	producer, id = strings.TrimSpace(producer), strings.TrimSpace(id)
+	if producer == "" || id == "" {
+		return nil
+	}
+	return map[string]string{producer: id}
+}
+
+// sourceBUExternal is the third-party record a Business Unit maps from.
+type sourceBUExternal struct {
+	System string `json:"system"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+}
+
+// item is the wire asset as the service's input. producer is the request
+// source's producer (`netbox`): the key the source's own ids are stamped under.
+func (w sourceAssetWire) item(producer string) services.SourceAssetItem {
 	in := models.AssetInput{
 		ClassKey:             w.ClassKey,
 		DisplayName:          w.DisplayName,
@@ -243,6 +287,13 @@ func (w sourceAssetWire) item() services.SourceAssetItem {
 		Metadata:             w.Metadata,
 		ObservationReceiptID: w.ObservationReceiptID,
 	}
+	if x := w.BusinessUnitExternal; x != nil && strings.TrimSpace(x.System) != "" && strings.TrimSpace(x.ID) != "" {
+		in.BusinessUnitExternalSystem, in.BusinessUnitExternalID = strings.TrimSpace(x.System), strings.TrimSpace(x.ID)
+		if strings.TrimSpace(x.Name) != "" && in.BusinessUnit == nil {
+			n := strings.TrimSpace(x.Name)
+			in.BusinessUnit = &n
+		}
+	}
 	if w.ObservedAt != nil {
 		in.ObservationTime = w.ObservedAt.UTC()
 	}
@@ -251,6 +302,18 @@ func (w sourceAssetWire) item() services.SourceAssetItem {
 	}
 	for _, id := range w.Identifiers {
 		in.Identifiers = append(in.Identifiers, models.AssetIdentifierInput{Kind: id.Kind, Value: id.Value, Scope: id.Scope})
+	}
+	for _, ifc := range w.Interfaces {
+		decl := models.AssetInterfaceInput{
+			Name: ifc.Name, Type: ifc.Type, MACAddress: ifc.MACAddress, MTU: ifc.MTU, Enabled: ifc.Enabled,
+			Mode: ifc.Mode, UntaggedVLAN: ifc.UntaggedVLAN, ExternalIDs: externalIDs(producer, ifc.ExternalID),
+		}
+		for _, a := range ifc.Addresses {
+			decl.Addresses = append(decl.Addresses, models.AssetInterfaceAddressInput{
+				Address: a.Address, VRF: a.VRF, ExternalIDs: externalIDs(producer, a.ExternalID),
+			})
+		}
+		in.Interfaces = append(in.Interfaces, decl)
 	}
 	return services.SourceAssetItem{Input: in, Facts: w.Facts, ClaimDiscoverySource: w.ClaimDiscoverySource}
 }
@@ -302,7 +365,7 @@ func (h *SourceImportHandler) ResolveAssets(c *gin.Context) {
 	}
 	items := make([]services.SourceAssetItem, 0, len(req.Assets))
 	for _, w := range req.Assets {
-		items = append(items, w.item())
+		items = append(items, w.item(source.Producer()))
 	}
 	c.JSON(http.StatusOK, gin.H{"results": h.svc.ResolveAssets(c.Request.Context(), tenantID, source, items)})
 }
@@ -576,7 +639,7 @@ func (h *SourceImportHandler) HardwareAssets(c *gin.Context) {
 // full so the spec-route guard, which scans for a method call followed by a
 // string literal, can see them.
 func RegisterSourceImportRoutes(internal *gin.RouterGroup, h *SourceImportHandler) {
-	internal.POST("/inventory-service/internal/sources/segments", h.UpsertSegments)
+	internal.POST("/inventory-service/internal/sources/prefixes", h.UpsertPrefixes)
 	internal.POST("/inventory-service/internal/sources/assets/admission", h.AssetAdmission)
 	internal.POST("/inventory-service/internal/sources/assets", h.ResolveAssets)
 	internal.POST("/inventory-service/internal/sources/assets/links", h.AttachLinks)

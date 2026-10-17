@@ -1,0 +1,4 @@
+line vty 0 4
+ transport input ssh
+line vty 5 15
+ transport input ssh

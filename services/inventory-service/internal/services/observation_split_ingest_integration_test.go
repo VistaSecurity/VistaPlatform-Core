@@ -78,8 +78,7 @@ func (f *provisionalFixture) observationLink(id string) (asset string, receipts 
 func TestIntegration_HostObservationIngest_SameFrameAfterPostureFlipSplitsTheObservation(t *testing.T) {
 	f := newProvisionalFixture(t)
 	seg := uuid.New()
-	f.exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment,metadata)
-	 VALUES($1,$2,'Lab','cidr',$3,true,'production','{}'::jsonb)`, seg, f.tenant, splitSegmentCIDR)
+	f.exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Lab',$3::cidr,'production','declared','active')`, seg, f.tenant, splitSegmentCIDR)
 
 	t0 := f.now.Add(-4 * time.Hour)
 	holder := f.ingestARPFrame(splitHolderMAC, splitVIPAddr, t0)
@@ -94,7 +93,7 @@ func TestIntegration_HostObservationIngest_SameFrameAfterPostureFlipSplitsTheObs
 			"rule to land it on the holder %s", floating.AssetID, floating.ObservationID, holder.AssetID)
 	}
 
-	f.exec(`UPDATE network_segments SET metadata='{"dynamic":true}'::jsonb WHERE tenant_id=$1 AND id=$2`, f.tenant, seg)
+	f.exec(`UPDATE prefixes SET dhcp_managed = true WHERE tenant_id=$1 AND id=$2`, f.tenant, seg)
 
 	again := f.ingestARPFrame(splitNodeMAC, splitVIPAddr, t0.Add(2*time.Hour))
 

@@ -55,6 +55,7 @@ type CreateIntegrationParams struct {
 	Description     *string
 	TagsJSON        string
 	IsEnabled       bool
+	AutoApprove     bool
 	Status          string
 	CreatedAt       time.Time
 }
@@ -81,7 +82,15 @@ const integrationSelectColumns = `
 	SELECT id, tenant_id, integration_type, integration_name, provider, config,
 		   account_id, region, environment, description, tags, is_enabled,
 		   COALESCE(is_shared, false) as is_shared, status, status_message,
-		   last_tested_at, created_at, updated_at
+		   last_tested_at, created_at, updated_at, auto_approve_resources,
+		   -- The account asset (ADR-0009 D1): the tenant's asset owning the
+		   -- cloud_resource_id <provider>:<account>.
+		   (SELECT ai.asset_id::text FROM asset_identifiers ai
+		     WHERE ai.tenant_id = platform_integrations.tenant_id
+		       AND ai.kind::text = 'cloud_resource_id'
+		       AND coalesce(ai.scope, '') = ''
+		       AND ai.value = platform_integrations.integration_type || ':' || platform_integrations.account_id
+		     LIMIT 1) AS account_asset_id
 	FROM platform_integrations
 `
 
@@ -99,6 +108,7 @@ func scanIntegration(scan func(dest ...any) error) (CloudIntegration, error) {
 		&integ.Description, &tagsJSON, &integ.IsEnabled,
 		&integ.IsShared, &integ.Status, &integ.StatusMessage,
 		&integ.LastTestedAt, &integ.CreatedAt, &integ.UpdatedAt,
+		&integ.AutoApproveResources, &integ.AccountAssetID,
 	); err != nil {
 		return CloudIntegration{}, err
 	}
@@ -193,8 +203,8 @@ func (r *integrationRepository) Create(ctx context.Context, p CreateIntegrationP
 		INSERT INTO platform_integrations (
 			id, tenant_id, integration_type, integration_name, provider, config,
 			account_id, region, environment, description, tags, is_enabled,
-			status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			status, created_at, updated_at, auto_approve_resources
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	`
 	// RLS-scoped write on `platform_integrations`: tenant-owned row → WithTenantTx.
 	return mapIntegrationWriteErr(shareddatabase.WithTenantTx(ctx, r.db, p.TenantID, func(tx *sql.Tx) error {
@@ -202,6 +212,7 @@ func (r *integrationRepository) Create(ctx context.Context, p CreateIntegrationP
 			p.ID, p.TenantID, p.IntegrationType, p.IntegrationName,
 			p.Provider, p.ConfigJSON, p.AccountID, p.Region, p.Environment,
 			p.Description, p.TagsJSON, p.IsEnabled, p.Status, p.CreatedAt, p.CreatedAt,
+			p.AutoApprove,
 		)
 		return err
 	}))

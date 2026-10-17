@@ -335,7 +335,7 @@ export interface DriftEvidence {
    *
    * Built from whatever the producer wrote rather than from a per-kind map,
    * because the four drift kinds each name their baseline differently
-   * (`protocols`, `ports`, `issuers`, `classes_in_segment`) and a map here would
+   * (`protocols`, `ports`, `issuers`, `classes_in_prefix`) and a map here would
    * render a blank for the fifth.
    */
   baseline: { label: string; value: string }[];
@@ -531,4 +531,48 @@ export function cryptoEvidence(f: ComplianceFinding): CryptoEvidence | null {
     out.assessmentLimitations.length > 0 ||
     out.reassessmentRequired;
   return anything ? out : null;
+}
+
+/** One port whose cable an LLDP / CDP neighbour contradicts (DCIM row 3.3). */
+export interface CableContradiction {
+  localInterface: string;
+  cableId: string | null;
+  /** The cable's far end (through any patch panels) as the record has it. */
+  recorded: string[];
+  /** What the neighbour said is there: the far port it resolved to, else what it advertised. */
+  observed: string;
+  protocol: string | null;
+  /** The far port the neighbour names is cabled to something else. */
+  farPortCabledElsewhere: boolean;
+}
+
+/**
+ * Reads a `topology/cable_drift` finding's evidence: each contradicted port
+ * with the cable's far end and the neighbour's. Null when the document carries
+ * no contradiction a person could act on.
+ */
+export function topologyEvidence(f: ComplianceFinding): CableContradiction[] | null {
+  const raw = ev(f).contradictions;
+  if (!Array.isArray(raw)) return null;
+  const out: CableContradiction[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const c = item as Record<string, unknown>;
+    const local = str(c.local_interface);
+    if (!local) continue;
+    const recorded = (Array.isArray(c.cable_far) ? c.cable_far : [])
+      .map((e) => (e && typeof e === 'object' ? str((e as Record<string, unknown>).interface) : null))
+      .filter((v): v is string => v !== null);
+    const o = (c.observed && typeof c.observed === 'object' ? c.observed : {}) as Record<string, unknown>;
+    const named = [str(o.system_name) ?? str(o.chassis_id) ?? str(o.mgmt_address), str(o.port_id)].filter((v): v is string => v !== null).join(' ');
+    out.push({
+      localInterface: local,
+      cableId: str(c.cable_id),
+      recorded,
+      observed: str(o.interface) ?? (named || 'an unnamed neighbour'),
+      protocol: str(o.protocol),
+      farPortCabledElsewhere: c.far_port_cabled_elsewhere === true,
+    });
+  }
+  return out.length > 0 ? out : null;
 }

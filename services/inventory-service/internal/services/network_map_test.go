@@ -15,7 +15,7 @@ func TestAssembleNetworkMapAssets(t *testing.T) {
 	seg := uuid.New()
 	addr := "10.0.0.5"
 	rows := []networkMapAssetRow{
-		{AssetID: a1, DisplayName: "web-01", ClassKey: "server", Address: &addr, SegmentID: &seg,
+		{AssetID: a1, DisplayName: "web-01", ClassKey: "server", Address: &addr, PrefixID: &seg,
 			Site: "DC-East", AssetStatus: "monitoring", RiskScore: 80, RiskAssessed: true},
 		{AssetID: a2, DisplayName: "", ClassKey: "server", Site: TopologyUnassignedSite,
 			AssetStatus: "pending_approval"},
@@ -80,7 +80,7 @@ func TestAssembleNetworkMapAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(b)
-	for _, want := range []string{`"strength":""`, `"segment_id":null`, `"components":[]`} {
+	for _, want := range []string{`"strength":""`, `"prefix_id":null`, `"components":[]`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("wire form lacks %s: %s", want, s)
 		}

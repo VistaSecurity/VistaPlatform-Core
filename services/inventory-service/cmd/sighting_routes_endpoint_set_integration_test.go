@@ -26,6 +26,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/handlers"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -127,7 +128,7 @@ func TestIntegration_SightingRoute_ACompleteEndpointSetClosesTheDroppedSocket(t 
 	}
 
 	var bridgeOwned int
-	if err := raw.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address' AND value='172.17.0.1'`, tenant).Scan(&bridgeOwned); err != nil {
+	if err := raw.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='ip_address' AND value='172.17.0.1'`, tenant).Scan(&bridgeOwned); err != nil {
 		t.Fatal(err)
 	}
 	if bridgeOwned != 0 {

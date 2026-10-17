@@ -145,6 +145,39 @@ func (c *recordingConn) firstWriteIsTLS() bool {
 	return len(c.first) >= 2 && c.first[0] == 0x16 && c.first[1] == 0x03
 }
 
+// identifyTestBannerWait is the banner window the identify tests have always
+// run with: testPace's 50ms connect timeout scaled by bannerWaitFor, which
+// floors at 250ms. It is pinned explicitly (see newLoadTolerantIdentifyScanner)
+// so that raising the connect timeout does not also stretch every silent port.
+const identifyTestBannerWait = 250 * time.Millisecond
+
+// loadTolerantPace is testPace with a connect timeout no loaded runner will
+// exceed. Scanner.dialGated bounds each dial by ConnectTimeout, and a dial that
+// loses to that 50ms budget is reported as "unreachable-during-identify" — the
+// handshake the test asserts on (or asserts is NOT made) never happens, so a
+// slow runner flipped the observed outcome.
+var loadTolerantPace = PaceProfile{GlobalConcurrency: 256, PerHostConcurrency: 64, ConnectTimeout: 10 * time.Second}
+
+// newLoadTolerantIdentifyScanner is newIdentifyScanner with loadTolerantPace.
+// Callers must set IdentifyOptions.BannerWait to identifyTestBannerWait (use
+// loadTolerantOpts), or the banner window would scale up with the pace to 2s.
+func newLoadTolerantIdentifyScanner(t testing.TB, d Dialer) *Scanner {
+	t.Helper()
+	s, err := NewScanner(WithDialer(d), WithPaceProfile(loadTolerantPace))
+	if err != nil {
+		t.Fatalf("NewScanner: %v", err)
+	}
+	return s
+}
+
+// loadTolerantOpts defaults the banner window to its historical value.
+func loadTolerantOpts(o IdentifyOptions) IdentifyOptions {
+	if o.BannerWait == 0 {
+		o.BannerWait = identifyTestBannerWait
+	}
+	return o
+}
+
 func newIdentifyScanner(t testing.TB, d Dialer) *Scanner {
 	t.Helper()
 	s, err := NewScanner(WithDialer(d), WithPaceProfile(testPace))
@@ -412,8 +445,8 @@ func TestIdentify_OTSuspectHostWithholdsSpeculativeTLS(t *testing.T) {
 		_, _ = c.Read(buf)
 	})
 	rec := &recordingDialer{}
-	s := newIdentifyScanner(t, rec)
-	obs, err := s.Identify(context.Background(), hostScan(mustAddr(t, host), true /*suspect*/, port), IdentifyOptions{})
+	s := newLoadTolerantIdentifyScanner(t, rec)
+	obs, err := s.Identify(context.Background(), hostScan(mustAddr(t, host), true /*suspect*/, port), loadTolerantOpts(IdentifyOptions{}))
 	if err != nil {
 		t.Fatal(err)
 	}

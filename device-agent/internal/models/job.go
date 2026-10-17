@@ -62,6 +62,11 @@ type JobResult struct {
 	Facts         []di.FactObservation         `json:"facts,omitempty"`
 	Relationships []di.RelationshipObservation `json:"relationships,omitempty"`
 
+	// Network is the device's own interfaces, addresses, VLANs and ARP cache
+	// (DCIM row 1.5), forwarded verbatim; the platform files it through the
+	// identity engine.
+	Network *di.NetworkObservation `json:"network,omitempty"`
+
 	// Warnings are the collection warnings the shared collector raised: what
 	// it could not read (a refused endpoint, a missing command, a table cut at
 	// its bound) and what the result lacks because of it. Forwarded verbatim —

@@ -118,9 +118,9 @@ describe('hostSummary', () => {
 
 describe('addressTooltip', () => {
   it('renders every address with its interface and prefix', () => {
-    // The cell can only show the primary; this is where "which segments is
+    // The cell can only show the primary; this is where "which networks is
     // this agent on?" is actually answerable, and the prefix is the part that
-    // turns an address into a segment.
+    // turns an address into a network.
     expect(addressTooltip({
       job_count: 0,
       addresses: [
@@ -240,7 +240,7 @@ describe('isPlatformInterrogationAgent', () => {
   // The in-cluster interrogation agent has a row in `sensors` only so the
   // interrogation pipeline has something to attribute discoveries to
   // (ResultProcessor.lookupSystemSensor). It is a command-driven agent, and the
-  // Sensors table showed it with Type "api" and an empty Segment because it has
+  // Sensors table showed it with Type "api" and an empty Network because it has
   // neither. These pin which rows move and, more importantly, which do not.
 
   const platformInterrogation = {

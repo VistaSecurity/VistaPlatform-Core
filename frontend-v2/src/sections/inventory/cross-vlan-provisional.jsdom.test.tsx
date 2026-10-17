@@ -157,7 +157,7 @@ beforeEach(() => {
       case '/infrastructure-assets/{id}/identifiers': return ok({ identifiers: asset().identifiers });
       case '/infrastructure-assets/{id}/endpoints': return ok({ endpoints: [] });
       case '/infrastructure-assets/facets': return ok({ facets: {} });
-      case '/saved-views': return ok({ saved_views: [] });
+      case '/dcim/saved-filters': return ok({ data: [], can_share: false });
       case '/discovery/observations': return ok({ observations: observations(), total: observations().length, page: 1, page_size: 50 });
       case '/discovery/observations/{id}': {
         const id = init?.params?.path?.id;

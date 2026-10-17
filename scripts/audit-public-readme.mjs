@@ -27,7 +27,7 @@ const ffGo = readFileSync('shared/services/free_frameworks.go', 'utf8');
 const ffBlock = ffGo.match(/FreeFrameworkCodes\s*=\s*\[\]string\{([\s\S]*?)\n\}/);
 if (!ffBlock) failures.push('could not locate FreeFrameworkCodes in shared/services/free_frameworks.go');
 const frameworkCount = ffBlock ? (ffBlock[1].match(/"[a-z0-9-]+"/g) || []).length : 0;
-const words = { 5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten', 11: 'eleven', 12: 'twelve', 13: 'thirteen' };
+const words = { 5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten', 11: 'eleven', 12: 'twelve', 13: 'thirteen', 14: 'fourteen', 15: 'fifteen', 16: 'sixteen', 17: 'seventeen', 18: 'eighteen', 19: 'nineteen', 20: 'twenty', 21: 'twenty-one', 22: 'twenty-two' };
 const frameworkWord = words[frameworkCount] ?? String(frameworkCount);
 
 if (!new RegExp(`Core ships ${frameworkWord}\\s+frameworks`, 'i').test(readme.replace(/\n/g, ' '))) {

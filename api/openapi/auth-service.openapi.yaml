@@ -2993,7 +2993,7 @@ components:
           description: "sso_providers row id. Present for tenant sso methods."
         provider_name:
           type: string
-          description: "Tenant-chosen provider name; the URL segment for the authorize endpoint. Present for tenant sso methods."
+          description: "Tenant-chosen provider name; the URL path part for the authorize endpoint. Present for tenant sso methods."
     AuthMethodsResponse:
       type: object
       required: [email, methods]
@@ -3022,7 +3022,7 @@ components:
             required: [provider, provider_name]
             properties:
               provider: { type: string, description: "Provider type (google, microsoft, azure)." }
-              provider_name: { type: string, description: "The authorize URL segment for this provider." }
+              provider_name: { type: string, description: "The authorize URL path part for this provider." }
     AcceptInvitationRequest:
       type: object
       required: [token, password]

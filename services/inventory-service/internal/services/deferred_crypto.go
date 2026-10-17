@@ -59,6 +59,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/events"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
 
@@ -235,7 +236,7 @@ const deferredObservationDirectSQL = `((COALESCE(o.evidence->'admission'->>'dire
 // raw_data.dest_ip. A finding with no address owns nothing.
 const deferredFindingAddressOwnedSQL = `(
 			                   COALESCE(NULLIF(w.finding->>'ip_address', ''), NULLIF(w.finding->'raw_data'->>'dest_ip', '')) IS NOT NULL
-			               AND (EXISTS (SELECT 1 FROM asset_identifiers ai
+			               AND (EXISTS (SELECT 1 FROM (` + identifiersql.Addresses + `) ai
 			                             WHERE ai.tenant_id = w.tenant_id AND ai.asset_id = $2 AND ai.kind = 'ip_address'
 			                               AND ai.value = COALESCE(NULLIF(w.finding->>'ip_address', ''), NULLIF(w.finding->'raw_data'->>'dest_ip', '')))
 			                 OR EXISTS (SELECT 1 FROM assets pa

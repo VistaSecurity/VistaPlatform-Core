@@ -98,7 +98,7 @@ func TestEveryPublishedFieldResolves(t *testing.T) {
 func TestTargetsAreTheSpecsTargets(t *testing.T) {
 	want := []string{
 		"asset", "certificate", "crypto_configuration", "endpoint", "finding",
-		"identifier", "measurement", "observation", "relationship", "software_install",
+		"identifier", "interface", "measurement", "observation", "relationship", "software_install",
 	}
 	got := make([]string, 0, len(want))
 	for _, tgt := range newCatalog().Targets() {

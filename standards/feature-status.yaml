@@ -197,6 +197,153 @@ features:
     summary: Active probing and an inventory view for Modbus, DNP3, BACnet and other OT protocols.
     status: in_progress
     edition: enterprise
+  - id: business_units
+    group: discover_inventory
+    name: Business Units
+    summary: Nested owners (department, customer, cost centre) on assets and prefixes, with import and query support.
+    status: available
+    edition: core
+    docs: inventory/business-units
+  - id: interfaces
+    group: discover_inventory
+    name: Interfaces
+    summary: Every asset's network interfaces with MAC and IP addresses, filled by discovery or entered by hand.
+    status: available
+    edition: core
+    docs: inventory/interfaces
+  - id: networks_ipam
+    group: discover_inventory
+    name: Networks (IPAM)
+    summary: Prefixes, IP addresses, ranges and VRFs as a tree with utilisation, free space and address lookup.
+    status: available
+    edition: core
+    docs: inventory/networks
+  - id: vlans
+    group: discover_inventory
+    name: VLANs
+    summary: VLAN groups and VLANs, with the prefixes and interfaces that carry them.
+    status: available
+    edition: core
+    docs: inventory/networks
+  - id: cabling
+    group: discover_inventory
+    name: Cabling and cable tracing
+    summary: Every cable with both ends, a faceplate per device, bulk cable editing, and port traces through patch panels, tinted by the crypto behind each port.
+    status: available
+    edition: core
+    docs: inventory/cabling
+  - id: map_physical_cabling
+    group: discover_inventory
+    name: Physical cabling on the map
+    summary: The map draws cables between devices beside their observed relationships, and any relationship seen on a port can show the physical path behind it.
+    status: available
+    edition: core
+    docs: features/map
+  - id: change_log
+    group: discover_inventory
+    name: Change log on assets
+    summary: Who changed what, from where and when, plus a journal of dated notes on each object.
+    status: available
+    edition: core
+    docs: features/inventory-and-lenses
+  - id: cloud_account_approval
+    group: discover_inventory
+    name: Cloud account approval
+    summary: A cloud account is an asset you approve once; its resources are then admitted automatically or queued for review.
+    status: available
+    edition: core
+    docs: features/asset-approval
+  - id: rack_elevations
+    group: discover_inventory
+    name: Rack elevations
+    summary: Front and rear elevations of every rack — drag devices into place, see reserved units, and tint each device by its worst open crypto finding.
+    status: available
+    edition: core
+    docs: inventory/racks
+  - id: sites_locations
+    group: discover_inventory
+    name: Sites and locations
+    summary: Regions, site groups, sites and the locations inside them, with a page per site and assets placed on it.
+    status: available
+    edition: core
+    docs: inventory/sites
+  - id: device_types
+    group: discover_inventory
+    name: Device types and catalogue
+    summary: A seeded catalogue of 154 device types, manufacturers, roles and platforms, instantiating interface and port templates when applied.
+    status: available
+    edition: core
+    docs: inventory/device-types
+  - id: modules_virtual_chassis
+    group: discover_inventory
+    name: Modules and virtual chassis
+    summary: Module types and bays, inventory items and stacked-switch virtual chassis on each asset's Hardware tab.
+    status: available
+    edition: core
+    docs: inventory/device-types
+  - id: circuits
+    group: discover_inventory
+    name: Circuits
+    summary: Providers, provider networks and circuits with terminations that cable to your ports.
+    status: available
+    edition: core
+    docs: inventory/circuits
+  - id: virtualisation
+    group: discover_inventory
+    name: Virtualisation
+    summary: Clusters and their hosts, virtual machines and disks, grouped by cluster type.
+    status: available
+    edition: core
+    docs: inventory/virtualization
+  - id: vpn_tunnels
+    group: discover_inventory
+    name: VPN tunnels and policy
+    summary: Tunnel groups, tunnels and terminations, with the IKE and IPsec policy each uses.
+    status: available
+    edition: core
+    docs: inventory/vpn
+  - id: wireless
+    group: discover_inventory
+    name: Wireless LANs and links
+    summary: WLAN groups, WLANs with their authentication type, and point-to-point wireless links.
+    status: available
+    edition: core
+    docs: inventory/wireless
+  - id: contacts
+    group: discover_inventory
+    name: Contacts
+    summary: Contacts and roles assigned to any object, plus image attachments.
+    status: available
+    edition: core
+    docs: inventory/contacts
+  - id: custom_fields
+    group: discover_inventory
+    name: Custom fields
+    summary: Tenant-defined fields on assets, interfaces, prefixes and VLANs, validated on every write and usable in queries.
+    status: available
+    edition: core
+    docs: inventory/custom-fields
+  - id: config_contexts
+    group: discover_inventory
+    name: Config contexts
+    summary: Weighted JSON contexts assigned by site, role or platform and merged per asset.
+    status: available
+    edition: core
+    docs: inventory/config-contexts
+  - id: saved_filters_export_templates
+    group: discover_inventory
+    name: Saved filters and export templates
+    summary: Saved filters for every object kind and text templates that render any list for export.
+    status: available
+    edition: core
+    docs: inventory/saved-filters-and-export-templates
+  - id: bulk_import_export
+    group: discover_inventory
+    name: Bulk import and export
+    summary: CSV import with dry run and CSV export for every DCIM object kind, under Settings → Infrastructure.
+    status: available
+    edition: core
+    docs: inventory/import-export
 
   # ── Evaluate & prove ────────────────────────────────────────────────────────
   - id: crypto_assessment
@@ -273,10 +420,46 @@ features:
     summary: Two-way sync with ServiceNow, Device42, SolarWinds and Oomnitza, with dry run and undo.
     status: available
     edition: enterprise
+  - id: cmdb_sync_dcim_classes
+    group: integrations
+    name: CMDB sync — DCIM classes
+    summary: Push racks, networks, IP addresses, circuits, VLANs, network adapters and datacenters to ServiceNow and Device42 as their own CI classes, each switchable.
+    status: available
+    edition: enterprise
   - id: netbox
     group: integrations
     name: NetBox connector
     summary: Pull sites, prefixes, VLANs and devices from NetBox and see where reality differs.
+    status: available
+    edition: enterprise
+  - id: netbox_two_way_sync
+    group: integrations
+    name: NetBox two-way sync
+    summary: Sync Business Units, IPAM and Interfaces with NetBox in both directions, field by field, with conflicts left to a person.
+    status: available
+    edition: enterprise
+  - id: netbox_sync_circuits_virtualisation_vpn_wireless
+    group: integrations
+    name: NetBox sync — circuits, virtualisation, VPN, wireless
+    summary: Sync circuits, clusters, VPN tunnels and policies, and wireless LANs with NetBox both ways, one switch per class; keys never cross.
+    status: available
+    edition: enterprise
+  - id: netbox_sync_dcim
+    group: integrations
+    name: NetBox sync — sites, racks, device catalogue, modules
+    summary: Sync sites, racks, device types and their templates, device placement, modules and virtual chassis with NetBox, field by field.
+    status: available
+    edition: enterprise
+  - id: netbox_sync_cabling
+    group: integrations
+    name: NetBox sync — ports and cables
+    summary: Sync console, patch-panel and power ports and cables with NetBox both ways; far ends not yet here wait, and LLDP proposals sync once approved.
+    status: available
+    edition: enterprise
+  - id: device42_import
+    group: integrations
+    name: Device42 import
+    summary: Import Device42's sites, racks, devices in their rack units, cabling, IP space and circuits, planned in a dry run first.
     status: available
     edition: enterprise
   - id: siem_export

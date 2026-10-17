@@ -1,6 +1,6 @@
 {
   "vendor": "snmp",
-  "input_sha256": "02689bf8c9ed6f23211d88f8340316a19158758a4bb816b63572a973d8a1b388",
+  "input_sha256": "a0dcb9526efbdded809091da91ec2d1fc72a2ded297fbaf336e51f985fd4b387",
   "inventory": {
     "assets": [
       {

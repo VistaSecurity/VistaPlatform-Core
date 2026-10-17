@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "name": "0",
+      "fullPath": "/Common/0",
+      "id": 0
+    },
+    {
+      "name": "tenant-a",
+      "fullPath": "/Common/tenant-a",
+      "id": 2
+    }
+  ]
+}

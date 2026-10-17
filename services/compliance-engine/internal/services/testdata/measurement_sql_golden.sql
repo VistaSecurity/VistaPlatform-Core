@@ -30,12 +30,12 @@ SELECT
 			a.id AS subject_id,
 			a.tenant_id AS tenant_id,
 			a.updated_at AS measured_at,
-			(COALESCE(NULLIF(btrim(a.site), ''), NULLIF(btrim(a.region), ''), NULLIF(btrim(a.zone), ''), a.location_id::text) IS NOT NULL) AS col_0,
+			(COALESCE(a.site_id::text, NULLIF(btrim(a.region), ''), NULLIF(btrim(a.zone), ''), a.location_id::text) IS NOT NULL) AS col_0,
 			a.hostname AS col_1,
 			host(a.primary_address) AS col_2,
 			a.display_name AS col_3,
 			a.class_key AS col_4,
-			a.site AS col_5,
+			(SELECT st.name FROM sites st WHERE st.id = a.site_id) AS col_5,
 			a.region AS col_6
 		FROM assets a
 		WHERE a.tenant_id = $1

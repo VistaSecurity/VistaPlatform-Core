@@ -6,11 +6,12 @@ replace github.com/vistasecurity/vistaplatform/shared => ../../shared
 
 require (
 	github.com/gin-gonic/gin v1.12.0
+	github.com/goccy/go-yaml v1.19.2
 	github.com/google/uuid v1.6.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/sirupsen/logrus v1.10.2
 	github.com/vistasecurity/vistaplatform/shared v0.0.0-00010101000000-000000000000
-	golang.org/x/sync v0.23.0
+	golang.org/x/sync v0.24.0
 	golang.org/x/time v0.16.0
 )
 
@@ -20,14 +21,12 @@ require (
 	github.com/bytedance/sonic/loader v0.5.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
-	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/gabriel-vasile/mimetype v1.4.15 // indirect
 	github.com/gin-contrib/sse v1.1.2 // indirect
 	github.com/go-playground/locales v0.14.2 // indirect
 	github.com/go-playground/universal-translator v0.18.2 // indirect
 	github.com/go-playground/validator/v10 v10.30.5 // indirect
 	github.com/goccy/go-json v0.11.2 // indirect
-	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -53,10 +52,10 @@ require (
 	go.mongodb.org/mongo-driver/v2 v2.9.2 // indirect
 	go.uber.org/atomic v1.12.0 // indirect
 	golang.org/x/arch v0.31.0 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )

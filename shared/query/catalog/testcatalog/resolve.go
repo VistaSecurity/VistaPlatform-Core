@@ -1,6 +1,7 @@
 package testcatalog
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/vistasecurity/vistaplatform/shared/query/ast"
@@ -109,7 +110,6 @@ var classTree = []catalog.ClassInfo{
 	{Key: "virtual", Path: "virtual"},
 	{Key: "virtual_machine", Path: "virtual.virtual_machine"},
 	{Key: "container", Path: "virtual.container"},
-	{Key: "cluster", Path: "virtual.cluster"},
 	{Key: "hypervisor", Path: "virtual.hypervisor"},
 	{Key: "cloud_resource", Path: "cloud_resource"},
 	{Key: "compute_instance", Path: "cloud_resource.compute_instance"},
@@ -120,8 +120,6 @@ var classTree = []catalog.ClassInfo{
 	{Key: "api_gateway", Path: "cloud_resource.api_gateway"},
 	{Key: "cdn_distribution", Path: "cloud_resource.cdn_distribution"},
 	{Key: "serverless_function", Path: "cloud_resource.serverless_function"},
-	{Key: "virtual_network", Path: "cloud_resource.virtual_network"},
-	{Key: "subnet", Path: "cloud_resource.subnet"},
 	{Key: "application", Path: "application"},
 	{Key: "web_application", Path: "application.web_application"},
 	{Key: "database_instance", Path: "application.database_instance"},
@@ -258,6 +256,20 @@ func (c *Catalog) resolveNamespaced(tgt catalog.Target, ns ast.Namespace, path [
 			Accessor: ast.Accessor{Kind: ast.AccessorIdentifier, Column: "value", Key: stored},
 		}, ns, stored), nil
 
+	case ast.NamespaceCF:
+		// cf: a tenant-defined custom field (§15.5). Any well-formed field
+		// name resolves, typed keyword over the custom_fields jsonb.
+		name := strings.ToLower(key)
+		if !customFieldKey.MatchString(name) {
+			return ast.FieldRef{}, &catalog.ResolveError{
+				Target: tgt.Name, Path: path, Namespace: ns, Reason: catalog.ReasonUnknownKey,
+			}
+		}
+		return fieldRef(path, catalog.FieldInfo{
+			Name: "cf." + name, Type: ast.TypeKeyword,
+			Accessor: ast.Accessor{Kind: ast.AccessorJSONB, JSONColumn: "custom_fields", Key: name},
+		}, ns, name), nil
+
 	default: // tag: any tenant key resolves; tags are free-form by design.
 		return fieldRef(path, catalog.FieldInfo{
 			Name: "tag." + key, Type: ast.TypeKeyword,
@@ -288,3 +300,7 @@ func containsFold(list []string, s string) bool {
 	}
 	return false
 }
+
+// customFieldKey is a custom field name (the schema's CHECK on
+// custom_fields.name).
+var customFieldKey = regexp.MustCompile(`^[a-z][a-z0-9_]{0,49}$`)

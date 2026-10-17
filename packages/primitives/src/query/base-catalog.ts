@@ -36,6 +36,25 @@ export interface CatalogVocabulary {
   factKeys: Readonly<Record<string, NamespaceKey>>;
   /** Every class, key and materialised path (§5.3). */
   classes: readonly ClassInfo[];
+  /**
+   * The tenant's custom field names (`/dcim/custom-fields`), published as
+   * `cf.<name>` for autocomplete. Resolution does not depend on them: like a
+   * tag key, any well-formed name resolves (§15.5), so the editor and the
+   * server agree whether or not the list has loaded.
+   */
+  customFieldNames?: readonly string[];
+}
+
+/** A custom field name: the schema's CHECK on custom_fields.name. */
+const CUSTOM_FIELD_KEY = /^[a-z][a-z0-9_]{0,49}$/;
+
+function customFieldInfo(key: string): FieldInfo {
+  return {
+    name: 'cf.' + key,
+    type: 'keyword',
+    accessor: { kind: 'jsonb', jsonColumn: 'custom_fields', key },
+    description: 'custom field ' + key,
+  };
 }
 
 /**
@@ -129,6 +148,11 @@ export abstract class BaseCatalog implements Catalog {
         accessor: { kind: 'tag_any', jsonColumn: 'tags' },
         description: 'any tag key or value',
       });
+    }
+    if (namespaces.includes('cf')) {
+      for (const k of [...(vocab.customFieldNames ?? [])].sort()) {
+        if (CUSTOM_FIELD_KEY.test(k)) out.push(customFieldInfo(k));
+      }
     }
     return out;
   }
@@ -240,6 +264,13 @@ export abstract class BaseCatalog implements Catalog {
           stored,
         ),
       };
+    }
+    if (ns === 'cf') {
+      // cf: a tenant-defined custom field (§15.5) — any well-formed name.
+      if (!CUSTOM_FIELD_KEY.test(lower)) {
+        return { ok: false, error: { target, path, namespace: ns, reason: 'unknown_key' } };
+      }
+      return { ok: true, field: buildFieldRef(path, customFieldInfo(lower), ns, lower) };
     }
     // tag: any tenant key resolves; tags are free-form by design.
     return {

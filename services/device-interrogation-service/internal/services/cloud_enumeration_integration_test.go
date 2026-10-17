@@ -3,11 +3,12 @@ package services
 // What only a real database can say about cloud enumeration (BUILD_PLAN 2.4).
 //
 // The builder tests next door pin what each provider PRODUCES. These pin what
-// the recording actually WRITES: assets in the right class and the right
+// the recording actually WRITES: the instance in the right class and the right
 // approval state, the provider's resource id as an identifier, the `cloud.*`
-// facts under the cloud-collector producer, the `contains` edges, the network
-// segment an instance's address scopes to — and, on a second run, exactly the
-// same rows rather than a second set.
+// facts under the cloud-collector producer, its ENI as an interface with its
+// address, the VPC and subnet as prefixes (and as NO asset and NO `contains`
+// edge — DCIM row 1.5f), the prefix the instance's address scopes to — and, on
+// a second run, exactly the same rows rather than a second set.
 //
 // Skips unless TEST_DATABASE_URL is set (run `make test-integration-db`).
 
@@ -15,7 +16,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"strings"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -23,7 +24,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
-	"github.com/vistasecurity/vistaplatform/shared/relationships"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -41,9 +42,8 @@ func awsEnumerationPlanForTest(t *testing.T) cloudEnumerationPlan {
 	subnets[0].SubnetID = rewrite(subnets[0].SubnetID)
 	subnets[0].ARN = rewrite(subnets[0].ARN)
 	subnets[0].VPCID = vpcs[0].VPCID
-	// A per-run CIDR: network_segments is unique on (tenant, value), and a
-	// shared one would make the second test's segment a match rather than an
-	// insert.
+	// A per-run CIDR: a shared one would make the second test's prefix a
+	// match rather than an insert.
 	subnets[0].CIDRBlock = "10.0." + itoaByte(suffix) + ".0/24"
 	instances[0].InstanceID = rewrite(instances[0].InstanceID)
 	instances[0].ARN = rewrite(instances[0].ARN)
@@ -57,6 +57,8 @@ func awsEnumerationPlanForTest(t *testing.T) cloudEnumerationPlan {
 	// two instances can share.
 	instances[0].PrivateDNSName = instances[0].InstanceID + ".ec2.internal"
 	instances[0].Interfaces[0].Addresses = instances[0].PrivateIPs
+	instances[0].Interfaces[0].SubnetID = subnets[0].SubnetID
+	instances[0].Interfaces[0].VPCID = vpcs[0].VPCID
 	groups[0].GroupID = rewrite(groups[0].GroupID)
 	instances[0].SecurityGroups[0].ID = groups[0].GroupID
 
@@ -85,15 +87,14 @@ func itoa(n int) string {
 	return digits
 }
 
-func TestIntegration_CloudEnumeration_WritesAssetsFactsAndContainment(t *testing.T) {
+func TestIntegration_CloudEnumeration_WritesInstanceInterfacesAndPrefixes(t *testing.T) {
 	owner := testdb.Connect(t)
 	tenantID := testdb.NewTenant(t, owner)
 	ctx := context.Background()
 
 	appDB := testdb.ConnectAsAppRole(t, owner)
-	integrationID := seedCloudIntegration(t, owner, tenantID)
-
 	svc := NewCloudDiscoveryService(appDB, owner, testMasterKey)
+	ctx, integrationID := accountRunContext(ctx, t, svc, owner, tenantID)
 	plan := awsEnumerationPlanForTest(t)
 
 	devices, counts, err := svc.recordEnumeration(ctx, tenantID, integrationID, "production", plan)
@@ -103,42 +104,32 @@ func TestIntegration_CloudEnumeration_WritesAssetsFactsAndContainment(t *testing
 	if counts != (CloudEnumerationCounts{Instances: 1, Networks: 1, Subnets: 1, SecurityGroups: 1}) {
 		t.Fatalf("counts = %+v", counts)
 	}
-	if len(devices) != 3 {
-		t.Fatalf("recorded %d devices, want 3 (vpc, subnet, instance)", len(devices))
+	if len(devices) != 1 {
+		t.Fatalf("recorded %d devices, want 1: the instance (the VPC and subnet are prefixes)", len(devices))
 	}
 
 	vpcRes := plan.Networks[0]
 	subnetRes := plan.Subnets[0]
 	instRes := plan.Instances[0]
-
-	vpcID := assetIDForCloudResource(t, owner, tenantID, vpcRes.ResourceID)
-	subnetID := assetIDForCloudResource(t, owner, tenantID, subnetRes.ResourceID)
 	instID := assetIDForCloudResource(t, owner, tenantID, instRes.ResourceID)
 
-	// --- classes and approval state -----------------------------------------
-	for _, tc := range []struct {
-		id        uuid.UUID
-		wantClass string
-		label     string
-	}{
-		{vpcID, "virtual_network", "vpc"},
-		{subnetID, "subnet", "subnet"},
-		{instID, "compute_instance", "instance"},
-	} {
-		var classKey, status string
-		if err := owner.QueryRow(
-			`SELECT class_key, asset_status FROM assets WHERE tenant_id = $1 AND id = $2`,
-			tenantID, tc.id).Scan(&classKey, &status); err != nil {
-			t.Fatalf("%s asset row: %v", tc.label, err)
-		}
-		if classKey != tc.wantClass {
-			t.Errorf("%s class_key = %q, want %q", tc.label, classKey, tc.wantClass)
-		}
-		// New cloud assets land pending_approval, exactly like every other
-		// discovered asset. The engine only ever writes this status.
-		if status != identity.StatusPendingApproval {
-			t.Errorf("%s asset_status = %q, want %q", tc.label, status, identity.StatusPendingApproval)
-		}
+	// --- no network asset (row 1.5f) ----------------------------------------
+	assertNoCloudNetworkAssets(t, owner, tenantID, vpcRes.ResourceID, subnetRes.ResourceID)
+
+	// --- class and approval state -------------------------------------------
+	var classKey, status string
+	if err := owner.QueryRow(
+		`SELECT class_key, asset_status FROM assets WHERE tenant_id = $1 AND id = $2`,
+		tenantID, instID).Scan(&classKey, &status); err != nil {
+		t.Fatalf("instance asset row: %v", err)
+	}
+	if classKey != "compute_instance" {
+		t.Errorf("class_key = %q, want compute_instance", classKey)
+	}
+	// New cloud assets land pending_approval, exactly like every other
+	// discovered asset. The engine only ever writes this status.
+	if status != identity.StatusPendingApproval {
+		t.Errorf("asset_status = %q, want %q", status, identity.StatusPendingApproval)
 	}
 
 	// --- the instance's address and hostname --------------------------------
@@ -163,7 +154,6 @@ func TestIntegration_CloudEnumeration_WritesAssetsFactsAndContainment(t *testing
 		facts.KeyCloudAccountID:  `"123456789012"`,
 		facts.KeyCloudRegion:     `"us-east-1"`,
 		facts.KeyCloudResourceID: `"` + instRes.ResourceID + `"`,
-		facts.KeyCloudVPCID:      `"` + instRes.Metadata["vpc_id"].(string) + `"`,
 	} {
 		if got := instFacts[key]; got != want {
 			t.Errorf("fact %s = %s, want %s", key, got, want)
@@ -172,12 +162,13 @@ func TestIntegration_CloudEnumeration_WritesAssetsFactsAndContainment(t *testing
 	if instFacts[facts.KeyCloudSecurityGroups] == "" {
 		t.Error("cloud.security_groups is missing — membership is the whole security-group answer")
 	}
-	if instFacts[facts.KeyNetInterfaces] == "" {
-		t.Error("net.interfaces is missing")
+	// Retired by row 1.5f: the ENIs are interfaces and the network is prefix
+	// containment.
+	for _, gone := range []string{facts.KeyNetInterfaces, facts.KeyCloudVPCID, facts.KeyCloudSubnetID} {
+		if v, present := instFacts[gone]; present {
+			t.Errorf("fact %s = %s is still written", gone, v)
+		}
 	}
-	// A fact written under the wrong producer would have been refused by
-	// UpsertFacts, so reaching here at all proves the producer; the source_ref
-	// is what ADR-0003 D3 names.
 	var sourceKind, sourceRef string
 	if err := owner.QueryRow(`
 		SELECT source_kind, source_ref FROM asset_facts
@@ -198,58 +189,85 @@ func TestIntegration_CloudEnumeration_WritesAssetsFactsAndContainment(t *testing
 		t.Error("operating_system attribute was written; EC2 states no guest OS")
 	}
 
-	// --- containment --------------------------------------------------------
-	assertEdge(t, owner, tenantID, vpcID, subnetID, relationships.Contains)
-	assertEdge(t, owner, tenantID, subnetID, instID, relationships.Contains)
-	// The reverse of a type is a LABEL, never a second edge.
-	if edgeExists(t, owner, tenantID, instID, subnetID, relationships.MemberOf) {
-		t.Error("a member_of edge was written alongside contains; one fact, two spellings")
-	}
-
-	// --- the network segment the address scopes to --------------------------
-	var segType, segValue, segNetworkType string
-	var segMeta []byte
+	// --- the ENI is an interface carrying the address -----------------------
+	var ifaceName, ifaceType, ifaceSource, addr string
 	if err := owner.QueryRow(`
-		SELECT segment_type, value, network_type, metadata
-		FROM network_segments WHERE tenant_id = $1 AND value = $2`,
-		tenantID, subnetRes.SegmentCIDR).Scan(&segType, &segValue, &segNetworkType, &segMeta); err != nil {
-		t.Fatalf("network segment for %s: %v", subnetRes.SegmentCIDR, err)
+		SELECT i.name, i.type, i.source_kind, host(ip.address) || '/' || masklen(ip.address)
+		  FROM interfaces i JOIN ip_addresses ip
+		    ON ip.tenant_id = i.tenant_id AND ip.assigned_kind = 'interface' AND ip.assigned_id = i.id
+		 WHERE i.tenant_id = $1 AND i.asset_id = $2`, tenantID, instID).Scan(&ifaceName, &ifaceType, &ifaceSource, &addr); err != nil {
+		t.Fatalf("ENI interface: %v", err)
 	}
-	if segType != "cidr" {
-		t.Errorf("segment_type = %q, want cidr — ScopeForAddress consults only cidr and ip_range", segType)
+	if ifaceName != "eni-01" || ifaceType != "virtual" || ifaceSource != "measured" {
+		t.Errorf("interface = %s/%s/%s, want eni-01/virtual/measured", ifaceName, ifaceType, ifaceSource)
 	}
-	if segNetworkType != "cloud" {
-		t.Errorf("network_type = %q, want cloud", segNetworkType)
-	}
-	var meta map[string]any
-	if err := json.Unmarshal(segMeta, &meta); err != nil {
-		t.Fatalf("segment metadata: %v", err)
-	}
-	if meta["dynamic"] != false {
-		t.Errorf("segment metadata dynamic = %#v, want an explicit false — a dynamic scope stops an address deciding identity", meta["dynamic"])
-	}
-	if meta["source"] != "cloud_discovery" {
-		t.Errorf("segment provenance = %#v, want cloud_discovery", meta["source"])
+	if want := instRes.IPAddress + "/24"; addr != want {
+		t.Errorf("ENI address = %s, want %s (the subnet's length)", addr, want)
 	}
 
-	// The instance's ip_address identifier must be scoped to that segment, not
-	// to the tenant default — that scoping is what lets an agent inside the
-	// instance, or the sensor on the wire, resolve to this same asset.
-	var segID string
-	if err := owner.QueryRow(
-		`SELECT id::text FROM network_segments WHERE tenant_id = $1 AND value = $2`,
-		tenantID, subnetRes.SegmentCIDR).Scan(&segID); err != nil {
-		t.Fatalf("segment id: %v", err)
+	// --- the VPC and the subnet are prefixes in the VPC's address space -----
+	for _, cidr := range []string{vpcRes.CIDRs[0], subnetRes.CIDRs[0]} {
+		var ref, networkType string
+		var dhcp sql.NullBool
+		if err := owner.QueryRow(`
+			SELECT coalesce(cloud_network_ref, ''), coalesce(network_type, ''), dhcp_managed
+			  FROM prefixes WHERE tenant_id = $1 AND prefix = $2::cidr`,
+			tenantID, cidr).Scan(&ref, &networkType, &dhcp); err != nil {
+			t.Fatalf("prefix %s: %v", cidr, err)
+		}
+		if ref != vpcRes.ResourceID || networkType != "cloud" || !dhcp.Valid || dhcp.Bool {
+			t.Errorf("prefix %s: cloud_network_ref=%q network_type=%q dhcp_managed=%v, want %q / cloud / false",
+				cidr, ref, networkType, dhcp, vpcRes.ResourceID)
+		}
+	}
+
+	// The instance's address is scoped to the SUBNET's prefix, not the tenant
+	// default and not the VPC's: that is the scope an agent inside the
+	// instance, or the sensor on the wire, reaches for the same address — so
+	// all three resolve to this one asset. (A subnet prefix carrying its own
+	// subnet id rather than the VPC's would be skipped for a sighting that
+	// names its VPC, and this assertion would fail.)
+	var subnetPrefix string
+	if err := owner.QueryRow(`SELECT id::text FROM prefixes WHERE tenant_id = $1 AND prefix = $2::cidr`,
+		tenantID, subnetRes.CIDRs[0]).Scan(&subnetPrefix); err != nil {
+		t.Fatalf("subnet prefix id: %v", err)
 	}
 	var idScope string
 	if err := owner.QueryRow(`
-		SELECT coalesce(scope, '') FROM asset_identifiers
+		SELECT coalesce(scope, '') FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'ip_address'`,
 		tenantID, instID).Scan(&idScope); err != nil {
 		t.Fatalf("ip_address identifier: %v", err)
 	}
-	if idScope != segID {
-		t.Errorf("ip_address scope = %q, want the subnet's segment %q", idScope, segID)
+	if idScope != subnetPrefix {
+		t.Errorf("ip_address scope = %q, want the subnet's prefix %q", idScope, subnetPrefix)
+	}
+
+	// The account's network listing matched the declared account asset and
+	// changed nothing about it but its last sighting.
+	account := assetIDForCloudResource(t, owner, tenantID, "aws:123456789012")
+	var acctClass, acctStatus, acctName string
+	if err := owner.QueryRow(`SELECT class_key, asset_status, coalesce(display_name, '') FROM assets WHERE tenant_id = $1 AND id = $2`,
+		tenantID, account).Scan(&acctClass, &acctStatus, &acctName); err != nil {
+		t.Fatal(err)
+	}
+	if acctClass != "cloud_account" || acctStatus != identity.StatusMonitoring || acctName != "aws-"+integrationID.String()[:8] {
+		t.Errorf("account asset = %s/%s/%q after the network listing, want cloud_account/monitoring/its integration's name",
+			acctClass, acctStatus, acctName)
+	}
+	var acctInterfaces int
+	if err := owner.QueryRow(`SELECT count(*) FROM interfaces WHERE tenant_id = $1 AND asset_id = $2`, tenantID, account).Scan(&acctInterfaces); err != nil || acctInterfaces != 0 {
+		t.Errorf("the account grew %d interfaces (%v); its sighting carries prefixes only", acctInterfaces, err)
+	}
+
+	// --- no containment edge ------------------------------------------------
+	var edges int
+	if err := owner.QueryRow(`SELECT count(*) FROM asset_relationships WHERE tenant_id = $1 AND type = 'contains'`,
+		tenantID).Scan(&edges); err != nil {
+		t.Fatal(err)
+	}
+	if edges != 0 {
+		t.Errorf("%d contains edges written; a VPC / subnet is a prefix, containment is by address", edges)
 	}
 
 	// --- enumerated resources are NOT crypto findings -----------------------
@@ -262,22 +280,77 @@ func TestIntegration_CloudEnumeration_WritesAssetsFactsAndContainment(t *testing
 	}
 }
 
-// Two runs, one asset. A re-run matches on cloud_resource_id and updates.
+// assertNoCloudNetworkAssets fails if any asset carries a retired class or one
+// of the networks' resource ids (row 1.5f).
+func assertNoCloudNetworkAssets(t *testing.T, db *sql.DB, tenantID uuid.UUID, resourceIDs ...string) {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM assets WHERE tenant_id = $1 AND class_key IN ('subnet', 'virtual_network')`,
+		tenantID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("%d assets of class subnet / virtual_network; they are prefixes since row 1.5f", n)
+	}
+	for _, rid := range resourceIDs {
+		if err := db.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
+			WHERE tenant_id = $1 AND kind = 'cloud_resource_id' AND value = $2`, tenantID, rid).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("an asset carries the network's resource id %s", rid)
+		}
+	}
+}
+
+// Two runs, one asset, one prefix each. A re-run matches on cloud_resource_id
+// and updates.
 func TestIntegration_CloudEnumeration_IsIdempotent(t *testing.T) {
 	owner := testdb.Connect(t)
 	tenantID := testdb.NewTenant(t, owner)
 	ctx := context.Background()
 
 	appDB := testdb.ConnectAsAppRole(t, owner)
-	integrationID := seedCloudIntegration(t, owner, tenantID)
-
 	svc := NewCloudDiscoveryService(appDB, owner, testMasterKey)
+	ctx, integrationID := accountRunContext(ctx, t, svc, owner, tenantID)
 	plan := awsEnumerationPlanForTest(t)
 
 	first, _, err := svc.recordEnumeration(ctx, tenantID, integrationID, "production", plan)
 	if err != nil {
 		t.Fatalf("first run: %v", err)
 	}
+	rows := func() map[string]int {
+		out := map[string]int{}
+		for _, table := range []string{"assets", "interfaces", "ip_addresses", "prefixes", "asset_relationships", "clusters"} {
+			var n int
+			if err := owner.QueryRow(`SELECT count(*) FROM `+table+` WHERE tenant_id = $1`, tenantID).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			out[table] = n
+		}
+		return out
+	}
+	before := rows()
+	// DCIM row 4.2: the account + region is mirrored as ONE aws cluster with
+	// the instance as its VM (mutation: drop the MirrorCloudCluster call from
+	// recordCloudResource → red).
+	var mirrored int
+	if err := owner.QueryRow(`SELECT count(*) FROM assets a JOIN clusters c ON c.id = a.cluster_id JOIN cluster_types ct ON ct.id = c.type_id
+		WHERE a.tenant_id = $1 AND a.class_key = 'compute_instance' AND ct.slug = 'aws' AND c.external_ids ? 'cloud'`, tenantID).Scan(&mirrored); err != nil {
+		t.Fatal(err)
+	}
+	if mirrored != len(plan.Instances) || before["clusters"] != 1 {
+		t.Errorf("mirrored instances = %d of %d in %d clusters, want every instance in one account+region cluster", mirrored, len(plan.Instances), before["clusters"])
+	}
+	prefixObservations := func() int {
+		var n int
+		if err := owner.QueryRow(`SELECT observation_count FROM prefixes WHERE tenant_id = $1 AND prefix = $2::cidr`,
+			tenantID, plan.Subnets[0].CIDRs[0]).Scan(&n); err != nil {
+			t.Fatalf("prefix observation count: %v", err)
+		}
+		return n
+	}
+	firstObservations := prefixObservations()
 	second, _, err := svc.recordEnumeration(ctx, tenantID, integrationID, "production", plan)
 	if err != nil {
 		t.Fatalf("second run: %v", err)
@@ -292,50 +365,37 @@ func TestIntegration_CloudEnumeration_IsIdempotent(t *testing.T) {
 				first[i].DeviceType, first[i].ID, second[i].ID)
 		}
 	}
-
-	// And the database agrees: one asset per resource id, one edge per pair.
-	for _, res := range append(append([]cloudEnumResource{}, plan.Networks...), append(plan.Subnets, plan.Instances...)...) {
-		var n int
-		if err := owner.QueryRow(`
-			SELECT count(*) FROM asset_identifiers
-			WHERE tenant_id = $1 AND kind = 'cloud_resource_id' AND value = $2`,
-			tenantID, res.ResourceID).Scan(&n); err != nil {
-			t.Fatalf("identifier count: %v", err)
-		}
-		if n != 1 {
-			t.Errorf("%s has %d cloud_resource_id rows, want 1", res.ResourceID, n)
-		}
+	if after := rows(); fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Errorf("rows after the second run %v, want unchanged %v", after, before)
 	}
-
-	var edges int
-	if err := owner.QueryRow(
-		`SELECT count(*) FROM asset_relationships WHERE tenant_id = $1 AND type = 'contains'`,
-		tenantID).Scan(&edges); err != nil {
-		t.Fatalf("edge count: %v", err)
-	}
-	if edges != 2 {
-		t.Errorf("%d contains edges after two runs, want 2 (vpc→subnet, subnet→instance)", edges)
-	}
-	var observations int
+	var n int
 	if err := owner.QueryRow(`
-		SELECT observation_count FROM asset_relationships
-		WHERE tenant_id = $1 AND type = 'contains' LIMIT 1`, tenantID).Scan(&observations); err != nil {
-		t.Fatalf("observation count: %v", err)
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
+		WHERE tenant_id = $1 AND kind = 'cloud_resource_id' AND value = $2`,
+		tenantID, plan.Instances[0].ResourceID).Scan(&n); err != nil {
+		t.Fatalf("identifier count: %v", err)
 	}
-	if observations != 2 {
-		t.Errorf("observation_count = %d, want 2 — a re-observation bumps rather than appends", observations)
+	if n != 1 {
+		t.Errorf("%s has %d cloud_resource_id rows, want 1", plan.Instances[0].ResourceID, n)
 	}
+	// The prefix was observed again rather than written again: once by the
+	// account's network listing and once by the instance sitting in it, per run.
+	if firstObservations != 2 {
+		t.Errorf("subnet prefix observation_count after one run = %d, want 2 (the account's listing and the instance)", firstObservations)
+	}
+	if got := prefixObservations(); got != 2*firstObservations {
+		t.Errorf("subnet prefix observation_count = %d after two runs, want %d — a re-observation bumps rather than appends", got, 2*firstObservations)
+	}
+}
 
-	// One segment, not two: the second run matched the existing row.
-	var segments int
-	if err := owner.QueryRow(
-		`SELECT count(*) FROM network_segments WHERE tenant_id = $1 AND value = $2`,
-		tenantID, plan.Subnets[0].SegmentCIDR).Scan(&segments); err != nil {
-		t.Fatalf("segment count: %v", err)
-	}
-	if segments != 1 {
-		t.Errorf("%d segments for %s, want 1", segments, plan.Subnets[0].SegmentCIDR)
-	}
+// accountRunContext seeds an integration that names the fixtures' AWS account
+// and begins a cloud run for it, as a real run does: the account asset exists
+// (declared by the integration), so the account's network listing records the
+// prefixes BEFORE any instance resolves (recordNetworkPrefixes).
+func accountRunContext(ctx context.Context, t *testing.T, svc *CloudDiscoveryService, owner *sql.DB, tenantID uuid.UUID) (context.Context, uuid.UUID) {
+	t.Helper()
+	integrationID := seedAccountIntegration(t, owner, tenantID, "123456789012", false)
+	return svc.beginCloudRun(ctx, tenantID, integrationID, "aws"), integrationID
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +406,7 @@ func assetIDForCloudResource(t *testing.T, db *sql.DB, tenantID uuid.UUID, resou
 	t.Helper()
 	var id uuid.UUID
 	if err := db.QueryRow(`
-		SELECT asset_id FROM asset_identifiers
+		SELECT asset_id FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND kind = 'cloud_resource_id' AND value = $2`,
 		tenantID, resourceID).Scan(&id); err != nil {
 		t.Fatalf("no asset carries cloud_resource_id %q: %v", resourceID, err)
@@ -389,45 +449,6 @@ func attributeMap(t *testing.T, db *sql.DB, tenantID, assetID uuid.UUID) map[str
 	return out
 }
 
-func edgeExists(t *testing.T, db *sql.DB, tenantID, from, to uuid.UUID, typ relationships.Type) bool {
-	t.Helper()
-	var n int
-	if err := db.QueryRow(`
-		SELECT count(*) FROM asset_relationships
-		WHERE tenant_id = $1 AND from_asset_id = $2 AND to_asset_id = $3 AND type = $4`,
-		tenantID, from, to, string(typ)).Scan(&n); err != nil {
-		t.Fatalf("edge lookup: %v", err)
-	}
-	return n > 0
-}
-
-// assertEdge asserts the edge exists AND says where it came from.
-//
-// The provenance half was added for gate 2. Without it the containment edges
-// were the only rows this suite wrote whose source was never checked, and
-// source_kind is the field a reviewer uses to decide whether to believe an edge
-// at all — "the provider's own API stated this containment" (measured) is a
-// different claim from "something proposed it" (inferred, ADR-0008 D4.2). An
-// edge that lost its source_ref also cannot be swept when the resource goes
-// away, because nothing identifies the pass that drew it.
-func assertEdge(t *testing.T, db *sql.DB, tenantID, from, to uuid.UUID, typ relationships.Type) {
-	t.Helper()
-	var kind, ref string
-	if err := db.QueryRow(`
-		SELECT source_kind, coalesce(source_ref, '') FROM asset_relationships
-		WHERE tenant_id = $1 AND from_asset_id = $2 AND to_asset_id = $3 AND type = $4`,
-		tenantID, from, to, string(typ)).Scan(&kind, &ref); err != nil {
-		t.Errorf("no %s edge from %s to %s: %v", typ, from, to, err)
-		return
-	}
-	if kind != string(identity.SourceMeasured) {
-		t.Errorf("%s edge %s -> %s source_kind = %q, want measured — the provider's API stated this containment", typ, from, to, kind)
-	}
-	if !strings.HasPrefix(ref, "cloud:") {
-		t.Errorf("%s edge %s -> %s source_ref = %q, want a cloud:<provider> reference", typ, from, to, ref)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // The two ways one private address can name two machines
 // ---------------------------------------------------------------------------
@@ -453,6 +474,8 @@ func oneVPCPlan(tag, cidr, addr string) cloudEnumerationPlan {
 	// keeps this test about the ADDRESS and nothing else.
 	instances[0].PrivateDNSName = ""
 	instances[0].Interfaces[0].Addresses = instances[0].PrivateIPs
+	instances[0].Interfaces[0].SubnetID = subnets[0].SubnetID
+	instances[0].Interfaces[0].VPCID = vpcs[0].VPCID
 	groups[0].GroupID = "sg-" + tag
 	instances[0].SecurityGroups[0].ID = groups[0].GroupID
 	return buildAWSEnumerationPlan(instances, vpcs, subnets, groups)
@@ -472,7 +495,7 @@ func instanceAssetID(t *testing.T, devices []models.Device) uuid.UUID {
 func cloudResourceIDsOf(t *testing.T, db *sql.DB, tenantID, assetID uuid.UUID) []string {
 	t.Helper()
 	rows, err := db.Query(`
-		SELECT value FROM asset_identifiers
+		SELECT value FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'cloud_resource_id'
 		ORDER BY value`, tenantID, assetID)
 	if err != nil {
@@ -496,23 +519,27 @@ func cloudResourceIDsOf(t *testing.T, db *sql.DB, tenantID, assetID uuid.UUID) [
 // Two VPCs, the same subnet CIDR, the same private address: TWO assets.
 //
 // This is the reproduction that failed before this workstream's identity fixes.
-// `network_segments` was unique on (tenant, value), so both subnets shared one
-// segment; both instances' ip_address identifiers landed in one scope; and
+// The network container was unique on (tenant, value), so both subnets shared
+// one scope; both instances' ip_address identifiers landed in it; and
 // because a `cloud_resource_id` the engine has never seen owns nothing and so
 // cannot decide, `ip_address` decided instead and the second instance was
 // ABSORBED — one asset carrying two `cloud_resource_id` identifiers, with the
 // first instance's approval state, and no merge proposal.
 //
-// Mutation checks: drop `cloud_network_ref` from ensureCIDRSegment's INSERT, or
-// take the network filter out of ScopeForAddress, and this fails.
+// The subnets are prefixes (rows 1.5f, 1.6), and a prefix's identity includes
+// its cloud network (prefixes_identity_uniq keys on `cloud_network_ref`), so
+// the two subnets are two prefix rows and the two addresses sit in two scopes.
+// Mutation checks: drop the cloud_network_ref predicate from the observed
+// prefix writer's lookup, or take the network filter out of ScopeForAddress,
+// and this fails.
 func TestIntegration_CloudEnumeration_TwoVPCsSharingACIDRAreTwoAssets(t *testing.T) {
 	owner := testdb.Connect(t)
 	tenantID := testdb.NewTenant(t, owner)
 	ctx := context.Background()
 
 	appDB := testdb.ConnectAsAppRole(t, owner)
-	integrationID := seedCloudIntegration(t, owner, tenantID)
 	svc := NewCloudDiscoveryService(appDB, owner, testMasterKey)
+	ctx, integrationID := accountRunContext(ctx, t, svc, owner, tenantID)
 
 	const cidr, addr = "10.0.1.0/24", "10.0.1.20"
 	planA := oneVPCPlan("aaaa", cidr, addr)
@@ -548,33 +575,23 @@ func TestIntegration_CloudEnumeration_TwoVPCsSharingACIDRAreTwoAssets(t *testing
 		}
 	}
 
-	// Two segments for the one CIDR, told apart by their VPC.
-	var segs int
+	// Two prefixes for the one CIDR, told apart by their VPC.
+	var prefixes, refs int
 	if err := owner.QueryRow(`
-		SELECT count(*) FROM network_segments WHERE tenant_id = $1 AND value = $2`,
-		tenantID, cidr).Scan(&segs); err != nil {
-		t.Fatalf("segment count: %v", err)
+		SELECT count(*), count(DISTINCT cloud_network_ref) FROM prefixes WHERE tenant_id = $1 AND prefix = $2::cidr`,
+		tenantID, cidr).Scan(&prefixes, &refs); err != nil {
+		t.Fatalf("prefix count: %v", err)
 	}
-	if segs != 2 {
-		t.Errorf("%d segments for %s, want 2 — one per VPC", segs, cidr)
-	}
-	var refs int
-	if err := owner.QueryRow(`
-		SELECT count(DISTINCT cloud_network_ref) FROM network_segments
-		WHERE tenant_id = $1 AND value = $2 AND cloud_network_ref IS NOT NULL`,
-		tenantID, cidr).Scan(&refs); err != nil {
-		t.Fatalf("network ref count: %v", err)
-	}
-	if refs != 2 {
-		t.Errorf("%d distinct cloud_network_ref values, want 2 — the ref is what tells the segments apart", refs)
+	if prefixes != 2 || refs != 2 {
+		t.Errorf("%d prefixes (%d distinct cloud_network_ref) for %s, want 2 and 2 — one per VPC", prefixes, refs, cidr)
 	}
 
-	// And the two addresses are scoped to DIFFERENT segments, which is the
+	// And the two addresses are scoped to DIFFERENT prefixes, which is the
 	// mechanism: without it they are one identifier and one asset.
 	scopeOf := func(asset uuid.UUID) string {
 		var scope string
 		if err := owner.QueryRow(`
-			SELECT coalesce(scope, '') FROM asset_identifiers
+			SELECT coalesce(scope, '') FROM (`+identifiersql.All+`) ident_rows
 			WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'ip_address'`,
 			tenantID, asset).Scan(&scope); err != nil {
 			t.Fatalf("ip_address scope for %s: %v", asset, err)
@@ -590,7 +607,7 @@ func TestIntegration_CloudEnumeration_TwoVPCsSharingACIDRAreTwoAssets(t *testing
 // subnet.
 //
 // EC2 hands a freed private address to the next instance launched, so this is
-// genuinely one segment and the VPC-scoping fix does not — and should not —
+// genuinely one prefix and the VPC-scoping fix does not — and should not —
 // separate them. What stops the silent merge is the engine's singleton guard:
 // the new instance's `cloud_resource_id` disagrees with the one the matched
 // asset carries, so the observation becomes its own pending asset and a merge
@@ -604,8 +621,8 @@ func TestIntegration_CloudEnumeration_ReusedAddressOpensAProposal(t *testing.T) 
 	ctx := context.Background()
 
 	appDB := testdb.ConnectAsAppRole(t, owner)
-	integrationID := seedCloudIntegration(t, owner, tenantID)
 	svc := NewCloudDiscoveryService(appDB, owner, testMasterKey)
+	ctx, integrationID := accountRunContext(ctx, t, svc, owner, tenantID)
 
 	// ONE VPC and ONE subnet: the second run is the same placement with a new
 	// instance in it, which is what terminate-then-launch looks like from here.

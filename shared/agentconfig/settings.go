@@ -227,7 +227,7 @@ var Registry = func() map[Key]Field {
 		{
 			// Off by default, and a consent rather than a tuning knob: with it
 			// off the enricher handshakes only with the tenant's own address
-			// space — private addresses, declared network segments and elevated
+			// space — private addresses, declared prefixes and elevated
 			// connections — and every other destination is recorded passively
 			// and left alone. The confirmation names the consequence because it
 			// is one a third party, not the tenant, experiences.

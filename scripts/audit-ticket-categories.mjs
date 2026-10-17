@@ -5,7 +5,8 @@
 //
 //   1. scripts/database/schema.sql
 //        - the inline CHECK on CREATE TABLE public.tickets  (fresh installs)
-//        - the DROP/ADD pair in POST-MIGRATIONS             (existing installs)
+//        - the DROP/ADD pair in POST-MIGRATIONS             (existing installs,
+//          once 5.0.0 has shipped; see below)
 //   2. services/compliance-engine/internal/models/ticket_categories.go
 //        - TicketCategoriesWritable + TicketCategoriesLegacy (the 400 gate)
 //   3. api/openapi/compliance-engine.openapi.yaml
@@ -25,6 +26,12 @@
 // well as to the rest, because they are the pair most likely to drift: the
 // first is what a fresh install gets and the second is what an upgrade gets,
 // and a double-apply against an empty database proves neither.
+//
+// 5.0 cycle (asset-inventory ADR-0010 D11): schema.sql is the 5.0.0 baseline
+// and has NO POST-MIGRATIONS block — every 5.0 release candidate is a fresh
+// install, so the inline CHECK is the only edit. The pair is therefore checked
+// only when it is present; once 5.0.0 ships and a category is added to an
+// installed base, the DROP/ADD pair returns and is held to the inline list.
 //
 // Run standalone for a report; `--strict` (how `make audit` runs it) exits 1
 // on any disagreement.
@@ -59,10 +66,9 @@ const inlineCats = inlineMatch ? categoriesFromCheckBody(inlineMatch[1]) : [];
 const postMatch = schema.match(
   /ADD CONSTRAINT tickets_category_check\s*\n\s*CHECK \(\(\(category\)::text = ANY \(\(ARRAY\[([\s\S]*?)\]\)::text\[\]\)\)\);/,
 );
-if (!postMatch) fail('schema.sql: could not find the POST-MIGRATIONS ADD CONSTRAINT tickets_category_check');
 const postCats = postMatch ? categoriesFromCheckBody(postMatch[1]) : [];
 
-if (!schema.includes('ALTER TABLE public.tickets DROP CONSTRAINT IF EXISTS tickets_category_check;')) {
+if (postMatch && !schema.includes('ALTER TABLE public.tickets DROP CONSTRAINT IF EXISTS tickets_category_check;')) {
   fail(
     'schema.sql: the POST-MIGRATIONS block must DROP the old constraint before adding it. ' +
       'Without the DROP, ADD CONSTRAINT fails on any database that already has one.',
@@ -126,7 +132,7 @@ const tsAll = [...tsWritable, ...tsLegacy];
 // The DB must permit everything writable AND everything legacy — legacy rows
 // predate the split and still have to satisfy the constraint.
 compare('schema.sql inline CHECK', inlineCats, 'writable + legacy (Go)', goAll);
-compare('schema.sql POST-MIGRATIONS CHECK', postCats, 'schema.sql inline CHECK', inlineCats);
+if (postMatch) compare('schema.sql POST-MIGRATIONS CHECK', postCats, 'schema.sql inline CHECK', inlineCats);
 
 // The UI and the write gate must agree on both halves separately: a category
 // the UI offers but Go rejects is a button that 400s, and a legacy category Go
@@ -252,7 +258,7 @@ console.log(`\n${B}Ticket-category parity — schema ↔ Go ↔ OpenAPI ↔ prim
 console.log(`${D}  writable            : ${goWritable.length} (${goWritable.join(', ')})${X}`);
 console.log(`${D}  legacy (read-only)  : ${goLegacy.length} (${goLegacy.join(', ') || 'none'})${X}`);
 console.log(`${D}  schema CHECK inline : ${inlineCats.length}${X}`);
-console.log(`${D}  schema CHECK post-m : ${postCats.length}${X}`);
+console.log(`${D}  schema CHECK post-m : ${postMatch ? postCats.length : 'none (5.0 baseline)'}${X}`);
 console.log(`${D}  openapi filter enum : ${specCats.length}${X}`);
 console.log(`${D}  primitives registry : ${tsWritable.length} + ${tsLegacy.length} legacy${X}`);
 console.log(`${D}  default SLA days    : ${['critical', 'high', 'medium', 'low'].map((p) => `${p}=${goDays[p]}`).join(' ')} (due-soon ${goDueSoon}d)${X}\n`);
@@ -263,8 +269,8 @@ if (problems.length === 0) {
 }
 for (const p of problems) console.log(`${R}  ✗ ${p}${X}`);
 console.log(
-  `\n${D}  Adding a category is four edits: schema.sql (inline CHECK AND the` +
-    `\n  POST-MIGRATIONS pair), ticket_categories.go, the OpenAPI enum, and` +
+  `\n${D}  Adding a category is four edits: schema.sql (the inline CHECK, plus the` +
+    `\n  POST-MIGRATIONS pair once 5.0.0 has shipped), ticket_categories.go, the OpenAPI enum, and` +
     `\n  packages/primitives/src/tickets/categories.ts.${X}\n`,
 );
 process.exit(strict ? 1 : 0);

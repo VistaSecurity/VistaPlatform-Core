@@ -114,7 +114,7 @@ describe('FACET_LEVEL_FOR', () => {
   });
 
   it('covers every facet the rail asks the server to count', () => {
-    const asked: FacetKey[] = ['class', 'status', 'environment', 'site', 'segment', 'owner', 'business_unit', 'tag', 'risk', 'provenance', 'findings'];
+    const asked: FacetKey[] = ['class', 'status', 'environment', 'site', 'prefix', 'owner', 'business_unit', 'tag', 'risk', 'provenance', 'findings'];
     for (const key of asked) {
       expect(FACET_LEVEL_FOR[key], `no server level for the ${key} facet`).toBeTruthy();
       expect(FACET_LABEL[key]).toBeTruthy();
@@ -134,7 +134,7 @@ describe('FACET_LEVEL_FOR', () => {
     // the count and the term the rail's click writes.
     const supported = new Set([
       'class', 'risk', 'tag', 'has_findings', 'has_endpoints', 'status', 'environment',
-      'ownership', 'stale_status', 'site', 'region', 'zone', 'segment', 'owner_email',
+      'ownership', 'stale_status', 'site', 'region', 'zone', 'prefix', 'owner_email',
       'business_unit', 'support_group', 'operating_system', 'source', 'proposed_by',
     ]);
     for (const level of FACET_LEVELS) expect(supported).toContain(level);
@@ -208,5 +208,16 @@ describe('the rail starts collapsed', () => {
   it('the class tree is closed, not pre-expanded to every top-level node', () => {
     expect(src).toMatch(/useState<Set<string>>\(\(\) => new Set\(\)\)/);
     expect(src).not.toMatch(/new Set\(CLASS_TREE\.map/);
+  });
+});
+
+describe('the business unit facet (DCIM 1.1)', () => {
+  it('shows the unit NAME while the query term carries the slug', () => {
+    const view = bucketFacetView([{ value: 'finance', label: 'Finance', count: 3 }], [], false, 'none');
+    expect(view.kind).toBe('values');
+    if (view.kind === 'values') {
+      expect(view.values[0].label).toBe('Finance');
+      expect(view.values[0].value).toBe('finance');
+    }
   });
 });

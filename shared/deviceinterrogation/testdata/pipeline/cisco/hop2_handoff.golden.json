@@ -1,6 +1,6 @@
 {
   "vendor": "cisco",
-  "input_sha256": "abe457d9bd5f8c4fc452def61478a1ed2e5ed3a1439130aede8eb2420c10d849",
+  "input_sha256": "4c114f0a064aac9e143f2784fc17353f40b0e2aac66b8c03627107def8f2a640",
   "imports": [
     {
       "findings": [
@@ -259,7 +259,13 @@
     }
   ],
   "process_error": "",
-  "learned_segments": [],
+  "learned_prefixes": [
+    {
+      "value": "192.0.2.0/30",
+      "network_type": "",
+      "dhcp_managed": null
+    }
+  ],
   "assets": [
     {
       "label": "device",
@@ -274,10 +280,40 @@
           "source_kind": "declared"
         },
         {
+          "kind": "hostname",
+          "value": "ce-router",
+          "scope": "tenant",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "hostname",
+          "value": "server",
+          "scope": "tenant",
+          "source_kind": "measured"
+        },
+        {
           "kind": "ip_address",
           "value": "{{APPLIANCE_IP}}",
           "scope": "tenant",
           "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.2",
+          "scope": "prefix:192.0.2.0/30",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.2",
+          "scope": "tenant",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "203.0.113.2",
+          "scope": "tenant",
+          "source_kind": "measured"
         },
         {
           "kind": "mac_address",
@@ -306,73 +342,35 @@
       ]
     },
     {
-      "label": "asset[hostname=ce-router,ip_address=198.51.100.2]",
-      "hostname": "ce-router",
-      "primary_address": "198.51.100.2",
-      "class_key": "network_device",
-      "identifiers": [
-        {
-          "kind": "hostname",
-          "value": "ce-router",
-          "scope": "tenant",
-          "source_kind": "measured"
-        },
-        {
-          "kind": "ip_address",
-          "value": "198.51.100.2",
-          "scope": "tenant",
-          "source_kind": "measured"
-        }
-      ]
-    },
-    {
-      "label": "asset[hostname=desktop-switch,hostname=hpswitch,ip_address=192.0.2.2,mac_address=94:f1:28:79:55:55]",
-      "hostname": "hpswitch",
-      "primary_address": "192.0.2.2",
+      "label": "asset[hostname=desktop-switch]",
+      "hostname": "desktop-switch",
+      "primary_address": null,
       "class_key": "switch",
       "identifiers": [
         {
           "kind": "hostname",
           "value": "desktop-switch",
-          "scope": "segment:192.0.2.0/25",
+          "scope": "prefix:192.0.2.0/30",
           "source_kind": "measured"
-        },
+        }
+      ]
+    },
+    {
+      "label": "asset[hostname=hpswitch,mac_address=94:f1:28:79:55:55]",
+      "hostname": "hpswitch",
+      "primary_address": null,
+      "class_key": "unknown_host",
+      "identifiers": [
         {
           "kind": "hostname",
           "value": "hpswitch",
-          "scope": "segment:192.0.2.0/25",
-          "source_kind": "measured"
-        },
-        {
-          "kind": "ip_address",
-          "value": "192.0.2.2",
-          "scope": "segment:192.0.2.0/25",
+          "scope": "prefix:192.0.2.0/30",
           "source_kind": "measured"
         },
         {
           "kind": "mac_address",
           "value": "94:f1:28:79:55:55",
           "scope": null,
-          "source_kind": "measured"
-        }
-      ]
-    },
-    {
-      "label": "asset[hostname=server,ip_address=203.0.113.2]",
-      "hostname": "server",
-      "primary_address": "203.0.113.2",
-      "class_key": "unknown_host",
-      "identifiers": [
-        {
-          "kind": "hostname",
-          "value": "server",
-          "scope": "tenant",
-          "source_kind": "measured"
-        },
-        {
-          "kind": "ip_address",
-          "value": "203.0.113.2",
-          "scope": "tenant",
           "source_kind": "measured"
         }
       ]

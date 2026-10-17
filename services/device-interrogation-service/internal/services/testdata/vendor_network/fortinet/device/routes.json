@@ -1,0 +1,23 @@
+{
+  "routes": [
+    {
+      "path_suffix": "/api/v2/cmdb/system/status",
+      "body_file": "system_status.json"
+    },
+    {
+      "path_suffix": "/api/v2/cmdb/system/interface",
+      "body_file": "system_interface.json"
+    },
+    {
+      "path_suffix": "/api/v2/monitor/system/interface",
+      "body_file": "monitor_system_interface.json"
+    },
+    {
+      "path_suffix": "/api/v2/monitor/network/arp",
+      "body_file": "monitor_network_arp.json"
+    }
+  ],
+  "default": {
+    "body": "{\"http_method\": \"GET\", \"status\": \"success\", \"vdom\": \"root\", \"results\": []}"
+  }
+}

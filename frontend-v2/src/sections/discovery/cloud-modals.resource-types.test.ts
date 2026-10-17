@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { RESOURCE_TYPES, AWS_REGIONS, selectionNeedsRegions, selectionHasGlobal } from './cloud-modals';
+import { RESOURCE_TYPES, REGION_SCOPE_NOTE } from './cloud-modals';
 
 // The AWS discovery backend dispatches EIGHT resource types
 // (cloud_discovery_service.go DiscoverAWSResources); the modal used to offer
@@ -10,14 +10,14 @@ import { RESOURCE_TYPES, AWS_REGIONS, selectionNeedsRegions, selectionHasGlobal 
 describe('RESOURCE_TYPES.aws', () => {
   it('offers every resource type the backend dispatches', () => {
     expect(RESOURCE_TYPES.aws.map((r) => r.value).sort()).toEqual(
-      ['alb', 'api_gateway', 'cloudfront', 'elb', 'kms', 'nlb', 'rds', 's3'],
+      ['alb', 'api_gateway', 'cloudfront', 'compute_instances', 'container_clusters', 'dns_zones', 'elb', 'kms', 'networks', 'nlb', 'rds', 's3', 'secret_stores', 'security_groups', 'serverless_functions'],
     );
   });
 
   it('marks exactly the account-wide types global', () => {
     // S3 ListBuckets and CloudFront ListDistributions are called without a
-    // region argument; everything else iterates the selected regions.
-    expect(RESOURCE_TYPES.aws.filter((r) => r.global).map((r) => r.value).sort()).toEqual(['cloudfront', 's3']);
+    // region argument; everything else iterates the account's regions.
+    expect(RESOURCE_TYPES.aws.filter((r) => r.global).map((r) => r.value).sort()).toEqual(['cloudfront', 'dns_zones', 's3']);
   });
 
   it('gives every type a label and a description', () => {
@@ -36,13 +36,13 @@ describe('RESOURCE_TYPES.aws', () => {
 describe('RESOURCE_TYPES for Azure and GCP', () => {
   it('offers every Azure collector', () => {
     expect(RESOURCE_TYPES.azure.map((r) => r.value).sort()).toEqual(
-      ['application_gateway', 'key_vault', 'load_balancer', 'sql_database', 'storage_account'],
+      ['application_gateway', 'compute_instances', 'container_clusters', 'dns_zones', 'key_vault', 'load_balancer', 'networks', 'secret_stores', 'security_groups', 'serverless_functions', 'sql_database', 'storage_account'],
     );
   });
 
   it('offers every GCP collector', () => {
     expect(RESOURCE_TYPES.gcp.map((r) => r.value).sort()).toEqual(
-      ['cloudsql', 'kms', 'load_balancer', 'ssl_proxy', 'storage'],
+      ['cloudsql', 'compute_instances', 'container_clusters', 'dns_zones', 'kms', 'load_balancer', 'networks', 'secret_stores', 'security_groups', 'serverless_functions', 'ssl_proxy', 'storage'],
     );
   });
 
@@ -64,45 +64,22 @@ describe('RESOURCE_TYPES.aws KMS copy', () => {
   });
 });
 
-describe('AWS_REGIONS', () => {
-  it('covers the commercial-partition regions the old 15-entry list missed', () => {
-    for (const r of ['eu-north-1', 'af-south-1', 'me-central-1', 'me-south-1', 'ap-east-1', 'ca-west-1', 'il-central-1']) {
-      expect(AWS_REGIONS).toContain(r);
+// ADR-0009 D3: the account is the scope. The modal offers no region field —
+// AWS regions are listed from the account, Azure and GCP listings are
+// account-wide — and says so per provider.
+describe('region scope', () => {
+  it('states where each provider reads, and offers no region list', () => {
+    for (const p of ['aws', 'azure', 'gcp'] as const) {
+      expect(REGION_SCOPE_NOTE[p].trim()).not.toBe('');
     }
+    expect(REGION_SCOPE_NOTE.aws).toMatch(/DescribeRegions/);
   });
 
-  it('holds no duplicates and no other partition', () => {
-    expect(new Set(AWS_REGIONS).size).toBe(AWS_REGIONS.length);
-    // GovCloud / China are separate partitions with separate credentials.
-    expect(AWS_REGIONS.some((r) => r.startsWith('us-gov-') || r.startsWith('cn-'))).toBe(false);
-  });
-});
-
-describe('selectionNeedsRegions', () => {
-  it('is true when any regional type is selected', () => {
-    expect(selectionNeedsRegions('aws', ['alb'])).toBe(true);
-    expect(selectionNeedsRegions('aws', ['kms'])).toBe(true);
-    expect(selectionNeedsRegions('aws', ['rds'])).toBe(true);
-    expect(selectionNeedsRegions('aws', ['s3', 'rds'])).toBe(true);
-  });
-
-  it('is false for a global-only selection — regions would filter nothing', () => {
-    expect(selectionNeedsRegions('aws', ['s3'])).toBe(false);
-    expect(selectionNeedsRegions('aws', ['cloudfront'])).toBe(false);
-    expect(selectionNeedsRegions('aws', ['s3', 'cloudfront'])).toBe(false);
-  });
-
-  it('is false with nothing selected, and for non-AWS providers', () => {
-    expect(selectionNeedsRegions('aws', [])).toBe(false);
-    expect(selectionNeedsRegions('azure', ['load_balancer'])).toBe(false);
-    expect(selectionNeedsRegions('gcp', ['ssl_proxy'])).toBe(false);
-  });
-});
-
-describe('selectionHasGlobal', () => {
-  it('detects a global type in a mixed selection', () => {
-    expect(selectionHasGlobal('aws', ['rds', 's3'])).toBe(true);
-    expect(selectionHasGlobal('aws', ['alb', 'kms', 'rds'])).toBe(false);
-    expect(selectionHasGlobal('azure', ['load_balancer'])).toBe(false);
+  // The account inventory listings lead the list on every provider: the
+  // frame the rest hangs on, selected like any other type.
+  it('leads every provider with the three enumeration listings', () => {
+    for (const p of ['aws', 'azure', 'gcp'] as const) {
+      expect(RESOURCE_TYPES[p].slice(0, 3).map((r) => r.value)).toEqual(['compute_instances', 'networks', 'security_groups']);
+    }
   });
 });

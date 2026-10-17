@@ -20,7 +20,7 @@
   },
   {
     "name": "vistaplatform_asset_facets",
-    "description": "Count assets by one or more facets over the set a query selects — the way to answer \"how many, broken down by …?\" without paging through rows. Returns, per requested facet, its buckets as {key, count}, plus `query`: the canonical query the counts were taken over. The counts and vistaplatform_query_assets run the SAME predicate, so a total here and a list there always describe the same set.\nQUERY LANGUAGE. One line of text; adjacent terms mean AND. Operators: `:` loose/case-insensitive (substring on text fields, subtree on `class`), `=` exact, `!=`, `\u003c` `\u003c=` `\u003e` `\u003e=`, `in (a, b)`, `~ \"regex\"`, `field:[lo to hi]`, `*` wildcard, `exists(field)`, `not`/`-` to negate, parentheses to group. Child collections are EXISTS sub-predicates: `endpoint:(…)`, `cert:(…)`, `crypto:(…)`, `software:(…)`, `finding:(…)`, `identifier:(…)`. Dates: `now`, `now-30d`, `now+7d` (units s m h d w mo y). There is no null literal — use `exists(field)`.\nFIELD NAMESPACES: bare names are first-class asset columns (class, display_name, hostname, primary_address, environment, business_unit, owner_email, support_group, site, region, zone, status, ownership, stale_status, source, risk, risk_score, risk_assessed_by, confidence_score, first_seen, last_seen); `attr.` a class attribute (attr.os_version); `fact.` a registered fact key (fact.os.name); `id.` an identifier kind (id.serial_number, id.mac, id.any); `tag.` a tenant tag (tag.owner). A bare name NEVER resolves to an attribute, fact, identifier or tag — the prefix is required.\nEXAMPLES:\n  1. environment:production class:hardware.computer.server not exists(owner_email)\n     — production servers nobody owns.\n  2. cert:(not_after \u003c now+30d)\n     — anything with a certificate expiring in the next 30 days.\n  3. risk \u003e= high and last_seen \u003e now-7d\n     — high or critical risk, seen in the last week.\n  4. crypto:(algorithm.deprecated:true) and environment in (production, staging)\n     — deprecated algorithms outside dev.\n  5. risk:not_assessed and class:hardware\n     — hardware NOBODY HAS SCORED. This is not `risk:informational`, which means \"we looked and it scored zero\". The two are different sets and neither implies the other.\nA query that does not validate is REFUSED, never guessed at: the tool returns the diagnostics (code, message, byte span, suggestion) and no rows. Read them, fix the query, call again.\nDEFAULT SCOPE: with no `status` term the platform adds `status:monitoring` — approved inventory only. It is a default, not a floor: name `status` yourself and it steps aside, so `status:pending_approval` reaches the approval queue and `status:archived` reaches assets that were archived or merged away. The echoed query is how you tell which happened.\nNOTE ON `risk`: the risk facet bands the persisted per-asset score. Assets nobody has scored land in the not-assessed bucket rather than in the zero bucket — do not add them to \"low risk\".",
+    "description": "Count assets by one or more facets over the set a query selects — the way to answer \"how many, broken down by …?\" without paging through rows. Returns, per requested facet, its buckets as {key, count}, plus `query`: the canonical query the counts were taken over. The counts and vistaplatform_query_assets run the SAME predicate, so a total here and a list there always describe the same set.\nQUERY LANGUAGE. One line of text; adjacent terms mean AND. Operators: `:` loose/case-insensitive (substring on text fields, subtree on `class`), `=` exact, `!=`, `\u003c` `\u003c=` `\u003e` `\u003e=`, `in (a, b)`, `~ \"regex\"`, `field:[lo to hi]`, `*` wildcard, `exists(field)`, `not`/`-` to negate, parentheses to group. Child collections are EXISTS sub-predicates: `endpoint:(…)`, `cert:(…)`, `crypto:(…)`, `software:(…)`, `finding:(…)`, `identifier:(…)`. Dates: `now`, `now-30d`, `now+7d` (units s m h d w mo y). There is no null literal — use `exists(field)`.\nFIELD NAMESPACES: bare names are first-class asset columns (class, display_name, hostname, primary_address, environment, business_unit, owner_email, support_group, site (site.region, site.group), location, region, zone, status, ownership, stale_status, source, risk, risk_score, risk_assessed_by, confidence_score, first_seen, last_seen); `attr.` a class attribute (attr.os_version); `fact.` a registered fact key (fact.os.name); `id.` an identifier kind (id.serial_number, id.mac, id.any); `tag.` a tenant tag (tag.owner). A bare name NEVER resolves to an attribute, fact, identifier or tag — the prefix is required.\nEXAMPLES:\n  1. environment:production class:hardware.computer.server not exists(owner_email)\n     — production servers nobody owns.\n  2. cert:(not_after \u003c now+30d)\n     — anything with a certificate expiring in the next 30 days.\n  3. risk \u003e= high and last_seen \u003e now-7d\n     — high or critical risk, seen in the last week.\n  4. crypto:(algorithm.deprecated:true) and environment in (production, staging)\n     — deprecated algorithms outside dev.\n  5. risk:not_assessed and class:hardware\n     — hardware NOBODY HAS SCORED. This is not `risk:informational`, which means \"we looked and it scored zero\". The two are different sets and neither implies the other.\nA query that does not validate is REFUSED, never guessed at: the tool returns the diagnostics (code, message, byte span, suggestion) and no rows. Read them, fix the query, call again.\nDEFAULT SCOPE: with no `status` term the platform adds `status:monitoring` — approved inventory only. It is a default, not a floor: name `status` yourself and it steps aside, so `status:pending_approval` reaches the approval queue and `status:archived` reaches assets that were archived or merged away. The echoed query is how you tell which happened.\nNOTE ON `risk`: the risk facet bands the persisted per-asset score. Assets nobody has scored land in the not-assessed bucket rather than in the zero bucket — do not add them to \"low risk\".",
     "read_only": true,
     "title": "Count assets by facet",
     "input_schema": {
@@ -71,6 +71,29 @@
       "required": [
         "base_id",
         "head_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_find_ip",
+    "description": "Answer 'what holds this IP address?'. Returns one result per VRF the address appears in: the most specific Prefix containing it, the recorded IP Address (if any), what it is assigned to, and the asset that holds it (`asset.via` says how: interface, primary_ip4, primary_ip6 or oob_ip). A result with a prefix but a null ip_address and asset means 'inside an allocated block, nobody recorded it' — not 'unused'. An empty list means no prefix or address in the tenant's IPAM matches. Omit `vrf` to search every VRF.",
+    "read_only": true,
+    "title": "Find an IP address",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "description": "An IPv4 or IPv6 address. A zone or prefix length is ignored.",
+          "type": "string"
+        },
+        "vrf": {
+          "description": "A VRF UUID, or the word global. Omit to look in every VRF.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "address"
       ],
       "type": "object"
     }
@@ -131,6 +154,37 @@
         },
         "direction": {
           "description": "downstream (default) for what depends on this asset, upstream for what this asset depends on",
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_asset_interfaces",
+    "description": "List one asset's interfaces in natural name order (Gi0/2 before Gi0/10). Use after vistaplatform_get_asset when the question is about a device's ports, its LAG members or its MAC addresses. An unknown asset id returns an empty list, not an error.",
+    "read_only": true,
+    "title": "Get an asset's interfaces",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "UUID of the asset",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Rows to return, 1-100 (default 50)",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows to skip, for paging",
+          "type": "integer"
+        },
+        "q": {
+          "description": "Substring of name, label or description",
           "type": "string"
         }
       },
@@ -285,12 +339,71 @@
     }
   },
   {
+    "name": "vistaplatform_get_object_changes",
+    "description": "Show the recorded change history of ONE object (an asset, interface, prefix, IP address, VLAN, Business Unit, ...), newest first: who changed it (user or discovery source), when, what action, which fields, and the before/after images (secrets are redacted by the platform). Use `since` to ask 'what changed this week'. Answers 'who changed this prefix?' and 'when did this interface go down?'. An object with no recorded changes returns an empty list.",
+    "read_only": true,
+    "title": "Get an object's changes",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "UUID of the object",
+          "type": "string"
+        },
+        "kind": {
+          "description": "The object noun, as a key: asset, interface, prefix, ip_address, vlan, vrf, business_unit, site, rack, ...",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Rows to return, 1-100 (default 25)",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows to skip, for paging",
+          "type": "integer"
+        },
+        "since": {
+          "description": "RFC 3339 time. Only changes at or after it, e.g. 2026-10-01T00:00:00Z",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "vistaplatform_get_pqc_readiness",
     "description": "Get the tenant's post-quantum readiness: totals of PQC-ready, quantum-safe-symmetric and needs-migration crypto implementations, broken down by algorithm family with suggested migration targets. The four categories are mutually exclusive and sum to the total; `unclassified` means the catalogue could not decide, NOT that the item is safe.",
     "read_only": true,
     "title": "Get PQC readiness",
     "input_schema": {
       "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_get_prefix",
+    "description": "Fetch one Prefix with its place in the hierarchy: the `parent`, the direct `children`, `child_count`, `ip_count`, `utilization` and the free space (`available_prefixes`, `available_ips`). HONESTY: a prefix with no addresses is 0% utilised with a count, not unknown; a prefix flagged as a pool or mark-utilized is reported as the platform computes it, so quote `utilization` as returned rather than recomputing it from ip_count.",
+    "read_only": true,
+    "title": "Get a prefix",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "available_limit": {
+          "description": "How many free blocks to list, 1-100 (default 10)",
+          "type": "integer"
+        },
+        "prefix_id": {
+          "description": "UUID of the prefix",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prefix_id"
+      ],
       "type": "object"
     }
   },
@@ -350,6 +463,16 @@
     }
   },
   {
+    "name": "vistaplatform_list_business_units",
+    "description": "List the tenant's Business Units — the organisational owners that assets, prefixes and other objects are attributed to. Returns every Business Unit (the list is small and unpaged) with its id; pass an id as `business_unit_id` to vistaplatform_list_prefixes, or use `business_unit` in an asset query.",
+    "read_only": true,
+    "title": "List business units",
+    "input_schema": {
+      "additionalProperties": false,
+      "type": "object"
+    }
+  },
+  {
     "name": "vistaplatform_list_cbom_artifacts",
     "description": "List the tenant's bill-of-materials artifacts — immutable, content-hashed CycloneDX snapshots, newest first. Each entry includes the scope it was generated from, its content hash, entry count, signing status, and its `artifact_kind`: `cbom` (cryptographic), `sbom` (software), `hbom` (hardware) or `inventory` (every asset with endpoints, relationships and open vulnerabilities). Read the kind before drawing a conclusion — an SBOM listing no certificates means it is not a CBOM, not that the tenant has none.",
     "read_only": true,
@@ -390,6 +513,181 @@
     }
   },
   {
+    "name": "vistaplatform_list_interfaces",
+    "description": "List network interfaces, physical and virtual, across the tenant's assets. An Interface belongs to one asset and carries its name, type, speed, enabled state, MAC addresses, LAG and parent links and 802.1Q mode. Filter by asset_id for one device, or by mac_address to find which asset owns a MAC (the same MAC on two assets is a duplicate or a move). Returns `data` (the page) and `pagination.total` (the whole match). To see every interface of ONE asset in natural name order use vistaplatform_get_asset_interfaces. To find who holds an IP address use vistaplatform_find_ip.",
+    "read_only": true,
+    "title": "List interfaces",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "description": "UUID of an asset. Omit to search interfaces across the whole estate.",
+          "type": "string"
+        },
+        "enabled": {
+          "description": "Only administratively enabled (true) or disabled (false) interfaces",
+          "type": [
+            "null",
+            "boolean"
+          ]
+        },
+        "limit": {
+          "description": "Rows to return, 1-100 (default 25)",
+          "type": "integer"
+        },
+        "mac_address": {
+          "description": "A MAC address in any common notation. Matches the primary or any additional address of an interface; across assets this is an identity signal (the same MAC on two assets means a duplicate or a move).",
+          "type": "string"
+        },
+        "name": {
+          "description": "Exact interface name, e.g. Gi0/1 or eth0",
+          "type": "string"
+        },
+        "offset": {
+          "description": "Rows to skip, for paging",
+          "type": "integer"
+        },
+        "q": {
+          "description": "Substring of name, label or description",
+          "type": "string"
+        },
+        "type": {
+          "description": "Interface type key, e.g. 1000base-t, virtual, lag, 10gbase-x-sfpp",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_list_ip_addresses",
+    "description": "List IP Addresses recorded in IPAM, with their status, DNS name and what they are assigned to. Filter by `parent` (a CIDR; pass vrf_id as well) to see the addresses of one prefix, or by `assigned_interface_id` to see an interface's addresses. This lists recorded addresses; it does not say who is using an address that was never recorded — to ask 'what holds 10.1.2.3?' use vistaplatform_find_ip.",
+    "read_only": true,
+    "title": "List IP addresses",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "assigned_interface_id": {
+          "description": "UUID of an interface (see vistaplatform_get_asset_interfaces). Only addresses assigned to it.",
+          "type": "string"
+        },
+        "dns_name": {
+          "description": "Exact DNS name",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Rows to return, 1-100 (default 25)",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows to skip, for paging",
+          "type": "integer"
+        },
+        "parent": {
+          "description": "CIDR. Only addresses inside this prefix. Pass vrf_id too: containment is per VRF.",
+          "type": "string"
+        },
+        "q": {
+          "description": "Free-text search over the address, DNS name and description",
+          "type": "string"
+        },
+        "status": {
+          "description": "Address status filter, e.g. active, reserved, deprecated, dhcp, slaac",
+          "type": "string"
+        },
+        "vrf_id": {
+          "description": "A VRF UUID, or the word global for the global routing table",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_list_prefixes",
+    "description": "List IP Prefixes (CIDR blocks) from the tenant's IPAM. A Prefix sits in one VRF (or the global table), nests under the longest prefix that contains it, and may belong to a Business Unit, a VLAN and a scope (site, location, ...). Use `parent` to walk down a block, `contains` to find the prefixes holding an address, and `vrf_id` to stay in one routing table. For utilisation, children and free space of ONE prefix use vistaplatform_get_prefix.",
+    "read_only": true,
+    "title": "List prefixes",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "business_unit_id": {
+          "description": "UUID of a Business Unit (see vistaplatform_list_business_units)",
+          "type": "string"
+        },
+        "contains": {
+          "description": "An IP address. Only prefixes that contain it, most specific last",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Rows to return, 1-100 (default 25)",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows to skip, for paging",
+          "type": "integer"
+        },
+        "parent": {
+          "description": "CIDR. Only prefixes strictly inside this one, e.g. 203.0.113.0/24",
+          "type": "string"
+        },
+        "q": {
+          "description": "Free-text search",
+          "type": "string"
+        },
+        "status": {
+          "description": "Prefix status filter, e.g. active, reserved, deprecated, container",
+          "type": "string"
+        },
+        "vrf_id": {
+          "description": "A VRF UUID, or the word global for the global routing table. Omit for every VRF.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
+    "name": "vistaplatform_list_vlans",
+    "description": "List VLANs: VID, name, status, the VLAN group and Site they belong to. Use `vid` to find every VLAN with that 802.1Q id across groups (the same VID legitimately appears in several groups). Prefixes and interfaces reference VLANs by id.",
+    "read_only": true,
+    "title": "List VLANs",
+    "input_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "group_id": {
+          "description": "UUID of a VLAN group",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Rows to return, 1-100 (default 25)",
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Rows to skip, for paging",
+          "type": "integer"
+        },
+        "q": {
+          "description": "Free-text search over the name and description",
+          "type": "string"
+        },
+        "site_id": {
+          "description": "UUID of a Site",
+          "type": "string"
+        },
+        "status": {
+          "description": "VLAN status filter, e.g. active, reserved, deprecated",
+          "type": "string"
+        },
+        "vid": {
+          "description": "The 802.1Q VLAN id, 1-4094",
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
     "name": "vistaplatform_query_algorithms",
     "description": "Look up the platform's authoritative cryptographic algorithm assessments: strength, deprecation status, post-quantum classification, risk score, migration guidance and recommended alternatives. This catalog is the source of truth for whether an algorithm is considered weak or quantum-vulnerable — cite it rather than judging an algorithm yourself.",
     "read_only": true,
@@ -422,7 +720,7 @@
   },
   {
     "name": "vistaplatform_query_assets",
-    "description": "Search the tenant's asset inventory with a query-language predicate. An asset is any configuration item the platform tracks — servers, network devices, cloud resources, applications, endpoints — classified into a hierarchical class tree (see vistaplatform_list_asset_classes). Returns a page of assets with their class, primary endpoint, identifiers, risk and counts, plus `query`: THE CANONICAL QUERY THAT ACTUALLY RAN. Show that string, not the one you sent — the platform AND-s its own default scope in (normally `status:monitoring`, i.e. approved inventory only), so the two differ. Use vistaplatform_asset_facets for counts rather than paging through rows.\nQUERY LANGUAGE. One line of text; adjacent terms mean AND. Operators: `:` loose/case-insensitive (substring on text fields, subtree on `class`), `=` exact, `!=`, `\u003c` `\u003c=` `\u003e` `\u003e=`, `in (a, b)`, `~ \"regex\"`, `field:[lo to hi]`, `*` wildcard, `exists(field)`, `not`/`-` to negate, parentheses to group. Child collections are EXISTS sub-predicates: `endpoint:(…)`, `cert:(…)`, `crypto:(…)`, `software:(…)`, `finding:(…)`, `identifier:(…)`. Dates: `now`, `now-30d`, `now+7d` (units s m h d w mo y). There is no null literal — use `exists(field)`.\nFIELD NAMESPACES: bare names are first-class asset columns (class, display_name, hostname, primary_address, environment, business_unit, owner_email, support_group, site, region, zone, status, ownership, stale_status, source, risk, risk_score, risk_assessed_by, confidence_score, first_seen, last_seen); `attr.` a class attribute (attr.os_version); `fact.` a registered fact key (fact.os.name); `id.` an identifier kind (id.serial_number, id.mac, id.any); `tag.` a tenant tag (tag.owner). A bare name NEVER resolves to an attribute, fact, identifier or tag — the prefix is required.\nEXAMPLES:\n  1. environment:production class:hardware.computer.server not exists(owner_email)\n     — production servers nobody owns.\n  2. cert:(not_after \u003c now+30d)\n     — anything with a certificate expiring in the next 30 days.\n  3. risk \u003e= high and last_seen \u003e now-7d\n     — high or critical risk, seen in the last week.\n  4. crypto:(algorithm.deprecated:true) and environment in (production, staging)\n     — deprecated algorithms outside dev.\n  5. risk:not_assessed and class:hardware\n     — hardware NOBODY HAS SCORED. This is not `risk:informational`, which means \"we looked and it scored zero\". The two are different sets and neither implies the other.\nA query that does not validate is REFUSED, never guessed at: the tool returns the diagnostics (code, message, byte span, suggestion) and no rows. Read them, fix the query, call again.\nDEFAULT SCOPE: with no `status` term the platform adds `status:monitoring` — approved inventory only. It is a default, not a floor: name `status` yourself and it steps aside, so `status:pending_approval` reaches the approval queue and `status:archived` reaches assets that were archived or merged away. The echoed query is how you tell which happened.\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
+    "description": "Search the tenant's asset inventory with a query-language predicate. An asset is any configuration item the platform tracks — servers, network devices, cloud resources, applications, endpoints — classified into a hierarchical class tree (see vistaplatform_list_asset_classes). Returns a page of assets with their class, primary endpoint, identifiers, risk and counts, plus `query`: THE CANONICAL QUERY THAT ACTUALLY RAN. Show that string, not the one you sent — the platform AND-s its own default scope in (normally `status:monitoring`, i.e. approved inventory only), so the two differ. Use vistaplatform_asset_facets for counts rather than paging through rows.\nQUERY LANGUAGE. One line of text; adjacent terms mean AND. Operators: `:` loose/case-insensitive (substring on text fields, subtree on `class`), `=` exact, `!=`, `\u003c` `\u003c=` `\u003e` `\u003e=`, `in (a, b)`, `~ \"regex\"`, `field:[lo to hi]`, `*` wildcard, `exists(field)`, `not`/`-` to negate, parentheses to group. Child collections are EXISTS sub-predicates: `endpoint:(…)`, `cert:(…)`, `crypto:(…)`, `software:(…)`, `finding:(…)`, `identifier:(…)`. Dates: `now`, `now-30d`, `now+7d` (units s m h d w mo y). There is no null literal — use `exists(field)`.\nFIELD NAMESPACES: bare names are first-class asset columns (class, display_name, hostname, primary_address, environment, business_unit, owner_email, support_group, site (site.region, site.group), location, region, zone, status, ownership, stale_status, source, risk, risk_score, risk_assessed_by, confidence_score, first_seen, last_seen); `attr.` a class attribute (attr.os_version); `fact.` a registered fact key (fact.os.name); `id.` an identifier kind (id.serial_number, id.mac, id.any); `tag.` a tenant tag (tag.owner). A bare name NEVER resolves to an attribute, fact, identifier or tag — the prefix is required.\nEXAMPLES:\n  1. environment:production class:hardware.computer.server not exists(owner_email)\n     — production servers nobody owns.\n  2. cert:(not_after \u003c now+30d)\n     — anything with a certificate expiring in the next 30 days.\n  3. risk \u003e= high and last_seen \u003e now-7d\n     — high or critical risk, seen in the last week.\n  4. crypto:(algorithm.deprecated:true) and environment in (production, staging)\n     — deprecated algorithms outside dev.\n  5. risk:not_assessed and class:hardware\n     — hardware NOBODY HAS SCORED. This is not `risk:informational`, which means \"we looked and it scored zero\". The two are different sets and neither implies the other.\nA query that does not validate is REFUSED, never guessed at: the tool returns the diagnostics (code, message, byte span, suggestion) and no rows. Read them, fix the query, call again.\nDEFAULT SCOPE: with no `status` term the platform adds `status:monitoring` — approved inventory only. It is a default, not a floor: name `status` yourself and it steps aside, so `status:pending_approval` reaches the approval queue and `status:archived` reaches assets that were archived or merged away. The echoed query is how you tell which happened.\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
     "read_only": true,
     "title": "Query assets",
     "input_schema": {

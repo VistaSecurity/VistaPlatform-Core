@@ -19,7 +19,7 @@ import (
 
 // assetFacetExpr maps a facet level to the SQL that produces its bucket key.
 //
-// The vocabulary is ADR-0006 D2's: class, status, environment, site, segment,
+// The vocabulary is ADR-0006 D2's: class, status, environment, site, prefix,
 // owner, business unit, tag, risk band, provenance, and has-open-findings. The
 // older spellings (`asset_type`, `location.region`, …) are kept as aliases so a
 // saved view built before the rename keeps working.
@@ -29,7 +29,6 @@ import (
 // reaching SQL as an identifier.
 var assetFacetExpr = map[string]string{
 	// Assets / context
-	"business_unit":   "COALESCE(NULLIF(a.business_unit, ''), 'Unknown')",
 	"environment":     "COALESCE(a.environment::text, 'Unknown')",
 	"owner_email":     "COALESCE(NULLIF(a.owner_email, ''), 'Unknown')",
 	"owner":           "COALESCE(NULLIF(a.owner_email, ''), 'Unknown')",
@@ -42,16 +41,24 @@ var assetFacetExpr = map[string]string{
 	// Location — the QUERY LANGUAGE reads these columns, not the tags JSON.
 	// Counting tag fallbacks here made the rail preview a site that
 	// `site:X` then failed to select (same class of bug as owner Unknown).
-	"site":              "COALESCE(NULLIF(a.site, ''), 'Unknown')",
-	"region":            "COALESCE(NULLIF(a.region, ''), 'Unknown')",
+	// `region` is the location region, or a cloud resource's provider region
+	// when it has no location region — the same expression the query
+	// language's `region` compiles to (DCIM row 4.6).
+	"region":            "COALESCE(NULLIF(a.region, ''), NULLIF(a.attributes->>'region', ''), 'Unknown')",
 	"zone":              "COALESCE(NULLIF(a.zone, ''), 'Unknown')",
-	"location.site":     "COALESCE(NULLIF(a.site, ''), 'Unknown')",
-	"location.region":   "COALESCE(NULLIF(a.region, ''), 'Unknown')",
+	"location.region":   "COALESCE(NULLIF(a.region, ''), NULLIF(a.attributes->>'region', ''), 'Unknown')",
 	"location.zone":     "COALESCE(NULLIF(a.zone, ''), 'Unknown')",
 	"location.building": "COALESCE(a.tags->'location'->>'building', a.tags->>'building', 'Unknown')",
 
 	// Class attributes
 	"operating_system": "COALESCE(" + assetOperatingSystemSQL + ", 'Unknown')",
+
+	// Cloud (asset-inventory ADR-0009 D7, DCIM row 4.6): the Cloud lens's
+	// facets, the same attributes the `provider`, `account` and `cloud.type`
+	// query fields read.
+	"cloud_provider": "COALESCE(NULLIF(a.attributes->>'provider', ''), 'Unknown')",
+	"cloud_account":  "COALESCE(NULLIF(a.attributes->>'account_id', ''), 'Unknown')",
+	"cloud_type":     "COALESCE(NULLIF(a.attributes->>'provider_type', ''), 'Unknown')",
 
 	// Provenance: HOW the class was decided (measured / declared / imported /
 	// inferred), which is ADR-0006 D2's "discovered, imported, declared,
@@ -74,7 +81,9 @@ const (
 	facetLevelClass        = "class"
 	facetLevelRisk         = "risk"
 	facetLevelTag          = "tag"
-	facetLevelSegment      = "segment"
+	facetLevelPrefix       = "prefix"
+	facetLevelBusinessUnit = "business_unit"
+	facetLevelSite         = "site"
 	facetLevelHasFindings  = "has_findings"
 	facetLevelHasEndpoints = "has_endpoints"
 )
@@ -150,8 +159,12 @@ func (s *AssetService) GetAssetFacets(tenantID uuid.UUID, filters models.AssetFi
 		return s.riskFacets(tenantID, where, args)
 	case facetLevelTag:
 		return s.tagFacets(tenantID, where, args, limit)
-	case facetLevelSegment:
-		return s.segmentFacets(tenantID, where, args, limit)
+	case facetLevelPrefix:
+		return s.prefixFacets(tenantID, where, args, limit)
+	case facetLevelBusinessUnit:
+		return s.businessUnitFacets(tenantID, where, args, limit)
+	case facetLevelSite, "location.site":
+		return s.siteFacets(tenantID, where, args, limit)
 	case facetLevelHasFindings:
 		return s.hasFindingsFacet(tenantID, where, args)
 	case facetLevelHasEndpoints:
@@ -174,7 +187,6 @@ func (s *AssetService) GetAssetFacets(tenantID uuid.UUID, filters models.AssetFi
 	query := fmt.Sprintf(`
 		SELECT %s AS "key", COUNT(*) AS "count"
 		FROM assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
 		WHERE %s
 		GROUP BY 1
 		ORDER BY "count" DESC, "key" ASC
@@ -222,8 +234,7 @@ func (s *AssetService) classFacets(tenantID uuid.UUID, where string, args []inte
 		WITH matched AS (
 			SELECT a.class_path, COUNT(*) AS n
 			FROM assets a
-			LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
-			WHERE %s
+				WHERE %s
 			GROUP BY a.class_path
 		),
 		expanded AS (
@@ -253,19 +264,19 @@ func (s *AssetService) classFacets(tenantID uuid.UUID, where string, args []inte
 	return rows, nil
 }
 
-// segmentFacets counts by network_segment_id, which is what `segment_id:`
-// matches. Grouping by ns.name used to put the human label in the bucket key,
-// so a click wrote `segment_id:DMZ` and the validator answered type_mismatch
-// (the field is a uuid). Unsegmented stays the absence sentinel the rail
-// already turns into `not exists(segment_id)`.
-func (s *AssetService) segmentFacets(tenantID uuid.UUID, where string, args []interface{}, limit int) ([]models.AssetFacetBucket, error) {
+// prefixFacets counts by prefix_id (the prefix the asset's identity is scoped
+// within, DCIM row 1.6), which is what `prefix_id:` matches. The bucket key is
+// the id — the field is a uuid, so a name in the key would make the click a
+// type_mismatch — and the label is the prefix's CIDR. Unknown is the absence
+// sentinel the rail turns into `not exists(prefix_id)`.
+func (s *AssetService) prefixFacets(tenantID uuid.UUID, where string, args []interface{}, limit int) ([]models.AssetFacetBucket, error) {
 	args = append(args, limit)
 	query := fmt.Sprintf(`
-		SELECT COALESCE(a.network_segment_id::text, 'Unsegmented') AS "key",
+		SELECT COALESCE(a.prefix_id::text, 'Unknown') AS "key",
 		       COUNT(*) AS "count",
-		       COALESCE(MAX(ns.name), 'Unsegmented') AS "label"
+		       COALESCE(MAX(pfx.prefix::text), 'Unknown') AS "label"
 		FROM assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
+		LEFT JOIN prefixes pfx ON pfx.tenant_id = a.tenant_id AND pfx.id = a.prefix_id
 		WHERE %s
 		GROUP BY 1
 		ORDER BY "count" DESC, "key" ASC
@@ -278,20 +289,108 @@ func (s *AssetService) segmentFacets(tenantID uuid.UUID, where string, args []in
 	if err := database.WithTenantTxTimeout(ctx, s.db, tenantID, assetQueryStatementTimeout, func(tx *sqlx.Tx) error {
 		rows, e := tx.QueryxContext(ctx, query, args...)
 		if e != nil {
-			return fmt.Errorf("failed to get segment facets: %w", e)
+			return fmt.Errorf("failed to get prefix facets: %w", e)
 		}
 		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var bucket models.AssetFacetBucket
 			if e := rows.Scan(&bucket.Key, &bucket.Count, &bucket.Label); e != nil {
-				return fmt.Errorf("failed to scan segment facet: %w", e)
+				return fmt.Errorf("failed to scan prefix facet: %w", e)
 			}
 			buckets = append(buckets, bucket)
 		}
 		if e := rows.Err(); e != nil {
-			return fmt.Errorf("error iterating segment facet rows: %w", e)
+			return fmt.Errorf("error iterating prefix facet rows: %w", e)
 		}
 		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return buckets, nil
+}
+
+// businessUnitFacets counts assets per Business Unit (DCIM 1.1). The bucket
+// key is the unit's SLUG, because the rail writes `business_unit:<key>` and that
+// field matches name or slug; the slug is unique per tenant and survives a
+// rename of the display name, which a name would not. The label is the name and
+// the id rides along for callers that want to write `business_unit.id`. The
+// Unknown bucket is the absence sentinel the rail turns into
+// `not exists(business_unit)`.
+func (s *AssetService) businessUnitFacets(tenantID uuid.UUID, where string, args []interface{}, limit int) ([]models.AssetFacetBucket, error) {
+	args = append(args, limit)
+	query := fmt.Sprintf(`
+		SELECT COALESCE(bu.slug, 'Unknown') AS "key",
+		       COUNT(*) AS "count",
+		       COALESCE(MAX(bu.name), 'Unknown') AS "label",
+		       COALESCE(MAX(bu.id::text), '') AS "id"
+		FROM assets a
+		LEFT JOIN business_units bu ON bu.id = a.business_unit_id
+		WHERE %s
+		GROUP BY bu.slug
+		ORDER BY "count" DESC, "key" ASC
+		LIMIT $%d`, where, len(args))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var buckets []models.AssetFacetBucket
+	if err := database.WithTenantTxTimeout(ctx, s.db, tenantID, assetQueryStatementTimeout, func(tx *sqlx.Tx) error {
+		rows, e := tx.QueryxContext(ctx, query, args...)
+		if e != nil {
+			return fmt.Errorf("failed to get business unit facets: %w", e)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var bucket models.AssetFacetBucket
+			if e := rows.Scan(&bucket.Key, &bucket.Count, &bucket.Label, &bucket.ID); e != nil {
+				return fmt.Errorf("failed to scan business unit facet: %w", e)
+			}
+			buckets = append(buckets, bucket)
+		}
+		return rows.Err()
+	}); err != nil {
+		return nil, err
+	}
+	return buckets, nil
+}
+
+// siteFacets counts assets per site (DCIM row 2.1), the businessUnitFacets
+// shape: the key is the site's SLUG (the rail writes `site:<key>`, which
+// matches name or slug, and a slug survives a rename), the label its name and
+// the id rides along for `site.id`. Unknown is the absence sentinel the rail
+// turns into `not exists(site)`.
+func (s *AssetService) siteFacets(tenantID uuid.UUID, where string, args []interface{}, limit int) ([]models.AssetFacetBucket, error) {
+	args = append(args, limit)
+	query := fmt.Sprintf(`
+		SELECT COALESCE(st.slug, 'Unknown') AS "key",
+		       COUNT(*) AS "count",
+		       COALESCE(MAX(st.name), 'Unknown') AS "label",
+		       COALESCE(MAX(st.id::text), '') AS "id"
+		FROM assets a
+		LEFT JOIN sites st ON st.id = a.site_id
+		WHERE %s
+		GROUP BY st.slug
+		ORDER BY "count" DESC, "key" ASC
+		LIMIT $%d`, where, len(args))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var buckets []models.AssetFacetBucket
+	if err := database.WithTenantTxTimeout(ctx, s.db, tenantID, assetQueryStatementTimeout, func(tx *sqlx.Tx) error {
+		rows, e := tx.QueryxContext(ctx, query, args...)
+		if e != nil {
+			return fmt.Errorf("failed to get site facets: %w", e)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var bucket models.AssetFacetBucket
+			if e := rows.Scan(&bucket.Key, &bucket.Count, &bucket.Label, &bucket.ID); e != nil {
+				return fmt.Errorf("failed to scan site facet: %w", e)
+			}
+			buckets = append(buckets, bucket)
+		}
+		return rows.Err()
 	}); err != nil {
 		return nil, err
 	}
@@ -331,7 +430,6 @@ func (s *AssetService) riskFacets(tenantID uuid.UUID, where string, args []inter
 	query := fmt.Sprintf(`
 		SELECT %s
 		FROM assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
 		WHERE %s`, strings.Join(arms, ",\n\t\t       "), where)
 
 	counts := make([]int64, len(labels)+1)
@@ -366,7 +464,6 @@ func (s *AssetService) tagFacets(tenantID uuid.UUID, where string, args []interf
 	query := fmt.Sprintf(`
 		SELECT t.key AS "key", COUNT(DISTINCT a.id) AS "count"
 		FROM assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
 		CROSS JOIN LATERAL jsonb_each_text(COALESCE(a.tags, '{}'::jsonb)) AS t(key, value)
 		WHERE %s
 		GROUP BY t.key
@@ -383,7 +480,6 @@ func (s *AssetService) booleanFacet(tenantID uuid.UUID, where string, args []int
 		SELECT COUNT(*) FILTER (WHERE %s) AS yes,
 		       COUNT(*) FILTER (WHERE NOT (%s)) AS no
 		FROM assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
 		WHERE %s`, predicate, predicate, where)
 	var yes, no int64
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -437,7 +533,7 @@ func (s *AssetService) facetRows(tenantID uuid.UUID, query string, args []interf
 // above so the two cannot disagree about what is supported.
 func AssetFacetLevels() []string {
 	seen := map[string]bool{}
-	out := []string{facetLevelClass, facetLevelRisk, facetLevelTag, facetLevelSegment, facetLevelHasFindings, facetLevelHasEndpoints}
+	out := []string{facetLevelClass, facetLevelRisk, facetLevelTag, facetLevelPrefix, facetLevelHasFindings, facetLevelHasEndpoints}
 	for _, l := range out {
 		seen[l] = true
 	}

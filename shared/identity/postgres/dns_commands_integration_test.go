@@ -25,7 +25,7 @@ func TestIntegration_IdentityDNSQueueScopeReplayAndCapabilities(t *testing.T) {
 	}{
 		{`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,network_interfaces,reported_capabilities,reported_dns_interfaces) VALUES($1,$2,'DNS sensor','linux','test','datacenter_host','active',now(),ARRAY['pcap-interface'],ARRAY['identity_dns_v1'],ARRAY['eth0'])`, []any{sensor, tenant}},
 		{`INSERT INTO agent_addresses(sensor_id,interface_name,address) VALUES($1,'eth0','192.0.2.4')`, []any{sensor}},
-		{`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Scoped DNS','cidr','192.0.2.0/24','production')`, []any{segment, tenant}},
+		{`INSERT INTO prefixes(id,tenant_id,prefix,description,source_kind,status) VALUES($1,$2,'192.0.2.0/24'::cidr,'Scoped DNS','declared','active')`, []any{segment, tenant}},
 		{`INSERT INTO identity_observations(id,tenant_id,fingerprint,source_kind,source_ref,evidence,first_seen_at,last_seen_at) VALUES($1::uuid,$2,$1::text,'measured','test','{}',now(),now())`, []any{observation, tenant}},
 	} {
 		if _, err := db.Exec(q.sql, q.args...); err != nil {

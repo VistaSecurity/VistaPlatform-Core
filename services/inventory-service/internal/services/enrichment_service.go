@@ -16,14 +16,16 @@ import (
 // It walks ENDPOINTS, not assets: the port a service is identified from and the
 // identified service itself both live on `asset_endpoints` now (DATA_MODEL §2).
 // An asset with no endpoint — an at-rest cloud resource — still appears once,
-// with a NULL endpoint, so its segment enrichment is not skipped.
+// with a NULL endpoint, so its prefix enrichment is not skipped.
 func (s *AssetService) EnrichAllAssets(tenantID uuid.UUID) (updated int, err error) {
-	if s.networkSegmentService == nil && s.serviceIdentificationSvc == nil {
+	if s.db == nil {
 		return 0, nil
 	}
 	const batchSize = 100
 	offset := 0
 	enriched := map[uuid.UUID]bool{}
+	// One prefix read for the whole walk.
+	prefixes := s.newImportPrefixes(tenantID)
 	for {
 		var batch []struct {
 			AssetID    uuid.UUID     `db:"asset_id"`
@@ -33,7 +35,7 @@ func (s *AssetService) EnrichAllAssets(tenantID uuid.UUID) (updated int, err err
 			Port       sql.NullInt64
 		}
 		// RLS-scoped read over assets + asset_endpoints. Scoped per batch (not
-		// around the whole loop) so the networkSegmentService /
+		// around the whole loop) so the prefix enrichment /
 		// serviceIdentificationSvc calls below open their own tenant
 		// transactions rather than nesting inside this one.
 		//
@@ -59,19 +61,16 @@ func (s *AssetService) EnrichAllAssets(tenantID uuid.UUID) (updated int, err err
 			break
 		}
 		for _, a := range batch {
-			var ip, host *string
+			var ip *string
 			if a.IP.Valid {
 				ip = &a.IP.String
 			}
-			if a.Hostname.Valid {
-				host = &a.Hostname.String
-			}
 			assetUpdated := false
-			// Once per asset: the segment is a property of the host, and the
+			// Once per asset: the prefix is a property of the host, and the
 			// same asset appears once per endpoint in this batch.
-			if s.networkSegmentService != nil && !enriched[a.AssetID] {
+			if !enriched[a.AssetID] {
 				enriched[a.AssetID] = true
-				if e := s.networkSegmentService.EnrichAssetByID(tenantID, a.AssetID, ip, host); e == nil {
+				if moved, e := s.enrichAssetFromPrefix(prefixes, tenantID, a.AssetID, ip); e == nil && moved {
 					assetUpdated = true
 				}
 			}

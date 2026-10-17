@@ -55,6 +55,12 @@ export interface RegistryCatalogOptions {
    * autocomplete offers it.
    */
   tenantClasses?: readonly ClassInfo[];
+  /**
+   * The tenant's custom field names (DCIM row 5.1), fetched from
+   * `/dcim/custom-fields`, so autocomplete offers `cf.<name>`. Resolution
+   * accepts any well-formed name whether or not this is supplied.
+   */
+  customFieldNames?: readonly string[];
 }
 
 /**
@@ -212,6 +218,7 @@ export class RegistryCatalog extends BaseCatalog {
           : { ...generatedAttrKeys(), ...opts.attributeKeys },
       factKeys: buildFactKeys(),
       classes: buildClasses(opts.tenantClasses ?? []),
+      ...(opts.customFieldNames === undefined ? {} : { customFieldNames: opts.customFieldNames }),
     };
   }
 

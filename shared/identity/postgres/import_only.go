@@ -81,6 +81,11 @@ const independentEvidenceSQL = `(
 	EXISTS (SELECT 1 FROM public.asset_identifiers mi
 	         WHERE mi.tenant_id = a.tenant_id AND mi.asset_id = a.id AND mi.source_kind = 'measured'
 	           AND COALESCE(mi.source_ref, '') <> 'scan' AND COALESCE(mi.source_ref, '') NOT LIKE 'scan:%')
+	OR EXISTS (SELECT 1 FROM public.ip_addresses mip
+	             JOIN public.interfaces mif ON mif.tenant_id = mip.tenant_id AND mif.id = mip.assigned_id
+	         WHERE mip.tenant_id = a.tenant_id AND mif.asset_id = a.id AND mip.assigned_kind = 'interface'
+	           AND mip.source_kind = 'measured'
+	           AND COALESCE(mip.source_ref, '') <> 'scan' AND COALESCE(mip.source_ref, '') NOT LIKE 'scan:%')
 	OR EXISTS (SELECT 1 FROM public.asset_facts mf
 	         WHERE mf.tenant_id = a.tenant_id AND mf.asset_id = a.id AND mf.source_kind = 'measured'
 	           AND mf.source_ref <> 'scan' AND mf.source_ref NOT LIKE 'scan:%')

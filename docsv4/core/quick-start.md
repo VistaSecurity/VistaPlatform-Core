@@ -66,12 +66,11 @@ The Dashboard will be empty. That's expected: nothing has been discovered yet.
 
 ## 2. Tell the platform about your network
 
-Go to **Settings → Infrastructure → Network Segments** and click **New
-segment**. Give it a name, choose **CIDR** as the type, enter the range your
+Go to **Inventory → Networks** and click **Add prefix**. Enter the range your
 sensor or devices live in (for example `10.0.1.0/24`), set **Network type** to
-`private`, and click **Create segment**.
+**Private**, and click **Create**.
 
-This takes a minute and it matters for two reasons. A segment is how you tell the
+This takes a minute and it matters for two reasons. A prefix is how you tell the
 platform a range is yours, so it can scan hosts there on its own, and it's how
 the platform decides how new discoveries are approved.
 
@@ -82,7 +81,7 @@ is running but Inventory is empty". You have two options:
 
 - **Accept them by hand** (step 6). Best when you want to see what's there
   before it counts.
-- **Auto-approve** them. Turn on **Auto-approve discoveries** on the segment, and
+- **Auto-approve** them. Turn on **Auto-approve discoveries** on the prefix, and
   anything found inside it skips the queue. Good for a lab or trial network; see
   [Asset Approval](./features/asset-approval.md) before using it on production.
 
@@ -144,7 +143,7 @@ nothing on macOS, and [Npcap](https://npcap.com/) on Windows.
 ### Where to put it
 
 A sensor only sees traffic that passes the network card it's listening on.
-Plugged into a **mirror or SPAN port** on a switch, it sees that whole segment.
+Plugged into a **mirror or SPAN port** on a switch, it sees that whole prefix.
 On a single server it sees that server's own connections, which is still enough
 for a first look. In the sensor's **Control** tab you choose which network
 interfaces it monitors.
@@ -158,11 +157,11 @@ fingerprint it prints against the one shown beneath the registration code before
 you say yes; that comparison is the whole security check.
 
 Click the sensor's row in **Sensors & Agents** and open **Discoveries** to watch
-what it finds. A busy segment shows results within minutes. A quiet one takes
+what it finds. A busy prefix shows results within minutes. A quiet one takes
 longer, because a passive sensor can only report what happens on the wire.
 
 > **Want data right now, with nothing to install?** Go to **Discovery → Command
-> Center → Discover assets**, enter a subnet or a few addresses you own, keep
+> Center → Discover assets**, enter a prefix or a few addresses you own, keep
 > the **Standard** depth and start it. This is an **active** scan, unlike a
 > passive sensor: the platform sensor finds which ports answer on each address,
 > identifies what is listening (a TLS or SSH handshake where it can) and records
@@ -247,7 +246,7 @@ needs an IAM change.
 ## 6. Approve what was found
 
 Open **Discovery → Approvals**. Everything the sensor, devices and cloud runs
-found is waiting here, unless you turned on auto-approve for its segment in
+found is waiting here, unless you turned on auto-approve for its prefix in
 step 2. Review the list and click **Accept all** (or accept rows one by one).
 
 This is the step that brings the data to life. A discovered asset's certificates
@@ -255,7 +254,7 @@ and cryptographic configurations are held back until you accept it, then
 appear in Inventory, risk scoring and compliance. Accepting is also what makes
 the rest of this page worth looking at.
 
-Cloud resources won't be auto-approved by a segment unless you ticked **Cloud
+Cloud resources won't be auto-approved by a prefix unless you ticked **Cloud
 discoveries** on it, so expect to accept those here the first time.
 
 ## 7. See what you've got

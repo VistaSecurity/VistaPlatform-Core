@@ -250,7 +250,7 @@ admin_plane:
     # whole platform's audit log: HMAC-gated with RequireInternalAuth, and the
     # caller reaches audit-service through PeerServiceURL, never the edge.
     - /audit-service/internal/
-    # POST /sources/segments, /sources/assets(/admission|/links|/presence);
+    # POST /sources/prefixes, /sources/assets(/admission|/links|/presence);
     # GET /sources/asset-classes/:key, /sources/hardware-assets — the write
     # path a connector running outside inventory-service uses to bring a
     # system of record's objects in through the identity engine (platform

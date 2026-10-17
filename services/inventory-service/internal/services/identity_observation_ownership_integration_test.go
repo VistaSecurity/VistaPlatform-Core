@@ -31,7 +31,7 @@ func TestIntegration_ObservationOwnership_SuggestionAndDecisionAgree(t *testing.
 		 SELECT $1,id,'{"quantity":100}'::jsonb,'ownership regression' FROM billable_items WHERE key='max_assets'`, tenant); err != nil {
 			t.Fatal(err)
 		}
-		segment := seedSegment(t, db, tenant, "Home", "192.0.2.0/24")
+		segment := seedPrefix(t, db, tenant, "Home", "192.0.2.0/24")
 		scope := segment.String()
 		ev := func(addr string, extra ...string) string {
 			ids := fmt.Sprintf(`{"kind":"ip_address","value":%q,"scope":%q}`, addr, scope)

@@ -32,7 +32,7 @@ func newIdentityPickupFixture(t *testing.T) *identityPickupFixture {
 	f.exec(t, `UPDATE sensors SET status='active',last_heartbeat=now(),reported_capabilities=ARRAY['identity_dns_v1'],reported_dns_interfaces=ARRAY['eth0'] WHERE id=$1`, sensor)
 	f.exec(t, `INSERT INTO agent_addresses(sensor_id,interface_name,address,prefix_length) VALUES($1,'eth0','192.168.80.4',24)`, sensor)
 	f.exec(t, `INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"},"identity_enrichment":{"enabled":true}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, tenant)
-	f.exec(t, `INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'test network','cidr','192.168.80.0/24','production')`, f.segment, tenant)
+	f.exec(t, `INSERT INTO prefixes(id,tenant_id,description,prefix,environment) VALUES($1,$2,'test network','192.168.80.0/24','production')`, f.segment, tenant)
 	e, _ := json.Marshal(identity.Observation{TenantID: tenant.String(), Source: identity.Source{Kind: identity.SourceMeasured, Ref: "sensor:" + sensor.String()}, Network: identity.Network{SegmentID: f.segment.String()}, Identifiers: []identity.Identifier{{Kind: identity.KindHostname, Value: "host.local", Scope: f.segment.String()}}})
 	f.exec(t, `INSERT INTO identity_observations(id,tenant_id,fingerprint,source_kind,source_ref,evidence,first_seen_at,last_seen_at) VALUES($1::uuid,$2,$1::text,'measured',$3,$4,now(),now())`, f.observation, tenant, "sensor:"+sensor.String(), string(e))
 	return f
@@ -151,13 +151,13 @@ func TestIntegration_IdentityCommandPickupRechecksAuthorization(t *testing.T) {
 			f.exec(t, `UPDATE tenant_admin_settings SET config=jsonb_set(config,'{identity_enrichment,excluded_cidrs}','["192.168.80.0/24"]') WHERE tenant_id=$1`, f.tenant)
 		}},
 		{"sensitive_segment", func(t *testing.T, f *identityPickupFixture, id uuid.UUID, kind string) {
-			f.exec(t, `UPDATE network_segments SET metadata='{"sensitive":true}' WHERE id=$1`, f.segment)
+			f.exec(t, `UPDATE prefixes SET sensitive=true WHERE id=$1`, f.segment)
 		}},
 		{"overlapping_segment", func(t *testing.T, f *identityPickupFixture, id uuid.UUID, kind string) {
-			f.exec(t, `INSERT INTO network_segments(tenant_id,name,segment_type,value,environment) VALUES($1,'overlap','cidr','192.168.80.0/25','production')`, f.tenant)
+			f.exec(t, `INSERT INTO prefixes(tenant_id,description,prefix,environment) VALUES($1,'overlap','192.168.80.0/25','production')`, f.tenant)
 		}},
 		{"scope_changed", func(t *testing.T, f *identityPickupFixture, id uuid.UUID, kind string) {
-			f.exec(t, `UPDATE network_segments SET value='192.168.81.0/24' WHERE id=$1`, f.segment)
+			f.exec(t, `UPDATE prefixes SET prefix='192.168.81.0/24' WHERE id=$1`, f.segment)
 		}},
 		{"sensor_unreachable", func(t *testing.T, f *identityPickupFixture, id uuid.UUID, kind string) {
 			f.exec(t, `DELETE FROM agent_addresses WHERE sensor_id=$1`, f.sensor)

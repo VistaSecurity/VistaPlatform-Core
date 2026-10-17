@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/sensor-manager/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
@@ -74,10 +75,11 @@ func (s *SensorService) EmitSelfObservationIfDue(sensorID uuid.UUID, host *model
 	var platform, profile *string
 	var storedHash *string
 	var lastAt *time.Time
+	var capture pq.StringArray
 	err := s.bypassDB.QueryRow(`
-		SELECT platform, profile, self_observation_hash, self_observation_at
+		SELECT platform, profile, self_observation_hash, self_observation_at, coalesce(network_interfaces, '{}')
 		FROM sensors WHERE id = $1`, sensorID,
-	).Scan(&platform, &profile, &storedHash, &lastAt)
+	).Scan(&platform, &profile, &storedHash, &lastAt, &capture)
 	if err != nil {
 		log.Printf("[SensorService] self-observation: could not read sensor %s: %v", sensorID, err)
 		return
@@ -89,7 +91,7 @@ func (s *SensorService) EmitSelfObservationIfDue(sensorID uuid.UUID, host *model
 		return
 	}
 
-	ho := selfHostObservation(sensorID, derefString(platform), derefString(profile), host)
+	ho := selfHostObservation(sensorID, derefString(platform), derefString(profile), host, capture...)
 	if !ho.Identifies() {
 		// Unreachable in practice: AgentID alone always identifies (Key()
 		// checks it first). Defensive rather than a panic — a self-report that
@@ -139,7 +141,13 @@ func derefString(s *string) string {
 // them to a class key is a decision the identification engine's caller makes,
 // not sensor-manager, the same separation host_inventory_ingest.go documents
 // for the device-agent path ("never guess a class").
-func selfHostObservation(sensorID uuid.UUID, platform, profile string, host *models.HostIdentity) *hostobs.HostObservation {
+//
+// capture names the interfaces the sensor captures on (`sensors.network_interfaces`):
+// the host's own interface table travels in Interfaces (DCIM row 1.5e) — each
+// real NIC with its name, MAC and configured addresses — and the capture
+// interface is flagged there, so the platform records the sensor host's
+// interfaces by name instead of on a synthetic `observed-<n>` interface.
+func selfHostObservation(sensorID uuid.UUID, platform, profile string, host *models.HostIdentity, capture ...string) *hostobs.HostObservation {
 	ho := &hostobs.HostObservation{
 		ObservedAt: time.Now().UTC(),
 		AgentID:    sensorID.String(),
@@ -191,8 +199,55 @@ func selfHostObservation(sensorID uuid.UUID, platform, profile string, host *mod
 		ho.Addresses = append(ho.Addresses, addr)
 	}
 
+	ho.Interfaces = selfInterfaceTable(interfaces, capture)
+
 	ho.Finalize()
 	return ho
+}
+
+// selfInterfaceTable groups the host's per-address rows into one entry per
+// NAMED interface, in report order: its MAC, its addresses with their
+// configured length, and whether the sensor captures on it. A row with no
+// interface name (an older sensor) stays an unnamed address and MAC, as it
+// always was. A capture interface that carries no address — the usual case
+// for a SPAN or mirror port — is still listed when the host reported it,
+// because naming it is the point.
+func selfInterfaceTable(rows []sharednetwork.InterfaceAddress, capture []string) []hostobs.Interface {
+	captured := map[string]bool{}
+	for _, c := range capture {
+		if c = strings.TrimSpace(c); c != "" {
+			captured[c] = true
+		}
+	}
+	var (
+		out   []hostobs.Interface
+		index = map[string]int{}
+	)
+	for _, row := range rows {
+		name := strings.TrimSpace(row.InterfaceName)
+		if name == "" {
+			continue
+		}
+		i, ok := index[name]
+		if !ok {
+			i = len(out)
+			index[name] = i
+			out = append(out, hostobs.Interface{Name: name, Capture: captured[name]})
+		}
+		if out[i].MAC == "" {
+			out[i].MAC = row.MAC
+		}
+		addr, err := netip.ParseAddr(strings.TrimSpace(row.Address))
+		if err != nil || !addr.IsValid() {
+			continue
+		}
+		if row.PrefixLength > 0 && row.PrefixLength <= addr.BitLen() {
+			out[i].Addresses = append(out[i].Addresses, netip.PrefixFrom(addr, row.PrefixLength).String())
+		} else {
+			out[i].Addresses = append(out[i].Addresses, addr.String())
+		}
+	}
+	return out
 }
 
 // selfObservationDiscovery renders a self-observation the way

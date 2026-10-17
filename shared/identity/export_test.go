@@ -38,3 +38,7 @@ func (e *Engine) ProvisionalMatchModeForTest(ctx context.Context, ref AssetRef, 
 	mode, err := cp.provisionalMatchMode(ctx, ref, matched)
 	return [...]string{"none", "corroborate", "yield"}[mode], err
 }
+
+// RecordsObservedNetworkForTest exposes which resolutions may carry an
+// observation's interfaces (DCIM row 1.5).
+func RecordsObservedNetworkForTest(res Resolution) bool { return recordsObservedNetwork(res) }

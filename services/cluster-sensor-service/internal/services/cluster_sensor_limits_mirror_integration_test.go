@@ -343,8 +343,8 @@ func TestIntegration_UnitAuthorizer_AutomaticScopeIsCachedPerTTL(t *testing.T) {
 	if n := log.count("FOR SHARE"); n != 2 {
 		t.Fatalf("policy row read %d times for %d units, want 2 (one per scope)", n, len(addrs))
 	}
-	if n := log.count("FROM network_segments"); n > 2 { // 1 automatic scope + 1 target scope
-		t.Fatalf("segments read %d times for %d units, want once per scope", n, len(addrs))
+	if n := log.count("FROM prefixes"); n > 2 { // 1 automatic scope + 1 target scope
+		t.Fatalf("prefixes read %d times for %d units, want once per scope", n, len(addrs))
 	}
 
 	// Within the TTL a pause is not yet seen (the trade the manual path makes);

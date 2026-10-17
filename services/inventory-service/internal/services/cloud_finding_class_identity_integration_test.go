@@ -229,3 +229,44 @@ func TestIntegration_KMSKeyFinding_IsAKeyStoreNotAnApplication(t *testing.T) {
 			classKey)
 	}
 }
+
+// S3 ARNs carry no account component. The finding must therefore inherit the
+// account from the integration whose credentials listed the bucket, while its
+// provider and region come from the cloud envelope. Those are the attributes
+// the Cloud lens facets read; without this projection all three showed Unknown.
+func TestIntegration_S3Finding_CarriesCloudLensAttributes(t *testing.T) {
+	raw := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, raw)
+	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
+	tenant := testdb.NewTenant(t, raw)
+	svc := newCloudRoutingAssetService(db)
+	integrationID := uuid.New()
+	const account = "123456789012"
+	if _, err := raw.Exec(`INSERT INTO platform_integrations
+		(id, tenant_id, integration_name, integration_type, provider, status, account_id)
+		VALUES ($1, $2, 's3-attributes', 'aws', 'cloud', 'connected', $3)`, integrationID, tenant, account); err != nil {
+		t.Fatalf("seed integration: %v", err)
+	}
+
+	hostname := "rc1-attributes-bucket"
+	f := IngestFinding{
+		Hostname: &hostname, AssetType: "service", Protocol: atRestProtocolSentinel,
+		RawData: map[string]interface{}{
+			"source": "cloud_discovery", "discovery_method": "cloud_api", "integration_id": integrationID.String(),
+			"cloud_provider": "aws", "cloud_region": "us-east-2", "device_type": "aws_s3_bucket", "at_rest": true,
+			"arn": "arn:aws:s3:::" + hostname,
+		},
+	}
+	if _, err := svc.IngestFindings(tenant, []IngestFinding{f}, "monitoring"); err != nil {
+		t.Fatalf("IngestFindings: %v", err)
+	}
+	var provider, gotAccount, region, providerType string
+	if err := raw.QueryRow(`SELECT attributes->>'provider', attributes->>'account_id', attributes->>'region', attributes->>'provider_type'
+		FROM assets WHERE tenant_id=$1 AND class_key='object_storage' AND display_name=$2`, tenant, hostname).
+		Scan(&provider, &gotAccount, &region, &providerType); err != nil {
+		t.Fatalf("read bucket attributes: %v", err)
+	}
+	if provider != "aws" || gotAccount != account || region != "us-east-2" || providerType != "AWS::S3::Bucket" {
+		t.Fatalf("bucket attributes = provider %q account %q region %q type %q", provider, gotAccount, region, providerType)
+	}
+}

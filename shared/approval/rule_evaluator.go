@@ -63,12 +63,18 @@ func NewRuleEvaluator() *RuleEvaluator {
 func ValidateRuleQuery(src string) (string, error) {
 	if strings.TrimSpace(src) == "" {
 		// An empty rule matches every observation. That is a real thing to
-		// want (auto-approve this segment, no further conditions) and the
-		// segment writer produces it, so it is not an error.
+		// want (auto-approve this prefix, no further conditions), so it is
+		// not an error.
 		return "", nil
 	}
 	node, err := query.Check(src, ObservationTarget, ruleCatalog(), ruleOptions().Validate)
 	if err != nil {
+		return "", err
+	}
+	// A prefix rule may not name the cloud source (ADR-0009 D5): cloud
+	// resources are auto-approved per account. Refused at write time like any
+	// other invalid rule, so the editor and the generator learn it here.
+	if err := checkPrefixCloud(node); err != nil {
 		return "", err
 	}
 	return query.FormatNode(node), nil
@@ -93,6 +99,12 @@ func (e *RuleEvaluator) EvaluateRule(rule *Rule, discovery Discovery, classifica
 		c:      classification,
 		source: discoverySource(discovery),
 	}
+	if prefixRuleIgnoresCloud(node, src.source) {
+		// A prefix does not decide a cloud resource's approval; its
+		// account does (ADR-0009 D5). Not an error: the rule is fine for every
+		// other observation.
+		return false, nil
+	}
 	return eval.Match(node, src, eval.Options{
 		Now:    time.Now().UTC(),
 		Ladder: ruleCatalog().Ladder(),
@@ -115,20 +127,30 @@ func (r *Rule) ast() (ast.Node, error) {
 		r.compileErr = fmt.Errorf("auto-approval rule %s (%q) does not validate: %w", r.ID, r.Name, err)
 		return nil, r.compileErr
 	}
+	if err := checkPrefixCloud(node); err != nil {
+		// Fail closed, as for a rule that does not parse: a stored rule that
+		// says "auto-approve cloud on this prefix" names the source D5
+		// retired, and honouring it would be the second evaluator.
+		r.compileErr = wrapRuleErr(r, err)
+		return nil, r.compileErr
+	}
 	r.compiled = node
 	return node, nil
 }
 
-// SegmentIDFromQuery extracts the `network.segment_id=<uuid>` term a
-// segment-generated rule carries, so inventory-service can find the rule it
-// owns for a segment.
+// PrefixIDFromQuery extracts the `network.prefix_id=<uuid>` term a
+// prefix-scoped rule carries (DCIM rows 1.4, 1.6), so inventory-service can
+// find the rule it generated for a prefix.
 //
-// It reads the AST rather than matching on the query TEXT: `segment_id=X`,
-// `network.segment_id = X` and `network.segment_id="X"` are the same predicate
-// and a LIKE over the text would find one of them. It does not need a
-// catalogue — the parser resolves nothing, and the field's written path is
-// exactly what is being looked for.
-func SegmentIDFromQuery(src string) (uuid.UUID, bool) {
+// It reads the AST rather than matching on the query TEXT:
+// `network.prefix_id=X`, `network.prefix_id = X` and `network.prefix_id="X"`
+// are the same predicate, and a text match would find one of the three and
+// orphan the rules written the other two ways.
+func PrefixIDFromQuery(src string) (uuid.UUID, bool) {
+	return scopeIDFromQuery(src, "network.prefix_id")
+}
+
+func scopeIDFromQuery(src, field string) (uuid.UUID, bool) {
 	if strings.TrimSpace(src) == "" {
 		return uuid.Nil, false
 	}
@@ -143,7 +165,7 @@ func SegmentIDFromQuery(src string) (uuid.UUID, bool) {
 		if !isCmp || ok {
 			return !ok
 		}
-		if !strings.EqualFold(cmp.Field.Text, "network.segment_id") {
+		if !strings.EqualFold(cmp.Field.Text, field) {
 			return true
 		}
 		if cmp.Op != ast.OpEq && cmp.Op != ast.OpColon {

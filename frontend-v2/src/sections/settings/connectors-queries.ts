@@ -82,7 +82,7 @@ export const CONFIGURED_ELSEWHERE: Record<string, string> = {
 };
 
 /** Connector keys this page can add directly. */
-export const ADDABLE_HERE = new Set(['netbox', 'servicenow', 'device42', 'solarwinds', 'oomnitza']);
+export const ADDABLE_HERE = new Set(['netbox', 'device42_import', 'servicenow', 'device42', 'solarwinds', 'oomnitza']);
 
 export function connectorAction(entry: ConnectorEntry): ConnectorAction {
   // Status first, and not overridable: nothing that is not live is ever

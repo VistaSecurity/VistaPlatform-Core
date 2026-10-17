@@ -11,7 +11,7 @@ import { StateNote, SCard, SSection } from './kit';
 
 export const NETBOX_SECTION_TITLE = 'NetBox';
 export const NETBOX_SECTION_DESC =
-  'Pull sites, prefixes, VLANs and devices from your network source of truth. Read-only towards NetBox — nothing is ever written back.';
+  'Pull sites, prefixes, VLANs and devices from your network source of truth, and sync Business Units, IPAM and Interfaces with it both ways.';
 
 /** The upgrade card on its own, for a section that decides when to show it. */
 export function NetBoxUpgradeNote() {

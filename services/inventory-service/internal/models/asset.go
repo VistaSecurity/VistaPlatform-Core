@@ -47,32 +47,47 @@ type Asset struct {
 	PrimaryAddress *string                `json:"primary_address,omitempty" db:"primary_address"`
 	Attributes     map[string]interface{} `json:"attributes" db:"attributes"`
 
-	Environment  *string `json:"environment" db:"environment"`
-	BusinessUnit *string `json:"business_unit" db:"business_unit"`
-	OwnerEmail   *string `json:"owner_email" db:"owner_email"`
+	Environment *string `json:"environment" db:"environment"`
+	// BusinessUnit is the assigned Business Unit (DCIM 1.1), nil when none.
+	BusinessUnit *BusinessUnitRef `json:"business_unit" db:"-"`
+	OwnerEmail   *string          `json:"owner_email" db:"owner_email"`
 	// SupportGroup is the team on the hook for it — ADR-0001 D3 Q5, the one
 	// context field the CMDB buyer asked for that the old model had no home for.
-	SupportGroup       *string    `json:"support_group,omitempty" db:"support_group"`
-	Description        *string    `json:"description" db:"description"`
-	Site               *string    `json:"site,omitempty" db:"site"`
-	Region             *string    `json:"region,omitempty" db:"region"`
-	Zone               *string    `json:"zone,omitempty" db:"zone"`
-	LocationID         *uuid.UUID `json:"location_id,omitempty" db:"location_id"`
-	NetworkSegmentID   *uuid.UUID `json:"network_segment_id,omitempty" db:"network_segment_id"`
-	NetworkSegmentName *string    `json:"network_segment_name,omitempty" db:"network_segment_name"`
-	// RoutedSegments are the segments this asset is the gateway of (
+	SupportGroup *string `json:"support_group,omitempty" db:"support_group"`
+	Description  *string `json:"description" db:"description"`
+	// Site and Location are the asset's placement (DCIM row 2.1): the site, and
+	// a location inside it ("HQ / Hall 2 / Cage 7"), nil when unplaced.
+	// Region and Zone are the cloud provider's own placement words, text.
+	Site     *SiteRef     `json:"site" db:"-"`
+	Location *LocationRef `json:"location" db:"-"`
+	// Rack is the rack placement (DCIM row 2.3): rack, lowest unit, face; nil
+	// when the asset is not in a rack.
+	Rack       *RackPlacementRef `json:"rack" db:"-"`
+	Region     *string           `json:"region,omitempty" db:"region"`
+	Zone       *string           `json:"zone,omitempty" db:"zone"`
+	LocationID *uuid.UUID        `json:"location_id,omitempty" db:"location_id"`
+	// PrefixID is the prefix the asset's identity is scoped within (DCIM row
+	// 1.6), and Prefix that prefix's CIDR.
+	PrefixID *uuid.UUID `json:"prefix_id,omitempty" db:"prefix_id"`
+	Prefix   *string    `json:"prefix,omitempty" db:"prefix"`
+	// RoutedPrefixes are the prefixes this asset is the gateway of (
 	// the "Networks routed" card). Set by the single-asset read only: `[]` when
 	// it routes nothing, absent when the read could not load them (and on every
 	// list read).
-	RoutedSegments *[]RoutedSegment `json:"routed_segments,omitempty" db:"-"`
-	// SegmentGateway is the gateway of the asset's own segment ("via
+	RoutedPrefixes *[]RoutedPrefix `json:"routed_prefixes,omitempty" db:"-"`
+	// PrefixGateway is the gateway of the asset's own prefix ("via
 	// <gateway>"), derived when read and never stored per host. Single-asset
-	// read only; absent when the segment has no gateway, when the asset IS
-	// that gateway, or when it could not be loaded.
-	SegmentGateway      *SegmentGateway        `json:"segment_gateway,omitempty" db:"-"`
-	DiscoveryMethod     *string                `json:"discovery_method,omitempty" db:"discovery_method"`
-	ConfidenceScore     *int                   `json:"confidence_score,omitempty" db:"confidence_score"`
-	Tags                map[string]interface{} `json:"tags" db:"tags"`
+	// read only; absent when the prefix has no gateway, when the asset IS
+	// that gateway, or when it could not be loaded. PrefixFHRPGroup is the
+	// redundancy group whose VIP is on that network, when one is recorded.
+	PrefixGateway   *PrefixGateway         `json:"prefix_gateway,omitempty" db:"-"`
+	PrefixFHRPGroup *FHRPGroupRef          `json:"prefix_fhrp_group,omitempty" db:"-"`
+	DiscoveryMethod *string                `json:"discovery_method,omitempty" db:"discovery_method"`
+	ConfidenceScore *int                   `json:"confidence_score,omitempty" db:"confidence_score"`
+	Tags            map[string]interface{} `json:"tags" db:"tags"`
+	// CustomFields are the tenant-defined custom field values (DCIM row 5.1),
+	// loaded on the single-asset read.
+	CustomFields        map[string]interface{} `json:"custom_fields,omitempty" db:"custom_fields"`
 	Metadata            map[string]interface{} `json:"metadata" db:"metadata"`
 	AssetOwnership      string                 `json:"asset_ownership" db:"asset_ownership"`
 	AssetStatus         string                 `json:"asset_status" db:"asset_status"`
@@ -376,7 +391,6 @@ type AssetFilters struct {
 	LocationBuilding []string `json:"location_building" form:"location_building"`
 	LocationZone     []string `json:"location_zone" form:"location_zone"`
 	LocationID       []string `json:"location_id" form:"location_id"`
-	NetworkSegmentID []string `json:"network_segment_id" form:"network_segment_id"`
 	AssetOwnership   []string `json:"asset_ownership" form:"asset_ownership"`
 	AssetStatus      []string `json:"asset_status" form:"asset_status"`
 	// UnscannedOnly keeps only assets that have never been actively scanned
@@ -432,6 +446,13 @@ type AssetInput struct {
 	// Endpoints are optional: a manually created asset usually has none, and an
 	// import may carry one.
 	Endpoints []AssetEndpointInput `json:"endpoints,omitempty"`
+	// Interfaces are the interfaces the declaration states, each with its
+	// addresses (DCIM row 1.5f): a spreadsheet row's interface / MAC / IP /
+	// prefix length / VLAN, a NetBox device's interfaces. They travel on the
+	// declared observation and the identity engine writes them, source kind
+	// `declared` or `imported` like the rest of the declaration. Create only:
+	// an update does not read them.
+	Interfaces []AssetInterfaceInput `json:"interfaces,omitempty"`
 
 	// DisplayName is what a person calls this thing. For most classes it is
 	// cosmetic (the engine derives one from the identifiers). For the SERVICE
@@ -444,23 +465,37 @@ type AssetInput struct {
 	IPAddress *string `json:"ip_address"`
 	// Attributes are the class-specific typed attributes (operating_system,
 	// vendor, model, firmware_version …), validated against the class's schema.
-	Attributes   map[string]interface{} `json:"attributes"`
-	Environment  *string                `json:"environment"`
-	BusinessUnit *string                `json:"business_unit"`
-	OwnerEmail   *string                `json:"owner_email"`
-	SupportGroup *string                `json:"support_group"`
-	Description  *string                `json:"description"`
-	// Site and Region are the physical placement of the asset, as the source
-	// that supplied it names it — a NetBox site and its region, a CMDB
-	// location. They are free text rather than a FK to `locations` because a
-	// connector cannot be trusted to have created a location row, and an
-	// import that silently invented one would grow a location tree nobody
-	// asked for. A nil pointer is "not stated" and leaves the column alone,
-	// like every other context field.
+	Attributes  map[string]interface{} `json:"attributes"`
+	Environment *string                `json:"environment"`
+	// BusinessUnitID assigns the asset to a Business Unit; BusinessUnit is the
+	// name form accepted by imports, resolved (or created) server side.
+	BusinessUnitID *string `json:"business_unit_id"`
+	BusinessUnit   *string `json:"business_unit"`
+	// BusinessUnitExternalSystem/ID name the third-party record the unit maps
+	// from (NetBox tenant). Set by the source-import wire only, never accepted
+	// from asset-edit JSON.
+	BusinessUnitExternalSystem string  `json:"-"`
+	BusinessUnitExternalID     string  `json:"-"`
+	OwnerEmail                 *string `json:"owner_email"`
+	SupportGroup               *string `json:"support_group"`
+	Description                *string `json:"description"`
+	// SiteID and LocationID place the asset (DCIM row 2.1): ids a person picks
+	// in the asset form. "" clears (clearing the site clears the location);
+	// the location must be in the site (SiteService.ResolveAssetPlacement).
+	SiteID     *string `json:"site_id"`
+	LocationID *string `json:"location_id"`
+	// Site is the NAME form an import supplies (a NetBox site, a CMDB
+	// location): resolved to the tenant's site of that name, which is created
+	// when there is none. Region is the source's region text. A nil pointer is
+	// "not stated" and leaves the placement alone, like every other context
+	// field.
 	Site   *string `json:"site"`
 	Region *string `json:"region"`
 
-	Tags           map[string]interface{} `json:"tags"`
+	Tags map[string]interface{} `json:"tags"`
+	// CustomFields (DCIM row 5.1): the fields to set; on an update the others
+	// are kept (NetBox's PATCH). Checked against the tenant's definitions.
+	CustomFields   map[string]interface{} `json:"custom_fields"`
 	Metadata       map[string]interface{} `json:"metadata"`
 	AssetOwnership *string                `json:"asset_ownership"`
 	// AssetStatus is REFUSED on both paths and exists only so a client that
@@ -474,6 +509,43 @@ type AssetInput struct {
 	// deferred-finding materialisation) and denying carries a suppression, so
 	// writing the column alone produces a monitored asset with none of it done.
 	AssetStatus *string `json:"asset_status"`
+}
+
+// AssetInterfaceInput is one interface a declaration states.
+//
+// A NAMED interface is declared as itself. An interface with no name carries
+// its MAC and addresses as identifiers only, and the identity engine files
+// them on the interface it names (`observed-<n>`, row 1.4's rule) — nothing
+// invents an interface name, and the type, MTU, mode and VLAN of an unnamed
+// interface have nowhere to go.
+type AssetInterfaceInput struct {
+	Name       string `json:"name"`
+	Type       string `json:"type,omitempty"`
+	MACAddress string `json:"mac_address,omitempty"`
+	MTU        *int   `json:"mtu,omitempty"`
+	Enabled    *bool  `json:"enabled,omitempty"`
+	// Mode is the 802.1Q mode (access, tagged, tagged-all, q-in-q);
+	// UntaggedVLAN the access / native VLAN id, 0 for none. A VLAN with no
+	// mode is an access VLAN.
+	Mode         string                       `json:"mode,omitempty"`
+	UntaggedVLAN int                          `json:"untagged_vlan,omitempty"`
+	Addresses    []AssetInterfaceAddressInput `json:"addresses,omitempty"`
+	// ExternalIDs are the source's own ids for the interface, stamped into
+	// `interfaces.external_ids` (peer → id). Set by the source-import wire
+	// only, never accepted from request JSON.
+	ExternalIDs map[string]string `json:"-"`
+}
+
+// AssetInterfaceAddressInput is one address on a declared interface.
+type AssetInterfaceAddressInput struct {
+	// Address is the host address; a CIDR spelling ("192.0.2.10/24") also
+	// states the length, as PrefixLength does.
+	Address      string `json:"address"`
+	PrefixLength int    `json:"prefix_length,omitempty"`
+	// VRF names a VRF the tenant has (name or RD); empty is the global table.
+	VRF string `json:"vrf,omitempty"`
+	// ExternalIDs: as AssetInterfaceInput.ExternalIDs, for the ip_addresses row.
+	ExternalIDs map[string]string `json:"-"`
 }
 
 // IdentifierUpdateReport says what an update did to an asset's identifiers.
@@ -530,6 +602,8 @@ type AssetEndpointInput struct {
 // `label || key` and a facet that gains a label later does not need a client
 // change.
 type AssetFacetBucket struct {
+	// ID is set by facets over an object (business_unit): the row's id.
+	ID    string `json:"id,omitempty"`
 	Key   string `json:"value"`
 	Label string `json:"label,omitempty"`
 	Count int    `json:"count"`

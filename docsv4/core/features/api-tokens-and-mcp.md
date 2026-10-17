@@ -8,13 +8,19 @@ scoped to your tenant and role, read-only.
 
 ## What your assistant can do
 
-Once connected, your assistant has 23 tools:
+Once connected, your assistant has 32 tools:
 
 - **Inventory** — search your assets with the [query language](./query.md),
   find them by free text when you don't know a field to filter on, count them
   by any facet, read one asset in full (its class, identifiers, endpoints,
   attributes and risk), read its change history, list the software installed on
   it, and browse the asset class tree.
+- **Interfaces and IP address management** — list interfaces across your
+  assets or for one asset (find which asset owns a MAC address), browse
+  prefixes with their utilisation and free space, list IP addresses and
+  VLANs, ask "what holds 10.1.2.3?", list your Business Units, and read the
+  recorded change history of any one object. The platform still applies your
+  own DCIM and IPAM permissions to every call.
 - **Relationships** — the typed relationships on one asset (what it runs on,
   hosts, depends on, connects to), the graph around it out to three hops, and
   its blast radius: what else is affected if it changes. See
@@ -28,7 +34,7 @@ Once connected, your assistant has 23 tools:
   the scope it was generated from, its content hash, component count, and how
   fresh your inventory was when it was taken.
 
-Two of the 23 reach capabilities that are not part of Vista Platform Core —
+Two of the 32 reach capabilities that are not part of Vista Platform Core —
 asking about your inventory in plain words, and comparing two CBOM artifacts.
 Both are offered to your assistant on every install, and on Core they answer
 *"not included in your subscription"* rather than failing obscurely.
@@ -256,7 +262,7 @@ Go to **My Profile → API Tokens → New token**:
 
 1. Name it for where it will live (e.g. "Claude Code on my laptop").
 2. Pick permissions — the default set (`assets.read`, `compliance.read`,
-   `reports.read`) covers all 23 MCP tools.
+   `reports.read`) covers all 32 MCP tools.
 3. Pick an expiry (default 90 days, max 1 year).
 4. **Copy the token immediately.** It is shown exactly once. Treat it like a
    password and store it in a secret manager.

@@ -159,4 +159,5 @@ var CollectionTarget = map[string]string{
 	"identifier":   "identifier",
 	"relationship": "relationship",
 	"asset":        "asset",
+	"interface":    "interface",
 }

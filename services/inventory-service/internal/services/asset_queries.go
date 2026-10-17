@@ -78,14 +78,14 @@ func (s *AssetService) GetAssets(tenantID uuid.UUID, filters models.AssetFilters
 		SELECT
 			a.id, a.tenant_id, a.hostname, a.display_name, host(a.primary_address),
 			a.class_key, a.class_path, a.class_source_kind, a.class_source_ref, a.class_confidence,
-			a.attributes::text, a.environment, a.business_unit, a.owner_email, a.support_group,
+			a.attributes::text, a.environment, ` + assetBusinessUnitSQL + `, a.owner_email, a.support_group,
 			a.description, a.tags::text, a.metadata::text, a.asset_ownership, a.asset_status,
 			a.stale_status, a.risk_score, a.risk_assessed_by,
 			a.identity_status, ` + assetIdentityConflictSQL + `,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at,
-			a.location_id, a.network_segment_id, ns.name AS network_segment_name,
-			a.site, a.region, a.zone,
+			a.location_id, a.prefix_id, pfx.prefix::text AS prefix,
+			` + assetSiteSQL + `, ` + assetLocationSQL + `, ` + assetRackSQL + `, a.region, a.zone,
 			(SELECT COUNT(DISTINCT ci2.certificate_id)
 			   FROM crypto_implementations ci2
 			  WHERE ci2.asset_id = a.id AND ci2.deleted_at IS NULL) AS certificate_count,
@@ -108,7 +108,7 @@ func (s *AssetService) GetAssets(tenantID uuid.UUID, filters models.AssetFilters
 				         GROUP BY ci3.protocol) p
 			), '[]'::jsonb)::text AS protocol_summary
 		FROM assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
+		LEFT JOIN prefixes pfx ON pfx.tenant_id = a.tenant_id AND pfx.id = a.prefix_id
 		WHERE ` + where
 
 	baseQuery += " ORDER BY " + assetListOrderBy(filters)
@@ -124,7 +124,7 @@ func (s *AssetService) GetAssets(tenantID uuid.UUID, filters models.AssetFilters
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// RLS-scoped reads over assets / network_segments / the crypto rollups —
+	// RLS-scoped reads over assets / prefixes / the crypto rollups —
 	// count, page and the two batched child loads run in one tenant tx, which is
 	// also what makes the page and its children a consistent snapshot.
 	var total int
@@ -230,8 +230,8 @@ func scanAssetListRow(rows *sqlx.Rows) (*models.Asset, error) {
 		&asset.StaleStatus, &asset.RiskScore, &assessedBy,
 		&asset.IdentityStatus, &asset.HasIdentityConflict,
 		&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
-		&asset.DeletedAt, &asset.LocationID, &asset.NetworkSegmentID, &asset.NetworkSegmentName,
-		&asset.Site, &asset.Region, &asset.Zone,
+		&asset.DeletedAt, &asset.LocationID, &asset.PrefixID, &asset.Prefix,
+		&asset.Site, &asset.Location, &asset.Rack, &asset.Region, &asset.Zone,
 		&certCount, &cfgCount, &protocolSummaryText,
 	); err != nil {
 		return nil, fmt.Errorf("failed to scan asset: %w", err)
@@ -281,7 +281,7 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 		SELECT
 			a.id, a.tenant_id, a.hostname, a.display_name, host(a.primary_address),
 			a.class_key, a.class_path, a.class_source_kind, a.class_source_ref, a.class_confidence,
-			` + assetOperatingSystemSQL + `, a.attributes::text, a.environment, a.business_unit, a.owner_email,
+			` + assetOperatingSystemSQL + `, a.attributes::text, a.environment, ` + assetBusinessUnitSQL + `, a.owner_email,
 			a.support_group, a.description, a.tags::text, a.metadata::text,
 			a.asset_ownership, a.asset_status, a.stale_status,
 			a.identity_status, ` + assetIdentityConflictSQL + `,
@@ -289,17 +289,17 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 			a.risk_score, a.risk_assessed_by,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at,
-			a.location_id, a.network_segment_id, ns.name AS network_segment_name,
-			a.site, a.region, a.zone
+			a.location_id, a.prefix_id, pfx.prefix::text AS prefix,
+			` + assetSiteSQL + `, ` + assetLocationSQL + `, ` + assetRackSQL + `, a.region, a.zone, a.custom_fields::text
 		FROM assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id
+		LEFT JOIN prefixes pfx ON pfx.tenant_id = a.tenant_id AND pfx.id = a.prefix_id
 		WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL
 	`
 	var asset models.Asset
-	var tagsText, metadataText, attributesText string
+	var tagsText, metadataText, attributesText, customFieldsText string
 	var operatingSystem *string
 	var assessedBy pq.StringArray
-	// RLS-scoped read over assets / network_segments — wrapped in WithTenantTx.
+	// RLS-scoped read over assets / prefixes — wrapped in WithTenantTx.
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.QueryRow(query, assetID, tenantID).Scan(
 			&asset.ID, &asset.TenantID, &asset.Hostname, &asset.DisplayName, &asset.PrimaryAddress,
@@ -311,8 +311,8 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 			&asset.DiscoveryMethod, &asset.ConfidenceScore,
 			&asset.RiskScore, &assessedBy,
 			&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
-			&asset.DeletedAt, &asset.LocationID, &asset.NetworkSegmentID, &asset.NetworkSegmentName,
-			&asset.Site, &asset.Region, &asset.Zone,
+			&asset.DeletedAt, &asset.LocationID, &asset.PrefixID, &asset.Prefix,
+			&asset.Site, &asset.Location, &asset.Rack, &asset.Region, &asset.Zone, &customFieldsText,
 		)
 	}); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -321,6 +321,10 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 		return nil, fmt.Errorf("failed to get asset: %w", err)
 	}
 	asset.RiskAssessedBy = []string(assessedBy)
+	asset.CustomFields = map[string]interface{}{}
+	if customFieldsText != "" {
+		_ = json.Unmarshal([]byte(customFieldsText), &asset.CustomFields)
+	}
 	if attributesText != "" {
 		_ = json.Unmarshal([]byte(attributesText), &asset.Attributes)
 	}

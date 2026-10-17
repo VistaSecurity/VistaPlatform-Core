@@ -290,6 +290,24 @@ var capabilityEvidence = map[Capability]func(evidence) bool{
 				return true
 			}
 		}
+		// DCIM row 1.5c: the same statement as objects — a connected prefix on
+		// a VLAN, and the device's own address inside it on one of its
+		// interfaces.
+		if n := e.result.Network; n != nil {
+			for _, p := range n.Prefixes {
+				prefix, err := netip.ParsePrefix(p.Prefix)
+				if err != nil || p.VLAN == 0 {
+					continue
+				}
+				for _, ifc := range n.Interfaces {
+					for _, a := range ifc.Addresses {
+						if ap, err := netip.ParsePrefix(a.Address); err == nil && prefix.Contains(ap.Addr()) {
+							return true
+						}
+					}
+				}
+			}
+		}
 		return false
 	},
 	CapVLANDHCP: func(e evidence) bool {
@@ -555,6 +573,19 @@ func resultAddresses(result *InterrogateResult) []string {
 	}
 	for _, a := range result.Assets {
 		out = append(out, a.IPAddress)
+	}
+	if n := result.Network; n != nil {
+		for _, ifc := range n.Interfaces {
+			for _, a := range ifc.Addresses {
+				out = append(out, a.Address)
+			}
+		}
+		for _, p := range n.Prefixes {
+			out = append(out, p.Prefix)
+		}
+		for _, e := range n.ARP {
+			out = append(out, e.Address)
+		}
 	}
 	for _, p := range resultPeerRefs(result) {
 		out = append(out, p.Identifier(IdentifierIPAddress))

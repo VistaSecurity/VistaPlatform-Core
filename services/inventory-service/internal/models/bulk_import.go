@@ -65,8 +65,3 @@ func (r *BulkImportResult) Add(index int, status BulkRowStatus, id *uuid.UUID, r
 type AssetBulkImportRequest struct {
 	Rows []AssetInput `json:"rows" binding:"required"`
 }
-
-// NetworkSegmentBulkImportRequest is the body for POST .../network-segments/bulk.
-type NetworkSegmentBulkImportRequest struct {
-	Rows []NetworkSegmentInput `json:"rows" binding:"required"`
-}

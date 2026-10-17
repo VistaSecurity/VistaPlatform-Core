@@ -194,11 +194,29 @@ func TestDefaultCloudResourceTypes_MatchDiscoverModal(t *testing.T) {
 	providerRe := regexp.MustCompile(`(?s)\n  (\w+): \[(.*?)\n  \],`)
 	valueRe := regexp.MustCompile(`value:\s*'([^']+)'`)
 
+	// The enumeration listings lead each provider's list through a spread of
+	// ENUMERATION_TYPES (ADR-0009 D3); resolve it the same way.
+	enumBlock := regexp.MustCompile(`(?s)const ENUMERATION_TYPES[^=]*=\s*\{(.*?)\n\};`).FindSubmatch(src)
+	if enumBlock == nil {
+		t.Fatal("ENUMERATION_TYPES table not found in cloud-modals.tsx — update this parser if it moved")
+	}
+	enumeration := map[string][][]byte{}
+	for _, m := range providerRe.FindAllSubmatch(enumBlock[1], -1) {
+		enumeration[string(m[1])] = [][]byte{m[2]}
+	}
+	spreadRe := regexp.MustCompile(`\.\.\.ENUMERATION_TYPES\.(\w+)`)
+
 	modal := map[string][]string{}
 	for _, m := range providerRe.FindAllSubmatch(block[1], -1) {
 		var values []string
-		for _, v := range valueRe.FindAllSubmatch(m[2], -1) {
-			values = append(values, string(v[1]))
+		bodies := [][]byte{m[2]}
+		for _, sp := range spreadRe.FindAllSubmatch(m[2], -1) {
+			bodies = append(bodies, enumeration[string(sp[1])]...)
+		}
+		for _, body := range bodies {
+			for _, v := range valueRe.FindAllSubmatch(body, -1) {
+				values = append(values, string(v[1]))
+			}
 		}
 		modal[string(m[1])] = values
 	}
@@ -234,6 +252,11 @@ func TestDefaultCloudResourceTypes_EveryTypeHasACollector(t *testing.T) {
 	}
 	for provider, table := range tables {
 		for _, rt := range DefaultCloudResourceTypes(provider) {
+			if selectEnumeration([]string{rt}).any() {
+				// An account inventory listing: run by the enumeration half,
+				// not the collector table (cloud_lifecycle.go).
+				continue
+			}
 			if _, ok := table[rt]; !ok {
 				t.Errorf("%s offers %q but its dispatch table has no collector for it", provider, rt)
 			}

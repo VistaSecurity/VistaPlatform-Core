@@ -70,12 +70,13 @@ type SensorDiscoveryRow struct {
 	Metadata   map[string]any `json:"metadata"`
 }
 
-// LearnedSegment is a network_segments row an interrogation created.
-type LearnedSegment struct {
-	Value       string         `json:"value"`
-	SegmentType string         `json:"segment_type"`
-	NetworkType string         `json:"network_type"`
-	Metadata    map[string]any `json:"metadata"`
+// LearnedPrefix is a measured prefix an interrogation recorded (DCIM row 1.6:
+// these were learned network segments).
+type LearnedPrefix struct {
+	Value       string `json:"value"`
+	NetworkType string `json:"network_type"`
+	// DHCPManaged is the posture the device stated; nil when it did not.
+	DHCPManaged *bool `json:"dhcp_managed"`
 }
 
 // AssetRecord is one asset row as hop 1 left it: the interrogated device
@@ -92,8 +93,8 @@ type AssetRecord struct {
 	Identifiers    []AssetIdentifier `json:"identifiers"`
 }
 
-// AssetIdentifier is one asset_identifiers row. Scope is "segment:<cidr>"
-// for a segment scope, so a downstream hop can map it to its own segment id.
+// AssetIdentifier is one asset_identifiers row. Scope is "prefix:<cidr>"
+// for a prefix scope, so a downstream hop can map it to its own prefix id.
 type AssetIdentifier struct {
 	Kind       string  `json:"kind"`
 	Value      string  `json:"value"`
@@ -110,10 +111,10 @@ type Hop1Handoff struct {
 	// SensorDiscoveries are the rows the in-cluster interrogation wrote, in a
 	// stable order.
 	SensorDiscoveries []SensorDiscoveryRow `json:"sensor_discoveries"`
-	// LearnedSegments are the segments the interrogation taught the tenant.
+	// LearnedPrefixes are the prefixes the interrogation taught the tenant.
 	// They travel with the rows because they decide how hops 2 and 3
 	// classify an address (internal versus third party).
-	LearnedSegments []LearnedSegment `json:"learned_segments"`
+	LearnedPrefixes []LearnedPrefix `json:"learned_prefixes"`
 }
 
 // ImportRequest is one POST discovery-processor made to inventory-service's
@@ -149,9 +150,9 @@ type Hop2Handoff struct {
 	Rows []RowOutcome `json:"rows"`
 	// ProcessError is what ProcessBatch returned, "" for success.
 	ProcessError string `json:"process_error"`
-	// LearnedSegments and Assets are passed through from hop 1 for hop 3.
-	LearnedSegments []LearnedSegment `json:"learned_segments"`
-	Assets          []AssetRecord    `json:"assets"`
+	// LearnedPrefixes and Assets are passed through from hop 1 for hop 3.
+	LearnedPrefixes []LearnedPrefix `json:"learned_prefixes"`
+	Assets          []AssetRecord   `json:"assets"`
 }
 
 // Hop3Inventory is hop 3's golden: a summary of what inventory holds after the

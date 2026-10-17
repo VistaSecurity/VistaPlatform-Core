@@ -104,8 +104,9 @@ func TestIntegration_CloudDiscovery_NothingDiscoveredIsManaged(t *testing.T) {
 	// response carry now that no asset_management row is written to hold it.
 	// "connected" would be a claim about a connection nothing made; the provider
 	// API was read.
-	if len(reported) != 3 {
-		t.Fatalf("recordEnumeration reported %d devices, want 3", len(reported))
+	// One: the instance. The VPC and subnet are prefixes since row 1.5f.
+	if len(reported) != 1 {
+		t.Fatalf("recordEnumeration reported %d devices, want 1", len(reported))
 	}
 	for _, d := range reported {
 		if d.ConnectionStatus != "discovered" {
@@ -137,8 +138,6 @@ func TestIntegration_CloudDiscovery_NothingDiscoveredIsManaged(t *testing.T) {
 		id    uuid.UUID
 		label string
 	}{
-		{assetIDForCloudResource(t, owner, tenantID, plan.Networks[0].ResourceID), "vpc"},
-		{assetIDForCloudResource(t, owner, tenantID, plan.Subnets[0].ResourceID), "subnet"},
 		{assetIDForCloudResource(t, owner, tenantID, plan.Instances[0].ResourceID), "ec2 instance"},
 		{assetIDForCloudResource(t, owner, tenantID, albARN), "load balancer"},
 	}
@@ -181,9 +180,7 @@ func TestIntegration_CloudDiscovery_NothingDiscoveredIsManaged(t *testing.T) {
 		wantClass string
 		label     string
 	}{
-		{subjects[0].id, "virtual_network", "vpc"},
-		{subjects[1].id, "subnet", "subnet"},
-		{subjects[2].id, "compute_instance", "ec2 instance"},
+		{subjects[0].id, "compute_instance", "ec2 instance"},
 	} {
 		var classKey, discoveryMethod string
 		if err := owner.QueryRow(`
@@ -211,15 +208,18 @@ func TestIntegration_CloudDiscovery_NothingDiscoveredIsManaged(t *testing.T) {
 		}
 	}
 
-	// Containment survives: vpc→subnet and subnet→instance.
-	var edges int
-	if err := owner.QueryRow(
-		`SELECT count(*) FROM asset_relationships WHERE tenant_id = $1 AND type = 'contains'`,
-		tenantID).Scan(&edges); err != nil {
-		t.Fatalf("edge count: %v", err)
+	// The network placement survives as the instance's interface and address:
+	// a VPC and a subnet are prefixes since row 1.5f, not assets with
+	// `contains` edges.
+	var addrs int
+	if err := owner.QueryRow(`
+		SELECT count(*) FROM ip_addresses ip JOIN interfaces i ON i.tenant_id = ip.tenant_id AND i.id = ip.assigned_id
+		 WHERE ip.tenant_id = $1 AND ip.assigned_kind = 'interface' AND i.asset_id = $2`,
+		tenantID, subjects[0].id).Scan(&addrs); err != nil {
+		t.Fatalf("address count: %v", err)
 	}
-	if edges != 2 {
-		t.Errorf("%d contains edges, want 2 — suppressing management must not suppress containment", edges)
+	if addrs != 1 {
+		t.Errorf("%d addresses on the instance's interfaces, want 1 — suppressing management must not suppress placement", addrs)
 	}
 }
 
@@ -333,7 +333,6 @@ func TestIntegration_CloudDiscovery_SuppressionSurvivesReplay(t *testing.T) {
 
 	plan := awsEnumerationPlanForTest(t)
 	instance := plan.Instances[0]
-	instance.ParentID = ""
 	_, err = svc.recordCloudResource(ctx, tenant, integration, "AWS", instance)
 	var retained *identity.RetainedObservation
 	if !errors.As(err, &retained) {

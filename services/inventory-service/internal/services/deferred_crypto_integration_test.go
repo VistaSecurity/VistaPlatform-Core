@@ -29,6 +29,7 @@ import (
 	invevents "github.com/vistasecurity/vistaplatform/inventory-service/internal/events"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgrepo "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
+	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
 // deferralRowState counts what deferred_crypto_findings holds for a tenant.
@@ -144,9 +145,7 @@ func TestIntegration_DeferredCrypto_PendingAssetHeldThenReplayedOnApproval(t *te
 func TestIntegration_DeferredCrypto_EnforceHeldEvidenceReplaysWhenLinkedAndMonitoring(t *testing.T) {
 	f := newLeafLinkFixture(t)
 	// A declared segment, so the engine may admit a new asset there.
-	f.svc.networkSegmentService = NewNetworkSegmentService(f.db, nil)
-	if _, err := f.db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment)
- VALUES($1,$2,'Deferral test','cidr','198.51.100.0/24','production')`, uuid.New(), f.tenant); err != nil {
+	if _, err := f.db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Deferral test','198.51.100.0/24'::cidr,'production','declared','active')`, uuid.New(), f.tenant); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}')
@@ -214,16 +213,18 @@ func TestIntegration_DeferredCrypto_EnforceHeldEvidenceReplaysWhenLinkedAndMonit
 }
 
 // deferralApplyAdoptionFunction executes the adoption function exactly as
-// schema.sql's POST-MIGRATIONS block defines it, read from the file, so the
-// test fails if the block is removed rather than passing on a database that
-// still has the function from an earlier apply.
+// schema.sql defines it, read from the file, so the test fails if the
+// definition is removed rather than passing on a database that still has the
+// function from an earlier apply. (The 5.0.0 baseline no longer calls it on
+// apply — a fresh install has nothing to adopt; inventory-service's evidence
+// sweep is its caller.)
 func deferralApplyAdoptionFunction(t *testing.T, f leafLinkFixture) {
 	t.Helper()
 	body := schemaSQL(t)
 	const start = "CREATE OR REPLACE FUNCTION public.adopt_legacy_crypto_deferrals("
 	i := strings.Index(body, start)
 	if i < 0 {
-		t.Fatal("schema.sql no longer defines public.adopt_legacy_crypto_deferrals — the POST-MIGRATIONS move of " +
+		t.Fatal("schema.sql no longer defines public.adopt_legacy_crypto_deferrals — the move of " +
 			"the old deferral stores into deferred_crypto_findings is gone")
 	}
 	j := strings.Index(body[i:], "\n$$;\n")
@@ -233,12 +234,9 @@ func deferralApplyAdoptionFunction(t *testing.T, f leafLinkFixture) {
 	if _, err := f.db.Exec(body[i : i+j+len("\n$$;")]); err != nil {
 		t.Fatalf("apply the adoption function from schema.sql: %v", err)
 	}
-	if !strings.Contains(body[i+j:], "SELECT public.adopt_legacy_crypto_deferrals();") {
-		t.Fatal("schema.sql defines the adoption function but never runs it on apply")
-	}
 }
 
-// (c) The POST-MIGRATIONS block moves an asset's metadata array and an
+// (c) The adoption function moves an asset's metadata array and an
 // unmaterialized discovery payload into deferred_crypto_findings, exactly once,
 // clears the metadata key, leaves host-observation payloads alone — and the
 // moved rows replay through the real approval.
@@ -386,15 +384,17 @@ func deferralBoundSetup(t *testing.T, f leafLinkFixture, host, ip, status string
 	}
 	for _, q := range []string{
 		`DELETE FROM deferred_crypto_findings WHERE tenant_id=$1`,
-		`DELETE FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address'`,
+		// Row 1.4: an address is an ip_addresses row on an interface;
+		// releasing every one leaves the asset holding no address.
+		`UPDATE ip_addresses SET assigned_kind=NULL, assigned_id=NULL WHERE tenant_id=$1`,
 		`UPDATE assets SET primary_address=NULL WHERE tenant_id=$1`,
 	} {
 		if _, err := f.db.Exec(q, f.tenant); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := f.db.Exec(`INSERT INTO asset_identifiers(tenant_id,asset_id,kind,value,scope) VALUES($1,$2,'ip_address',$3,'scope-a')`,
-		f.tenant, asset, ip); err != nil {
+	if _, err := f.db.Exec(testdb.SeedAssetAddressSQL,
+		f.tenant, asset, ip, "scope-a", "measured", "test"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.db.Exec(`UPDATE assets SET asset_status=$3 WHERE tenant_id=$1 AND id=$2`, f.tenant, asset, status); err != nil {
@@ -483,7 +483,7 @@ func TestIntegration_DeferredCrypto_BoundObservationOwnedAddress(t *testing.T) {
 func TestIntegration_DeferredCrypto_BoundObservationPrimaryAddress(t *testing.T) {
 	f := newLeafLinkFixture(t)
 	asset := deferralBoundSetup(t, f, "bound-primary.example.test", "192.0.2.10", "monitoring")
-	if _, err := f.db.Exec(`DELETE FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address'`, f.tenant); err != nil {
+	if _, err := f.db.Exec(`UPDATE ip_addresses SET assigned_kind=NULL, assigned_id=NULL WHERE tenant_id=$1`, f.tenant); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.db.Exec(`UPDATE assets SET primary_address='192.0.2.20' WHERE tenant_id=$1 AND id=$2`, f.tenant, asset); err != nil {

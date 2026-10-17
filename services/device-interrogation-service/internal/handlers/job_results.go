@@ -87,6 +87,18 @@ type JobResultResourceType struct {
 	ScopesSucceeded int                         `json:"scopes_succeeded"`
 	ScopesAttempted int                         `json:"scopes_attempted"`
 	Failures        []JobResultCollectorFailure `json:"failures,omitempty"`
+	// Regions is the type's per-region half (asset-inventory ADR-0009 D3):
+	// the job detail's outcome grid. Mirrors services.CloudRegionOutcome.
+	Regions []JobResultRegionOutcome `json:"regions,omitempty"`
+}
+
+// JobResultRegionOutcome is one resource type in one region (or `global`).
+type JobResultRegionOutcome struct {
+	Region             string                     `json:"region"`
+	Status             string                     `json:"status"`
+	Found              int                        `json:"found"`
+	Failure            *JobResultCollectorFailure `json:"failure,omitempty"`
+	FromAccountListing bool                       `json:"from_account_listing,omitempty"`
 }
 
 // JobResultCollectionWarning is one thing the collector could not read during
@@ -232,6 +244,12 @@ func buildJobResults(jobID, status, resultsJSON string) JobResultsResponse {
 		for i := range t.Failures {
 			t.Failures[i].Message = services.SanitizeCloudErrorMessage(t.Failures[i].Message)
 			t.Failures[i].Code = services.SanitizeCloudErrorMessage(t.Failures[i].Code)
+		}
+		for i := range t.Regions {
+			if f := t.Regions[i].Failure; f != nil {
+				f.Message = services.SanitizeCloudErrorMessage(f.Message)
+				f.Code = services.SanitizeCloudErrorMessage(f.Code)
+			}
 		}
 		out.ResourceTypes = append(out.ResourceTypes, t)
 	}

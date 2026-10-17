@@ -94,7 +94,7 @@ export function ProvisionalIdentityPanel({ assetID }: { assetID: string }) {
     <p>{PROVISIONAL_LEAD}</p>
 
     {collector === null ? (
-      // No segment could be resolved, so there is no collector question to
+      // No prefix could be resolved, so there is no collector question to
       // answer. Saying "no collector reaches this network" here would name a
       // network we could not identify.
       <p>Network placement could not be resolved for this observation.</p>

@@ -22,9 +22,9 @@ import { CLASS_GROUP_STYLES, classGroupOf, type ClassGroupKey } from './map-mode
 
 export type NetworkMap = inventoryComponents['schemas']['NetworkMap'];
 export type NetworkMapAsset = inventoryComponents['schemas']['NetworkMapAsset'];
-export type NetworkMapSegment = inventoryComponents['schemas']['NetworkMapSegment'];
+export type NetworkMapPrefix = inventoryComponents['schemas']['NetworkMapPrefix'];
 export type NetworkMapComponent = inventoryComponents['schemas']['NetworkMapComponent'];
-export type SegmentGateway = inventoryComponents['schemas']['SegmentGateway'];
+export type PrefixGateway = inventoryComponents['schemas']['PrefixGateway'];
 
 // ------------------------------------------------------------ view state ---
 
@@ -94,13 +94,13 @@ export type SiteKind = 'site' | 'cloud' | 'unassigned';
 export interface Tray {
   key: string;
   name: string;
-  /** The CIDR / range / cloud reference, or a line saying why there is none. */
+  /** The prefix's CIDR (and VLAN), or a line saying why there is none. */
   detail: string;
-  segmentId: string | null;
-  /** The device that reported routing this network, or null when none
-   *  has — and always null for a tray that is not a network (Unsegmented, a
+  prefixId: string | null;
+  /** The device linked as this prefix's gateway, or null when none
+   *  is — and always null for a tray that is not a prefix (No prefix, a
    *  cloud region). Never inferred from the addresses in the tray. */
-  gateway: SegmentGateway | null;
+  gateway: PrefixGateway | null;
   assets: NetworkMapAsset[];
 }
 
@@ -113,27 +113,28 @@ export interface SiteGroup {
   assets: NetworkMapAsset[];
 }
 
-const UNSEGMENTED_TRAY = '~unsegmented~';
+const NO_PREFIX_TRAY = '~no-prefix~';
 
 /**
  * Place every asset in a site and a tray (D2).
  *
- * - A physical site groups by the network segment each asset is assigned to.
- *   No subnet is inferred from an address: a device the data files in the
- *   wrong segment is drawn in the wrong segment, because a map that quietly
- *   corrected the data would hide the thing that needs fixing.
- * - An asset with no segment sits in an explicit **Unsegmented** tray.
+ * - A physical site groups by the prefix each asset is placed in
+ *   (`assets.prefix_id`, DCIM row 1.6). No prefix is inferred from an
+ *   address here: a device the data files in the wrong prefix is drawn in the
+ *   wrong prefix, because a map that quietly corrected the data would hide the
+ *   thing that needs fixing.
+ * - An asset in no prefix sits in an explicit **No prefix** tray.
  * - An asset with no site but a recorded cloud account is grouped under that
  *   account, one tray per region — a cloud account is where a cloud resource
  *   lives, and "Unassigned" would lump every account together.
  * - Everything else with no site is **Unassigned**, last.
  *
  * Sites are ordered biggest first with Unassigned last; trays likewise with
- * Unsegmented last. Ties break on the name, so the order is total and the map
+ * No prefix last. Ties break on the name, so the order is total and the map
  * does not reshuffle between renders.
  */
 export function groupSites(map: NetworkMap | undefined, assets: readonly NetworkMapAsset[]): SiteGroup[] {
-  const segments = new Map((map?.segments ?? []).map((s) => [s.segment_id, s]));
+  const prefixes = new Map((map?.prefixes ?? []).map((p) => [p.prefix_id, p]));
   const sites = new Map<string, { name: string; kind: SiteKind; trays: Map<string, Tray> }>();
 
   for (const a of assets) {
@@ -163,27 +164,27 @@ export function groupSites(map: NetworkMap | undefined, assets: readonly Network
 
     let trayKey: string;
     let tray: Omit<Tray, 'assets'>;
-    const seg = a.segment_id ? segments.get(a.segment_id) : undefined;
-    if (a.segment_id) {
-      trayKey = a.segment_id;
+    const pfx = a.prefix_id ? prefixes.get(a.prefix_id) : undefined;
+    if (a.prefix_id) {
+      trayKey = a.prefix_id;
       tray = {
         key: trayKey,
-        // A segment id the segments list does not carry (deactivated since the
+        // A prefix id the prefixes list does not carry (archived since the
         // asset was placed) still gets its own tray rather than merging into
-        // Unsegmented — the asset IS assigned, to a network this answer does
-        // not describe.
-        name: seg?.name ?? 'Inactive network',
-        detail: seg?.value ?? 'Not an active segment',
-        segmentId: a.segment_id,
-        gateway: seg?.gateway ?? null,
+        // No prefix — the asset IS placed, in a network this answer does not
+        // describe.
+        name: pfx ? ((pfx.description ?? '').trim() || pfx.prefix) : 'Retired network',
+        detail: pfx ? `${pfx.prefix}${typeof pfx.vlan_vid === 'number' ? ` · VLAN ${pfx.vlan_vid}` : ''}` : 'Not a live prefix',
+        prefixId: a.prefix_id,
+        gateway: pfx?.gateway ?? null,
       };
     } else if (kind === 'cloud') {
       const region = (a.cloud_region ?? '').trim();
       trayKey = `region:${region}`;
-      tray = { key: trayKey, name: region || 'No region recorded', detail: region ? 'Cloud region' : '', segmentId: null, gateway: null };
+      tray = { key: trayKey, name: region || 'No region recorded', detail: region ? 'Cloud region' : '', prefixId: null, gateway: null };
     } else {
-      trayKey = UNSEGMENTED_TRAY;
-      tray = { key: trayKey, name: 'Unsegmented', detail: 'No network assigned', segmentId: null, gateway: null };
+      trayKey = NO_PREFIX_TRAY;
+      tray = { key: trayKey, name: 'No prefix', detail: 'In no recorded network', prefixId: null, gateway: null };
     }
     let t = group.trays.get(trayKey);
     if (!t) {
@@ -196,8 +197,8 @@ export function groupSites(map: NetworkMap | undefined, assets: readonly Network
   const byName = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0);
   const out: SiteGroup[] = [...sites.entries()].map(([key, g]) => {
     const trays = [...g.trays.values()].sort((x, y) => {
-      const xu = x.key === UNSEGMENTED_TRAY ? 1 : 0;
-      const yu = y.key === UNSEGMENTED_TRAY ? 1 : 0;
+      const xu = x.key === NO_PREFIX_TRAY ? 1 : 0;
+      const yu = y.key === NO_PREFIX_TRAY ? 1 : 0;
       return xu - yu || y.assets.length - x.assets.length || byName(x.name, y.name);
     });
     return { key, name: g.name, kind: g.kind, trays, assets: trays.flatMap((t) => t.assets) };
@@ -209,11 +210,11 @@ export function groupSites(map: NetworkMap | undefined, assets: readonly Network
   });
 }
 
-/** Active segments no drawn asset sits in. Counted, not drawn: an empty tray
+/** Live prefixes no drawn asset sits in. Counted, not drawn: an empty tray
  *  per unused network is scaffolding with nothing to click. */
-export function emptySegmentCount(map: NetworkMap | undefined): number {
-  const used = new Set((map?.assets ?? []).map((a) => a.segment_id).filter(Boolean));
-  return (map?.segments ?? []).filter((s) => !used.has(s.segment_id)).length;
+export function emptyPrefixCount(map: NetworkMap | undefined): number {
+  const used = new Set((map?.assets ?? []).map((a) => a.prefix_id).filter(Boolean));
+  return (map?.prefixes ?? []).filter((p) => !used.has(p.prefix_id)).length;
 }
 
 export const hasCrypto = (a: NetworkMapAsset): boolean => a.crypto_service_count > 0;

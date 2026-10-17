@@ -162,6 +162,7 @@ export const COLLECTION_TARGET: Readonly<Record<string, string>> = {
   identifier: 'identifier',
   relationship: 'relationship',
   asset: 'asset',
+  interface: 'interface',
 };
 
 // ------------------------------------------------- the §4.4 operator matrix --

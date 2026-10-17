@@ -75,7 +75,7 @@ export const LENS_NAV_ITEMS: CommandItem[] = INVENTORY_LENSES
   .map((l) => ({
     id: `nav-inv-${l.key}`,
     kind: 'nav' as const,
-    label: `Inventory · ${l.label}`,
+    label: `Infrastructure · ${l.label}`,
     // A placeholder lens is a real destination — it explains what is coming —
     // but saying so here means nobody arrives expecting data.
     sublabel: l.placeholder ? `${l.placeholder.phase} — not built yet` : undefined,
@@ -90,8 +90,14 @@ export const NAV_ITEMS: CommandItem[] = [
   // nothing fails when it does. `command-palette.nav.test.ts` already guards
   // the Inventory half of this join; `dashboard-nav.test.ts` guards this one.
   ...DASHBOARD_NAV_ITEMS,
-  { id: 'nav-inventory', kind: 'nav', label: 'Inventory', sublabel: 'Assets, certificates, keys, configurations', to: '/inventory' },
+  { id: 'nav-inventory', kind: 'nav', label: 'Infrastructure', sublabel: 'Assets, facilities, networks, connectivity and cryptography', to: '/inventory' },
   ...LENS_NAV_ITEMS,
+  { id: 'nav-infra-organization', kind: 'nav', label: 'Infrastructure · Organization', sublabel: 'Business units and contacts', to: '/inventory/manage/organization' },
+  { id: 'nav-infra-catalog', kind: 'nav', label: 'Infrastructure · Device Catalog', sublabel: 'Device and module types, manufacturers, roles and platforms', to: '/inventory/manage/catalog' },
+  { id: 'nav-infra-wireless', kind: 'nav', label: 'Infrastructure · Wireless', to: '/inventory/manage/wireless' },
+  { id: 'nav-infra-import', kind: 'nav', label: 'Infrastructure · Import', sublabel: 'Validate and import infrastructure records from CSV', to: '/inventory/manage/import' },
+  { id: 'nav-infra-classes', kind: 'nav', label: 'Infrastructure · Asset Classes', sublabel: 'Asset taxonomy and class attributes', to: '/inventory/manage/classes' },
+  { id: 'nav-infra-saved-filters', kind: 'nav', label: 'Infrastructure · Saved Views', sublabel: 'Manage personal and shared inventory filters', to: '/inventory/manage/saved-filters' },
   { id: 'nav-posture', kind: 'nav', label: 'Risk & Compliance · Posture', sublabel: 'Compliance posture & frameworks', to: '/risk-compliance/posture' },
   { id: 'nav-findings', kind: 'nav', label: 'Risk & Compliance · Findings', to: '/risk-compliance/findings' },
   // The sublabel spells the four kinds out because the palette matches on
@@ -105,6 +111,8 @@ export const NAV_ITEMS: CommandItem[] = [
     sublabel: 'CBOM, SBOM, HBOM and full-inventory snapshots',
     to: '/risk-compliance/cbom',
   },
+  { id: 'nav-scopes', kind: 'nav', label: 'Risk & Compliance · Scopes', sublabel: 'Versioned asset boundaries for bills of materials', to: '/risk-compliance/scopes' },
+  { id: 'nav-audit', kind: 'nav', label: 'Risk & Compliance · Audit Log', sublabel: 'Who changed what and when', to: '/risk-compliance/audit' },
   // Enterprise-only (cbom-service/ee/diff) — filtered out below when the
   // cbom_signing entitlement is off, so ⌘K never offers a locked page.
   {
@@ -117,14 +125,11 @@ export const NAV_ITEMS: CommandItem[] = [
   },
   { id: 'nav-discovery', kind: 'nav', label: 'Discovery', sublabel: 'Sensors, jobs, devices, scans', to: '/discovery' },
   { id: 'nav-sensors', kind: 'nav', label: 'Discovery · Sensors', to: '/discovery/sensors' },
-  { id: 'nav-devices', kind: 'nav', label: 'Discovery · Devices', to: '/discovery/devices' },
+  { id: 'nav-devices', kind: 'nav', label: 'Discovery · Managed Devices', to: '/discovery/devices' },
+  { id: 'nav-cloud-accounts', kind: 'nav', label: 'Discovery · Cloud Accounts', to: '/discovery/cloud' },
   { id: 'nav-remediation', kind: 'nav', label: 'Remediation · Queue', to: '/remediation/queue' },
+  { id: 'nav-delivery', kind: 'nav', label: 'Remediation · Notification Delivery', to: '/remediation/delivery' },
   { id: 'nav-settings', kind: 'nav', label: 'Settings', sublabel: 'Organization configuration', to: '/settings' },
-  // The two pages that explain how the inventory is DECIDED (ADR-0006 D7).
-  // They are the answer to "why is this thing a server?" and "why did these
-  // two sightings become one asset?", and they sit deep in Settings where
-  // nobody looking for that answer would think to go.
-  { id: 'nav-settings-classes', kind: 'nav', label: 'Settings · Classes', sublabel: 'The asset class taxonomy and its attributes', to: '/settings/classes' },
   { id: 'nav-settings-identification-rules', kind: 'nav', label: 'Settings · Identification rules', sublabel: 'How a sighting is matched to an existing asset', to: '/settings/identification-rules' },
 ];
 

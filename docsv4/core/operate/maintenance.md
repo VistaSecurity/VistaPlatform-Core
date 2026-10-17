@@ -375,6 +375,33 @@ before the update, restore the backup the update took, following [Restore](#rest
   skipped by configuration, and the chart is installed unverified. Turn this on only when you
   trust the mirror's contents; prefer mirroring with signatures intact.
 - **Mirrors without TLS.** `maintenance.updates.plainHttp=true` pulls the chart over HTTP.
+- **Mirrors signed by your own CA.** If the registry that holds the chart presents a
+  certificate from a private CA (an internal Harbor, an air-gapped mirror), the update check
+  reports `x509: certificate signed by unknown authority` and the update's verify and upgrade
+  steps fail the same way. Give maintenance-service the CA the way monitoring-service takes
+  one for its synthetic checks: mount the PEM from a Secret and point
+  `EXTRA_TRUSTED_CA_PATH` at it. The service adds it to the public trust store (never
+  replacing it, so a public registry keeps working), cosign gets it as `SSL_CERT_FILE`, and the
+  update Job carries the same env and mount, so `helm upgrade` trusts it too.
+
+  ```yaml
+  backends:
+    maintenance-service:
+      extraEnv:
+        - name: EXTRA_TRUSTED_CA_PATH
+          value: /app/certs/mirror-ca/ca.crt
+      extraVolumes:
+        - name: mirror-ca
+          secret:
+            secretName: mirror-ca        # kubectl create secret generic mirror-ca --from-file=ca.crt=…
+      extraVolumeMounts:
+        - name: mirror-ca
+          mountPath: /app/certs/mirror-ca
+          readOnly: true
+  ```
+
+  A missing or unreadable file is logged at start-up and the service runs with the public
+  trust store, as it does without the variable.
 - **Private registries.** The registry credential is the first `image.pullSecrets` entry. It
   is never written to the run log.
 

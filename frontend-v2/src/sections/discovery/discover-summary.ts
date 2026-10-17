@@ -78,7 +78,7 @@ export function describeMaterialization(count: number, m?: Materialization): Dis
   }
 
   const rule =
-    'Assets are auto-approved only on network segments with auto-approve enabled; the rest wait in Discovery → Approvals.';
+    'Assets are auto-approved only in prefixes with auto-approve enabled; the rest wait in Discovery → Approvals.';
   const shortfall = count - queued;
   const note =
     shortfall > 0

@@ -7,6 +7,8 @@
 // comes first and the rest of the form follows from it — a server offers
 // operating system and serial, an S3 bucket offers provider and account, and
 // neither list is written down in this file.
+import { BusinessUnitSelect, NO_BUSINESS_UNIT, businessUnitFields, type BusinessUnitChoice } from '../settings/business-unit-select';
+import { SiteLocationSelect, placementFields, type Placement } from './sites/site-location-select';
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { invalidateAssetDetail } from './asset-queries';
@@ -19,6 +21,7 @@ import {
   buildAttributes, isServiceBranch, type IdentifierDraft,
 } from './class-picker';
 import { unwrap } from '../../lib/api-result';
+import { AssetHardwareFields, isHardwareClass, useHardwareDraft } from './dcim/asset-hardware-fields';
 
 const ENVIRONMENTS = ['production', 'staging', 'development', 'test'];
 
@@ -154,11 +157,15 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
   const [attributes, setAttributes] = useState<Record<string, string>>({});
   const [environment, setEnvironment] = useState('');
   const [supportGroup, setSupportGroup] = useState('');
-  const [businessUnit, setBusinessUnit] = useState('');
+  const [businessUnit, setBusinessUnit] = useState<BusinessUnitChoice>(NO_BUSINESS_UNIT);
+  const [placement, setPlacement] = useState<Placement>({ siteId: '', locationId: '' });
   const [ownerEmail, setOwnerEmail] = useState('');
   const [description, setDescription] = useState('');
   const [tags, setTags] = useState<TagRow[]>([]);
   const [metadataText, setMetadataText] = useState('{}');
+  // Device type, role, platform, serial, asset tag (DCIM 2.2): written by their
+  // own endpoint after the asset saves, only when one changed.
+  const hardware = useHardwareDraft(asset?.id, open);
 
   // (Re)hydrate from the target asset whenever it changes or the modal reopens.
   useEffect(() => {
@@ -168,7 +175,8 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
     setAttributes(attributesToValues(asset?.attributes));
     setEnvironment(asset?.environment ?? '');
     setSupportGroup(asset?.support_group ?? '');
-    setBusinessUnit(asset?.business_unit ?? '');
+    setBusinessUnit({ id: asset?.business_unit?.id ?? '', newName: null });
+    setPlacement({ siteId: asset?.site?.id ?? '', locationId: asset?.location?.id ?? '' });
     setOwnerEmail(asset?.owner_email ?? '');
     setDescription(asset?.description ?? '');
     setTags(tagsToRows(asset?.tags));
@@ -199,15 +207,18 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
         // The DESIRED set, locked rows included: on update, an identifier left
         // out of this array is a request to retire it, and nothing on this form
         // is a request to retire a fact a collector recorded. `scope` goes back
-        // as the server gave it, so a hostname keeps the segment it was scoped
-        // to rather than being re-scoped by whatever segment this edit resolves.
+        // as the server gave it, so a hostname keeps the prefix it was scoped
+        // to rather than being re-scoped by whatever prefix this edit resolves.
         identifiers: identifiers
           .filter((i) => i.value.trim() !== '')
           .map(identifierInputFor),
         attributes: buildAttributes(classKey, attributes),
         support_group: supportGroup.trim() || undefined,
         environment: environment || undefined,
-        business_unit: businessUnit.trim() || undefined,
+        // An edit that picks "None" CLEARS the assignment; a create just omits it.
+        ...businessUnitFields(businessUnit, isEdit),
+        // Site and location (DCIM row 2.1): an edit that picks "None" clears.
+        ...placementFields(placement, isEdit),
         owner_email: ownerEmail.trim() || undefined,
         description: description.trim() || undefined,
         tags: tagsObj,
@@ -218,6 +229,7 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
           params: { path: { id: asset!.id } }, body,
         });
         if (!response.ok || error || !data) throw new Error(identifierUpdateError(error));
+        if (asset) await hardware.save(asset.id);
         // What the server DID to the identifiers, which is not always what was
         // asked. A kept identifier reported as removed would be a lie the next
         // read exposes.
@@ -228,6 +240,7 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
         if (!data.observation_id) throw new Error('The server did not return an asset or retained observation');
         return { observationID: data.observation_id, kept: [] };
       }
+      await hardware.save(data.asset.id);
       return { asset: data.asset, kept: [] };
     },
     onSuccess: ({ asset: a, observationID, kept }) => {
@@ -241,6 +254,7 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
       }
       if (!a) return;
       invalidateAssetDetail(qc, a.id);
+      void qc.invalidateQueries({ queryKey: ['dcim-hardware', a.id] });
       void qc.invalidateQueries({ queryKey: ['asset-configs', a.id] });
       if (kept.length > 0) toast(keptIdentifiersMessage(kept), { icon: 'ℹ️', duration: 7000 });
       onSaved?.(a);
@@ -315,16 +329,19 @@ export function AssetFormModal({ open, asset, onClose, onSaved }: {
           <ModalInput value={supportGroup} onChange={(e) => setSupportGroup(e.target.value)} placeholder="Platform SRE" />
         </ModalField>
         <ModalField label="Business unit">
-          <ModalInput value={businessUnit} onChange={(e) => setBusinessUnit(e.target.value)} placeholder="Payments" />
+          <BusinessUnitSelect value={businessUnit} onChange={setBusinessUnit} />
         </ModalField>
         <ModalField label="Owner email">
           <ModalInput type="email" value={ownerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@example.com" />
         </ModalField>
+        <SiteLocationSelect value={placement} onChange={setPlacement} />
       </div>
 
       <ModalField label="Description">
         <ModalInput value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Short description" />
       </ModalField>
+
+      <AssetHardwareFields draft={hardware.draft} onChange={hardware.setDraft} isHardware={isHardwareClass(classKey)} current={hardware.current} />
 
       {/* Tags — flat key/value rows, serialized to a JSONB object map. */}
       <div style={{ marginBottom: 15 }}>

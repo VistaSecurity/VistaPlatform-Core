@@ -5,7 +5,7 @@ package services
 //
 // The assertions that matter are the ones about what is NOT dropped. A grouping
 // query is easy to write so that the interesting rows fall out of it — an INNER
-// JOIN to `network_segments` instead of a LEFT one, `<>` instead of
+// JOIN to `prefixes` instead of a LEFT one, `<>` instead of
 // `IS DISTINCT FROM` — and every such mistake produces a tidy, plausible,
 // WRONG diagram that nothing on screen contradicts. So each test seeds the
 // awkward row first and asserts it is there.
@@ -33,31 +33,35 @@ func newTopologyFixture(t *testing.T) (*AssetService, *database.DB, uuid.UUID) {
 	return &AssetService{db: db}, db, testdb.NewTenant(t, raw)
 }
 
-// seedSegment writes one network segment and returns its id.
-func seedSegment(t *testing.T, db *database.DB, tenant uuid.UUID, name, cidr string) uuid.UUID {
+// seedPrefix writes one prefix and returns its id.
+func seedPrefix(t *testing.T, db *database.DB, tenant uuid.UUID, name, cidr string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	if _, err := db.Exec(`
-		INSERT INTO network_segments (id, tenant_id, name, segment_type, value, environment)
-		VALUES ($1, $2, $3, 'cidr', $4, 'production')`, id, tenant, name, cidr); err != nil {
-		t.Fatalf("insert segment %s: %v", name, err)
+		INSERT INTO prefixes (id, tenant_id, description, prefix, environment, source_kind, status)
+		VALUES ($1, $2, $3, $4::cidr, 'production', 'declared', 'active')`, id, tenant, name, cidr); err != nil {
+		t.Fatalf("insert prefix %s: %v", name, err)
 	}
 	return id
 }
 
-// seedTopologyAsset writes one asset with an optional site and segment.
+// seedTopologyAsset writes one asset with an optional site and prefix.
 func seedTopologyAsset(
 	t *testing.T, db *database.DB, tenant uuid.UUID,
-	hostname, classKey, classPath string, site *string, segment *uuid.UUID,
+	hostname, classKey, classPath string, site *string, prefix *uuid.UUID,
 ) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
+	var siteID any
+	if site != nil {
+		siteID = testdb.EnsureSite(t, db, tenant, *site)
+	}
 	if _, err := db.Exec(`
 		INSERT INTO assets (id, tenant_id, hostname, display_name, class_key, class_path,
-		                    asset_status, site, network_segment_id,
+		                    asset_status, site_id, prefix_id,
 		                    last_seen_at, first_discovered_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$3,$4,$5,'monitoring',$6,$7,NOW(),NOW(),NOW(),NOW())`,
-		id, tenant, hostname, classKey, classPath, site, segment); err != nil {
+		id, tenant, hostname, classKey, classPath, siteID, prefix); err != nil {
 		t.Fatalf("insert asset %s: %v", hostname, err)
 	}
 	return id
@@ -74,18 +78,18 @@ func siteNamed(t *testing.T, tp *Topology, name string) TopologySite {
 	return TopologySite{}
 }
 
-func segmentNamed(t *testing.T, site TopologySite, name string) TopologySegment {
+func prefixNamed(t *testing.T, site TopologySite, name string) TopologyPrefix {
 	t.Helper()
-	for _, s := range site.Segments {
-		if s.SegmentName == name {
+	for _, s := range site.Prefixes {
+		if s.PrefixName == name {
 			return s
 		}
 	}
-	t.Fatalf("no segment %q under site %q", name, site.Site)
-	return TopologySegment{}
+	t.Fatalf("no prefix %q under site %q", name, site.Site)
+	return TopologyPrefix{}
 }
 
-// The headline: an asset with no site and no segment is IN the tree, under
+// The headline: an asset with no site and no prefix is IN the tree, under
 // explicit nodes, and the independent total proves the tree did not lose it.
 //
 // On a fresh inventory almost every asset is in that state. A topology that
@@ -94,12 +98,12 @@ func segmentNamed(t *testing.T, site TopologySite, name string) TopologySegment 
 func TestIntegration_Topology_NothingIsDropped(t *testing.T) {
 	svc, db, tenant := newTopologyFixture(t)
 	east := "DC-East"
-	core := seedSegment(t, db, tenant, "Core VLAN", "10.0.0.0/16")
+	core := seedPrefix(t, db, tenant, "Core VLAN", "10.0.0.0/16")
 
 	seedTopologyAsset(t, db, tenant, "web-01", "server", "hardware.computer.server", &east, &core)
 	seedTopologyAsset(t, db, tenant, "web-02", "server", "hardware.computer.server", &east, &core)
 	seedTopologyAsset(t, db, tenant, "db-01", "managed_database", "service.data.managed_database", &east, &core)
-	// Sited but unsegmented.
+	// Sited but prefix-less.
 	seedTopologyAsset(t, db, tenant, "printer-01", "network_device", "hardware.network_device", &east, nil)
 	// Neither.
 	seedTopologyAsset(t, db, tenant, "mystery-01", "server", "hardware.computer.server", nil, nil)
@@ -120,18 +124,18 @@ func TestIntegration_Topology_NothingIsDropped(t *testing.T) {
 	summed := 0
 	for _, s := range tp.Sites {
 		siteSum := 0
-		for _, g := range s.Segments {
+		for _, g := range s.Prefixes {
 			segSum := 0
 			for _, c := range g.Classes {
 				segSum += c.AssetCount
 			}
 			if segSum != g.AssetCount {
-				t.Errorf("segment %q sums to %d over its classes but reports %d", g.SegmentName, segSum, g.AssetCount)
+				t.Errorf("prefix %q sums to %d over its classes but reports %d", g.PrefixName, segSum, g.AssetCount)
 			}
 			siteSum += g.AssetCount
 		}
 		if siteSum != s.AssetCount {
-			t.Errorf("site %q sums to %d over its segments but reports %d", s.Site, siteSum, s.AssetCount)
+			t.Errorf("site %q sums to %d over its prefixes but reports %d", s.Site, siteSum, s.AssetCount)
 		}
 		summed += s.AssetCount
 	}
@@ -143,27 +147,27 @@ func TestIntegration_Topology_NothingIsDropped(t *testing.T) {
 	if east0.AssetCount != 4 {
 		t.Errorf("DC-East holds %d assets, want 4", east0.AssetCount)
 	}
-	coreSeg := segmentNamed(t, east0, "Core VLAN")
-	if coreSeg.SegmentID == nil || *coreSeg.SegmentID != core {
-		t.Errorf("Core VLAN carries segment_id %v, want %s — without it the drill-through cannot be written", coreSeg.SegmentID, core)
+	coreSeg := prefixNamed(t, east0, "10.0.0.0/16")
+	if coreSeg.PrefixID == nil || *coreSeg.PrefixID != core {
+		t.Errorf("Core VLAN carries prefix_id %v, want %s — without it the drill-through cannot be written", coreSeg.PrefixID, core)
 	}
 	if coreSeg.AssetCount != 3 || len(coreSeg.Classes) != 2 {
 		t.Errorf("Core VLAN = %d assets over %d classes, want 3 over 2", coreSeg.AssetCount, len(coreSeg.Classes))
 	}
-	unseg := segmentNamed(t, east0, TopologyUnsegmented)
-	if unseg.SegmentID != nil {
-		t.Errorf("the Unsegmented bucket carries a segment_id (%v); a client would write a query that matches nothing", unseg.SegmentID)
+	unseg := prefixNamed(t, east0, TopologyNoPrefix)
+	if unseg.PrefixID != nil {
+		t.Errorf("the No prefix bucket carries a prefix_id (%v); a client would write a query that matches nothing", unseg.PrefixID)
 	}
 	if unseg.AssetCount != 1 {
-		t.Errorf("DC-East's Unsegmented bucket = %d, want 1", unseg.AssetCount)
+		t.Errorf("DC-East's No prefix bucket = %d, want 1", unseg.AssetCount)
 	}
 
 	unassigned := siteNamed(t, tp, TopologyUnassignedSite)
 	if unassigned.AssetCount != 1 {
 		t.Errorf("the Unassigned site = %d assets, want 1", unassigned.AssetCount)
 	}
-	if len(unassigned.Segments) != 1 || unassigned.Segments[0].SegmentName != TopologyUnsegmented {
-		t.Errorf("the Unassigned site's segments = %+v, want one Unsegmented bucket", unassigned.Segments)
+	if len(unassigned.Prefixes) != 1 || unassigned.Prefixes[0].PrefixName != TopologyNoPrefix {
+		t.Errorf("the Unassigned site's prefixes = %+v, want one No prefix bucket", unassigned.Prefixes)
 	}
 }
 
@@ -194,13 +198,13 @@ func TestIntegration_Topology_SiteFallsBackToTags(t *testing.T) {
 	}
 }
 
-// Cross-segment edges, aggregated, per type — and the pairs that must NOT be
+// Cross-prefix edges, aggregated, per type — and the pairs that must NOT be
 // there.
-func TestIntegration_Topology_EdgesAreCrossSegmentAndActiveOnly(t *testing.T) {
+func TestIntegration_Topology_EdgesAreCrossPrefixAndActiveOnly(t *testing.T) {
 	svc, db, tenant := newTopologyFixture(t)
 	east := "DC-East"
-	core := seedSegment(t, db, tenant, "Core VLAN", "10.0.0.0/16")
-	dmz := seedSegment(t, db, tenant, "DMZ", "10.1.0.0/16")
+	core := seedPrefix(t, db, tenant, "Core VLAN", "10.0.0.0/16")
+	dmz := seedPrefix(t, db, tenant, "DMZ", "10.1.0.0/16")
 
 	a := seedTopologyAsset(t, db, tenant, "core-a", "server", "hardware.computer.server", &east, &core)
 	b := seedTopologyAsset(t, db, tenant, "core-b", "server", "hardware.computer.server", &east, &core)
@@ -210,10 +214,10 @@ func TestIntegration_Topology_EdgesAreCrossSegmentAndActiveOnly(t *testing.T) {
 	// Two counted types across the same pair.
 	seedEdge(t, db, tenant, a, c, relationships.ConnectsTo, "measured", EdgeStatusActive)
 	seedEdge(t, db, tenant, b, c, relationships.DependsOn, "declared", EdgeStatusActive)
-	// Into the unsegmented bucket. `IS DISTINCT FROM` is what keeps this one:
+	// Into the prefix-less bucket. `IS DISTINCT FROM` is what keeps this one:
 	// with `<>` the NULL side makes the predicate UNKNOWN and the edge vanishes.
 	seedEdge(t, db, tenant, a, loose, relationships.ConnectsTo, "measured", EdgeStatusActive)
-	// Same segment: not a CROSS-segment connection, so not here.
+	// Same prefix: not a CROSS-prefix connection, so not here.
 	seedEdge(t, db, tenant, a, b, relationships.ConnectsTo, "measured", EdgeStatusActive)
 	// Pending: nobody has agreed it is true.
 	seedEdge(t, db, tenant, b, c, relationships.ConnectsTo, "inferred", EdgeStatusPending)
@@ -227,9 +231,9 @@ func TestIntegration_Topology_EdgesAreCrossSegmentAndActiveOnly(t *testing.T) {
 
 	byPair := map[string]TopologyEdge{}
 	for _, e := range tp.Edges {
-		byPair[e.FromSegmentName+"->"+e.ToSegmentName] = e
+		byPair[e.FromPrefixName+"->"+e.ToPrefixName] = e
 	}
-	coreToDMZ, ok := byPair["Core VLAN->DMZ"]
+	coreToDMZ, ok := byPair["10.0.0.0/16->10.1.0.0/16"]
 	if !ok {
 		t.Fatalf("no Core VLAN->DMZ edge in %+v", tp.Edges)
 	}
@@ -239,12 +243,12 @@ func TestIntegration_Topology_EdgesAreCrossSegmentAndActiveOnly(t *testing.T) {
 	if coreToDMZ.ByType["connects_to"] != 1 || coreToDMZ.ByType["depends_on"] != 1 {
 		t.Errorf("by_type = %v, want one of each — the breakdown is what says which claim a line represents", coreToDMZ.ByType)
 	}
-	if _, ok := byPair["Core VLAN->"+TopologyUnsegmented]; !ok {
-		t.Errorf("the edge into the Unsegmented bucket was dropped; `<>` instead of IS DISTINCT FROM loses every "+
-			"edge with an unsegmented end, which on a fresh tenant is all of them. Edges: %+v", tp.Edges)
+	if _, ok := byPair["10.0.0.0/16->"+TopologyNoPrefix]; !ok {
+		t.Errorf("the edge into the No prefix bucket was dropped; `<>` instead of IS DISTINCT FROM loses every "+
+			"edge with an prefix-less end, which on a fresh tenant is all of them. Edges: %+v", tp.Edges)
 	}
-	if _, ok := byPair["Core VLAN->Core VLAN"]; ok {
-		t.Error("a same-segment edge was returned; the question is cross-segment connections")
+	if _, ok := byPair["10.0.0.0/16->10.0.0.0/16"]; ok {
+		t.Error("a same-prefix edge was returned; the question is cross-prefix connections")
 	}
 	// The pending edge and the containment edge are the same pair as one that
 	// IS counted, so their absence shows in the count, not in the pair list.
@@ -256,7 +260,7 @@ func TestIntegration_Topology_EdgesAreCrossSegmentAndActiveOnly(t *testing.T) {
 		total += e.Count
 	}
 	if total != 3 {
-		t.Errorf("%d edges counted in total, want 3 — pending, same-segment and containment edges must all be out", total)
+		t.Errorf("%d edges counted in total, want 3 — pending, same-prefix and containment edges must all be out", total)
 	}
 	if tp.TotalEdges != 3 {
 		t.Errorf("total_edges = %d, want 3", tp.TotalEdges)
@@ -313,7 +317,7 @@ func TestIntegration_Topology_RLSIsolatesTenants(t *testing.T) {
 
 	ownerDB := &database.DB{DB: sqlx.NewDb(owner, "postgres")}
 	east := "DC-East"
-	seg := seedSegment(t, ownerDB, tenantA, "A Core", "10.0.0.0/16")
+	seg := seedPrefix(t, ownerDB, tenantA, "A Core", "10.0.0.0/16")
 	seedTopologyAsset(t, ownerDB, tenantA, "a-only", "server", "hardware.computer.server", &east, &seg)
 
 	appRole := testdb.ConnectAsAppRole(t, owner)
@@ -359,7 +363,7 @@ func TestIntegration_Topology_RLSIsolatesTenants(t *testing.T) {
 func TestIntegration_Topology_ClassDrillThroughSelectsWhatItCounted(t *testing.T) {
 	svc, db, tenant := newTopologyFixture(t)
 	east := "DC-East"
-	seg := seedSegment(t, db, tenant, "Core VLAN", "10.20.0.0/16")
+	seg := seedPrefix(t, db, tenant, "Core VLAN", "10.20.0.0/16")
 
 	// One asset at the NON-LEAF class, two at classes beneath it.
 	seedTopologyAsset(t, db, tenant, "unknown-box", "network_device", "hardware.network_device", &east, &seg)
@@ -370,16 +374,16 @@ func TestIntegration_Topology_ClassDrillThroughSelectsWhatItCounted(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	segment := segmentNamed(t, siteNamed(t, tp, east), "Core VLAN")
+	prefix := prefixNamed(t, siteNamed(t, tp, east), "10.20.0.0/16")
 
 	var node *TopologyClass
-	for i := range segment.Classes {
-		if segment.Classes[i].ClassKey == "network_device" {
-			node = &segment.Classes[i]
+	for i := range prefix.Classes {
+		if prefix.Classes[i].ClassKey == "network_device" {
+			node = &prefix.Classes[i]
 		}
 	}
 	if node == nil {
-		t.Fatalf("no network_device class node in %+v", segment.Classes)
+		t.Fatalf("no network_device class node in %+v", prefix.Classes)
 	}
 	if node.AssetCount != 1 {
 		t.Fatalf("the node counts %d assets, want 1 — it groups by class_key, which is exact", node.AssetCount)
@@ -387,7 +391,7 @@ func TestIntegration_Topology_ClassDrillThroughSelectsWhatItCounted(t *testing.T
 
 	// The query topology-model.ts writes for this node (pinned verbatim there by
 	// its "matches the class EXACTLY, because that is what the node counted" case).
-	exact := "segment_id:" + segment.SegmentID.String() + " and class=network_device"
+	exact := "prefix_id:" + prefix.PrefixID.String() + " and class=network_device"
 	_, total, err := svc.GetAssets(tenant, models.AssetFilters{Query: exact})
 	if err != nil {
 		t.Fatalf("the drill-through query did not run: %v", err)
@@ -400,7 +404,7 @@ func TestIntegration_Topology_ClassDrillThroughSelectsWhatItCounted(t *testing.T
 	// The other polarity: the subtree form, which this link used to carry, must
 	// be measurably wrong here. Without this the test would pass on a fixture
 	// whose classes were all leaves, which is exactly how the bug survived.
-	subtree := "segment_id:" + segment.SegmentID.String() + " and class:network_device"
+	subtree := "prefix_id:" + prefix.PrefixID.String() + " and class:network_device"
 	_, subtreeTotal, err := svc.GetAssets(tenant, models.AssetFilters{Query: subtree})
 	if err != nil {
 		t.Fatalf("the subtree query did not run: %v", err)

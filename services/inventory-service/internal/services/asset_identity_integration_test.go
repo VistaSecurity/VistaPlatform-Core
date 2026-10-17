@@ -23,6 +23,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -114,7 +115,7 @@ func TestIntegration_Ingest_RecordsIdentifiersAndHistory(t *testing.T) {
 	}
 
 	kinds := map[string]string{}
-	rows, err := db.Query(`SELECT kind, value FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2`, tenant, assetID)
+	rows, err := db.Query(`SELECT kind, value FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1 AND asset_id = $2`, tenant, assetID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,28 +162,16 @@ func TestIntegration_Ingest_RecordsIdentifiersAndHistory(t *testing.T) {
 	}
 }
 
-// TestIntegration_Ingest_ScopesWeakIdentifiersToTheSegment is the rule that
+// TestIntegration_Ingest_ScopesWeakIdentifiersToThePrefix is the rule that
 // makes a hostname usable as identity at all (ADR-0002 D3).
 //
 // "printer-2" and 10.0.0.5 are answers to a question only once you say where you
 // were standing. Unscoped they are recorded and do not vote, which means two
 // segments' `printer-2` would be two assets — correct, but only because nothing
 // matched. Scoped, the SAME segment's second observation matches.
-func TestIntegration_Ingest_ScopesWeakIdentifiersToTheSegment(t *testing.T) {
+func TestIntegration_Ingest_ScopesWeakIdentifiersToThePrefix(t *testing.T) {
 	svc, db, tenant := newIdentityFixture(t)
-	segSvc := NewNetworkSegmentService(db, NewLocationService(db))
-	svc.SetEnrichmentServices(segSvc, nil)
-
-	seg, err := segSvc.Create(tenant, models.NetworkSegmentInput{
-		Name:        "office",
-		SegmentType: "cidr",
-		Value:       "192.0.2.0/24",
-		NetworkType: "private",
-		Environment: "production",
-	})
-	if err != nil {
-		t.Fatalf("create segment: %v", err)
-	}
+	prefix := declarePrefix(t, db.DB.DB, tenant, map[string]any{"prefix": "192.0.2.0/24", "description": "office", "network_type": "private", "environment": "production"})
 
 	f := IngestFinding{
 		Hostname:  ptr("printer-2"), // single label: a hostname, not an fqdn
@@ -199,12 +188,12 @@ func TestIntegration_Ingest_ScopesWeakIdentifiersToTheSegment(t *testing.T) {
 
 	var scope *string
 	if err := db.QueryRow(`
-		SELECT scope FROM asset_identifiers
+		SELECT scope FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND kind = 'hostname' AND value = 'printer-2'`, tenant).Scan(&scope); err != nil {
 		t.Fatalf("read hostname identifier: %v", err)
 	}
-	if scope == nil || *scope != seg.ID.String() {
-		t.Fatalf("hostname scope = %v, want the segment id %s — unscoped it cannot decide a match", scope, seg.ID)
+	if scope == nil || *scope != prefix.String() {
+		t.Fatalf("hostname scope = %v, want the prefix id %s — unscoped it cannot decide a match", scope, prefix)
 	}
 
 	var assets int
@@ -487,7 +476,7 @@ func TestIntegration_Ingest_UnsegmentedHostIsOneAsset(t *testing.T) {
 			// scope is part of the uniqueness key, so a NULL here would be a
 			// different key and the match above would be luck.
 			rows, err := db.Query(`
-				SELECT kind, coalesce(scope, '') FROM asset_identifiers
+				SELECT kind, coalesce(scope, '') FROM (`+identifiersql.All+`) ident_rows
 				WHERE tenant_id = $1 AND kind IN ('hostname', 'ip_address')`, tenant)
 			if err != nil {
 				t.Fatal(err)
@@ -546,7 +535,7 @@ func TestIntegration_Ingest_ContextAndIdentityShareOneTransaction(t *testing.T) 
 	}
 	// The identity half.
 	var identifiers int
-	if err := db.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2`, tenant, assetID).Scan(&identifiers); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1 AND asset_id = $2`, tenant, assetID).Scan(&identifiers); err != nil {
 		t.Fatal(err)
 	}
 	if identifiers == 0 {
@@ -622,7 +611,7 @@ func TestIntegration_CreateAsset_DeclaredServiceIdentifiesByName(t *testing.T) {
 
 	var kind, scope, value string
 	if err := db.QueryRow(`
-		SELECT kind, coalesce(scope, ''), value FROM asset_identifiers
+		SELECT kind, coalesce(scope, ''), value FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND asset_id = $2`, tenant, first.ID).Scan(&kind, &scope, &value); err != nil {
 		t.Fatalf("read the service identifier: %v", err)
 	}
@@ -802,7 +791,7 @@ func TestIntegration_Ingest_AnApplicationIsOneAssetAcrossPolls(t *testing.T) {
 	// And the key is the dependent one, not a hostname the class may not vote on.
 	var names int
 	if err := db.QueryRow(`
-		SELECT count(*) FROM asset_identifiers i JOIN assets a ON a.id = i.asset_id AND a.tenant_id = i.tenant_id
+		SELECT count(*) FROM (`+identifiersql.All+`) i JOIN assets a ON a.id = i.asset_id AND a.tenant_id = i.tenant_id
 		WHERE i.tenant_id = $1 AND a.class_key = $2 AND i.kind = 'name' AND i.scope = $2
 		  AND i.value LIKE 'application:%'`,
 		tenant, assetclass.KeyApplication).Scan(&names); err != nil {

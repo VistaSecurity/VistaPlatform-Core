@@ -1,17 +1,19 @@
 // @vitest-environment jsdom
 //
-// The WIRING for the map's cloud scope boxes ( slice D).
+// The WIRING for the map's cloud region boxes ( slice D, amended by
+// asset-inventory ADR-0009 D1: the account is a real asset with stored
+// `hosted_on` edges, so no account box is synthesised).
 //
 // `map-cloud-scope.test.ts` pins what `withCloudScopeRoots` decides. That is
 // the easy half, and on its own it is the trap CLAUDE.md names twice: a helper
 // with perfect tests and no call site. Delete the `withCloudScopeRoots(...)`
 // call in `map-lens.tsx` and every one of those 27 assertions stays green while
-// the map goes back to drawing two unrooted VPCs.
+// the map goes back to drawing two unrooted load balancers.
 //
 // So this drives the REAL renderer through the REAL hook and looks for the
-// boxes on the canvas: an account box, a region box, both labelled with what
-// they are, and a legend that lists them as scaffolding rather than folding
-// them into the cloud-resource count.
+// box on the canvas: a region box labelled with what it is, the account drawn
+// as the asset it is, and a legend that lists the region as scaffolding rather
+// than folding it into the cloud-resource count.
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter } from 'react-router';
@@ -33,23 +35,28 @@ vi.stubGlobal('DOMMatrixReadOnly', class { m22 = 1; constructor(_?: string) {} }
 
 const ACCOUNT = '123456789012';
 const REGION = 'us-east-1';
-const VPC = 'aaaaaaaa-0000-4000-8000-000000000001';
+const LB = 'aaaaaaaa-0000-4000-8000-000000000001';
 const BUCKET = 'aaaaaaaa-0000-4000-8000-000000000004';
+const ACCOUNT_ASSET = 'aaaaaaaa-0000-4000-8000-000000000007';
 
 const NEIGHBOURHOOD: Neighbourhood = {
-  root_asset_id: VPC,
+  root_asset_id: LB,
   depth: 2,
   include_pending: false,
   nodes: [
-    { asset_id: VPC, display_name: 'vpc-prod', class_key: 'virtual_network', asset_status: 'monitoring', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
+    { asset_id: LB, display_name: 'lb-front', class_key: 'cloud_load_balancer', asset_status: 'monitoring', depth: 0, is_root: true, cloud_account: ACCOUNT, cloud_region: REGION },
     { asset_id: BUCKET, display_name: 'assets-bucket', class_key: 'object_storage', asset_status: 'monitoring', depth: 1, cloud_account: ACCOUNT, cloud_region: REGION },
+    { asset_id: ACCOUNT_ASSET, display_name: `AWS account ${ACCOUNT}`, class_key: 'cloud_account', asset_status: 'monitoring', depth: 1, cloud_account: ACCOUNT },
   ],
-  // No stored relationship at all: the bucket is exactly the "isolated node"
-  // this slice exists to place.
-  edges: [],
+  // The stored hosted_on edges are the account's whole connection to its
+  // resources now.
+  edges: [
+    { id: 'h-lb', tenant_id: 't', from_asset_id: LB, to_asset_id: ACCOUNT_ASSET, type: 'hosted_on', source_kind: 'measured', confidence: 1, status: 'active', first_seen_at: '2026-10-15T00:00:00Z', last_seen_at: '2026-10-15T00:00:00Z', observation_count: 1 },
+    { id: 'h-bucket', tenant_id: 't', from_asset_id: BUCKET, to_asset_id: ACCOUNT_ASSET, type: 'hosted_on', source_kind: 'measured', confidence: 1, status: 'active', first_seen_at: '2026-10-15T00:00:00Z', last_seen_at: '2026-10-15T00:00:00Z', observation_count: 1 },
+  ],
   truncated: false,
-  total_nodes: 2,
-  total_edges: 0,
+  total_nodes: 3,
+  total_edges: 2,
   node_cap: 500,
   edge_cap: 2000,
 };
@@ -95,7 +102,7 @@ async function render(): Promise<void> {
       <QueryClientProvider client={client}>
         <MemoryRouter>
           <AssetMapView
-            assetId={VPC}
+            assetId={LB}
             depth={2}
             includePending={false}
             onDepthChange={() => {}}
@@ -113,14 +120,14 @@ async function render(): Promise<void> {
 const groups = (): string[] =>
   [...host.querySelectorAll('[data-testid="map-node"]')].map((el) => el.getAttribute('data-group') ?? '');
 
-it('draws the account and region boxes the model synthesised', async () => {
+it('draws the region box the model synthesised, and the account as an asset', async () => {
   await render();
   const drawn = groups();
-  expect(drawn).toContain('cloud_account');
   expect(drawn).toContain('cloud_region');
-  // And the assets are still there — the boxes are additional, not a
-  // replacement.
-  expect(drawn.filter((g) => g === 'cloud_resource')).toHaveLength(2);
+  // No synthetic account box: the account is the cloud_account ASSET.
+  expect(drawn).not.toContain('cloud_account');
+  // Load balancer, bucket and the account asset — all cloud resources.
+  expect(drawn.filter((g) => g === 'cloud_resource')).toHaveLength(3);
 });
 
 it('labels the boxes with the account and the region, not with a uuid', async () => {
@@ -130,19 +137,18 @@ it('labels the boxes with the account and the region, not with a uuid', async ()
   // map-cloud-scope.test.ts.
   await render();
   const boxes = [...host.querySelectorAll('[data-testid="map-node"]')]
-    .filter((el) => (el.getAttribute('data-group') ?? '').startsWith('cloud_') && el.getAttribute('data-group') !== 'cloud_resource')
+    .filter((el) => el.getAttribute('data-group') === 'cloud_region')
     .map((el) => el.textContent ?? '');
-  expect(boxes.some((t) => t.includes(ACCOUNT))).toBe(true);
-  expect(boxes.some((t) => t.includes(REGION))).toBe(true);
-  // Two assets plus the two boxes.
+  expect(boxes.some((t) => t.includes(REGION) && t.includes(ACCOUNT))).toBe(true);
+  // Three assets plus the one region box.
   expect(host.querySelectorAll('[data-testid="map-node"]')).toHaveLength(4);
 });
 
 it('shows the scope kinds in the legend rather than counting them as assets', async () => {
   await render();
   const legend = host.querySelector('[data-testid="map-legend"]')?.textContent ?? '';
-  expect(legend).toContain('Cloud account');
   expect(legend).toContain('Cloud region');
-  // Two cloud resources, not five: the boxes must not inflate the class count.
-  expect(legend).toMatch(/Cloud resource\s*2/);
+  // Three cloud resources (the account is one), not four: the box must not
+  // inflate the class count.
+  expect(legend).toMatch(/Cloud resource\s*3/);
 });

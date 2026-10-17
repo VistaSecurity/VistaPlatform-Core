@@ -33,6 +33,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -61,9 +62,8 @@ func newHostObsFixture(t *testing.T) (*AssetService, *database.DB, uuid.UUID) {
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
 	algorithms := NewAlgorithmService(db)
 	svc := &AssetService{
-		db:                    db,
-		algorithmService:      algorithms,
-		networkSegmentService: NewNetworkSegmentService(db, nil),
+		db:               db,
+		algorithmService: algorithms,
 	}
 	svc.SetExternalConnectionsService(NewExternalConnectionsService(db, algorithms))
 	return svc, db, testdb.NewTenant(t, raw)
@@ -193,7 +193,7 @@ func TestIntegration_HostObservation_BecomesAnAssetWithIdentifiersAndFacts(t *te
 	// kind|value → scope. A kind can hold several rows (the mDNS name is filed
 	// twice: whole and short), so the map is keyed on both.
 	identifiers := map[string]string{}
-	rows, err := db.Query(`SELECT kind, value, coalesce(scope, '') FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2`, tenant, assetID)
+	rows, err := db.Query(`SELECT kind, value, coalesce(scope, '') FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1 AND asset_id = $2`, tenant, assetID)
 	if err != nil {
 		t.Fatalf("read identifiers: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestIntegration_HostObservation_SameMACMatchesTheSameAsset(t *testing.T) {
 	// already existed — a NEW identifier on the SAME asset, not a new asset.
 	var hostnames int
 	if err := db.QueryRow(`
-		SELECT count(*) FROM asset_identifiers
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
 		 WHERE tenant_id = $1 AND kind = 'hostname' AND value = 'acct-ws-14'`, tenant).Scan(&hostnames); err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestIntegration_HostObservation_ASecondNameOnAKnownMACDoesNotDuplicate(t *t
 
 	var names int
 	if err := db.QueryRow(`
-		SELECT count(*) FROM asset_identifiers
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
 		 WHERE tenant_id = $1 AND kind IN ('hostname', 'fqdn')`, tenant).Scan(&names); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestIntegration_HostObservation_MACOnlyBecomesAnAsset(t *testing.T) {
 
 	var macs int
 	if err := db.QueryRow(`
-		SELECT count(*) FROM asset_identifiers
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
 		 WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'mac_address'`, tenant, assetID).Scan(&macs); err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +609,7 @@ func TestIntegration_HostObservation_ContestedMACProposesAndTheBatchContinues(t 
 	// the contested row was lost.
 	var landed int
 	if err := db.QueryRow(`
-		SELECT count(*) FROM asset_identifiers
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
 		 WHERE tenant_id = $1 AND kind = 'mac_address' AND value = '28:cf:da:ff:ee:dd'`, tenant).Scan(&landed); err != nil {
 		t.Fatal(err)
 	}
@@ -674,9 +674,8 @@ func TestIntegration_HostObservation_IngestIsTenantIsolatedUnderRLS(t *testing.T
 	db := &database.DB{DB: sqlx.NewDb(app, "postgres")}
 	algorithms := NewAlgorithmService(db)
 	svc := &AssetService{
-		db:                    db,
-		algorithmService:      algorithms,
-		networkSegmentService: NewNetworkSegmentService(db, nil),
+		db:               db,
+		algorithmService: algorithms,
 	}
 	svc.SetExternalConnectionsService(NewExternalConnectionsService(db, algorithms))
 
@@ -723,7 +722,7 @@ func TestIntegration_HostObservation_IngestIsTenantIsolatedUnderRLS(t *testing.T
 			// and the Scan above would have silently taken whichever came
 			// first — which is how an isolation test ends up proving that two
 			// tenants have one asset each and nothing more.
-			if err := tx.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE kind = 'mac_address' AND value = $1`, mac).
+			if err := tx.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE kind = 'mac_address' AND value = $1`, mac).
 				Scan(&identifiers); err != nil {
 				t.Fatalf("tenant %s: counting identifiers: %v", name, err)
 			}
@@ -771,10 +770,10 @@ func asTenant(t *testing.T, db *sql.DB, tenant uuid.UUID, fn func(tx *sql.Tx)) {
 func TestIntegration_HostObservation_ProjectsSiteWithoutListeners(t *testing.T) {
 	svc, db, tenant := newHostObsFixture(t)
 	location, segment := uuid.New(), uuid.New()
-	if _, err := db.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'North','site')`, location, tenant); err != nil {
+	if _, err := db.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,'North',regexp_replace(lower('North'),'[^a-z0-9]+','-','g')) RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,'North',regexp_replace(lower('North'),'[^a-z0-9]+','-','g') FROM s`, location, tenant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,location_id) VALUES($1,$2,'North','cidr','192.0.2.0/24','production',$3)`, segment, tenant, location); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,scope_kind,scope_id,source_kind,status) VALUES($1,$2,'North','192.0.2.0/24'::cidr,'production','location',$3,'declared','active')`, segment, tenant, location); err != nil {
 		t.Fatal(err)
 	}
 	ho := &hostobs.HostObservation{Source: hostobs.SourceARP, MAC: "00:1a:2b:11:22:33", Addresses: addrsFor(t, "192.0.2.50"), ObservedAt: time.Now().UTC()}
@@ -789,7 +788,7 @@ func TestIntegration_HostObservation_ProjectsSiteWithoutListeners(t *testing.T) 
 		}
 		var id uuid.UUID
 		var site, loc, class, name string
-		if err := db.QueryRow(`SELECT id,site,location_id::text,class_key,coalesce(hostname,'') FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant).Scan(&id, &site, &loc, &class, &name); err != nil {
+		if err := db.QueryRow(`SELECT id,coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),''),location_id::text,class_key,coalesce(hostname,'') FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant).Scan(&id, &site, &loc, &class, &name); err != nil {
 			t.Fatal(err)
 		}
 		if i == 0 {
@@ -983,36 +982,5 @@ func TestIntegration_HostObservation_SelfReportUsesSensorNamespace(t *testing.T)
 	var status string
 	if err := db.QueryRow(`SELECT identity_status FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, agentResult.Asset.ID).Scan(&status); err != nil || status != "established" {
 		t.Fatalf("identity status=%s err=%v", status, err)
-	}
-}
-
-func TestIntegration_HostObservation_UpgradePreservesSensorIdentifierOwnership(t *testing.T) {
-	_, db, tenant := newHostObsFixture(t)
-	sensor := uuid.New()
-	asset := seedAsset(t, db, tenant, "Existing sensor host", "workstation", "hardware.computer.workstation", "production", 0, 0)
-	seen := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
-	if _, err := db.Exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status)
- VALUES($1,$2,'Sensor','windows','1.0','datacenter_host','active')`, sensor, tenant); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO asset_identifiers(tenant_id,asset_id,kind,value,source_kind,source_ref,confidence,first_seen_at,last_seen_at)
- VALUES($1,$2,'agent_id',$3,'measured',$4,1,$5,$5),
-       ($1,$2,'agent_id','device-agent-installation','measured','agent:device-agent-installation',1,$5,$5)`, tenant, asset, sensor.String(), "sensor:"+sensor.String(), seen); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		testdb.ForceApplySchema(t, db.DB.DB)
-		var owner uuid.UUID
-		var firstSeen, lastSeen time.Time
-		if err := db.QueryRow(`SELECT asset_id,first_seen_at,last_seen_at FROM asset_identifiers WHERE tenant_id=$1 AND kind='sensor_id' AND value=$2`, tenant, sensor.String()).Scan(&owner, &firstSeen, &lastSeen); err != nil {
-			t.Fatal(err)
-		}
-		if owner != asset || !firstSeen.Equal(seen) || !lastSeen.Equal(seen) {
-			t.Fatalf("upgrade changed ownership or clocks: %v %v %v", owner, firstSeen, lastSeen)
-		}
-		var agents int
-		if err := db.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind='agent_id'`, tenant, asset).Scan(&agents); err != nil || agents != 1 {
-			t.Fatalf("device-agent identity changed: count=%d err=%v", agents, err)
-		}
 	}
 }

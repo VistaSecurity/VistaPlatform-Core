@@ -99,6 +99,12 @@ data:
                   value: {{ include "vistaplatform.maintenanceUpdateTimeout" . | quote }}
                 - name: HELM_PLAIN_HTTP
                   value: {{ include "vistaplatform.maintenanceUpdatesFlag" (dict "ctx" . "key" "plainHttp") | quote }}
+                {{- /* maintenance-service's own extras, so the Job trusts what the
+                       service trusts: EXTRA_TRUSTED_CA_PATH and its mounted CA
+                       (a chart mirror behind a private CA) reach helm too. */}}
+                {{- with $svc.extraEnv }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
               command:
                 - sh
                 - -c
@@ -109,6 +115,19 @@ data:
                   # filesystem is read-only, /tmp is an emptyDir.
                   export HOME=/tmp/home HELM_CACHE_HOME=/tmp/helm/cache HELM_CONFIG_HOME=/tmp/helm/config HELM_DATA_HOME=/tmp/helm/data
                   mkdir -p "$HOME" "$HELM_CACHE_HOME" "$HELM_CONFIG_HOME" "$HELM_DATA_HOME"
+                  # An operator-supplied CA (EXTRA_TRUSTED_CA_PATH, the same
+                  # variable maintenance-service reads): helm's registry calls
+                  # verify a mirror signed by it. Combined with the image's
+                  # public bundle, never alone, so a public registry still works.
+                  if [ -n "${EXTRA_TRUSTED_CA_PATH:-}" ]; then
+                    if [ -r "$EXTRA_TRUSTED_CA_PATH" ]; then
+                      cat /etc/ssl/certs/ca-certificates.crt "$EXTRA_TRUSTED_CA_PATH" > "$HOME/ca-bundle.pem" 2>/dev/null || cat "$EXTRA_TRUSTED_CA_PATH" > "$HOME/ca-bundle.pem"
+                      export SSL_CERT_FILE="$HOME/ca-bundle.pem"
+                      echo "trusting the extra CA at $EXTRA_TRUSTED_CA_PATH"
+                    else
+                      echo "EXTRA_TRUSTED_CA_PATH=$EXTRA_TRUSTED_CA_PATH is not readable; using the public trust store" >&2
+                    fi
+                  fi
                   registry=""
                   if [ -f /etc/vistaplatform/registry/.dockerconfigjson ]; then
                     registry="--registry-config /etc/vistaplatform/registry/.dockerconfigjson"
@@ -160,6 +179,9 @@ data:
                   mountPath: /etc/vistaplatform/registry
                   readOnly: true
                 {{- end }}
+                {{- with $svc.extraVolumeMounts }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
           volumes:
             - name: tmp
               emptyDir: {}
@@ -171,5 +193,8 @@ data:
                 items:
                   - key: .dockerconfigjson
                     path: .dockerconfigjson
+            {{- end }}
+            {{- with $svc.extraVolumes }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
 {{- end }}

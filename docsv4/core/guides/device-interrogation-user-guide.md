@@ -88,7 +88,7 @@ After a cloud discovery job completes, discovered cloud resources are **automati
    **Note:** Private/internal endpoints that are not publicly reachable will still have their devices and crypto configurations created with API-only metadata, but without a full certificate record.
 
 3. **Approvals**: what was discovered waits on **Discovery → Approvals**, unless
-   its segment auto-approves it. Approvals is a page of its own — the queue is
+   its prefix auto-approves it. Approvals is a page of its own — the queue is
    shared by every source, and the **source** facet is how you narrow it to what
    came from the cloud.
 
@@ -169,7 +169,7 @@ can run 20 of these connections a minute.
 ### Adding a device only an agent can reach
 
 The platform can only connect to devices it can route to. A device on a
-segment that only one of your deployed device agents can see is identified by
+prefix that only one of your deployed device agents can see is identified by
 that agent instead.
 
 1. Click **Add device** and fill in the same four fields.
@@ -205,6 +205,11 @@ Click **Add without connecting** to save what you entered, or **Enter the detail
 by hand instead** to skip the connection altogether. For **Other** device types,
 which can't be identified automatically, the form shows every field from the
 start. Anything you leave blank an interrogation can fill in later.
+
+When you add a device by hand you can also give the **MAC address** and the
+**Interface** its IP address is on (`port1`, `mgmt`). The device's
+**Interfaces** tab then shows that interface holding the MAC and the address.
+Leave the interface name blank and the platform names it (`observed-1`).
 
 ### Interrogating
 
@@ -353,6 +358,37 @@ and an interrogated address is never given a name by reverse DNS either.
 If a finding cannot be attributed to any device, the job's **Pipeline** counts
 it as skipped, with the reason, rather than dropping it silently.
 
+#### What interrogating a UniFi controller records
+
+A UniFi controller describes every device it manages and every client it sees,
+and an interrogation records that on each one's own asset — not on the
+controller's:
+
+- **Each switch's ports** on its **Interfaces** tab, named `Port 1` … `Port 24`
+  (`SFP+ 1` where the controller names it so; a label you gave a port in UniFi,
+  such as "Printer", is not its name), with the port's type (`1000base-t`,
+  `10gbase-x-sfpp`, …), negotiated speed, up/down and enabled/disabled state,
+  and its VLANs: an access port's VLAN, or a trunk's native VLAN and the VLANs it
+  carries (a port that carries every network is recorded as tagged-all).
+  Ports aggregated into a link aggregation are members of a `LAG <n>` interface
+  that carries the aggregate's VLANs.
+- **Each access point's radios**: one wireless interface per SSID a radio
+  broadcasts (`ra0`, `rai0`, …), typed by band (2.4 GHz as 802.11n, 5 GHz as
+  802.11ac, 6 GHz as 802.11ax), with its BSSID. SSID passphrases are never kept.
+- **The gateway's interfaces**: one bridge interface per network it serves
+  (`br0`, `br20`, …) holding the gateway's own address on that network, and its
+  WAN address on the port the WAN is.
+- **The site's networks** as **prefixes** and **VLANs** (**Inventory → Networks**
+  and **VLANs**), each prefix with its VLAN, whether it hands out addresses by
+  DHCP, and its purpose (corporate or guest). WAN and VPN networks are not
+  prefixes; a VPN becomes a VPN gateway with its crypto configuration.
+- **Each client's MAC and address** on the client's own asset, on an interface
+  named `observed-1` until something that knows the client's own name for it —
+  its agent — reports it.
+
+Each device's management address — the address the controller lists it at —
+becomes its primary IP.
+
 #### What interrogating a gateway records
 
 A router or firewall knows which networks it serves: on each one it holds an
@@ -372,7 +408,7 @@ From each network the device reports, an interrogation records:
   something stronger — a MAC address, a serial number, an agent, or an address
   you declared — the router does not take it; a merge proposal opens for you to
   decide instead.
-- **That the device is the network's gateway.** Every network segment where the
+- **That the device is the network's gateway.** Every prefix where the
   device holds that address — one you created or one learned from the device —
   records it as its gateway. The next interrogation keeps this current: a
   network the device no longer reports loses it, and another device's gateway is
@@ -380,8 +416,14 @@ From each network the device reports, an interrogation records:
   pair), the most recent report is shown.
 - **Its WAN address** (UniFi gateways), from the device's own record, as an
   identifier with no network attached — your provider's network is not one of
-  your segments. Only the address is kept, never WAN credentials or connection
+  your prefixes. Only the address is kept, never WAN credentials or connection
   settings.
+
+A UniFi controller is treated as the site's gateway only when it may be one.
+When you add a controller by its IP address and that address is none of the
+site's UniFi gateway's own addresses — a Cloud Key, or the Network application
+on a server, in front of a UDM, USG or UXG — the gateway's addresses stay on
+the gateway (see below) and the controller is not made the networks' gateway.
 
 The device's own network is the one its **management address** — the address
 the platform interrogates it at — falls in, and its location follows that
@@ -397,10 +439,10 @@ Where you see it:
   whether a sensor covers it. The card is not shown for an asset that routes
   nothing. If it says *Couldn't load routed networks*, the rest of the page is
   still correct; reload to try again.
-- **A host's asset page → Overview → Network segment**: for example *Office LAN
+- **A host's asset page → Overview → Prefix**: for example *Office LAN
   · via edge-router (192.0.2.1)*, linking to the router. A network with no
   recorded gateway shows just its name.
-- **Settings → Infrastructure → Network Segments**: the **Gateway** and
+- **Inventory → Networks**: the **Gateway** and
   **Coverage** columns — see
   [Gateway and coverage](./tenant-admin-guide.md#gateway-and-coverage), which
   also explains *No sensor on this network*.
@@ -418,7 +460,7 @@ interruptible and will finish anyway.
 ## The approval queue
 
 Discovered assets wait on **Discovery → Approvals** — a page, not a button on
-some other page — unless the network segment they landed in auto-approves them,
+some other page — unless the prefix they landed in auto-approves them,
 or they are the host a device agent of yours is installed on (its first
 [host inventory](../features/host-inventory.md) admits it).
 

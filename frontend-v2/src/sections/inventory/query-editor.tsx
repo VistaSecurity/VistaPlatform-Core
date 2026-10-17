@@ -17,7 +17,9 @@ import {
   CVSS_LADDER, check, defaultOptions, newRegistryCatalog, parse, suggest, walkFields, withLadder,
   type Completion, type QueryError,
 } from '@vistasecurity/primitives/query';
+import { usePermissions, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { Icon } from '../../components/ui';
+import { useCustomFields } from './dcim/custom-field-queries';
 
 /** The production catalogue and options, built once. Both are pure data. */
 const CATALOG = newRegistryCatalog();
@@ -33,9 +35,30 @@ export function checkAssetQuery(text: string): { ok: boolean; canonical: string;
     : { ok: false, canonical: '', errors: out.errors };
 }
 
+/** The catalogue with the tenant's custom field names published, so
+ *  autocomplete offers `cf.<name>` (QUERY_LANGUAGE §15.5). Resolution is the
+ *  same with or without them: any well-formed `cf.` name validates. */
+let cfCatalog: { key: string; cat: ReturnType<typeof newRegistryCatalog> } | null = null;
+function catalogWith(customFieldNames: readonly string[]): ReturnType<typeof newRegistryCatalog> {
+  if (customFieldNames.length === 0) return CATALOG;
+  const key = customFieldNames.join('\n');
+  if (cfCatalog?.key !== key) cfCatalog = { key, cat: newRegistryCatalog({ customFieldNames }) };
+  return cfCatalog.cat;
+}
+
+const NO_NAMES: readonly string[] = [];
+
+/** The tenant's custom field names for kind `asset`, for `cf.<name>`
+ *  completions. dcim.read reads them; without it none are offered. */
+export function useAssetCustomFieldNames(): readonly string[] {
+  const canReadDcim = usePermissions().hasPermission(TENANT_PERMISSIONS.dcim.read);
+  const q = useCustomFields('asset', canReadDcim);
+  return useMemo(() => (q.data ?? []).map((f) => f.name), [q.data]);
+}
+
 /** Completions at a cursor, against the same catalogue. */
-export function suggestAssetQuery(text: string, cursor: number): ReturnType<typeof suggest> {
-  return suggest(text, cursor, CATALOG, { target: 'asset', ladder: CVSS_LADDER, limit: 12 });
+export function suggestAssetQuery(text: string, cursor: number, customFieldNames: readonly string[] = []): ReturnType<typeof suggest> {
+  return suggest(text, cursor, catalogWith(customFieldNames), { target: 'asset', ladder: CVSS_LADDER, limit: 12 });
 }
 
 const KIND_ICON: Record<Completion['kind'], string> = {
@@ -196,9 +219,11 @@ export function ServerQueryErrors({ query, errors }: { query: string; errors: Di
  * callback — the parent has the text.
  */
 export function QueryInput({
-  value, onDraftChange, onCommit, placeholder, inputId, ariaLabel, autoFocus,
+  value, onDraftChange, onCommit, placeholder, inputId, ariaLabel, autoFocus, customFieldNames = NO_NAMES,
 }: {
   value: string;
+  /** The tenant's custom field names, offered as `cf.<name>` completions. */
+  customFieldNames?: readonly string[];
   onDraftChange: (draft: string) => void;
   /** Enter with no completion highlighted. */
   onCommit?: (canonical: string) => void;
@@ -213,11 +238,10 @@ export function QueryInput({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const outcome = useMemo(() => checkAssetQuery(value), [value]);
-
   const completions = useMemo(() => {
     if (!open) return null;
-    return suggestAssetQuery(value, cursor);
-  }, [open, value, cursor]);
+    return suggestAssetQuery(value, cursor, customFieldNames);
+  }, [open, value, cursor, customFieldNames]);
   const list = completions ? completions.completions : [];
 
   const apply = (c: Completion) => {
@@ -345,6 +369,7 @@ export function QueryEditor({ value, onChange, onSubmit, placeholder, busy }: {
 }) {
   const [draft, setDraft] = useState(value);
   const [lastValue, setLastValue] = useState(value);
+  const customFieldNames = useAssetCustomFieldNames();
 
   // The URL is the source of truth: a facet click rewrites the query, and the
   // editor must show what the rail just wrote.
@@ -376,6 +401,7 @@ export function QueryEditor({ value, onChange, onSubmit, placeholder, busy }: {
         onDraftChange={setDraft}
         onCommit={(canonical) => { onChange(canonical); onSubmit?.(); }}
         placeholder={placeholder}
+        customFieldNames={customFieldNames}
       />
       <button
         className={'ui-btn' + (dirty && outcome.ok ? ' accent' : '')}

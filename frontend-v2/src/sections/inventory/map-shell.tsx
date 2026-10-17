@@ -5,7 +5,7 @@
 //     default when nothing is focused.
 //   - **Neighbourhood** — the interactive graph around one asset (2.9). Any
 //     URL carrying `focus=` still opens here.
-//   - **Topology** — the site → segment → class tree with counts (3.8).
+//   - **Topology** — the site → prefix → class tree with counts (3.8).
 //
 // This shell owns only the switch between them and the `?view=` parameter that
 // makes each one a link somebody can paste into a ticket. It holds no data and
@@ -40,7 +40,7 @@ const VIEW_META: Readonly<Record<MapView, { label: string; icon: string; hint: s
   topology: {
     label: 'Topology',
     icon: 'map',
-    hint: 'Where everything is — by site, segment and class.',
+    hint: 'Where everything is — by site, network prefix and class.',
   },
 };
 

@@ -66,6 +66,7 @@ export type ConnectorKey =
   | "solarwinds"
   | "oomnitza"
   | "netbox"
+  | "device42_import"
   | "jira"
   | "intune"
   | "jamf"
@@ -96,30 +97,30 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     label: "Amazon Web Services",
     kind: "cloud",
     direction: "pull",
-    producesClasses: ["compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "api_gateway", "cdn_distribution", "key_store", "object_storage", "managed_database"],
+    producesClasses: ["compute_instance", "cloud_load_balancer", "api_gateway", "cdn_distribution", "key_store", "object_storage", "managed_database", "serverless_function", "container_cluster", "secret_store", "dns_zone", "security_group"],
     status: "live",
     configuredBy: "tenant",
-    description: "Reads EC2 instances, VPCs and subnets; ALB, NLB and classic ELB load balancers; API Gateway (v2) APIs; CloudFront distributions; KMS keys; S3 buckets and RDS instances, with placement facts (cloud.account_id, cloud.region, cloud.vpc_id, cloud.subnet_id). Load-balancer and CloudFront certificates are collected with their ACM metadata. Lambda functions are not collected, and ACM is read only as metadata on those certificates, not as inventory of its own.",
+    description: "Reads EC2 instances with their network interfaces (ENIs) and private addresses; VPCs and their address ranges, recorded as IPAM prefixes; ALB, NLB and classic ELB load balancers; API Gateway (v2) APIs; CloudFront distributions; KMS keys; S3 buckets and RDS instances, with placement facts (cloud.account_id, cloud.region). Load-balancer and CloudFront certificates are collected with their ACM metadata. Lambda functions (runtime, handler, environment variable NAMES, execution role name), EKS clusters, Secrets Manager secrets (metadata, never values), Route 53 hosted zones and security groups (membership, never rules) are assets of their own classes. ACM is read only as metadata on those certificates, not as inventory of its own.",
   },
   {
     key: "azure",
     label: "Microsoft Azure",
     kind: "cloud",
     direction: "pull",
-    producesClasses: ["compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "key_store", "object_storage", "managed_database"],
+    producesClasses: ["compute_instance", "cloud_load_balancer", "key_store", "object_storage", "managed_database", "serverless_function", "container_cluster", "secret_store", "dns_zone", "security_group"],
     status: "live",
     configuredBy: "tenant",
-    description: "Reads virtual machines, virtual networks and subnets; Application Gateway and load balancers; Key Vault keys; storage accounts and SQL databases, with subscription and region placement facts. Azure Functions are not collected.",
+    description: "Reads virtual machines with their network interfaces and private addresses; virtual networks and their address ranges, recorded as IPAM prefixes; Application Gateway and load balancers; Key Vault keys; storage accounts and SQL databases, with subscription and region placement facts; Function Apps (their application settings are not read), AKS clusters, Key Vault secrets (metadata only), DNS zones and network security groups.",
   },
   {
     key: "gcp",
     label: "Google Cloud Platform",
     kind: "cloud",
     direction: "pull",
-    producesClasses: ["compute_instance", "virtual_network", "subnet", "cloud_load_balancer", "key_store", "object_storage", "managed_database"],
+    producesClasses: ["compute_instance", "cloud_load_balancer", "key_store", "object_storage", "managed_database", "serverless_function", "container_cluster", "secret_store", "dns_zone", "security_group"],
     status: "live",
     configuredBy: "tenant",
-    description: "Reads Compute Engine instances, VPC networks and subnetworks; HTTPS load balancers and SSL proxies; Cloud KMS keys; Cloud Storage buckets and Cloud SQL instances, with project and region placement facts. Cloud Functions are not collected.",
+    description: "Reads Compute Engine instances with their network interfaces and internal addresses; VPC networks and their address ranges, recorded as IPAM prefixes; HTTPS load balancers and SSL proxies; Cloud KMS keys; Cloud Storage buckets and Cloud SQL instances, with project and region placement facts; Cloud Functions (runtime, entry point, environment variable NAMES, service account name), GKE clusters, Secret Manager secrets (metadata only), Cloud DNS managed zones and firewall rules as security groups (targeting, never rule content).",
   },
   {
     key: "email",
@@ -281,7 +282,7 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     label: "Device42",
     kind: "cmdb",
     direction: "both",
-    producesClasses: ["hardware", "hypervisor", "switch", "server", "virtual_machine", "cluster"],
+    producesClasses: ["hardware", "hypervisor", "switch", "server", "virtual_machine"],
     status: "live",
     configuredBy: "tenant",
     feature: "cmdb_sync",
@@ -318,7 +319,18 @@ export const CONNECTORS: readonly ConnectorDef[] = [
     status: "live",
     configuredBy: "tenant",
     feature: "connector_netbox",
-    description: "Pulls sites, prefixes, VLANs, device types and devices from NetBox (ADR-0001 D3 Q3, ADR-0004 D5). Sites become location context, prefixes and VLANs become network segments, devices become observations through the identification engine, classed by their NetBox device role (a role the shipped table and the connection's own mapping do not know arrives as `unknown_host`, never a guess). Where the two disagree: NetBox's site and region are written onto the assets it matches, while a prefix that matches a network segment you already drew keeps your name, environment, tags and auto-approval — only provenance and site and VLAN details are added. Direction is PULL, not both: v1 writes NOTHING back. What NetBox does not know about is surfaced as a read-only Drift view for the network team to act on in NetBox itself — pushing discovered devices into a source of truth would make it a mirror of our guesses rather than a statement of their intent. A push direction is a separate, deliberate decision.",
+    description: "Pulls sites, prefixes, VLANs, device types and devices from NetBox (ADR-0001 D3 Q3, ADR-0004 D5). Sites become location context, prefixes become IPAM prefixes (with their VLAN), devices become observations through the identification engine, classed by their NetBox device role (a role the shipped table and the connection's own mapping do not know arrives as `unknown_host`, never a guess). Where the two disagree: NetBox's site and region are written onto the assets it matches, while a prefix that matches a prefix you already declared keeps your description, environment and auto-approval — only provenance and site and VLAN details are added. Direction is PULL, not both: v1 writes NOTHING back. What NetBox does not know about is surfaced as a read-only Drift view for the network team to act on in NetBox itself — pushing discovered devices into a source of truth would make it a mirror of our guesses rather than a statement of their intent. A push direction is a separate, deliberate decision.",
+  },
+  {
+    key: "device42_import",
+    label: "Device42 DCIM import",
+    kind: "network_source_of_truth",
+    direction: "pull",
+    producesClasses: ["hardware", "hypervisor", "switch", "virtual_machine"],
+    status: "live",
+    configuredBy: "tenant",
+    feature: "cmdb_sync",
+    description: "One-way import of Device42's data-centre model into the DCIM inventory (DCIM SYNC_MODEL §6): customers become Business Units, buildings Sites, rooms Locations, racks Racks, hardware models Device Types (with their Manufacturers), devices assets placed in their rack at their unit and face, switch ports Interfaces, patch panel ports Front and Rear Ports, the connections between ports Cables, VRF groups VRFs, Device42's IP networks Prefixes, IPs IP Addresses, VLANs VLANs, and circuits Circuits (with Providers and Circuit Types). Every run is planned first; a dry run shows the plan per class and writes nothing. Devices go through the identification engine, so a device discovery already found becomes that asset. A connection whose far end is not imported is parked as an unresolved termination. Pull only: nothing is ever written to Device42; the two-way device exchange is the Device42 CMDB connector. Basic authentication only. Contract-tested against recorded Device42 API shapes, not verified against a live instance.",
   },
   {
     key: "jira",

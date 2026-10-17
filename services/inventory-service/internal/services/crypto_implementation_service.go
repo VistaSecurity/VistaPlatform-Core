@@ -60,7 +60,7 @@ func (s *CryptoImplementationService) GetCryptoImplementations(tenantID uuid.UUI
 			ci.compliance_status, ci.first_discovered_at, ci.last_verified_at,
 			ci.created_at, ci.updated_at, ci.deleted_at,
 			-- Asset information
-			a.hostname as asset_hostname, COALESCE(host(e.address), host(a.primary_address)) as asset_ip_address, a.class_key, a.environment as asset_environment, a.business_unit as asset_business_unit,
+			a.hostname as asset_hostname, COALESCE(host(e.address), host(a.primary_address)) as asset_ip_address, a.class_key, a.environment as asset_environment, (SELECT bu.name FROM business_units bu WHERE bu.id = a.business_unit_id) as asset_business_unit,
 			-- Certificate information (if present)
 			c.common_name as cert_common_name, c.issuer_dn as cert_issuer_dn
 		FROM crypto_implementations ci
@@ -391,7 +391,7 @@ func (s *CryptoImplementationService) GetCryptoImplementationByID(tenantID, id u
 			ci.compliance_status, ci.first_discovered_at, ci.last_verified_at,
 			ci.created_at, ci.updated_at, ci.deleted_at,
 			-- Asset information
-			a.hostname as asset_hostname, COALESCE(host(e.address), host(a.primary_address)) as asset_ip_address, a.class_key, a.environment as asset_environment, a.business_unit as asset_business_unit
+			a.hostname as asset_hostname, COALESCE(host(e.address), host(a.primary_address)) as asset_ip_address, a.class_key, a.environment as asset_environment, (SELECT bu.name FROM business_units bu WHERE bu.id = a.business_unit_id) as asset_business_unit
 		FROM crypto_implementations ci
 		INNER JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
 		LEFT JOIN asset_endpoints e ON e.tenant_id = ci.tenant_id AND e.id = ci.endpoint_id

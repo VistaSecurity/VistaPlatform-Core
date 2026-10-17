@@ -1482,6 +1482,7 @@ func RunRepositoryContract(t *testing.T, newRepo func() identity.Repository) {
 	runAnnouncementContract(t, newRepo, tenant, now, ident, newAsset)
 	runProvisionalContract(t, newRepo, tenant, ident, newAsset)
 	runHostnameCardinalityContract(t, newRepo, tenant, otherTenant, ident, newAsset)
+	runInterfaceAddressContract(t, newRepo, tenant, ident, newAsset)
 }
 
 // ProposalResolver stamps a proposal's outcome the way the approvals path does

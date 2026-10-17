@@ -32,16 +32,15 @@ func TestIntegration_CreateAlgorithmPreservesExplicitZero(t *testing.T) {
 	}
 }
 
-func TestIntegration_Schema_RemovesAlgorithmRiskDefaultWithoutRegradingRows(t *testing.T) {
-	// A database of its own: this test rewinds the GLOBAL algorithms table to
-	// its pre-ADR-0016 shape and re-applies all of schema.sql twice. On the
-	// shared database that exposed every concurrently running test to the
-	// legacy default and the missing trigger, and the re-apply's ACCESS
-	// EXCLUSIVE locks deadlocked (40P01) against other packages' ordinary
-	// statements — the advisory schema lock only orders it against other
-	// schema applies, not against DML.
-	db := testdb.ScratchDatabase(t)
-
+// TestIntegration_Schema_AlgorithmRiskScoreHasNoDefault: the 5.0.0 baseline
+// (asset-inventory ADR-0010 D11) declares algorithms.risk_score with no
+// default — a default of 50 looked like an assessment nobody made (ADR-0016) —
+// and refuses an INSERT that omits it, while a row whose score is NULL stays
+// editable. (The upgrade half of this guard, which rewound a 4.x shape and
+// re-applied the file, retired with the migration block.)
+func TestIntegration_Schema_AlgorithmRiskScoreHasNoDefault(t *testing.T) {
+	db := testdb.Connect(t)
+	testdb.ApplySchemaAndSeed(t, db)
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -49,39 +48,6 @@ func TestIntegration_Schema_RemovesAlgorithmRiskDefaultWithoutRegradingRows(t *t
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Reconstruct the old column shape and rows that could exist on an upgrade:
-	// a deliberate score, an explicitly unknown score, and a write that received
-	// the old default. Applying the current schema must remove only the default.
-	if _, err := conn.ExecContext(ctx, `DROP TRIGGER IF EXISTS algorithms_risk_score_required_on_insert ON algorithms`); err != nil {
-		t.Fatalf("remove current required-score trigger: %v", err)
-	}
-	if _, err := conn.ExecContext(ctx, `ALTER TABLE algorithms ALTER COLUMN risk_score SET DEFAULT 50`); err != nil {
-		t.Fatalf("restore legacy default: %v", err)
-	}
-	prefix := "ADR16-" + uuid.NewString()
-	defer func() { _, _ = conn.ExecContext(ctx, `DELETE FROM algorithms WHERE code LIKE $1`, prefix+"%") }()
-	if _, err := conn.ExecContext(ctx, `
-		INSERT INTO algorithms (code, category, name, risk_score) VALUES
-			($1, 'hash', 'deliberately scored', 73),
-			($2, 'hash', 'historically unassessed', NULL)`, prefix+"-SCORED", prefix+"-NULL"); err != nil {
-		t.Fatalf("insert existing assessed/unknown rows: %v", err)
-	}
-	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO algorithms (code, category, name) VALUES ($1, 'hash', 'legacy defaulted')`, prefix+"-DEFAULTED"); err != nil {
-		t.Fatalf("insert legacy-defaulted row: %v", err)
-	}
-
-	for pass := 1; pass <= 2; pass++ {
-		// FORCE: re-applying the file is the assertion. This also takes the
-		// shared testdb advisory lock and transient-race retry; a raw Exec of
-		// schema.sql bypasses both and can deadlock concurrent integration legs.
-		testdb.ForceApplySchema(t, db)
-		assertAlgorithmRiskDefaultAndRows(t, conn, ctx, prefix)
-	}
-}
-
-func assertAlgorithmRiskDefaultAndRows(t *testing.T, conn *sql.Conn, ctx context.Context, prefix string) {
-	t.Helper()
 	var columnDefault sql.NullString
 	if err := conn.QueryRowContext(ctx, `
 		SELECT column_default
@@ -92,60 +58,23 @@ func assertAlgorithmRiskDefaultAndRows(t *testing.T, conn *sql.Conn, ctx context
 	if columnDefault.Valid {
 		t.Fatalf("algorithms.risk_score default = %q, want NULL", columnDefault.String)
 	}
-	var requiredGuard bool
-	if err := conn.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM pg_trigger
-			WHERE tgrelid = 'public.algorithms'::regclass
-			  AND tgname = 'algorithms_risk_score_required_on_insert'
-			  AND NOT tgisinternal
-		)`).Scan(&requiredGuard); err != nil {
-		t.Fatalf("read required-score trigger: %v", err)
-	}
-	if !requiredGuard {
-		t.Fatal("algorithms_risk_score_required_on_insert trigger is missing")
-	}
 
-	type row struct {
-		code  string
-		score sql.NullInt64
-	}
-	rows, err := conn.QueryContext(ctx,
-		`SELECT code, risk_score FROM algorithms WHERE code LIKE $1 ORDER BY code`, prefix+"%")
-	if err != nil {
-		t.Fatalf("read preserved rows: %v", err)
-	}
-	got := make(map[string]sql.NullInt64)
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.code, &r.score); err != nil {
-			t.Fatalf("scan preserved row: %v", err)
-		}
-		got[r.code] = r.score
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate preserved rows: %v", err)
-	}
-	if err := rows.Close(); err != nil {
-		t.Fatalf("close preserved rows: %v", err)
-	}
-
-	if score := got[prefix+"-SCORED"]; !score.Valid || score.Int64 != 73 {
-		t.Errorf("deliberate score after migration = %v, want 73", score)
-	}
-	if score := got[prefix+"-DEFAULTED"]; !score.Valid || score.Int64 != 50 {
-		t.Errorf("legacy defaulted score after migration = %v, want preserved 50", score)
-	}
-	if score, ok := got[prefix+"-NULL"]; !ok || score.Valid {
-		t.Errorf("historically unassessed score after migration = %v (present=%t), want preserved NULL", score, ok)
+	prefix := "ADR16-" + uuid.NewString()
+	defer func() { _, _ = conn.ExecContext(ctx, `DELETE FROM algorithms WHERE code LIKE $1`, prefix+"%") }()
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO algorithms (code, category, name) VALUES ($1, 'hash', 'missing assessment')`, prefix+"-NEW"); err == nil {
+		t.Fatal("a new algorithm without risk_score was accepted; algorithms_risk_score_required_on_insert must refuse it")
 	}
 	if _, err := conn.ExecContext(ctx,
-		`UPDATE algorithms SET description = 'still editable while unassessed' WHERE code = $1`, prefix+"-NULL"); err != nil {
-		t.Fatalf("unrelated update of historical NULL risk_score was blocked: %v", err)
+		`INSERT INTO algorithms (code, category, name, risk_score) VALUES ($1, 'hash', 'scored', 73)`, prefix+"-SCORED"); err != nil {
+		t.Fatalf("a scored algorithm was refused: %v", err)
 	}
-
 	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO algorithms (code, category, name) VALUES ($1, 'hash', 'missing new assessment')`, prefix+"-NEW"); err == nil {
-		t.Fatal("new algorithm without risk_score succeeded after migration")
+		`UPDATE algorithms SET risk_score = NULL WHERE code = $1`, prefix+"-SCORED"); err != nil {
+		t.Fatalf("clearing a score on UPDATE was refused: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		`UPDATE algorithms SET description = 'still editable while unassessed' WHERE code = $1`, prefix+"-SCORED"); err != nil {
+		t.Fatalf("an unrelated update of a NULL-scored row was refused: %v", err)
 	}
 }

@@ -54,7 +54,7 @@ function derived(name: string, builder: string, type: FieldType): FieldInfo {
  * value in the spec fixtures while the column happily stored it.
  */
 const PROTOCOL_VALUES = [
-  'TLS', 'SSH', 'IPSec', 'VPN', 'Database', 'API', 'SMB', 'Kerberos', 'QUIC', 'PPTP',
+  'TLS', 'SSH', 'IPSec', 'VPN', 'Database', 'API', 'SMB', 'Kerberos', 'QUIC', 'PPTP', 'IKE',
   'Modbus', 'DNP3', 'MMS', 'ICCP', 'IEC62351', 'OPC_UA',
   'EtherNet_IP', 'BACnet', 'BACnet_SC', 'HART_IP', 'S7',
 ];
@@ -78,12 +78,57 @@ const ASSET_FIELDS: FieldInfo[] = [
   // Postgres type, so a row holding `prod` cannot exist. An open set turns a
   // typo into an empty result where a closed one gives a diagnostic.
   enumAs('environment', 'environment', 'production', 'staging', 'development', 'test'),
-  col('business_unit', 'keyword'),
+  // Object-valued (DCIM 1.1): name or slug of the assigned business unit;
+  // `.id` is its uuid and `.parent` matches the unit and its descendants.
+  derived('business_unit', 'asset.business_unit', 'keyword'),
+  colAs('business_unit.id', 'business_unit_id', 'uuid'),
+  derived('business_unit.parent', 'asset.business_unit_parent', 'keyword'),
   col('owner_email', 'keyword'),
   col('support_group', 'keyword'),
-  col('site', 'keyword'),
-  col('region', 'keyword'),
+  // Placement (DCIM 2.1): site by name/slug, `.id`, `.group`/`.region` with
+  // descendants, and `location` by name, slug or path, including ancestors.
+  derived('site', 'asset.site', 'keyword'),
+  colAs('site.id', 'site_id', 'uuid'),
+  derived('site.group', 'asset.site_group', 'keyword'),
+  derived('site.region', 'asset.site_region', 'keyword'),
+  derived('location', 'asset.location', 'keyword'),
+  // The location region, or a cloud resource's provider region (DCIM 4.6).
+  derived('region', 'asset.region', 'keyword'),
   col('zone', 'keyword'),
+  // Device catalogue (DCIM 2.2): object-valued like business_unit.
+  derived('device_type', 'asset.device_type', 'keyword'),
+  colAs('device_type.id', 'device_type_id', 'uuid'),
+  derived('device_type.manufacturer', 'asset.device_type_manufacturer', 'keyword'),
+  derived('device_role', 'asset.device_role', 'keyword'),
+  colAs('device_role.id', 'device_role_id', 'uuid'),
+  derived('platform', 'asset.platform', 'keyword'),
+  colAs('platform.id', 'platform_id', 'uuid'),
+  col('serial', 'keyword'),
+  col('asset_tag', 'keyword'),
+  // Virtualisation (DCIM 4.2): the asset's cluster (a VM's or a host's).
+  derived('cluster', 'asset.cluster', 'keyword'),
+  colAs('cluster.id', 'cluster_id', 'uuid'),
+  derived('cluster.type', 'asset.cluster_type', 'keyword'),
+  derived('cluster.group', 'asset.cluster_group', 'keyword'),
+  // Circuits (DCIM 4.1): circuits terminating at the asset's location.
+  derived('circuit', 'asset.circuit', 'keyword'),
+  derived('circuit.cid', 'asset.circuit_cid', 'keyword'),
+  derived('circuit.provider', 'asset.circuit_provider', 'keyword'),
+  // Rack placement (DCIM 2.3): object-valued like site.
+  derived('rack', 'asset.rack', 'keyword'),
+  colAs('rack.id', 'rack_id', 'uuid'),
+  derived('rack.site', 'asset.rack_site', 'keyword'),
+  derived('rack.role', 'asset.rack_role', 'keyword'),
+  // Hardware (DCIM 2.4): modules, inventory items, virtual chassis.
+  derived('module_type', 'asset.module_type', 'keyword'),
+  derived('inventory_item.serial', 'asset.inventory_item_serial', 'keyword'),
+  derived('virtual_chassis', 'asset.virtual_chassis', 'keyword'),
+  col('position', 'number'),
+  enumAs('face', 'face', 'front', 'rear'),
+  // Cloud (DCIM 4.6, ADR-0009 D7): the cloud_resource attributes.
+  { ...derived('provider', 'asset.cloud_provider', 'keyword'), enum: ['aws', 'azure', 'gcp', 'oci', 'other'] },
+  derived('account', 'asset.cloud_account', 'keyword'),
+  derived('cloud.type', 'asset.cloud_type', 'keyword'),
   enumAs('status', 'asset_status', 'pending_approval', 'monitoring', 'denied', 'archived'),
   enumAs('ownership', 'asset_ownership', 'internal', 'third_party', 'unknown'),
   enumAs('stale_status', 'stale_status', 'active', 'stale', 'archived'),
@@ -102,6 +147,28 @@ const ASSET_FIELDS: FieldInfo[] = [
     ...derived('cert_trust', 'asset.cert_trust', 'keyword'),
     enum: ['public', 'private_trusted', 'incomplete', 'self_signed', 'untrusted', 'distrusted', 'unevaluated', 'none'],
   },
+  // IPAM (QUERY_LANGUAGE §15 D2): computed from the asset's addresses.
+  derived('ip.address', 'asset.ip.address', 'inet'),
+  derived('ip.dns_name', 'asset.ip.dns_name', 'keyword'),
+  { ...derived('ip.status', 'asset.ip.status', 'keyword'), enum: ['active', 'reserved', 'deprecated', 'dhcp', 'slaac'] },
+  { ...derived('ip.role', 'asset.ip.role', 'keyword'), enum: ['loopback', 'secondary', 'anycast', 'vip', 'vrrp', 'hsrp', 'glbp', 'carp'] },
+  derived('prefix.prefix', 'asset.prefix.prefix', 'inet'),
+  { ...derived('prefix.status', 'asset.prefix.status', 'keyword'), enum: ['container', 'active', 'reserved', 'deprecated'] },
+  derived('prefix.network_type', 'asset.prefix.network_type', 'keyword'),
+  derived('vlan.vid', 'asset.vlan.vid', 'number'),
+  derived('vlan.name', 'asset.vlan.name', 'keyword'),
+  derived('vrf.name', 'asset.vrf.name', 'keyword'),
+  // VPN (DCIM 4.3): a tunnel one of the asset's interfaces terminates.
+  derived('tunnel', 'asset.tunnel', 'keyword'),
+  { ...derived('tunnel.encapsulation', 'asset.tunnel.encapsulation', 'keyword'), enum: ['ipsec-transport', 'ipsec-tunnel', 'ip-ip', 'gre', 'wireguard', 'l2tp', 'pptp', 'openvpn'] },
+  derived('tunnel.ike_version', 'asset.tunnel.ike_version', 'number'),
+  derived('tunnel.pfs_group', 'asset.tunnel.pfs_group', 'number'),
+  derived('wireless_lan.ssid', 'asset.wireless_lan.ssid', 'keyword'),
+  { ...derived('wireless_lan.auth_type', 'asset.wireless_lan.auth_type', 'keyword'), enum: ['open', 'wep', 'wpa-personal', 'wpa-enterprise'] },
+  // Cabling (DCIM 3.2): the cables on the asset's components.
+  { ...derived('cable.type', 'asset.cable.type', 'keyword'), enum: ['cat3', 'cat5', 'cat5e', 'cat6', 'cat6a', 'cat7', 'cat7a', 'cat8', 'dac-active', 'dac-passive', 'mrj21-trunk', 'coaxial', 'mmf', 'mmf-om1', 'mmf-om2', 'mmf-om3', 'mmf-om4', 'mmf-om5', 'smf', 'smf-os1', 'smf-os2', 'aoc', 'usb', 'power'] },
+  { ...derived('cable.status', 'asset.cable.status', 'keyword'), enum: ['connected', 'planned', 'decommissioning'] },
+  derived('cabled_to', 'asset.cabled_to', 'keyword'),
   {
     name: 'risk',
     type: 'band',
@@ -119,7 +186,7 @@ const ASSET_FIELDS: FieldInfo[] = [
   { name: 'last_scanned', type: 'timestamp', accessor: { kind: 'jsonb', jsonColumn: 'metadata', key: 'last_scanned_at' } },
   col('created_at', 'timestamp'),
   col('updated_at', 'timestamp'),
-  colAs('segment_id', 'network_segment_id', 'uuid'),
+  col('prefix_id', 'uuid'),
   col('location_id', 'uuid'),
   col('id', 'uuid'),
 ];
@@ -211,16 +278,16 @@ const CRYPTO_FIELDS: FieldInfo[] = [
 const FINDING_FIELDS: FieldInfo[] = [
   enumAs(
     'producer', 'producer',
-    'compliance', 'crypto', 'eol', 'vulnerability', 'configuration', 'hygiene', 'drift',
+    'compliance', 'crypto', 'eol', 'vulnerability', 'configuration', 'hygiene', 'drift', 'topology',
   ),
   enumAs(
     'kind', 'kind',
-    'control_noncompliant', 'weak_configuration', 'weak_certificate', 'pqc_vulnerable',
+    'control_noncompliant', 'weak_configuration', 'weak_certificate', 'pqc_vulnerable', 'weak_wireless_auth',
     'os_end_of_life', 'software_end_of_life', 'hardware_end_of_support', 'known_vulnerability',
     'plaintext_management', 'default_credentials_exposed', 'insecure_service_exposed',
     'no_owner', 'no_class', 'no_location', 'duplicate_suspected', 'stale', 'orphan_relationship',
     'new_class_in_segment', 'unexpected_protocol', 'port_profile_changed', 'new_issuer',
-    'host_key_changed',
+    'host_key_changed', 'cable_drift',
   ),
   enumAs(
     'subject_type', 'subject_type',
@@ -312,19 +379,39 @@ const OBSERVATION_FIELDS: FieldInfo[] = [
   // `network.type:corporate`, and nothing in the platform has ever emitted
   // "corporate" — §13 A8.
   enumAs('network.ownership', 'network_ownership', 'internal', 'third_party', 'unknown'),
-  // FOUR values, not two. The classifier copies the matching SEGMENT's
-  // `network_type` column through, and `network_segments_network_type_check`
-  // allows private / public / vpn / cloud (§14 B1). Published as two, an
-  // auto-approval rule for a cloud or VPN segment was refused outright and that
-  // segment silently stopped generating one. The production table was corrected
-  // then; this copy was not.
+  // FOUR values, not two: private / public / vpn / cloud, the prefix network
+  // types an auto-approval rule is generated for (§14 B1, DCIM row 1.6).
+  // Published as two, a rule for a cloud or VPN network was refused outright
+  // and silently stopped being generated.
   enumAs('network.type', 'network_type', 'private', 'public', 'vpn', 'cloud'),
-  colAs('network.segment_id', 'network_segment_id', 'uuid'),
+  // DCIM row 1.4 (§15): prefix, VRF and interface of the observation.
+  colAs('network.prefix_id', 'network_prefix_id', 'uuid'),
+  colAs('network.vrf_id', 'network_vrf_id', 'uuid'),
+  colAs('interface_id', 'interface_id', 'uuid'),
+  // The account scope term of a cloud auto-approval rule (ADR-0009 D5, §15).
+  // Mirrors testcatalog.observationFields.
+  colAs('cloud.account_id', 'cloud_account_id', 'keyword'),
   colAs('first_seen', 'first_seen_at', 'timestamp'),
 ];
 
 // measurement carries only §8's reserved scalar; everything else it reads is a
 // fact path.
+// §15 (DCIM row 1.2). `mac_address` is derived: the column is macaddr8.
+const INTERFACE_FIELDS: FieldInfo[] = [
+  col('name', 'keyword'),
+  col('type', 'keyword'),
+  derived('mac_address', 'interface.mac_address', 'keyword'),
+  col('enabled', 'boolean'),
+  col('mgmt_only', 'boolean'),
+  col('mtu', 'number'),
+  col('speed_kbps', 'number'),
+  enumAs('mode', 'mode', 'access', 'tagged', 'tagged-all', 'q-in-q'),
+  enumAs('status', 'status', 'pending', 'active', 'rejected', 'stale', 'archived'),
+  enumAs('operational_status', 'operational_status', 'up', 'down', 'testing', 'unknown'),
+  col('description', 'text'),
+  col('id', 'uuid'),
+];
+
 const MEASUREMENT_FIELDS: FieldInfo[] = [
   {
     name: 'value',
@@ -346,4 +433,5 @@ export const TEST_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldInfo[]
   relationship: RELATIONSHIP_FIELDS,
   observation: OBSERVATION_FIELDS,
   measurement: MEASUREMENT_FIELDS,
+  interface: INTERFACE_FIELDS,
 };

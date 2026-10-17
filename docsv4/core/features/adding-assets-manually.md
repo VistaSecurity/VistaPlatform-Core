@@ -109,15 +109,15 @@ you already have:
 That is decided by your own approval policy, not by the fact that you typed it.
 
 An asset — however it arrives — joins active inventory immediately only when it
-falls inside a **network segment you defined with auto-approve turned on**
-(**Settings → Infrastructure → Network Segments**). Anything else waits in
+falls inside a **prefix you defined with auto-approve turned on**
+(**Inventory → Networks**). Anything else waits in
 **Discovery → Approvals** for a person.
 
 So in practice:
 
-- A host inside an auto-approving segment: **monitored straight away**, and it
+- A host inside an auto-approving prefix: **monitored straight away**, and it
   shows up in All assets on your next refresh.
-- Everything else — including anything with no address to match a segment against,
+- Everything else — including anything with no address to match a prefix against,
   such as a business service or an object store: **pending approval**. It will not
   appear in the asset list until you accept it, and All assets shows a banner with
   the pending count and a link into the queue.
@@ -125,9 +125,9 @@ So in practice:
 This is on purpose. The approval policy is the tenant's, and letting a
 hand-entered asset step around it would make the policy advisory. If you
 regularly add assets by hand and want them monitored immediately, define the
-segment they live in and mark it auto-approve.
+prefix they live in and mark it auto-approve.
 
-An asset in conflict always waits for a human, whatever the segment rule says —
+An asset in conflict always waits for a human, whatever the prefix rule says —
 there is a merge to settle first.
 
 ## Certificates are a separate button
@@ -146,4 +146,4 @@ Uploading needs the **manage assets** permission.
 - [Asset approval](./asset-approval.md) — the queue, merge proposals, class proposals, and the one auto-approval rule
 - [Assets and crypto configurations](./assets-and-crypto-configurations.md) — what an asset, an endpoint and a configuration each are
 - [Spreadsheet import](./spreadsheet-import.md) — the same job for many assets at once
-- [Operational context](./operational-context.md) — locations and network segments
+- [Operational context](./operational-context.md) — locations and prefixes

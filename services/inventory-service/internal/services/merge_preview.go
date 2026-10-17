@@ -15,6 +15,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	identitypg "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/redact"
 )
@@ -96,7 +97,7 @@ type AssetMergeResult struct {
 	Replayed        bool        `json:"replayed"`
 }
 
-var mergeEditableFields = []string{"display_name", "hostname", "class_key", "primary_address", "environment", "business_unit", "owner_email", "support_group", "description", "site", "region", "zone", "location_id", "network_segment_id", "attributes", "tags"}
+var mergeEditableFields = []string{"display_name", "hostname", "class_key", "primary_address", "environment", "business_unit_id", "owner_email", "support_group", "description", "site_id", "region", "zone", "location_id", "prefix_id", "attributes", "tags"}
 var mergeSnapshotFields = append(append([]string{}, mergeEditableFields...), "id", "class_path", "class_source_kind", "class_source_ref", "class_confidence", "asset_status", "identity_status", "first_discovered_at", "last_seen_at")
 
 type mergeRecord struct {
@@ -192,7 +193,7 @@ func lockMergeSelection(ctx context.Context, tx *sqlx.Tx, tenant uuid.UUID, ids 
 	return nil
 }
 func mergeIdentifierKeys(ctx context.Context, tx *sqlx.Tx, tenant uuid.UUID, ids []uuid.UUID) ([]identity.Identifier, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT kind,value,coalesce(scope,'') FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=ANY($2)
+	rows, err := tx.QueryContext(ctx, `SELECT kind,value,coalesce(scope,'') FROM (`+identifiersql.All+`) ai WHERE tenant_id=$1 AND asset_id=ANY($2)
  UNION SELECT i->>'kind',i->>'value',coalesce(i->>'scope','') FROM identity_observations o CROSS JOIN LATERAL jsonb_array_elements(coalesce(o.evidence->'identifiers','[]')) i WHERE o.tenant_id=$1 AND o.asset_id=ANY($2) ORDER BY 1,2,3`, tenant, pq.Array(ids))
 	if err != nil {
 		return nil, err
@@ -258,7 +259,14 @@ func readMergeSnapshot(ctx context.Context, tx *sqlx.Tx, tenant uuid.UUID, ids [
 		"implementation_keys":                "implementation_id IN (SELECT id FROM crypto_implementations WHERE tenant_id=$1 AND asset_id=ANY($2))",
 	}
 	for _, ref := range assetReferrers {
-		specs[ref.table] = ref.column + "=ANY($2)"
+		// OR onto an existing spec: assets.parent_asset_id (DCIM row 2.3)
+		// must widen the assets snapshot to the candidates' children, not
+		// replace the candidates themselves.
+		if existing, ok := specs[ref.table]; ok {
+			specs[ref.table] = existing + " OR " + ref.column + "=ANY($2)"
+		} else {
+			specs[ref.table] = ref.column + "=ANY($2)"
+		}
 	}
 	for _, ref := range mergeInformalReferrers {
 		predicate := ref.column + "=ANY($2)"

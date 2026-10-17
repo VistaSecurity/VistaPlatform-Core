@@ -22,7 +22,7 @@ export const TARGETS: readonly Target[] = [
     table: 'assets',
     alias: 'a',
     idColumn: 'id',
-    subs: ['endpoint', 'software', 'finding', 'cert', 'crypto', 'identifier', 'relationship'],
+    subs: ['endpoint', 'software', 'finding', 'cert', 'crypto', 'identifier', 'relationship', 'interface'],
     traversable: true,
     freeTextable: true,
   },
@@ -84,6 +84,17 @@ export const TARGETS: readonly Target[] = [
     freeTextable: false,
   },
   {
+    // DCIM BUILD_PLAN row 1.2 (QUERY_LANGUAGE §15): an asset's interfaces.
+    name: 'interface',
+    table: 'interfaces',
+    alias: 'ifc',
+    idColumn: 'id',
+    assetIdColumn: 'asset_id',
+    subs: ['asset'],
+    traversable: false,
+    freeTextable: false,
+  },
+  {
     // An edge has two ends, so "the asset of a relationship" is ambiguous;
     // there is no `asset:(…)` shape from here rather than an invented one.
     name: 'relationship',
@@ -129,10 +140,12 @@ export const TARGETS: readonly Target[] = [
  * predicate reads facts and nothing else (§8).
  */
 export const NAMESPACES_BY_TARGET: Readonly<
-  Record<string, readonly ('attr' | 'fact' | 'id' | 'tag')[]>
+  Record<string, readonly ('attr' | 'fact' | 'id' | 'tag' | 'cf')[]>
 > = {
-  asset: ['attr', 'fact', 'id', 'tag'],
+  asset: ['attr', 'fact', 'id', 'tag', 'cf'],
   observation: ['attr', 'fact', 'id', 'tag'],
+  // An interface row carries custom fields and nothing else namespaced (§15.5).
+  interface: ['cf'],
   measurement: ['fact'],
 };
 

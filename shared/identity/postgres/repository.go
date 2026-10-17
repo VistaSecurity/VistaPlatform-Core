@@ -238,6 +238,28 @@ func (r *Repository) savepoint(ctx context.Context, tx *sql.Tx, name string, fn 
 func (r *Repository) FindByIdentifier(ctx context.Context, tenantID string, kind identity.Kind, value, scope string) ([]identity.AssetRef, error) {
 	var refs []identity.AssetRef
 	err := r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
+		// The two interface-borne kinds answer from the DCIM tables (row 1.4,
+		// addresses.go): an address from `ip_addresses JOIN interfaces`, a MAC
+		// from the identifier rows unioned with every interface MAC.
+		var owners []uuid.UUID
+		var err error
+		switch kind {
+		case identity.KindIPAddress:
+			owners, err = findAddressOwners(ctx, tx, tenantID, value, scope)
+		case identity.KindMACAddress:
+			owners, err = findMACOwners(ctx, tx, tenantID, value, scope)
+		default:
+			owners, err = nil, errNotInterfaceBorne
+		}
+		if err == nil {
+			for _, id := range owners {
+				refs = append(refs, identity.AssetRef{TenantID: tenantID, ID: id.String()})
+			}
+			return nil
+		}
+		if !errors.Is(err, errNotInterfaceBorne) {
+			return err
+		}
 		rows, err := tx.QueryContext(ctx, `
 			SELECT asset_id
 			FROM public.asset_identifiers
@@ -283,17 +305,17 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 
 	byID := make(map[string]*identity.AssetSummary, len(wanted))
 	err := r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
-		// The segment, the last sighting and the two comparable class attributes
+		// The prefix, the last sighting and the two comparable class attributes
 		// travel with the summary because the matcher seam compares them
 		// (ADR-0008 D1): two records agreeing on a hostname while disagreeing
-		// about the SEGMENT are probably two things, and two disagreeing about
+		// about the PREFIX are probably two things, and two disagreeing about
 		// the VENDOR certainly are. Only `vendor` and `model` are lifted out of
 		// `attributes` — identity.SummaryAttributeKeys — because a candidate
 		// summary is what a seam needs to rank a pairing, not the asset.
 		rows, err := tx.QueryContext(ctx, `
 			SELECT id, class_key, coalesce(display_name, ''), coalesce(hostname, ''), asset_status,
 			       identity_status,
-			       coalesce(network_segment_id::text, ''), last_seen_at,
+			       coalesce(prefix_id::text, ''), last_seen_at,
 			       coalesce(attributes ->> 'vendor', ''), coalesce(attributes ->> 'model', '')
 			FROM public.assets
 			WHERE tenant_id = $1 AND id = ANY($2::uuid[])`,
@@ -339,7 +361,7 @@ func (r *Repository) LoadSummaries(ctx context.Context, tenantID string, ids []s
 			SELECT asset_id, kind, value, coalesce(scope, ''), confidence, source_kind,
 			       coalesce(source_ref, ''), last_seen_at, coalesce(address_assignment, ''), coalesce(key_algorithm, ''),
 			       device_confirmed_at
-			FROM public.asset_identifiers
+			FROM (`+IdentifierRowsSQL+`) ai
 			WHERE tenant_id = $1 AND asset_id = ANY($2::uuid[])
 			ORDER BY asset_id, kind, value`,
 			tenantID, pgUUIDArray(wanted))
@@ -437,6 +459,13 @@ func (r *Repository) CreateAsset(ctx context.Context, tenantID string, a identit
 			if classKey == "" {
 				classKey = assetclass.KeyUnknownHost
 			}
+			// A cluster is the clusters object, never an asset (DCIM row 4.2):
+			// the retired class is refused here too, the one place every
+			// engine-minted asset is written, so an observation that reached
+			// the engine without Intake cannot mint one either.
+			if strings.EqualFold(classKey, identity.RetiredClusterClass) {
+				return identity.ErrClusterNotAnAsset
+			}
 			classPath, err := classPathFor(ctx, tx, tenantID, classKey)
 			if err != nil {
 				return err
@@ -452,7 +481,7 @@ func (r *Repository) CreateAsset(ctx context.Context, tenantID string, a identit
 				INSERT INTO public.assets (
 					tenant_id, class_key, class_path, class_source_kind, class_source_ref,
 					class_confidence, display_name, hostname, primary_address,
-					asset_status, asset_ownership, network_segment_id, discovery_method,
+					asset_status, asset_ownership, prefix_id, discovery_method,
 					confidence_score, first_discovered_at, last_seen_at, metadata,
 					identity_status, import_only_sources
 				) VALUES (
@@ -593,7 +622,17 @@ func (r *Repository) attach(ctx context.Context, tx *sql.Tx, asset identity.Asse
 		return 0, err
 	}
 	inserted := 0
+	// Addresses are written under the asset's interfaces, never as identifier
+	// rows (row 1.4); MACs are both — the identifier row, and the interface.
+	filed, err := r.fileUnderInterfaces(ctx, tx, asset, assetID, ids)
+	if err != nil {
+		return 0, err
+	}
+	inserted += filed
 	for _, id := range ids {
+		if isAddressKind(id.Kind) {
+			continue
+		}
 		if id.Kind == "" || strings.TrimSpace(id.Value) == "" {
 			// The absence of an identifier is not an identifier whose value is
 			// "". The engine normalises before it gets here; this is the
@@ -948,6 +987,11 @@ func (r *Repository) upsertEndpoints(ctx context.Context, tx *sql.Tx, asset iden
 			changed++
 		}
 	}
+	if len(eps) > 0 {
+		if err := linkEndpointAddresses(ctx, tx, asset.TenantID, assetID); err != nil {
+			return 0, err
+		}
+	}
 	for _, ep := range eps {
 		if vouches(sourceKindOr(ep.Source.Kind), ep.Source.Ref) {
 			if err := ClearImportOnlyIfVouched(ctx, tx, asset.TenantID, assetID); err != nil {
@@ -1254,6 +1298,10 @@ func (r *Repository) OpenMergeProposal(ctx context.Context, tenantID string, p i
 	}
 
 	fingerprint := identity.MergeProposalFingerprint(p)
+	p, err = r.annotateMatchedInterfaces(ctx, tenantID, p)
+	if err != nil {
+		return identity.ProposalRef{}, err
+	}
 	payload, err := json.Marshal(mergeProposalPayload(p, fingerprint))
 	if err != nil {
 		return identity.ProposalRef{}, fmt.Errorf("identity/postgres: marshal merge proposal: %w", err)
@@ -1395,6 +1443,12 @@ func mergeProposalPayload(p identity.MergeProposal, fingerprint string) map[stri
 			if id.Inferred() {
 				m["source"] = map[string]any{"kind": string(id.Source.Kind), "ref": id.Source.Ref}
 			}
+			// The candidate's interface holding a matched MAC or address
+			// (row 1.4, annotateMatchedInterfaces): what the Approvals card
+			// lists beside the value.
+			if id.Interface != "" {
+				m["interface"] = id.Interface
+			}
 			matched = append(matched, m)
 		}
 		candidate := map[string]any{
@@ -1502,6 +1556,11 @@ func identifierPayload(ids []identity.Identifier) []map[string]any {
 		if id.Generic {
 			m["generic"] = true
 		}
+		if id.Interface != "" {
+			// Row 1.4: the interface of the candidate that holds a matched
+			// MAC or address — evidence the Approvals card shows.
+			m["interface"] = id.Interface
+		}
 		out = append(out, m)
 	}
 	return out
@@ -1534,10 +1593,13 @@ type storedIdentifier struct {
 	Scope   string `json:"scope"`
 	Derived bool   `json:"derived"`
 	Generic bool   `json:"generic"`
+	// Interface is the candidate's interface holding a matched MAC or
+	// address (row 1.4), empty on proposals written before it.
+	Interface string `json:"interface,omitempty"`
 }
 
 func (s storedIdentifier) identifier() identity.Identifier {
-	id := identity.Identifier{Kind: identity.Kind(s.Kind), Value: s.Value, Scope: s.Scope, Generic: s.Generic}
+	id := identity.Identifier{Kind: identity.Kind(s.Kind), Value: s.Value, Scope: s.Scope, Generic: s.Generic, Interface: s.Interface}
 	if s.Derived {
 		id.Source.Kind = identity.SourceInferred
 	}
@@ -1782,11 +1844,21 @@ func (r *Repository) LastKeptSeparate(ctx context.Context, tenantID string, asse
 func (r *Repository) IdentifierLastSeen(ctx context.Context, tenantID string, id identity.Identifier) (time.Time, bool, error) {
 	var seen sql.NullTime
 	err := r.withTx(ctx, tenantID, func(tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, `
+		q := `
 			SELECT max(last_seen_at)
 			  FROM public.asset_identifiers
-			 WHERE tenant_id = $1 AND kind = $2 AND value = $3 AND coalesce(scope, '') = $4`,
-			tenantID, string(id.Kind), id.Value, id.Scope).Scan(&seen)
+			 WHERE tenant_id = $1 AND kind = $2 AND value = $3 AND coalesce(scope, '') = $4`
+		if isAddressKind(id.Kind) {
+			// The address row's own last-seen: when its holder was last seen
+			// WITH it. A row with no identity scope answers every scope.
+			q = `
+			SELECT max(ai.last_seen_at)
+			  FROM (` + AddressIdentifiersSQL + `) ai
+			  JOIN public.ip_addresses src ON src.id = ai.id
+			 WHERE ai.tenant_id = $1 AND $2 = 'ip_address' AND ai.value = $3
+			   AND (src.identity_scope IS NULL OR src.identity_scope = $4)`
+		}
+		err := tx.QueryRowContext(ctx, q, tenantID, string(id.Kind), id.Value, id.Scope).Scan(&seen)
 		if err != nil {
 			return fmt.Errorf("identity/postgres: read last-seen of %s=%q: %w", id.Kind, id.Value, err)
 		}

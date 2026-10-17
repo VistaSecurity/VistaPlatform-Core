@@ -30,6 +30,7 @@ var TicketCategoriesWritable = []string{
 	"inventory",     // CI hygiene: no owner/class/location, stale, duplicate
 	"configuration", // insecure exposure: plaintext mgmt, default creds
 	"drift",         // new issuer, unexpected protocol, port-profile change
+	"topology",      // a neighbour table contradicting a declared cable
 	"operational",   // platform ops: sensor/agent offline, service down
 	"general",       // manual, anything else
 }

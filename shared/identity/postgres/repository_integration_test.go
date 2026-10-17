@@ -516,7 +516,7 @@ type contractRepo struct {
 	back    map[string]string // tenant uuid -> logical name
 	ghosts  map[string]string // non-uuid asset id -> a uuid that names no row
 
-	// segments maps a written network_segments id back to the logical scope
+	// segments maps a written prefixes id back to the logical scope
 	// name the contract used, so ScopeForAddress can be asserted on in the
 	// contract's own vocabulary.
 	segments map[string]string
@@ -906,74 +906,56 @@ func (c *contractRepo) SegmentSnapshot(ctx context.Context, tenantID string) (id
 		return identity.SegmentSnapshot{}, err
 	}
 	snap.TenantID = tenantID
-	for i := range snap.Segments {
-		if name, ok := c.segmentName(snap.Segments[i].ID); ok {
-			snap.Segments[i].ID = name
+	for i := range snap.Prefixes {
+		if name, ok := c.segmentName(snap.Prefixes[i].ID); ok {
+			snap.Prefixes[i].ID = name
 		}
 	}
 	return snap, nil
 }
 
-// AddDomainSegment implements identitytest.DomainSegmentWriter with a real
-// `domain` row.
-func (c *contractRepo) AddDomainSegment(tenantID, pattern, scope string) error {
-	var id string
-	err := c.db.QueryRow(`
-		INSERT INTO public.network_segments
-			(tenant_id, name, segment_type, value, network_type, environment, is_active, metadata)
-		VALUES ($1, $2, 'domain', $3, 'private', 'production', true, '{}'::jsonb)
-		RETURNING id::text`, c.tenantID(tenantID), scope, pattern).Scan(&id)
-	if err != nil {
-		return err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.segments[id] = scope
-	return nil
-}
-
-// StateSegmentPosture implements identitytest.SegmentPostureWriter through the
-// product's own posture writer, so the contract reads back what the deployed
-// precedence rule stored.
-func (c *contractRepo) StateSegmentPosture(tenantID, scope, source string, dynamic *bool) error {
-	id := c.segmentIDFor(scope)
-	tid := c.tenantID(tenantID)
-	ctx := context.Background()
-	var err error
-	if dynamic == nil {
-		_, err = pgrepo.ClearSegmentPosture(ctx, c.db, tid, id, pgrepo.PostureSource(source))
-	} else {
-		_, err = pgrepo.RecordSegmentPosture(ctx, c.db, tid, id, pgrepo.PostureSource(source), *dynamic, pgrepo.PostureEvidence{})
-	}
-	return err
-}
-
-// AddSegment implements identitytest.SegmentWriter: it writes a real
-// network_segments row, so the SQL ScopeForAddress is exercised against the
-// table it actually reads rather than a stub.
+// AddSegment implements identitytest.SegmentWriter: it writes a real declared
+// global-VRF prefix, so the SQL ScopeForAddress is exercised against the table
+// it actually reads rather than a stub. `dynamic` true states the DHCP posture;
+// false leaves it unsaid, which on a declared prefix reads static.
 func (c *contractRepo) AddSegment(tenantID, cidr, scope string, dynamic bool) error {
-	return c.AddCloudSegment(tenantID, cidr, scope, dynamic, "")
+	return c.addPrefix(tenantID, cidr, scope, "declared", dynamic, "")
 }
 
-// AddCloudSegment implements identitytest.CloudSegmentWriter: the same row with
-// a `cloud_network_ref`, which is what lets two segments share one CIDR.
-//
-// A NULL is written for the LAN case rather than an empty string, because that
-// is what the column actually holds for an operator-drawn segment and the
-// unique index keys on `coalesce(cloud_network_ref, ”)`. Writing ” here would
-// test a shape production never produces.
+// AddCloudSegment implements identitytest.CloudSegmentWriter: a prefix that
+// belongs to a cloud network. Two VPCs sharing one CIDR are two rows, told
+// apart by `cloud_network_ref` (prefixes_identity_uniq keys on it, DCIM row
+// 1.6).
 func (c *contractRepo) AddCloudSegment(tenantID, cidr, scope string, dynamic bool, networkRef string) error {
-	tid := c.tenantID(tenantID)
-	var ref any
-	if strings.TrimSpace(networkRef) != "" {
-		ref = networkRef
+	return c.addPrefix(tenantID, cidr, scope, "measured", dynamic, networkRef)
+}
+
+// AddLearnedPrefix implements identitytest.PrefixPostureWriter: a measured
+// prefix with no posture stated.
+func (c *contractRepo) AddLearnedPrefix(tenantID, cidr, scope string) error {
+	return c.addPrefix(tenantID, cidr, scope, "measured", false, "")
+}
+
+// RecordPrefixPosture implements identitytest.PrefixPostureWriter through the
+// product's own writer.
+func (c *contractRepo) RecordPrefixPosture(tenantID, scope string, dynamic bool) (bool, error) {
+	return pgrepo.RecordPrefixPosture(context.Background(), c.db, c.tenantID(tenantID), c.segmentIDFor(scope), dynamic)
+}
+
+func (c *contractRepo) addPrefix(tenantID, cidr, scope, sourceKind string, dynamic bool, networkRef string) error {
+	var dhcp any
+	if dynamic {
+		dhcp = true
+	} else if networkRef != "" {
+		// A cloud subnet states its posture: not DHCP-managed (cloud
+		// enumeration's prefixes say so explicitly).
+		dhcp = false
 	}
 	var id string
 	err := c.db.QueryRow(`
-		INSERT INTO public.network_segments
-			(tenant_id, name, segment_type, value, network_type, environment, is_active, metadata, cloud_network_ref)
-		VALUES ($1, $2, 'cidr', $3, 'private', 'production', true, jsonb_build_object('dynamic', $4::boolean), $5)
-		RETURNING id::text`, tid, scope, cidr, dynamic, ref).Scan(&id)
+		INSERT INTO public.prefixes (tenant_id, prefix, description, source_kind, status, dhcp_managed, cloud_network_ref)
+		VALUES ($1, $2::cidr, $3, $4, 'active', $5, NULLIF($6, ''))
+		RETURNING id::text`, c.tenantID(tenantID), cidr, scope, sourceKind, dhcp, networkRef).Scan(&id)
 	if err != nil {
 		return err
 	}
@@ -993,7 +975,7 @@ func (c *contractRepo) segmentName(id string) (string, bool) {
 // ProvisionalScope, ReassignIdentifier and ArchiveAsset are the D2/D3
 // capabilities, delegated to the real repository.
 //
-// The eligibility answer is DERIVED from `network_segments` here, so this
+// The eligibility answer is DERIVED from `prefixes` here, so this
 // adapter deliberately does NOT implement identitytest.ProvisionalScopeWriter:
 // the contract's configurable subtest skips, and the derivation itself is
 // pinned by TestIntegration_ProvisionalScope below against real rows. What the
@@ -1136,4 +1118,66 @@ func TestIntegration_SourceRankSQLMatchesGo(t *testing.T) {
 			t.Errorf("SQL rank(%s) = %d, Go = %d", k, got, want)
 		}
 	}
+}
+
+// ── row 1.4: interfaces, addresses and prefixes ─────────────────────────────
+
+var _ identitytest.InterfaceReader = (*contractRepo)(nil)
+var _ identitytest.InterfaceWriter = (*contractRepo)(nil)
+var _ identitytest.UnassignedAddressWriter = (*contractRepo)(nil)
+var _ identitytest.PrefixWriter = (*contractRepo)(nil)
+
+// Interfaces reads the asset's interfaces back through the real repository.
+func (c *contractRepo) Interfaces(ref identity.AssetRef) []identity.StoredInterface {
+	return c.inner.Interfaces(c.ref(ref))
+}
+
+// AddInterface writes a declared interface the way the interfaces API does —
+// straight into `interfaces` and `mac_addresses`, never through the engine —
+// so its MACs exist only as interface MACs.
+func (c *contractRepo) AddInterface(ref identity.AssetRef, name string, macs ...string) error {
+	r := c.ref(ref)
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var primary any
+	if len(macs) > 0 {
+		primary = macs[0]
+	}
+	var id string
+	if err := tx.QueryRow(`
+		INSERT INTO public.interfaces (tenant_id, asset_id, name, type, mac_address, source_kind, status)
+		VALUES ($1, $2, $3, '1000base-t', $4::macaddr8, 'declared', 'active') RETURNING id::text`,
+		r.TenantID, r.ID, name, primary).Scan(&id); err != nil {
+		return err
+	}
+	for _, m := range macs[min(1, len(macs)):] {
+		if _, err := tx.Exec(`
+			INSERT INTO public.mac_addresses (tenant_id, interface_id, mac, source_kind)
+			VALUES ($1, $2, $3::macaddr8, 'declared')`, r.TenantID, id, m); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// AddUnassignedAddress writes an IPAM address on no interface.
+func (c *contractRepo) AddUnassignedAddress(tenantID, address string) error {
+	_, err := c.db.Exec(`
+		INSERT INTO public.ip_addresses (tenant_id, address, source_kind, status)
+		VALUES ($1, $2::inet, 'declared', 'active')`, c.tenantID(tenantID), address)
+	return err
+}
+
+// AddPrefix writes a declared global-VRF prefix and returns its id — the scope
+// the SQL ScopeForAddress reports for an address inside it.
+func (c *contractRepo) AddPrefix(tenantID, cidr string, dhcpManaged *bool) (string, error) {
+	var id string
+	err := c.db.QueryRow(`
+		INSERT INTO public.prefixes (tenant_id, prefix, dhcp_managed, source_kind, status)
+		VALUES ($1, $2::cidr, $3, 'declared', 'active') RETURNING id::text`,
+		c.tenantID(tenantID), cidr, dhcpManaged).Scan(&id)
+	return id, err
 }

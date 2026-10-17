@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/vistasecurity/vistaplatform/shared/dcim/ifnames"
 )
 
 // UnifiInterrogator interrogates Ubiquiti UniFi controllers (legacy software
@@ -148,7 +150,16 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 	} else {
 		networkConfs = confs
 	}
-	vlanByNetworkID := unifiVLANByNetworkID(networkConfs)
+
+	// The site's wireless networks carry the authentication each SSID uses
+	// (row 4.4). Best effort: a controller without the endpoint still yields
+	// every VAP, only without its posture.
+	var wlanConfs []map[string]interface{}
+	if confs, err := c.getWLANConfs(ctx, site); err != nil {
+		result.warn(c.apiPrefix+"/api/s/"+site+"/rest/wlanconf", err, "Wireless network authentication not collected")
+	} else {
+		wlanConfs = confs
+	}
 
 	controllerHost, _ := unifiHostPort(c.baseURL)
 
@@ -162,19 +173,15 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 		}
 	}
 
-	if devices, err := c.getDevices(ctx, site); err != nil {
+	devices, err := c.getDevices(ctx, site)
+	if err != nil {
 		result.warn(c.apiPrefix+"/api/s/"+site+"/stat/device", err, "Managed devices and their topology not collected")
-	} else {
-		controllerPeer := unifiControllerPeer(controllerHost, result.DeviceInfo)
-		for _, device := range devices {
-			asset := c.convertDeviceToAsset(device, site)
-			if asset.Hostname != "" || asset.IPAddress != "" {
-				result.Assets = append(result.Assets, asset)
-			}
-			// Ops facts and topology for the managed device itself. These are
-			// about the DEVICE, not the controller, which is why they carry a
-			// subject: a switch's port table is not the controller's.
-			unifiEmitDeviceObservations(result, device, controllerPeer, vlanByNetworkID)
+		devices = nil
+	}
+	for _, device := range devices {
+		asset := c.convertDeviceToAsset(device, site)
+		if asset.Hostname != "" || asset.IPAddress != "" {
+			result.Assets = append(result.Assets, asset)
 		}
 	}
 
@@ -184,16 +191,26 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 	// VPN networks (site-to-site IPsec / OpenVPN, WireGuard / OpenVPN / L2TP
 	// remote-user servers) become vpn_gateway assets carrying the API-reported
 	// crypto config. Ordinary LAN and VLAN networks — the other ~90% of
-	// this response, filtered away until now — become the controller's
-	// net.vlans fact and, at ingest, the site's segments.
+	// this response, filtered away until now — become the site's prefixes and
+	// VLANs (unifiEmitSiteObservations).
 	result.Assets = append(result.Assets, unifiVPNAssets(networkConfs, controllerHost)...)
-	unifiEmitNetworkFacts(result, networkConfs)
+	// Site-to-site VPNs as tunnel objects (DCIM row 4.3).
+	result.addTunnels(unifiTunnels(networkConfs), ifnames.VendorUniFi, c.apiPrefix+"/api/s/"+site+"/rest/networkconf")
 
-	if clients, err := c.getClients(ctx, site); err != nil {
+	clients, err := c.getClients(ctx, site)
+	if err != nil {
 		result.warn(c.apiPrefix+"/api/s/"+site+"/stat/sta", err, "Connected clients not collected")
-	} else {
-		unifiEmitClientObservations(result, clients)
+		clients = nil
 	}
+
+	unifiEmitSiteObservations(result, UnifiSite{
+		ControllerHost: controllerHost,
+		Controller:     result.DeviceInfo,
+		NetworkConfs:   networkConfs,
+		WLANConfs:      wlanConfs,
+		Devices:        devices,
+		Clients:        clients,
+	})
 
 	// The controller's own management plane. Read off the URL we just
 	// authenticated against rather than assumed: a legacy software controller
@@ -454,6 +471,23 @@ func (c *unifiClient) getControllerIdentity(ctx context.Context, site string) (m
 func (c *unifiClient) getDevices(ctx context.Context, site string) ([]map[string]interface{}, error) {
 	resp, err := c.apiRequest(ctx, "GET", fmt.Sprintf("/api/s/%s/stat/device", site), nil)
 	if err != nil {
+		return nil, err
+	}
+	if resp.Data == nil {
+		return []map[string]interface{}{}, nil
+	}
+	return resp.Data, nil
+}
+
+// getWLANConfs retrieves the site's wireless networks (`rest/wlanconf`). A 404
+// is "this controller has none", not a failure. The raw objects carry the
+// passphrase; they never leave unifiWLANPostures.
+func (c *unifiClient) getWLANConfs(ctx context.Context, site string) ([]map[string]interface{}, error) {
+	resp, err := c.apiRequest(ctx, "GET", fmt.Sprintf("/api/s/%s/rest/wlanconf", site), nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "status 404") {
+			return []map[string]interface{}{}, nil
+		}
 		return nil, err
 	}
 	if resp.Data == nil {

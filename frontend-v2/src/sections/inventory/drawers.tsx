@@ -9,7 +9,7 @@ import { useAsset } from './asset-queries';
 import { ShownOfNotice } from '../../components/shown-of-notice';
 import { serviceConfidence, keyCustodyLabel } from './lens-helpers';
 import { safeHttpUrl } from '../../lib/url';
-import { assetIdentity, classDeclares, classLabel, handshakeRefusal, operatingSystem, primaryAddressPort, primaryEndpoint, stripMask, type EndpointLike } from './asset-shape';
+import { assetIdentity, businessUnitName, sitePlacementLabel, classDeclares, classLabel, handshakeRefusal, operatingSystem, primaryAddressPort, primaryEndpoint, stripMask, type EndpointLike } from './asset-shape';
 import {
   PROVENANCE_LABEL,
   PROVENANCE_TITLE,
@@ -460,11 +460,12 @@ export function AssetDrawer({ assetId, seed, onOpenConfig, onClose, onEdit, acti
         )}
         <MetaRow k="Support group" v={a.support_group as string} />
         <MetaRow k="Environment" v={a.environment as string} />
-        <MetaRow k="Business unit" v={a.business_unit as string} />
+        <MetaRow k="Business unit" v={businessUnitName(a.business_unit)} />
         <MetaRow k="Owner" v={a.owner_email as string} />
-        <MetaRow k="Network segment" v={(a.network_segment_name as string) || (a.network_segment_id as string)} />
+        <MetaRow k="Network" v={a.prefix as string} mono />
         <MetaRow k="Cloud" v={(a.cloud_provider as string) ? `${a.cloud_provider}${a.region ? ' · ' + a.region : ''}` : 'on-prem'} />
-        <MetaRow k="Location" v={[a.site, a.region, a.zone].filter(Boolean).join(' / ') as string} />
+        <MetaRow k="Site" v={sitePlacementLabel(a)} />
+        <MetaRow k="Region / zone" v={[a.region, a.zone].filter(Boolean).join(' / ') as string} />
         <MetaRow k="Status" v={a.asset_status as string} />
         <MetaRow k="Ownership" v={a.asset_ownership as string} />
         <MetaRow k="Last seen" v={(a.last_seen_at as string)?.slice(0, 10)} mono />

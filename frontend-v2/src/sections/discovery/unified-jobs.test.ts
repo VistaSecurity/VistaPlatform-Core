@@ -216,7 +216,7 @@ describe('discoveryRow — scan-plan jobs', () => {
 describe('interrogationRow carries what Job Logs used to show', () => {
   it('puts a cloud run\'s enumeration under the status', () => {
     const row = interrogationRow(interrogation({ enumeration: { instances: 12, networks: 0, subnets: 3, security_groups: 0 } }));
-    expect(row.statusDetail).toBe('12 instances, 3 subnets');
+    expect(row.statusDetail).toBe('12 instances, 3 network prefixes');
   });
 
   it('says a host inventory failed rather than listing its counts', () => {

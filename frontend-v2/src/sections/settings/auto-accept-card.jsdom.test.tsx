@@ -169,7 +169,7 @@ it('explains what "sure" means, in plain words, and where the merges are listed'
   // you entered yields the survivor slot to an already-approved one.
   expect(text).toContain('Values you typed always win');
   expect(text).toContain('unless it is still waiting for');
-  expect(text).toContain('same network segment');
+  expect(text).toContain('same prefix');
   expect(text).toContain('nothing contradicts');
   expect(text).toContain('“keep separate”');
   expect(text).toContain('never overridden');
@@ -179,7 +179,7 @@ it('explains what "sure" means, in plain words, and where the merges are listed'
   stored = { auto_merge_existing: false };
   qc.clear();
   await render();
-  expect(host.querySelector('[data-testid="rule-merge"]')!.textContent).toContain('same network segment');
+  expect(host.querySelector('[data-testid="rule-merge"]')!.textContent).toContain('same prefix');
 });
 
 it('renders read-only, with the current value, for a role without both permissions', async () => {

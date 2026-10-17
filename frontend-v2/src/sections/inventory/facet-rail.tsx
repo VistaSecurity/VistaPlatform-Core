@@ -10,6 +10,7 @@
 // is what makes one faceted list able to replace the twelve near-identical pages
 // a lens-per-class would have needed.
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router';
 import { ASSET_CLASSES, CLASS_TREE, type AssetClassKey, type AssetClassNode } from '@vistasecurity/primitives/assets';
 import { Icon } from '../../components/ui';
 import {
@@ -181,7 +182,7 @@ function CheckRow({ label, value, count, checked, onToggle }: {
 
 /**
  * A multi-select facet whose values come from the SERVER's buckets, not from a
- * hardcoded list. Site, owner, business unit and segment are all tenant data;
+ * hardcoded list. Site, owner, business unit and prefix are all tenant data;
  * enumerating them here would show a list nobody in this tenant uses and hide
  * the one they do.
  */
@@ -261,7 +262,7 @@ export const FACET_LEVEL_FOR: Readonly<Record<string, FacetLevel>> = {
   status: 'status',
   environment: 'environment',
   site: 'site',
-  segment: 'segment',
+  prefix: 'prefix',
   owner: 'owner_email',
   business_unit: 'business_unit',
   tag: 'tag',
@@ -380,6 +381,9 @@ export function FacetRail({ facets, data, certTrust, extra, unparsed = false, on
       <fieldset disabled={unparsed} style={{ border: 'none', padding: 0, margin: 0, minWidth: 0, opacity: unparsed ? 0.55 : 1 }}>
 
       <Section label={FACET_LABEL.class} count={facets.class ? 1 : 0}>
+        <Link to="/inventory/manage/classes" className="ui-btn sm ghost" style={{ margin: '0 8px 7px', justifyContent: 'flex-start' }}>
+          <Icon name="shapes" size={12} />Browse class taxonomy
+        </Link>
         <div style={{ maxHeight: 300, overflowY: 'auto' }}>
           {CLASS_TREE.map((node) => (
             <ClassNode
@@ -502,7 +506,7 @@ export function FacetRail({ facets, data, certTrust, extra, unparsed = false, on
 
       <BucketFacet facetKey="environment" facets={facets} buckets={bucketsFor(buckets, 'environment')} failed={levelFailed(data, 'environment')} onChange={onChange} onRetry={onRetry} empty="No environment set on any asset." />
       <BucketFacet facetKey="site" facets={facets} buckets={bucketsFor(buckets, 'site')} failed={levelFailed(data, 'site')} onChange={onChange} onRetry={onRetry} empty="No sites recorded." />
-      <BucketFacet facetKey="segment" facets={facets} buckets={bucketsFor(buckets, 'segment')} failed={levelFailed(data, 'segment')} onChange={onChange} onRetry={onRetry} empty="No network segments defined." />
+      <BucketFacet facetKey="prefix" facets={facets} buckets={bucketsFor(buckets, 'prefix')} failed={levelFailed(data, 'prefix')} onChange={onChange} onRetry={onRetry} empty="No prefixes recorded." />
       <BucketFacet facetKey="owner" facets={facets} buckets={bucketsFor(buckets, 'owner')} failed={levelFailed(data, 'owner')} onChange={onChange} onRetry={onRetry} empty="No owner recorded." />
       <BucketFacet facetKey="business_unit" facets={facets} buckets={bucketsFor(buckets, 'business_unit')} failed={levelFailed(data, 'business_unit')} onChange={onChange} onRetry={onRetry} empty="No business unit recorded." />
       <BucketFacet facetKey="tag" facets={facets} buckets={bucketsFor(buckets, 'tag')} failed={levelFailed(data, 'tag')} onChange={onChange} onRetry={onRetry} empty="No tags on any asset." />

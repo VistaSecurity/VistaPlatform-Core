@@ -18,7 +18,7 @@ import (
 // everything the other produces, [Network.IsExternal] accepts both spellings
 // of outside.
 const (
-	// OwnershipInternal — the address is in a known tenant network segment.
+	// OwnershipInternal — the address is in a known tenant prefix.
 	OwnershipInternal = "internal"
 	// OwnershipExternal — the address is outside the tenant's owned space.
 	OwnershipExternal = "external"
@@ -43,7 +43,7 @@ type Network struct {
 	Ownership string `json:"ownership,omitempty"`
 	// Type is the classifier's network type: "private" or "public".
 	Type string `json:"type,omitempty"`
-	// SegmentID is the tenant network segment the address falls in, empty when
+	// SegmentID is the tenant prefix the address falls in, empty when
 	// it falls in none. It is also the natural [Identifier.Scope] for hostname
 	// and ip_address identifiers.
 	SegmentID string `json:"segment_id,omitempty"`
@@ -296,6 +296,31 @@ type Observation struct {
 	// the other, because both are saying the same thing and a scope named by
 	// either is dynamic.
 	DynamicScopes map[string]bool `json:"dynamic_scopes,omitempty"`
+
+	// Interfaces, Prefixes and VLANs are the posture half of a sighting's
+	// network evidence (DCIM row 1.5, observed_network.go), normalised by
+	// [Intake]. Their MACs and global-VRF addresses are ALSO in Identifiers,
+	// named by interface; the engine records the rest through an
+	// [ObservedNetworkRepository] once the observation resolved to an asset.
+	Interfaces []ObservedInterface `json:"interfaces,omitempty"`
+	Prefixes   []ObservedPrefix    `json:"prefixes,omitempty"`
+	VLANs      []ObservedVLAN      `json:"vlans,omitempty"`
+	// WirelessLANs and WirelessLinks are an access point's SSIDs and its
+	// point-to-point wireless links (DCIM row 4.4), recorded with the
+	// interfaces once the sighting resolved to an asset.
+	WirelessLANs  []ObservedWirelessLAN  `json:"wireless_lans,omitempty"`
+	WirelessLinks []ObservedWirelessLink `json:"wireless_links,omitempty"`
+
+	// Cluster is the cluster the observed asset belongs to (DCIM row 4.2),
+	// normalised by [Intake]; the engine records the membership through an
+	// [ObservedClusterRepository] once the observation resolved to an asset.
+	Cluster *ObservedCluster `json:"cluster,omitempty"`
+
+	// ManagementAddress is the sighting's management address, set by [Intake]
+	// only when the sighting lists it among the device's addresses. It is the
+	// stated primary address of an asset this observation creates, ahead of
+	// address order (primaryAddressFor).
+	ManagementAddress string `json:"management_address,omitempty"`
 
 	// pinned are the keys of this observation's `ip_address` identifiers whose
 	// owner holds them as [AssignmentStatic] inside a dynamic scope (pinned.go).

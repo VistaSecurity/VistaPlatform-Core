@@ -217,7 +217,7 @@ func TestIntegration_IdentityObservation_ConfirmationCorroboration(t *testing.T)
 	testdb.WithSchemaShareLock(t, db.DB.DB, func() {
 		svc := NewAssetService(db)
 		actor := seedUser(t, db, tenant)
-		segment := seedSegment(t, db, tenant, "Confirmation network", "192.0.2.0/24")
+		segment := seedPrefix(t, db, tenant, "Confirmation network", "192.0.2.0/24")
 		if _, err := db.Exec(`INSERT INTO tenant_entitlements(tenant_id,item_id,override_value,reason)
 		 SELECT $1,id,'{"quantity":10}'::jsonb,'confirmation regression' FROM billable_items WHERE key='max_assets'`, tenant); err != nil {
 			t.Fatal(err)

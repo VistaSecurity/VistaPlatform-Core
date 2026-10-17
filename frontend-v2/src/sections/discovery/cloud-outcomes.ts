@@ -12,6 +12,7 @@ import type { deviceInterrogationComponents } from '@vistasecurity/api-contract'
 
 export type ResourceTypeOutcome = deviceInterrogationComponents['schemas']['JobResultResourceType'];
 export type CollectorFailure = deviceInterrogationComponents['schemas']['JobResultCollectorFailure'];
+export type RegionOutcome = deviceInterrogationComponents['schemas']['JobResultRegionOutcome'];
 export type RunOutcome = 'complete' | 'partial' | 'failed';
 
 /**
@@ -36,11 +37,17 @@ const TYPE_LABELS: Record<string, string> = {
   ssl_proxy: 'SSL proxies',
   storage: 'Cloud Storage buckets',
   cloudsql: 'Cloud SQL instances',
-  // AWS account enumeration (ec2:Describe*).
-  ec2_instances: 'EC2 instances',
-  vpcs: 'VPCs',
-  subnets: 'Subnets',
-  security_groups: 'Security group membership',
+  // The account inventory listings (asset-inventory ADR-0009 D3), every
+  // provider.
+  compute_instances: 'Compute instances',
+  networks: 'Networks (prefixes)',
+  security_groups: 'Security groups',
+  region_discovery: 'Region discovery',
+  // The Tier-1 classes (ADR-0009 D2).
+  serverless_functions: 'Serverless functions',
+  container_clusters: 'Container clusters',
+  secret_stores: 'Secret stores',
+  dns_zones: 'DNS zones',
 };
 
 export function resourceTypeLabel(resourceType: string): string {
@@ -169,4 +176,58 @@ export function runBanner(outcome: string | undefined, types: ResourceTypeOutcom
 /** True when the job detail has a cloud outcome worth rendering at all. */
 export function hasResourceOutcomes(types: ResourceTypeOutcome[] | undefined): types is ResourceTypeOutcome[] {
   return Array.isArray(types) && types.length > 0;
+}
+
+// ---- The outcome grid (asset-inventory ADR-0009 D3) ----------------------
+
+export interface GridCell {
+  status: RegionOutcome['status'];
+  /** What the cell shows: a count, or a word when there is no count. */
+  text: string;
+  tone: OutcomeTone;
+  /** Hover text: the provider's code and message, or the attribution. */
+  title: string;
+}
+
+export interface OutcomeGrid {
+  /** Columns: `global` first (the account-wide calls), then regions A–Z. */
+  regions: string[];
+  rows: { resourceType: string; label: string; cells: Record<string, GridCell | undefined> }[];
+}
+
+const CELL_TONE: Record<RegionOutcome['status'], OutcomeTone> = {
+  succeeded: 'ok',
+  partial: 'warn',
+  failed: 'danger',
+  not_attempted: 'muted',
+};
+
+/**
+ * Types × regions. A missing cell means the type was not asked about in that
+ * region (an account-wide type has only `global` plus the regions its
+ * resources were in) — rendered as a dash, never as zero. A failed cell never
+ * shows a count, because zero is not what was measured.
+ */
+export function outcomeGrid(types: ResourceTypeOutcome[]): OutcomeGrid {
+  const seen = new Set<string>();
+  for (const t of types) for (const r of t.regions ?? []) seen.add(r.region);
+  const regions = [...seen].sort((a, b) => (a === 'global' ? -1 : b === 'global' ? 1 : a.localeCompare(b)));
+  return {
+    regions,
+    rows: types.map((t) => {
+      const cells: Record<string, GridCell | undefined> = {};
+      for (const r of t.regions ?? []) {
+        const failure = r.failure ? `${r.failure.code ? `${r.failure.code}: ` : ''}${r.failure.message ?? ''}`.trim() : '';
+        cells[r.region] = {
+          status: r.status,
+          tone: CELL_TONE[r.status] ?? 'muted',
+          text: r.status === 'failed' ? 'failed' : r.status === 'not_attempted' ? 'not asked' : String(r.found),
+          title: r.from_account_listing
+            ? `${r.found} found here by the account-wide listing`
+            : failure || (r.status === 'succeeded' ? `${r.found} found` : r.status),
+        };
+      }
+      return { resourceType: t.resource_type, label: resourceTypeLabel(t.resource_type), cells };
+    }),
+  };
 }

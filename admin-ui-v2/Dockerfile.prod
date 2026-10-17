@@ -124,7 +124,7 @@ RUN printf '%s\n' \
 # go.sum entries for Caddy's own optional-module imports unresolved after a
 # bare `go get`, and the build fails on ~10 "missing go.sum entry" errors.
 RUN go get github.com/caddyserver/caddy/v2@v2.11.7 \
- && go get golang.org/x/net@v0.59.0 \
+ && go get golang.org/x/net@v0.60.0 \
            golang.org/x/text@v0.42.0 \
            golang.org/x/crypto@v0.57.0 \
            google.golang.org/grpc@v1.83.2 \

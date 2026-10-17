@@ -4,7 +4,7 @@ import {
   ChevronLeft, ChevronRight, ChevronDown, ChevronUp, AlertTriangle, Loader,
   Inbox, Layers, Radar, Database, ShieldCheck, Wrench, LayoutDashboard,
   Shield, Bell, Settings, Check, X, Plus, Minus, ArrowUpRight, ArrowRight,
-  Download, Upload, Filter, Terminal, Lock, KeyRound, FileText, Activity,
+  Download, Upload, Filter, Terminal, Lock, KeyRound, FileText, FileCode, Activity,
   Cloud, CircleAlert, Wifi, MoreVertical, ShieldX, XCircle, Mail, Eye, EyeOff, BadgeCheck, LogOut, Server as Host,
   Building2, Palette, CreditCard, ChartColumn, Users, ShieldHalf, Fingerprint,
   Plug, BellRing, ScrollText, Recycle, Archive, Crop, History,
@@ -19,9 +19,9 @@ import {
   Tag, FolderTree, Box, Type, ScanBarcode, List, Tags,
   Blocks, Boxes, Briefcase, Cctv, CloudCog, CloudLightning, Cog, Computer, Container,
   Factory, Globe, HardDrive, Laptop, Monitor, Printer, Radio, RadioTower, Router,
-  ServerCog, Share2, SquareStack, TvMinimal, Webhook,
+  ServerCog, Share2, SquareStack, TvMinimal, Webhook, Cable, Braces,
 } from 'lucide-react';
-import { Route, Binary, Ruler, Key, Scale, OctagonAlert, ListChecks, CalendarClock, Gauge, CircleDot, User, Ticket, FolderPlus, ShieldOff, TrendingUp, TrendingDown, Info, SearchX, CheckCheck, Gem, ExternalLink, CircleHelp, CircleDashed, Shapes } from 'lucide-react';
+import { Pencil, Image as ImageIcon, Route, Binary, Ruler, Key, Scale, OctagonAlert, ListChecks, CalendarClock, Gauge, CircleDot, User, Ticket, FolderPlus, ShieldOff, TrendingUp, TrendingDown, Info, SearchX, CheckCheck, Gem, ExternalLink, CircleHelp, CircleDashed, Shapes } from 'lucide-react';
 
 // Explicit, tree-shakeable icon map (kebab-case → component). Add entries as
 // sections need them; an unknown name renders a question-mark placeholder (see
@@ -36,7 +36,7 @@ const MAP: Record<string, LucideIcon> = {
   database: Database, 'shield-check': ShieldCheck, wrench: Wrench, 'layout-dashboard': LayoutDashboard,
   shield: Shield, bell: Bell, settings: Settings, check: Check, x: X, plus: Plus, minus: Minus,
   'arrow-up-right': ArrowUpRight, 'arrow-right': ArrowRight, download: Download, upload: Upload,
-  filter: Filter, terminal: Terminal, lock: Lock, 'key-round': KeyRound, 'file-text': FileText,
+  filter: Filter, terminal: Terminal, lock: Lock, 'key-round': KeyRound, 'file-text': FileText, 'file-code': FileCode,
   activity: Activity, cloud: Cloud, 'circle-alert': CircleAlert, wifi: Wifi, 'more-vertical': MoreVertical,
   'shield-x': ShieldX, 'x-circle': XCircle, mail: Mail, eye: Eye, 'eye-off': EyeOff, 'badge-check': BadgeCheck, 'log-out': LogOut,
   route: Route, binary: Binary, ruler: Ruler, key: Key, scale: Scale, 'octagon-alert': OctagonAlert,
@@ -71,6 +71,8 @@ const MAP: Record<string, LucideIcon> = {
   // proposal row while missing here, so both rendered the unknown-name
   // placeholder; the rest are the map's class-group glyphs (matching what the
   // class picker shows for the same taxonomy root) and its chrome.
+  // Inventory → Circuits (DCIM row 4.1).
+  cable: Cable, pencil: Pencil, image: ImageIcon,
   waypoints: Waypoints, 'circuit-board': CircuitBoard, 'app-window': AppWindow,
   workflow: Workflow, maximize: Maximize, minimize: Minimize, crosshair: Crosshair,
   // Blast radius + direction swap — named by the Relationships tab's impact
@@ -108,7 +110,7 @@ const MAP: Record<string, LucideIcon> = {
   'circle-user': CircleUser, 'ethernet-port': EthernetPort, 'list-filter': ListFilter,
   'search-code': SearchCode, bookmark: Bookmark, 'trash-2': Trash2, map: MapIcon,
   // Settings: API tokens, account, integrations, people, policies.
-  bot: Bot, 'file-check': FileCheck, 'git-compare': GitCompare, send: Send, 'user-x': UserX, power: Power,
+  braces: Braces, bot: Bot, 'file-check': FileCheck, 'git-compare': GitCompare, send: Send, 'user-x': UserX, power: Power,
   // Named only inside `name={cond ? 'a' : 'b'}` expressions, which is how they
   // hid from a scan of string-literal props: the merge explanation's for /
   // against arrows, the invite page's accepted state, the facet rail's

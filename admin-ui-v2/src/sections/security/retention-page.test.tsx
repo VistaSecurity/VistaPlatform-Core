@@ -31,7 +31,9 @@ vi.mock('./audit-queries', () => ({
 
 vi.mock('react-hot-toast', () => ({ default: { success: vi.fn(), error: vi.fn() } }));
 
-import { RetentionModal, RetentionPage, retentionFormError } from './retention-page';
+import {
+  ChangeLogRetentionCard, CHANGE_LOG_EVENT_TYPE, RetentionModal, RetentionPage, changeLogDaysError, changeLogPolicyInput, retentionFormError,
+} from './retention-page';
 
 const mut = { create: { mutate: vi.fn(), isPending: false }, update: { mutate: vi.fn(), isPending: false } } as never;
 
@@ -88,5 +90,37 @@ describe('Retention policy list', () => {
     expect(headers).toEqual(['Policy', 'Scope', 'Hot', 'Total', 'Status']);
     expect(html).toContain('30d');
     expect(html).toContain('365d');
+  });
+});
+
+// Inventory change log retention (DCIM BUILD_PLAN row 5.2). The database
+// function that drops expired object_changes months reads the policy whose
+// event_type is 'inventory.change_log'; the card must write exactly that.
+describe('Inventory change log retention', () => {
+  it('is on the Retention page, defaulting to a year when nothing is saved', () => {
+    const html = renderToStaticMarkup(createElement(RetentionPage));
+    expect(html).toContain('data-testid="change-log-retention"');
+    expect(html).toContain('Inventory change log retention');
+    expect(html).toContain('No setting yet');
+    expect(html).toContain('value="365"');
+  });
+
+  it('shows a saved policy\'s days', () => {
+    const saved = { ...policies.list[0], id: '55555555-5555-4555-8555-555555555555', policy_name: 'Inventory change log', event_type: CHANGE_LOG_EVENT_TYPE, total_retention_days: 90, hot_storage_days: 30 };
+    const html = renderToStaticMarkup(createElement(ChangeLogRetentionCard, { policies: [saved], mut }));
+    expect(html).toContain('value="90"');
+    expect(html).not.toContain('No setting yet');
+    expect(html).toContain('data-testid="change-log-retention-save"');
+    expect(html).toMatch(/data-testid="change-log-retention-save"[^>]*disabled|disabled[^>]*data-testid="change-log-retention-save"/); // unchanged → nothing to save
+  });
+
+  it('saves under the event type the database function reads, with hot never above total', () => {
+    expect(changeLogPolicyInput(90)).toMatchObject({ event_type: 'inventory.change_log', total_retention_days: 90, hot_storage_days: 30, is_active: true, compliance_framework: null });
+    expect(changeLogPolicyInput(7)).toMatchObject({ total_retention_days: 7, hot_storage_days: 7 });
+  });
+
+  it('refuses a non-positive or fractional number of days', () => {
+    expect([0, -1, 1.5].map(changeLogDaysError).every(Boolean)).toBe(true);
+    expect(changeLogDaysError(30)).toBeNull();
   });
 });

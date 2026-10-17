@@ -49,7 +49,8 @@ export type FindingProducerKey =
   | 'vulnerability'
   | 'configuration'
   | 'hygiene'
-  | 'drift';
+  | 'drift'
+  | 'topology';
 
 /** Every registered kind key. Kind keys are unique across the whole registry,
  *  not just within a producer, so a finding row is readable from its kind
@@ -59,6 +60,7 @@ export type FindingKindKey =
   | 'weak_configuration'
   | 'weak_certificate'
   | 'pqc_vulnerable'
+  | 'weak_wireless_auth'
   | 'os_end_of_life'
   | 'software_end_of_life'
   | 'hardware_end_of_support'
@@ -76,7 +78,8 @@ export type FindingKindKey =
   | 'unexpected_protocol'
   | 'port_profile_changed'
   | 'host_key_changed'
-  | 'new_issuer';
+  | 'new_issuer'
+  | 'cable_drift';
 
 /** What a finding (or a ticket, or an alert) can be about. */
 export type FindingSubjectType =
@@ -176,7 +179,13 @@ export const FINDING_PRODUCERS: readonly FindingProducer[] = [
     key: 'drift',
     label: 'Drift',
     catalogue: 'none',
-    description: 'Compares the current population of a segment or an asset against its recent baseline window and reports what changed. Rule-based defaults first; the ADR-0008 drift seam may propose more later.',
+    description: 'Compares the current population of a prefix or an asset against its recent baseline window and reports what changed. Rule-based defaults first; the ADR-0008 drift seam may propose more later.',
+  },
+  {
+    key: 'topology',
+    label: 'Topology',
+    catalogue: 'none',
+    description: 'Compares what the network says about its own cabling — LLDP and CDP neighbour tables read by interrogation (DCIM row 3.3, inventory-service cable_intake.go) — against the cables people declared.',
   },
 ];
 
@@ -233,6 +242,19 @@ export const FINDING_KINDS: readonly FindingKind[] = [
     titleTemplate: '{subject} is vulnerable to quantum attack',
     guidance: 'Plan a migration to a post-quantum or hybrid algorithm for this subject. Nothing here is broken today: NIST IR 8547 deprecates these primitives in 2030 and disallows them in 2035, so the work is inventory-led — confirm what depends on this key or configuration, check whether the software and the peers support a PQC or hybrid option yet, and schedule the change. Long-lived data protected by this key is the part to prioritise.',
     description: 'The subject uses a classical asymmetric primitive broken by Shor\'s algorithm (signature, kem, key-agree, pke) per NIST IR 8547. Classification is the denylist in pqc_readiness.go — a subject not classified is unclassified, never assumed safe.',
+  },
+  {
+    producer: 'crypto',
+    key: 'weak_wireless_auth',
+    severityModel: 'fixed',
+    defaultSeverity: 'from-catalogue',
+    score: 0,
+    scoreSource: 'catalogue',
+    subjectTypes: ['asset'],
+    feedsRisk: true,
+    titleTemplate: '{subject} {detail}',
+    guidance: 'Move the wireless LAN named in the finding to WPA2 or WPA3 with the AES (CCMP) cipher only. Open networks, WEP and TKIP give a listener in range little or no protection. If a legacy client forces TKIP or WEP, put that client on its own SSID and VLAN with no route to anything that matters, then replace it. Re-read the controller afterwards to confirm the LAN reports the new authentication.',
+    description: 'An access point serves a wireless LAN whose authentication is open or whose cipher is TKIP or WEP. The subject is the access point asset (the LAN itself is not an asset); the evidence names each SSID. The cipher is scored by its algorithms-catalogue row (wireless_lans. algorithm_id), so editing the row changes the score. A LAN whose cipher is `auto` or unrecorded is not assessed and raises nothing.',
   },
   {
     producer: 'eol',
@@ -428,9 +450,9 @@ export const FINDING_KINDS: readonly FindingKind[] = [
     scoreSource: 'fixed',
     subjectTypes: ['asset'],
     feedsRisk: true,
-    titleTemplate: '{subject} is the first {detail} seen in its network segment',
-    guidance: 'Confirm whether the asset belongs on this segment. If it does, nothing needs fixing and the finding can be resolved. If it does not, move it — an unexpected class on a segment is usually either a misconfigured port or something nobody meant to plug in.',
-    description: 'An asset of a class never before seen in this network segment was observed. A printer on a server VLAN is worth a look; an OT device on a corporate VLAN is worth a call.',
+    titleTemplate: '{subject} is the first {detail} seen in its prefix',
+    guidance: 'Confirm whether the asset belongs on this network. If it does, nothing needs fixing and the finding can be resolved. If it does not, move it — an unexpected class on a network is usually either a misconfigured port or something nobody meant to plug in.',
+    description: 'An asset of a class never before seen in this prefix was observed. A printer on a server VLAN is worth a look; an OT device on a corporate VLAN is worth a call.',
   },
   {
     producer: 'drift',
@@ -484,6 +506,19 @@ export const FINDING_KINDS: readonly FindingKind[] = [
     guidance: 'Confirm the new issuer is one you chose. A planned CA migration explains it and the finding can be resolved; an issuer nobody recognises on a connection that should be direct is what an interception looks like, and is worth treating as one until it is explained.',
     description: 'A certificate was observed from an issuer not seen for this subject in the baseline window. A changed issuer is either a planned CA migration or an interception.',
   },
+  {
+    producer: 'topology',
+    key: 'cable_drift',
+    severityModel: 'fixed',
+    defaultSeverity: 'medium',
+    score: 0,
+    scoreSource: 'fixed',
+    subjectTypes: ['asset'],
+    feedsRisk: false,
+    titleTemplate: '{subject}\'s cabling differs from what its neighbours report ({detail})',
+    guidance: 'Open the asset\'s Interfaces tab and compare each port named in the finding with the neighbour the device reports on it. If the device was re-patched on purpose, update the cable so the record matches the network; if the cable record is right, find out what is plugged into that port instead. The finding resolves on the next interrogation in which the neighbours agree with the cables, or as soon as one of those cables is changed.',
+    description: 'An LLDP or CDP neighbour observed on a port contradicts an active cable on that port (or on the far port the neighbour names): the cable\'s far end, followed through any patch panels, is a different device or port. Evidence lists each contradicted port with both ends. Inventory accuracy, not exposure, so it does not feed risk.',
+  },
 ];
 
 /** The shared finding-subject vocabulary, in registry order. */
@@ -514,6 +549,7 @@ export const FINDING_PRODUCER_KEYS: readonly FindingProducerKey[] = [
   'configuration',
   'hygiene',
   'drift',
+  'topology',
 ];
 
 /** Kind keys alone, in registry order. */
@@ -522,6 +558,7 @@ export const FINDING_KIND_KEYS: readonly FindingKindKey[] = [
   'weak_configuration',
   'weak_certificate',
   'pqc_vulnerable',
+  'weak_wireless_auth',
   'os_end_of_life',
   'software_end_of_life',
   'hardware_end_of_support',
@@ -540,6 +577,7 @@ export const FINDING_KIND_KEYS: readonly FindingKindKey[] = [
   'port_profile_changed',
   'host_key_changed',
   'new_issuer',
+  'cable_drift',
 ];
 
 /** Producers by symbol, for call sites that prefer a name to a literal. */
@@ -551,6 +589,7 @@ export const FINDING_PRODUCER = {
   Configuration: 'configuration',
   Hygiene: 'hygiene',
   Drift: 'drift',
+  Topology: 'topology',
 } as const satisfies Record<string, FindingProducerKey>;
 
 /** Kinds by symbol. */
@@ -559,6 +598,7 @@ export const FINDING_KIND = {
   WeakConfiguration: 'weak_configuration',
   WeakCertificate: 'weak_certificate',
   PQCVulnerable: 'pqc_vulnerable',
+  WeakWirelessAuth: 'weak_wireless_auth',
   OSEndOfLife: 'os_end_of_life',
   SoftwareEndOfLife: 'software_end_of_life',
   HardwareEndOfSupport: 'hardware_end_of_support',
@@ -577,6 +617,7 @@ export const FINDING_KIND = {
   PortProfileChanged: 'port_profile_changed',
   HostKeyChanged: 'host_key_changed',
   NewIssuer: 'new_issuer',
+  CableDrift: 'cable_drift',
 } as const satisfies Record<string, FindingKindKey>;
 
 /** Subject types by symbol. */

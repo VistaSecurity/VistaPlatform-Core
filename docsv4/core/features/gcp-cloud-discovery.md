@@ -63,17 +63,17 @@ subnetworks, and firewall membership. This is inventory rather than cryptography
 — an instance negotiates no protocol and states no at-rest encryption — and it
 is what makes the rest of a run legible.
 
-It is controlled by one switch per integration, **Inventory compute, networks and
-subnets** in Discovery → Cloud → Edit integration. It is **on by default**,
+It is controlled by one switch per integration, **Inventory compute instances and
+their networks** in Discovery → Cloud → Edit integration. It is **on by default**,
 including for integrations created before this feature existed.
 
 ### Exact API calls
 
 | Call | Scope | Produces |
 |---|---|---|
-| `compute.instances.aggregatedList` | Project, **all zones**, paginated | One asset per instance |
-| `compute.networks.list` | Project (networks are global), paginated | One asset per VPC network |
-| `compute.subnetworks.aggregatedList` | Project, **all regions**, paginated | One asset per subnetwork |
+| `compute.instances.aggregatedList` | Project, **all zones**, paginated | One asset per instance, with its network interfaces |
+| `compute.networks.list` | Project (networks are global), paginated | The VPC networks the prefixes belong to (a legacy network's own range is a prefix) |
+| `compute.subnetworks.aggregatedList` | Project, **all regions**, paginated | One prefix per regional range (Inventory → Networks) |
 | `compute.firewalls.list` | Project (firewalls are global), paginated | Firewall **membership** — never the rules |
 
 The two **aggregated** forms are deliberate: GCP has around a hundred zones, and
@@ -100,11 +100,11 @@ balancers needs **no change**. The integration's existing
 
 ### What lands in the inventory
 
-| GCP resource | Asset class | Identified by |
+| GCP resource | Lands as | Identified by |
 |---|---|---|
-| Compute Engine instance | Compute instance | `projects/<p>/zones/<z>/instances/<name>` |
-| VPC network | Virtual network | `projects/<p>/global/networks/<name>` |
-| Subnetwork | Subnet | `projects/<p>/regions/<r>/subnetworks/<name>` |
+| Compute Engine instance | Compute instance asset | `projects/<p>/zones/<z>/instances/<name>` |
+| Network interface | an interface of the instance (type *Virtual*), named as in GCE (`nic0`, …) | the instance and the interface's name |
+| A network's regional range | a prefix, in **Inventory → Networks** | the range, and `projects/<p>/global/networks/<name>` as its cloud network |
 | Firewall rule | *not an asset* | recorded as membership on the instances it targets |
 
 The identifier is the **partial resource name**, not the self link. The Compute
@@ -112,10 +112,13 @@ API echoes `www.googleapis.com` on some surfaces and `compute.googleapis.com` on
 others, and an identifier that changed with the endpoint host would create a
 second asset for one instance.
 
-Each instance carries its internal addresses, its NICs, its machine type, its
-labels, and the `cloud.*` placement facts. The relationships **network contains
-subnetwork** and **subnetwork contains instance** are drawn from the provider's
-own placement, and a subnetwork's CIDR becomes a network segment.
+A VPC network and its ranges are **not assets**: each range is a prefix naming
+the network it belongs to (a custom-mode network has no range of its own, so it
+contributes none), and the network an instance is in is the prefix its address
+falls in. Each instance's **Interfaces** tab lists its network interfaces with their internal
+addresses at their range's prefix length; GCE states no MAC for one, and the
+external NAT address is not collected. The instance also carries its machine
+type, its labels, and the `cloud.*` placement facts.
 
 **Firewall membership is computed**, because GCP has no security-group object: a
 firewall rule attaches to a network and selects instances by network tag. The
@@ -138,11 +141,11 @@ and updates.
 A private address is not unique in a project, and the inventory is built so that
 it never has to be.
 
-- **Two VPC networks using the same CIDR** are two separate network segments, tagged
-  with the VPC network they belong to. Two instances at the same private address in two
-  different VPC networks are **two assets**, and neither is affected by the other.
-- **An address reused inside one subnetwork** — the provider gives a freed address to
-  the next instance created — is genuinely the same segment, and the platform cannot
+- **Two VPC networks using the same address range** are two address spaces. Two
+  instances at the same private address in two different VPC networks are **two
+  assets**, and neither is affected by the other.
+- **An address reused inside one VPC network** — the provider gives a freed address to
+  the next instance created — is genuinely the same address space, and the platform cannot
   tell from outside whether an address that changed hands means a new machine or
   a rebuilt one. So it does not guess: the new instance is recorded as its own asset
   in Pending approval, and a **review item appears in Approvals** asking whether
@@ -238,8 +241,8 @@ Cloud discoveries are automatically processed by the `discovery-processor-servic
 
 1. **Unified Pipeline**: GCP discoveries flow through the same `sensor_discoveries` pipeline as AWS, Azure, and sensor discoveries
 2. **Auto-Processing**: The `discovery-processor-service` automatically processes discoveries within seconds
-3. **Network Classification**: Discoveries are classified by the cloud segment for their project/region — a cloud resource's ownership comes from the account it lives in, not from an IP address it may not have
-4. **Auto-Approval**: The segment's auto-approval rule is evaluated. It applies only if that segment has auto-approve enabled **and** lists cloud discoveries among its sources — off on every pre-existing segment; see [Asset Approval](asset-approval.md#which-discoveries-a-segment-auto-approves)
+3. **Network Classification**: Discoveries are classified by the account they were listed from — a cloud resource's ownership comes from the account it lives in, not from an IP address it may not have
+4. **Auto-Approval**: The project's account-level rule is evaluated — the integration's **Auto-approve resources** switch, on by default; the resource also hangs off the project's **Cloud Account** asset. See [Asset Approval](asset-approval.md#cloud-resources-are-auto-approved-per-account)
 5. **Asset Creation**: Assets are created with `monitoring` (if auto-approved) or `pending_approval` status
 
 ### 5. Review and Approve Assets

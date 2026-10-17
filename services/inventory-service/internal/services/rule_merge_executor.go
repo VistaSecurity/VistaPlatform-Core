@@ -37,6 +37,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identitysettings"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
@@ -568,12 +569,12 @@ func chooseRuleSurvivor(ctx context.Context, tx *sql.Tx, tenant uuid.UUID, pair 
 		       (a.class_source_kind = 'declared'
 		        OR a.metadata ->> 'name_source_kind' = 'declared'
 		        OR a.identity_status = 'operator_confirmed'
-		        OR EXISTS (SELECT 1 FROM asset_identifiers i
+		        OR EXISTS (SELECT 1 FROM (`+identifiersql.All+`) i
 		                    WHERE i.tenant_id = a.tenant_id AND i.asset_id = a.id
 		                      AND (i.source_kind = 'declared' OR i.kind = 'declaration_id'))) AS declared,
 		       (a.identity_status = 'provisional') AS provisional,
 		       a.first_discovered_at,
-		       (SELECT count(*) FROM asset_identifiers i WHERE i.tenant_id = a.tenant_id AND i.asset_id = a.id)
+		       (SELECT count(*) FROM (`+identifiersql.All+`) i WHERE i.tenant_id = a.tenant_id AND i.asset_id = a.id)
 		  FROM assets a
 		 WHERE a.tenant_id = $1 AND a.id = ANY($2::uuid[])`,
 		tenant, pq.Array([]string{pair[0].String(), pair[1].String()}))

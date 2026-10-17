@@ -41,7 +41,7 @@ func (f *provisionalFixture) snapshotAsset(assetID string) assetSnapshot {
 	if err := f.raw.QueryRow(`
 		SELECT COALESCE(display_name,''), COALESCE(hostname,''), COALESCE(attributes::text,''), COALESCE(metadata::text,''),
 		       COALESCE(class_key,''), COALESCE(identity_status,''), COALESCE(asset_status::text,''),
-		       COALESCE(network_segment_id::text,''), COALESCE(location_id::text,''), COALESCE(asset_ownership::text,''), last_seen_at
+		       COALESCE(prefix_id::text,''), COALESCE(location_id::text,''), COALESCE(asset_ownership::text,''), last_seen_at
 		  FROM assets WHERE tenant_id=$1 AND id=$2`, f.tenant, assetID).
 		Scan(&s.displayName, &s.hostname, &s.attributes, &s.metadata, &s.classKey, &s.identityStatus, &s.assetStatus,
 			&s.segment, &s.location, &s.owner, &s.lastSeen); err != nil {

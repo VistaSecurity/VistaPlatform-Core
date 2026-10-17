@@ -975,7 +975,7 @@ bindings:
     schema_exception: Existing compliance-engine.openapi.yaml contract omits enum
       constraints; preserve current wire compatibility. The severity concept
       declares the intended scale; this audit does not prove runtime validation.
-  inventory-service.openapi.yaml#/paths/~1infrastructure-assets/get/parameters/28/schema:
+  inventory-service.openapi.yaml#/paths/~1infrastructure-assets/get/parameters/27/schema:
     concept: risk_band
     delivery: implement
     contract:
@@ -1030,6 +1030,17 @@ bindings:
       required: false
       minimum: 0
       maximum: 1
+  inventory-service.openapi.yaml#/components/schemas/IpAddress/properties/identity_confidence:
+    concept: confidence_fraction
+    delivery: implement
+    contract:
+      type:
+        - number
+        - 'null'
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 1
   inventory-service.openapi.yaml#/components/schemas/SightedIdentifier/properties/confidence:
     concept: confidence_fraction
     delivery: implement
@@ -1059,6 +1070,109 @@ bindings:
       required: true
       minimum: 0
       maximum: 1
+  inventory-service.openapi.yaml#/components/schemas/InterfacePostureConfiguration/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/InterfacePostureConfiguration/properties/risk_score_assessed:
+    concept: metadata
+    delivery: implement
+    contract:
+      type: boolean
+      nullable: false
+      required: true
+  inventory-service.openapi.yaml#/components/schemas/InterfacePostureConfiguration/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+        - null
+  inventory-service.openapi.yaml#/components/schemas/InterfacePosture/properties/worst_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/InterfacePosture/properties/weakest_strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: true
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+        - null
+  inventory-service.openapi.yaml#/components/schemas/InterfacePostureFinding/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - info
+        - low
+        - medium
+        - high
+        - critical
+  inventory-service.openapi.yaml#/components/schemas/RackDeviceTopFinding/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - info
+        - low
+        - medium
+        - high
+        - critical
+  inventory-service.openapi.yaml#/components/schemas/InterfacePostureFinding/properties/score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/RackDeviceTopFinding/properties/score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+      minimum: 0
+      maximum: 100
   inventory-service.openapi.yaml#/components/schemas/RemediationQueueRow/properties/severity:
     concept: severity
     delivery: implement
@@ -1198,6 +1312,58 @@ bindings:
       type: integer
       nullable: false
       required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/WirelessLan/properties/algorithm_strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: false
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+        - null
+  inventory-service.openapi.yaml#/components/schemas/WirelessLan/properties/algorithm_risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: false
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/WirelessLink/properties/algorithm_strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type:
+        - string
+        - "null"
+      nullable: true
+      required: false
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+        - null
+  inventory-service.openapi.yaml#/components/schemas/WirelessLink/properties/algorithm_risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: false
       minimum: 0
       maximum: 100
   inventory-service.openapi.yaml#/components/schemas/AlgorithmRecommendationsResponse/properties/recommendations/properties/risk_score:
@@ -1839,6 +2005,15 @@ bindings:
       minimum/maximum constraints; preserve current wire compatibility. The
       confidence_fraction concept declares the intended scale; this audit does
       not prove runtime validation.
+  inventory-service.openapi.yaml#/components/schemas/PrefixUtilization/properties/percent:
+    concept: utilization
+    delivery: implement
+    contract:
+      type: number
+      nullable: false
+      required: true
+      minimum: 0
+      maximum: 100
   sensor-manager.openapi.yaml#/components/schemas/SensorHealthMetrics/properties/cpu_usage_percent:
     concept: utilization
     delivery: register_only
@@ -2300,6 +2475,50 @@ bindings:
 # Supplemental storage inventory. These experimental routes are outside the
 # OpenAPI surface; audit-rating-scales checks API bindings, not these SQL defaults.
 # See ADR-0016 implementation ledger for the traced writers/readers and follow-up.
+  inventory-service.openapi.yaml#/components/schemas/VpnAlgorithmAssessment/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+  inventory-service.openapi.yaml#/components/schemas/VpnAlgorithmAssessment/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type:
+        - integer
+        - "null"
+      nullable: true
+      required: true
+      minimum: 0
+      maximum: 100
+  inventory-service.openapi.yaml#/components/schemas/TunnelWeakestComponent/properties/strength:
+    concept: algorithm_strength
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - weak
+        - acceptable
+        - strong
+        - recommended
+  inventory-service.openapi.yaml#/components/schemas/TunnelWeakestComponent/properties/risk_score:
+    concept: risk
+    delivery: implement
+    contract:
+      type: integer
+      nullable: false
+      required: true
+      minimum: 0
+      maximum: 100
 storage_followups:
   database_encryption_states.risk_score:
     concept: risk

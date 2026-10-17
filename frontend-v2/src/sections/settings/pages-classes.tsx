@@ -129,7 +129,7 @@ export function ClassesPage({ meta }: { meta: Meta }) {
  * class that cannot run an agent.
  *
  * `scoped` mirrors `Kind.AcceptsScope` in `shared/identity`: a scope means
- * something for exactly four kinds — the segment for `hostname` and
+ * something for exactly four kinds — the prefix for `hostname` and
  * `ip_address`, the class key for `name`, the sync profile for `cmdb_sys_id`.
  * The other six are globally unique by construction and the engine REJECTS a
  * scope on one, because a scope nobody asked for splits the uniqueness key.
@@ -143,8 +143,8 @@ export const IDENTIFIER_KIND_NOTES: Readonly<Record<string, { label: string; sco
   ssh_host_key_fingerprint: { label: 'SSH host key', scoped: false, why: 'The host’s own key. Changes only when the host is rebuilt — which is itself worth knowing.' },
   mac_address: { label: 'MAC address', scoped: false, why: 'Unique per interface. Weaker than a serial: virtual machines and containers can be given one.' },
   fqdn: { label: 'FQDN', scoped: false, why: 'A fully-qualified name. Unique across the tenant on its own, because the domain is part of it.' },
-  hostname: { label: 'Hostname', scoped: true, why: 'A short name, unique only inside a segment. Two segments can each have a “db01”.' },
-  ip_address: { label: 'IP address', scoped: true, why: 'Weakest: addresses are reassigned. Matched inside a segment, never across the tenant.' },
+  hostname: { label: 'Hostname', scoped: true, why: 'A short name, unique only inside a network prefix. Two prefixes can each have a “db01”.' },
+  ip_address: { label: 'IP address', scoped: true, why: 'Weakest: addresses are reassigned. Matched inside a network prefix, never across the tenant.' },
   name: { label: 'Name', scoped: true, why: 'For declared services, which have no address or serial. Scoped by class key.' },
 };
 
@@ -237,7 +237,7 @@ export function IdentificationRulesPage({ meta }: { meta: Meta }) {
                   </div>
                   <span
                     title={scoped
-                      ? 'Matched inside its scope — the network segment, the class, or the CMDB sync profile. An unsegmented tenant uses one tenant-wide default scope.'
+                      ? 'Matched inside its scope — the network prefix, the class, or the CMDB sync profile. An address in no prefix uses one tenant-wide default scope.'
                       : 'Unique across the whole tenant on its own.'}
                     style={{ fontSize: 10.5, fontWeight: 600, alignSelf: 'start', color: scoped ? 'var(--warn)' : 'var(--ok)', background: `color-mix(in srgb, ${scoped ? 'var(--warn)' : 'var(--ok)'} 11%, transparent)`, borderRadius: 40, padding: '2px 8px', justifySelf: 'start' }}
                   >

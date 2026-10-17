@@ -30,6 +30,7 @@ type ciExporter interface {
 	ExportItems(ctx context.Context, tenantID, after uuid.UUID, limit int) ([]services.CIExportItem, error)
 	ExportAssets(ctx context.Context, tenantID uuid.UUID, q services.CIExportAssetQuery) ([]services.CIExportAsset, error)
 	ExportRelationships(ctx context.Context, tenantID, after uuid.UUID, limit int) ([]services.CIExportRelationship, error)
+	ExportDCIM(ctx context.Context, tenantID uuid.UUID, class string, after uuid.UUID, limit int) ([]services.CIExportDCIMItem, error)
 }
 
 // CIExportHandler serves the internal CI export routes.
@@ -175,6 +176,35 @@ func (h *CIExportHandler) Relationships(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"relationships": rels, "more": len(rels) == limit})
 }
 
+// DCIM — GET /inventory-service/internal/ci-export/dcim/:class?after=&limit=
+//
+// The tenant's objects of one DCIM class in push scope (rack, prefix,
+// ip_address, circuit, vlan, interface, site), a page at a time in id order,
+// each with its allowlisted fields and its structural edges. An unknown class
+// is a 400, never an empty page: a caller that misspells one must not read it
+// as "the tenant has none".
+func (h *CIExportHandler) DCIM(c *gin.Context) {
+	tenantID, ok := signedTenant(c)
+	if !ok {
+		return
+	}
+	class := c.Param("class")
+	if !services.IsDCIMExportClass(class) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "class must be one of: " + strings.Join(services.DCIMExportClasses(), ", ")})
+		return
+	}
+	after, limit, ok := pageParams(c)
+	if !ok {
+		return
+	}
+	items, err := h.svc.ExportDCIM(c.Request.Context(), tenantID, class, after, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not read the inventory"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "more": len(items) == limit})
+}
+
 // RegisterCIExportRoutes mounts the internal CI export routes on internal,
 // which must be a group carrying RequireSignedServiceCall. Paths are written in
 // full so the spec-route guard can see them.
@@ -182,4 +212,5 @@ func RegisterCIExportRoutes(internal *gin.RouterGroup, h *CIExportHandler) {
 	internal.GET("/inventory-service/internal/ci-export/items", h.Items)
 	internal.POST("/inventory-service/internal/ci-export/assets", h.Assets)
 	internal.GET("/inventory-service/internal/ci-export/relationships", h.Relationships)
+	internal.GET("/inventory-service/internal/ci-export/dcim/:class", h.DCIM)
 }

@@ -102,11 +102,17 @@ func (j *JSONB) Scan(value interface{}) error {
 
 // CreateDeviceRequest represents a request to create a device
 type CreateDeviceRequest struct {
-	DeviceType      string     `json:"device_type" binding:"required"`
-	Vendor          *string    `json:"vendor"`
-	Model           *string    `json:"model"`
-	Hostname        *string    `json:"hostname"`
-	IPAddress       *string    `json:"ip_address"`
+	DeviceType string  `json:"device_type" binding:"required"`
+	Vendor     *string `json:"vendor"`
+	Model      *string `json:"model"`
+	Hostname   *string `json:"hostname"`
+	IPAddress  *string `json:"ip_address"`
+	// MACAddress and InterfaceName are what a person typed for the interface
+	// the IP address is on (DCIM row 1.5f): a declared interface carrying the
+	// address, named InterfaceName, or — with no name — the interface the
+	// platform names. Both optional.
+	MACAddress      *string    `json:"mac_address,omitempty"`
+	InterfaceName   *string    `json:"interface_name,omitempty"`
 	ManagementURL   *string    `json:"management_url"`
 	SerialNumber    *string    `json:"serial_number"`
 	FirmwareVersion *string    `json:"firmware_version"`

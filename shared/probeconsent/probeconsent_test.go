@@ -190,3 +190,26 @@ func TestEndpointStringRoundTrips(t *testing.T) {
 		}
 	}
 }
+
+func TestPrefixClaim_Contribution(t *testing.T) {
+	pub := netip.MustParsePrefix("93.184.218.0/28")
+	for _, c := range []struct {
+		name            string
+		claim           PrefixClaim
+		owned, excluded bool
+	}{
+		{"declared, owning type", PrefixClaim{Prefix: pub, Declared: true, GrantsOwnership: true}, true, false},
+		{"learned", PrefixClaim{Prefix: pub, GrantsOwnership: true}, false, false},
+		{"type grants nothing", PrefixClaim{Prefix: pub, Declared: true}, false, false},
+		{"blocked beats a claim", PrefixClaim{Prefix: pub, Declared: true, GrantsOwnership: true, Blocked: true}, false, true},
+		{"blocked and learned is still excluded", PrefixClaim{Prefix: pub, Blocked: true}, false, true},
+		{"too broad", PrefixClaim{Prefix: netip.MustParsePrefix("40.0.0.0/7"), Declared: true, GrantsOwnership: true}, false, false},
+		{"private already owned", PrefixClaim{Prefix: netip.MustParsePrefix("10.9.0.0/16"), Declared: true, GrantsOwnership: true}, false, false},
+		{"no prefix", PrefixClaim{Declared: true, GrantsOwnership: true}, false, false},
+	} {
+		owned, excluded := c.claim.Contribution()
+		if owned != c.owned || excluded != c.excluded {
+			t.Errorf("%s: owned=%v excluded=%v, want %v %v", c.name, owned, excluded, c.owned, c.excluded)
+		}
+	}
+}

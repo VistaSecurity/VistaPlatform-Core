@@ -2,7 +2,7 @@ package services
 
 // The tree assembly, as a pure function (workstream 3.8).
 //
-// `assembleTopology` folds flat (site, segment, class) triples into the nested
+// `assembleTopology` folds flat (site, prefix, class) triples into the nested
 // shape, and the nesting is where an off-by-one silently loses a branch. It
 // takes rows and returns a tree, so it is testable without a database — and the
 // two cases below are exactly the ones an integration test on ordinary data
@@ -14,20 +14,20 @@ import (
 	"github.com/google/uuid"
 )
 
-// A tenant that NAMES a segment "Unsegmented" must not have it merged with the
+// A tenant that NAMES a prefix "No prefix" must not have it merged with the
 // bucket for assets that have none.
 //
-// Nothing stops them: `network_segments.name` is free text. Keying the fold on
+// Nothing stops them: a label is not an identity. Keying the fold on
 // the NAME rather than the id moves those assets into the bucket, where the
-// drill-through query is `not segment_id exists` — so clicking the node returns
-// a different set from the one the count described, and the real segment
+// drill-through query is `not prefix_id exists` — so clicking the node returns
+// a different set from the one the count described, and the real prefix
 // disappears from the tree entirely.
-func TestAssembleTopology_RealSegmentNamedUnsegmentedIsNotMerged(t *testing.T) {
+func TestAssembleTopology_RealPrefixLabelledLikeTheBucketIsNotMerged(t *testing.T) {
 	awkward := uuid.New()
 	rows := []topologyRow{
-		{Site: "DC-East", SegmentID: &awkward, SegmentName: TopologyUnsegmented,
+		{Site: "DC-East", PrefixID: &awkward, PrefixName: TopologyNoPrefix,
 			ClassKey: "server", ClassPath: "hardware.computer.server", AssetCount: 7},
-		{Site: "DC-East", SegmentID: nil, SegmentName: TopologyUnsegmented,
+		{Site: "DC-East", PrefixID: nil, PrefixName: TopologyNoPrefix,
 			ClassKey: "server", ClassPath: "hardware.computer.server", AssetCount: 2},
 	}
 
@@ -35,20 +35,20 @@ func TestAssembleTopology_RealSegmentNamedUnsegmentedIsNotMerged(t *testing.T) {
 	if len(sites) != 1 {
 		t.Fatalf("%d sites, want 1", len(sites))
 	}
-	if len(sites[0].Segments) != 2 {
-		t.Fatalf("%d segments, want 2 — a segment a tenant NAMED \"Unsegmented\" was merged with the "+
-			"bucket for assets that have none; the fold must key on the id, not the name", len(sites[0].Segments))
+	if len(sites[0].Prefixes) != 2 {
+		t.Fatalf("%d prefixes, want 2 — a prefix a tenant NAMED \"No prefix\" was merged with the "+
+			"bucket for assets that have none; the fold must key on the id, not the name", len(sites[0].Prefixes))
 	}
-	var named, bucket *TopologySegment
-	for i := range sites[0].Segments {
-		if sites[0].Segments[i].SegmentID == nil {
-			bucket = &sites[0].Segments[i]
+	var named, bucket *TopologyPrefix
+	for i := range sites[0].Prefixes {
+		if sites[0].Prefixes[i].PrefixID == nil {
+			bucket = &sites[0].Prefixes[i]
 		} else {
-			named = &sites[0].Segments[i]
+			named = &sites[0].Prefixes[i]
 		}
 	}
 	if named == nil || bucket == nil {
-		t.Fatalf("expected one segment with an id and one without: %+v", sites[0].Segments)
+		t.Fatalf("expected one prefix with an id and one without: %+v", sites[0].Prefixes)
 	}
 	if named.AssetCount != 7 || bucket.AssetCount != 2 {
 		t.Errorf("counts crossed over: named=%d bucket=%d, want 7 and 2", named.AssetCount, bucket.AssetCount)
@@ -58,7 +58,7 @@ func TestAssembleTopology_RealSegmentNamedUnsegmentedIsNotMerged(t *testing.T) {
 	}
 }
 
-// Two sites, two segments each, several classes — the ordinary fold, asserted
+// Two sites, two prefixes each, several classes — the ordinary fold, asserted
 // on the sums at all three levels.
 //
 // The rows arrive flat and in the query's order (biggest first), and every
@@ -67,10 +67,10 @@ func TestAssembleTopology_RealSegmentNamedUnsegmentedIsNotMerged(t *testing.T) {
 func TestAssembleTopology_SumsAtEveryLevel(t *testing.T) {
 	a, b := uuid.New(), uuid.New()
 	rows := []topologyRow{
-		{Site: "DC-East", SegmentID: &a, SegmentName: "Core", ClassKey: "server", ClassPath: "hardware.computer.server", AssetCount: 10},
-		{Site: "DC-East", SegmentID: &a, SegmentName: "Core", ClassKey: "managed_database", ClassPath: "service.data.managed_database", AssetCount: 4},
-		{Site: "DC-East", SegmentID: &b, SegmentName: "DMZ", ClassKey: "server", ClassPath: "hardware.computer.server", AssetCount: 3},
-		{Site: TopologyUnassignedSite, SegmentID: nil, SegmentName: TopologyUnsegmented, ClassKey: "network_device", ClassPath: "hardware.network_device", AssetCount: 2},
+		{Site: "DC-East", PrefixID: &a, PrefixName: "Core", ClassKey: "server", ClassPath: "hardware.computer.server", AssetCount: 10},
+		{Site: "DC-East", PrefixID: &a, PrefixName: "Core", ClassKey: "managed_database", ClassPath: "service.data.managed_database", AssetCount: 4},
+		{Site: "DC-East", PrefixID: &b, PrefixName: "DMZ", ClassKey: "server", ClassPath: "hardware.computer.server", AssetCount: 3},
+		{Site: TopologyUnassignedSite, PrefixID: nil, PrefixName: TopologyNoPrefix, ClassKey: "network_device", ClassPath: "hardware.network_device", AssetCount: 2},
 	}
 
 	sites := assembleTopology(rows)
@@ -85,12 +85,12 @@ func TestAssembleTopology_SumsAtEveryLevel(t *testing.T) {
 	if sites[0].AssetCount != 17 || sites[1].AssetCount != 2 {
 		t.Errorf("site totals = %d, %d; want 17 and 2", sites[0].AssetCount, sites[1].AssetCount)
 	}
-	if len(sites[0].Segments) != 2 {
-		t.Fatalf("DC-East has %d segments, want 2", len(sites[0].Segments))
+	if len(sites[0].Prefixes) != 2 {
+		t.Fatalf("DC-East has %d prefixes, want 2", len(sites[0].Prefixes))
 	}
-	if sites[0].Segments[0].AssetCount != 14 || len(sites[0].Segments[0].Classes) != 2 {
+	if sites[0].Prefixes[0].AssetCount != 14 || len(sites[0].Prefixes[0].Classes) != 2 {
 		t.Errorf("Core = %d assets over %d classes, want 14 over 2",
-			sites[0].Segments[0].AssetCount, len(sites[0].Segments[0].Classes))
+			sites[0].Prefixes[0].AssetCount, len(sites[0].Prefixes[0].Classes))
 	}
 }
 
@@ -114,10 +114,10 @@ func TestAssembleTopology_EmptyIsASlice(t *testing.T) {
 func TestAssembleTopologyEdges_DirectedPairsWithBreakdown(t *testing.T) {
 	a, b := uuid.New(), uuid.New()
 	rows := []topologyEdgeRow{
-		{FromSegmentID: &a, FromSegmentName: "Core", ToSegmentID: &b, ToSegmentName: "DMZ", Type: "connects_to", Count: 7},
-		{FromSegmentID: &a, FromSegmentName: "Core", ToSegmentID: &b, ToSegmentName: "DMZ", Type: "depends_on", Count: 2},
-		{FromSegmentID: &b, FromSegmentName: "DMZ", ToSegmentID: &a, ToSegmentName: "Core", Type: "connects_to", Count: 1},
-		{FromSegmentID: &a, FromSegmentName: "Core", ToSegmentID: nil, ToSegmentName: TopologyUnsegmented, Type: "connects_to", Count: 4},
+		{FromPrefixID: &a, FromPrefixName: "Core", ToPrefixID: &b, ToPrefixName: "DMZ", Type: "connects_to", Count: 7},
+		{FromPrefixID: &a, FromPrefixName: "Core", ToPrefixID: &b, ToPrefixName: "DMZ", Type: "depends_on", Count: 2},
+		{FromPrefixID: &b, FromPrefixName: "DMZ", ToPrefixID: &a, ToPrefixName: "Core", Type: "connects_to", Count: 1},
+		{FromPrefixID: &a, FromPrefixName: "Core", ToPrefixID: nil, ToPrefixName: TopologyNoPrefix, Type: "connects_to", Count: 4},
 	}
 
 	edges := assembleTopologyEdges(rows)
@@ -130,11 +130,11 @@ func TestAssembleTopologyEdges_DirectedPairsWithBreakdown(t *testing.T) {
 	if edges[0].ByType["connects_to"] != 7 || edges[0].ByType["depends_on"] != 2 {
 		t.Errorf("Core->DMZ by_type = %v, want connects_to:7 depends_on:2", edges[0].ByType)
 	}
-	if edges[1].Count != 1 || edges[1].FromSegmentName != "DMZ" {
+	if edges[1].Count != 1 || edges[1].FromPrefixName != "DMZ" {
 		t.Errorf("the reverse direction was merged into the forward one: %+v", edges[1])
 	}
-	if edges[2].ToSegmentID != nil || edges[2].ToSegmentName != TopologyUnsegmented {
-		t.Errorf("the edge into the Unsegmented bucket lost its null id: %+v", edges[2])
+	if edges[2].ToPrefixID != nil || edges[2].ToPrefixName != TopologyNoPrefix {
+		t.Errorf("the edge into the No prefix bucket lost its null id: %+v", edges[2])
 	}
 }
 

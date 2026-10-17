@@ -39,52 +39,6 @@
       },
       {
         "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "admin_state": "up",
-            "mac": "00:23:e9:aa:bb:01",
-            "name": "1.1",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "admin_state": "down",
-            "mac": "00:23:e9:aa:bb:02",
-            "name": "1.2",
-            "state": "down"
-          },
-          {
-            "admin_state": "up",
-            "mac": "00:23:e9:aa:bb:00",
-            "name": "mgmt",
-            "speed": 100,
-            "state": "up"
-          }
-        ]
-      },
-      {
-        "asset": "device",
-        "key": "net.vlans",
-        "source_kind": "measured",
-        "value": [
-          {
-            "gateway": "192.0.2.5",
-            "id": 20,
-            "name": "internal",
-            "subnet": "192.0.2.0/24"
-          },
-          {
-            "gateway": "198.51.100.5",
-            "id": 10,
-            "name": "external",
-            "subnet": "198.51.100.0/24"
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "os.name",
         "source_kind": "measured",
         "value": "TMOS"
@@ -116,68 +70,58 @@
     ],
     "retained_observations": [
       {
-        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "admission_reasons": "{direct_scoped_interface}",
         "identifiers": [
           {
-            "claimed": true,
             "confidence": 1,
             "kind": "ip_address",
-            "pinned": true,
-            "scope": "segment:192.0.2.0/24",
+            "scope": "tenant",
+            "source": {
+              "kind": "inferred",
+              "ref": "asset:{{DEVICE_ASSET_ID}}"
+            },
+            "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "interface": "internal",
+            "kind": "ip_address",
+            "scope": "prefix:192.0.2.0/24",
             "value": "192.0.2.5"
           },
           {
             "confidence": 1,
+            "interface": "external",
             "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "lb-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{dynamic_address_without_device_binding}",
-        "identifiers": [
-          {
-            "claimed": true,
-            "confidence": 1,
-            "kind": "ip_address",
-            "pinned": true,
-            "scope": "segment:198.51.100.0/24",
+            "scope": "prefix:198.51.100.0/24",
             "value": "198.51.100.5"
           },
           {
             "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
             "kind": "fqdn",
             "source": {
               "kind": "inferred",
               "ref": "asset:{{DEVICE_ASSET_ID}}"
             },
             "value": "lb-01.corp.example.test"
+          },
+          {
+            "confidence": 1,
+            "interface": "1.1",
+            "kind": "mac_address",
+            "value": "00:23:e9:aa:bb:01"
+          },
+          {
+            "confidence": 1,
+            "interface": "1.2",
+            "kind": "mac_address",
+            "value": "00:23:e9:aa:bb:02"
+          },
+          {
+            "confidence": 1,
+            "interface": "mgmt",
+            "kind": "mac_address",
+            "value": "00:23:e9:aa:bb:00"
           }
         ],
         "source_kind": "measured",
@@ -189,13 +133,13 @@
           {
             "confidence": 1,
             "kind": "ip_address",
-            "scope": "segment:198.51.100.0/24",
+            "scope": "prefix:198.51.100.0/24",
             "value": "198.51.100.10"
           },
           {
             "confidence": 1,
             "kind": "hostname",
-            "scope": "segment:198.51.100.0/24",
+            "scope": "prefix:198.51.100.0/24",
             "value": "vs_web_443"
           }
         ],
@@ -208,13 +152,13 @@
           {
             "confidence": 1,
             "kind": "ip_address",
-            "scope": "segment:198.51.100.0/24",
+            "scope": "prefix:198.51.100.0/24",
             "value": "198.51.100.11"
           },
           {
             "confidence": 1,
             "kind": "hostname",
-            "scope": "segment:198.51.100.0/24",
+            "scope": "prefix:198.51.100.0/24",
             "value": "vs_legacy_443"
           }
         ],
@@ -227,7 +171,7 @@
           {
             "confidence": 1,
             "kind": "ip_address",
-            "scope": "segment:198.51.100.0/24",
+            "scope": "prefix:198.51.100.0/24",
             "value": "198.51.100.20"
           }
         ],
@@ -240,105 +184,12 @@
           {
             "confidence": 1,
             "kind": "ip_address",
-            "scope": "segment:198.51.100.0/24",
+            "scope": "prefix:198.51.100.0/24",
             "value": "198.51.100.21"
           }
         ],
         "source_kind": "measured",
         "state": "unresolved"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "00:23:e9:aa:bb:00"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "lb-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "00:23:e9:aa:bb:01"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "lb-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
-            "kind": "mac_address",
-            "value": "00:23:e9:aa:bb:02"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "lb-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
       }
     ],
     "collection_warnings": [
@@ -389,52 +240,6 @@
         "key": "mgmt.protocol",
         "source_kind": "measured",
         "value": "https"
-      },
-      {
-        "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "admin_state": "up",
-            "mac": "00:23:e9:aa:bb:01",
-            "name": "1.1",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "admin_state": "down",
-            "mac": "00:23:e9:aa:bb:02",
-            "name": "1.2",
-            "state": "down"
-          },
-          {
-            "admin_state": "up",
-            "mac": "00:23:e9:aa:bb:00",
-            "name": "mgmt",
-            "speed": 100,
-            "state": "up"
-          }
-        ]
-      },
-      {
-        "asset": "device",
-        "key": "net.vlans",
-        "source_kind": "measured",
-        "value": [
-          {
-            "gateway": "192.0.2.5",
-            "id": 20,
-            "name": "internal",
-            "subnet": "192.0.2.0/24"
-          },
-          {
-            "gateway": "198.51.100.5",
-            "id": 10,
-            "name": "external",
-            "subnet": "198.51.100.0/24"
-          }
-        ]
       },
       {
         "asset": "device",

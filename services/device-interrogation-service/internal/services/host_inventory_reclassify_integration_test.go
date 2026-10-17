@@ -617,10 +617,10 @@ func TestIntegration_HostInventory_SplitWindowsProjectsSiteWithoutListeners(t *t
 	app := testdb.ConnectAsAppRole(t, owner)
 	agent := seedHostInventoryAgent(t, owner, tenant)
 	location, segment := uuid.New(), uuid.New()
-	if _, err := owner.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'North','site')`, location, tenant); err != nil {
+	if _, err := owner.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,'North',regexp_replace(lower('North'),'[^a-z0-9]+','-','g')) RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,'North',regexp_replace(lower('North'),'[^a-z0-9]+','-','g') FROM s`, location, tenant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := owner.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,location_id) VALUES($1,$2,'North','cidr','198.51.100.0/24','production',$3)`, segment, tenant, location); err != nil {
+	if _, err := owner.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,scope_kind,scope_id,source_kind,status) VALUES($1,$2,'North','198.51.100.0/24'::cidr,'production','location',$3,'declared','active')`, segment, tenant, location); err != nil {
 		t.Fatal(err)
 	}
 	report := windowsHostReport(agent.String(), "SPLIT-WINDOWS")
@@ -641,7 +641,7 @@ func TestIntegration_HostInventory_SplitWindowsProjectsSiteWithoutListeners(t *t
 			t.Fatal("inventory changed identity")
 		}
 		var site, class, loc string
-		if err = owner.QueryRow(`SELECT site,location_id::text,class_key FROM assets WHERE id=$1 AND tenant_id=$2`, assetID, tenant).Scan(&site, &loc, &class); err != nil {
+		if err = owner.QueryRow(`SELECT coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),''),location_id::text,class_key FROM assets WHERE id=$1 AND tenant_id=$2`, assetID, tenant).Scan(&site, &loc, &class); err != nil {
 			t.Fatal(err)
 		}
 		if site != "North" || loc != location.String() || class != "computer" {

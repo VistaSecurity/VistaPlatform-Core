@@ -192,3 +192,16 @@ describe('splitFieldSpans — what QueryChip highlights', () => {
     }
   });
 });
+
+describe('cf.<name> (QUERY_LANGUAGE §15.5, DCIM row 5.1)', () => {
+  it('offers the tenant custom field names it is given', () => {
+    const out = suggestAssetQuery('cf.own', 6, ['owner_team', 'tier']);
+    expect(out.completions.map((c) => c.text)).toContain('cf.owner_team');
+    expect(suggestAssetQuery('cf.own', 6).completions.map((c) => c.text)).not.toContain('cf.owner_team');
+  });
+
+  it('validates any well-formed name, loaded or not, and refuses ordering', () => {
+    expect(checkAssetQuery('cf.owner_team:payments').ok).toBe(true);
+    expect(checkAssetQuery('cf.rack_units > 4').ok).toBe(false);
+  });
+});

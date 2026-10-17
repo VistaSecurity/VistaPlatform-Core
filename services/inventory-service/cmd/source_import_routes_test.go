@@ -58,7 +58,7 @@ func sourceEngine(t *testing.T) *gin.Engine {
 	})
 	users.GET("/inventory-service/assets", func(c *gin.Context) { c.Status(http.StatusOK) })
 
-	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), handlers.NewInternalTrustHandler(nil), sourceTestSecret)
+	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), handlers.NewInternalTrustHandler(nil), handlers.NewDCIMSyncHandler(nil), handlers.NewDCIMImportHandler(nil), sourceTestSecret)
 	return r
 }
 
@@ -74,7 +74,7 @@ func tenantToken(t *testing.T) string {
 }
 
 var sourceRoutes = []struct{ method, path string }{
-	{http.MethodPost, "/api/v1/inventory-service/internal/sources/segments"},
+	{http.MethodPost, "/api/v1/inventory-service/internal/sources/prefixes"},
 	{http.MethodPost, "/api/v1/inventory-service/internal/sources/assets/admission"},
 	{http.MethodPost, "/api/v1/inventory-service/internal/sources/assets"},
 	{http.MethodGet, "/api/v1/inventory-service/internal/sources/asset-classes/switch"},
@@ -85,10 +85,23 @@ var sourceRoutes = []struct{ method, path string }{
 	// …and the CI export it reads the inventory through.
 	{http.MethodGet, "/api/v1/inventory-service/internal/ci-export/items"},
 	{http.MethodPost, "/api/v1/inventory-service/internal/ci-export/assets"},
+	{http.MethodGet, "/api/v1/inventory-service/internal/dcim-sync/objects/prefix"},
+	{http.MethodGet, "/api/v1/inventory-service/internal/dcim-sync/changes/prefix"},
+	{http.MethodPost, "/api/v1/inventory-service/internal/dcim-sync/write/prefix"},
+	{http.MethodDelete, "/api/v1/inventory-service/internal/dcim-sync/objects/prefix/00000000-0000-0000-0000-000000000001"},
+	{http.MethodGet, "/api/v1/inventory-service/internal/dcim-sync/peer-assets"},
+	{http.MethodPost, "/api/v1/inventory-service/internal/dcim-sync/park"},
+	{http.MethodPost, "/api/v1/inventory-service/internal/dcim-sync/resolve"},
 	{http.MethodGet, "/api/v1/inventory-service/internal/ci-export/relationships"},
+	// DCIM row 5.7: the DCIM classes a CMDB push sends as CIs of their own.
+	{http.MethodGet, "/api/v1/inventory-service/internal/ci-export/dcim/rack"},
 	// slice 4: the tenant's trust decisions, for a connector service's
 	// connection trust pool.
 	{http.MethodGet, "/api/v1/inventory-service/internal/trust/anchors"},
+	// DCIM row 5.6: the import-only connectors' write surface.
+	{http.MethodGet, "/api/v1/inventory-service/internal/dcim-import/objects/site"},
+	{http.MethodPost, "/api/v1/inventory-service/internal/dcim-import/write/site"},
+	{http.MethodPost, "/api/v1/inventory-service/internal/dcim-import/placements"},
 }
 
 func sourceRequest(method, path string, body []byte) *http.Request {
@@ -169,7 +182,7 @@ func TestSourceImportRoutes_RefuseATenantSwappedAfterSigning(t *testing.T) {
 func TestSourceImportRoutes_RequireANamedTenant(t *testing.T) {
 	e := sourceEngine(t)
 	for _, tenant := range []string{"", uuid.Nil.String(), "not-a-uuid"} {
-		req := sourceRequest(http.MethodPost, "/api/v1/inventory-service/internal/sources/segments", nil)
+		req := sourceRequest(http.MethodPost, "/api/v1/inventory-service/internal/sources/prefixes", nil)
 		if tenant != "" {
 			req.Header.Set(serviceauth.HeaderTenantID, tenant)
 		}
@@ -185,7 +198,7 @@ func TestSourceImportRoutes_RequireANamedTenant(t *testing.T) {
 func TestSourceImportRoutes_AdmitASignedServiceCall(t *testing.T) {
 	e := sourceEngine(t)
 	for _, path := range []string{
-		"/api/v1/inventory-service/internal/sources/segments",
+		"/api/v1/inventory-service/internal/sources/prefixes",
 		"/api/v1/inventory-service/internal/sources/assets",
 		"/api/v1/inventory-service/internal/sources/assets/links",
 		"/api/v1/inventory-service/internal/sources/assets/presence",
@@ -208,8 +221,8 @@ func TestSourceImportRoutes_AdmitASignedServiceCall(t *testing.T) {
 func TestSourceImportRoutes_FailClosedWithoutASecret(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), handlers.NewInternalTrustHandler(nil), "")
-	req := sourceRequest(http.MethodPost, "/api/v1/inventory-service/internal/sources/segments", nil)
+	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil), handlers.NewInternalTrustHandler(nil), handlers.NewDCIMSyncHandler(nil), handlers.NewDCIMImportHandler(nil), "")
+	req := sourceRequest(http.MethodPost, "/api/v1/inventory-service/internal/sources/prefixes", nil)
 	req.Header.Set(serviceauth.HeaderTenantID, uuid.NewString())
 	serviceauth.NewSigner("anything-at-all-0123456789").SignRequest(req)
 	if w := serve(r, req); w.Code != http.StatusUnauthorized {
@@ -229,9 +242,53 @@ func TestMainMountsSourceImportRoutesOnlyThroughTheGate(t *testing.T) {
 	if !regexp.MustCompile(`(?m)^\s*mountSourceImportRoutes\(r,`).MatchString(src) {
 		t.Error("main.go does not call mountSourceImportRoutes(r, …); the internal source routes are not served")
 	}
-	for _, prefix := range []string{"/internal/sources/", "/internal/ci-export/", "/internal/trust/"} {
+	for _, prefix := range []string{"/internal/sources/", "/internal/ci-export/", "/internal/trust/", "/internal/dcim-sync/", "/internal/dcim-import/"} {
 		if strings.Contains(src, prefix) {
 			t.Errorf("main.go names an %s path directly; it must be mounted only by mountSourceImportRoutes, behind the signed-call gate", prefix)
+		}
+	}
+}
+
+// The DCIM sync routes (ADR-0010 D7): a correctly signed call naming a tenant
+// reaches the handler — which, over the nil service these tests build, answers
+// its own 503. Reaching the handler is the assertion; every refusal above
+// covers them too through sourceRoutes.
+func TestDCIMSyncRoutes_AdmitASignedServiceCall(t *testing.T) {
+	e := sourceEngine(t)
+	for _, rt := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/inventory-service/internal/dcim-sync/objects/prefix"},
+		{http.MethodGet, "/api/v1/inventory-service/internal/dcim-sync/changes/prefix?peer=netbox&since=2026-10-15T00:00:00Z"},
+		{http.MethodPost, "/api/v1/inventory-service/internal/dcim-sync/write/prefix?peer=netbox"},
+		{http.MethodDelete, "/api/v1/inventory-service/internal/dcim-sync/objects/prefix/00000000-0000-0000-0000-000000000001?peer=netbox"},
+		{http.MethodGet, "/api/v1/inventory-service/internal/dcim-sync/peer-assets?peer=netbox"},
+		{http.MethodPost, "/api/v1/inventory-service/internal/dcim-sync/park?peer=netbox"},
+		{http.MethodPost, "/api/v1/inventory-service/internal/dcim-sync/resolve"},
+	} {
+		req := sourceRequest(rt.method, rt.path, []byte(`{}`))
+		req.Header.Set(serviceauth.HeaderTenantID, uuid.NewString())
+		serviceauth.NewSigner(sourceTestSecret).SignRequest(req)
+		w := serve(e, req)
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "sync service not configured") {
+			t.Errorf("a signed call to %s %s = %d (%s), want the handler's own 503", rt.method, rt.path, w.Code, w.Body.String())
+		}
+	}
+}
+
+// The DCIM import routes (row 5.6): a correctly signed call naming a tenant
+// reaches the handler — over the nil service these tests build, its own 503.
+func TestDCIMImportRoutes_AdmitASignedServiceCall(t *testing.T) {
+	e := sourceEngine(t)
+	for _, rt := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/inventory-service/internal/dcim-import/objects/site?prefix=device42:x:"},
+		{http.MethodPost, "/api/v1/inventory-service/internal/dcim-import/write/site?producer=device42"},
+		{http.MethodPost, "/api/v1/inventory-service/internal/dcim-import/placements?producer=device42"},
+	} {
+		req := sourceRequest(rt.method, rt.path, []byte(`{}`))
+		req.Header.Set(serviceauth.HeaderTenantID, uuid.NewString())
+		serviceauth.NewSigner(sourceTestSecret).SignRequest(req)
+		w := serve(e, req)
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "import service not configured") {
+			t.Errorf("a signed call to %s %s = %d (%s), want the handler's own 503", rt.method, rt.path, w.Code, w.Body.String())
 		}
 	}
 }

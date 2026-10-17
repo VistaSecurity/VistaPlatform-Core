@@ -3,8 +3,8 @@ package sightingclient
 // The gateway-links route (slice B): after an interrogation has posted
 // the device's claimed gateway addresses as sightings, it tells
 // inventory-service the run's COMPLETE list, and inventory-service links the
-// device as the gateway of every segment where it now holds one of them —
-// and unlinks it from every segment where it no longer does
+// device as the gateway of every prefix where it now holds one of them —
+// and unlinks it from every prefix where it no longer does
 // (shared/identity/postgres ReconcileGatewayLinks). Same gate as the sightings
 // route: HMAC-only with a signed X-Tenant-ID, denied at the edge.
 
@@ -32,22 +32,22 @@ type GatewayLinksRequest struct {
 	ObservedAt time.Time `json:"observed_at"`
 	// Addresses is EVERY gateway address the run reported, contested or not.
 	// The route links only what the device holds, and clears the device's link
-	// on any segment the list no longer reaches, so an empty list unlinks the
+	// on any prefix the list no longer reaches, so an empty list unlinks the
 	// device everywhere.
 	Addresses []string `json:"addresses"`
 }
 
-// GatewaySegment is one segment in a [GatewayLinksResult].
-type GatewaySegment struct {
-	SegmentID string `json:"segment_id"`
-	Address   string `json:"address"`
+// GatewayPrefix is one prefix in a [GatewayLinksResult].
+type GatewayPrefix struct {
+	PrefixID string `json:"prefix_id"`
+	Address  string `json:"address"`
 }
 
 // GatewayLinksResult is what the route did.
 type GatewayLinksResult struct {
-	Linked     []GatewaySegment `json:"linked"`
-	Candidates []GatewaySegment `json:"candidates"`
-	Cleared    []string         `json:"cleared"`
+	Linked     []GatewayPrefix `json:"linked"`
+	Candidates []GatewayPrefix `json:"candidates"`
+	Cleared    []string        `json:"cleared"`
 }
 
 // GatewayLinker reconciles a device's gateway links. *Client implements it.

@@ -15,32 +15,23 @@ package services
 
 import (
 	"context"
-	"log"
+	"errors"
+	"slices"
 	"strings"
 
 	awsclient "github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/cloud/aws"
-	"github.com/vistasecurity/vistaplatform/shared/facts"
 )
 
-// Enumeration calls, recorded as per-type, per-region outcomes on the job
-// beside the crypto collectors' (see enumerateAWS).
-const (
-	EnumTypeAWSVPCs           = "vpcs"
-	EnumTypeAWSSubnets        = "subnets"
-	EnumTypeAWSSecurityGroups = "security_groups"
-	EnumTypeAWSInstances      = "ec2_instances"
-)
-
-// enumerateAWS runs the four calls in each region and builds the plan.
+// enumerateAWS runs the selected listings in each region and builds the plan.
 //
-// A region that fails is skipped rather than failing the run: an account with
-// an opted-out region, or a credential scoped to a subset, otherwise loses
-// every other region's inventory to one AuthFailure. The failure is RECORDED
-// against the call and the region (the run's CloudOutcomeRecorder), so the job
-// shows "EC2 instances — could not collect in eu-west-1: UnauthorizedOperation".
-// It used to be only logged, so a credential missing ec2:DescribeInstances
-// produced a job that read exactly like an account with no instances.
-func (s *CloudDiscoveryService) enumerateAWS(ctx context.Context, client *awsclient.Client, regions []string) (cloudEnumerationPlan, error) {
+// One selection, per type, per region (asset-inventory ADR-0009 D3): each
+// region is asked for every selected enumeration type, and each answer —
+// or refusal — is recorded as that type's row for that region. A region that
+// refuses one listing still answers the others: a credential without
+// ec2:DescribeVpcs loses the networks, not the instances. Instances need the
+// network listings to be placed (their ENIs' prefixes) and the group listing
+// to name their groups, so selecting instances runs those too.
+func (s *CloudDiscoveryService) enumerateAWS(ctx context.Context, client *awsclient.Client, regions []string, sel cloudEnumerationSelection) (cloudEnumerationPlan, error) {
 	plan := cloudEnumerationPlan{Provider: "aws", Vendor: "AWS", SecurityGroupIDs: map[string]bool{}}
 	if len(regions) == 0 {
 		regions = []string{client.GetRegion()}
@@ -53,40 +44,46 @@ func (s *CloudDiscoveryService) enumerateAWS(ctx context.Context, client *awscli
 		}
 		api := client.EC2ClientForRegion(region)
 
-		vpcs, err := awsclient.ListVPCs(ctx, api, region)
-		outcomes.Attempt(EnumTypeAWSVPCs, region, len(vpcs), err)
-		if err != nil {
-			log.Printf("[cloud enumeration] aws %s: %v", region, err)
-			continue
+		var (
+			vpcs      []awsclient.VPC
+			subnets   []awsclient.Subnet
+			groups    []awsclient.SecurityGroup
+			instances []awsclient.Instance
+			gone      []awsclient.Instance
+		)
+		if sel.needsNetworks() {
+			var vErr, sErr error
+			vpcs, vErr = awsclient.ListVPCs(ctx, api, region)
+			subnets, sErr = awsclient.ListSubnets(ctx, api, region)
+			// One row per region for the type: a VPC listing that answered
+			// and a subnet listing that did not is a partial `networks`.
+			outcomes.Attempt(CloudTypeNetworks, region, len(vpcs)+len(subnets), errors.Join(vErr, sErr))
+			logCloudCollectorFailure(CloudTypeNetworks, region, errors.Join(vErr, sErr))
 		}
-		subnets, err := awsclient.ListSubnets(ctx, api, region)
-		outcomes.Attempt(EnumTypeAWSSubnets, region, len(subnets), err)
-		if err != nil {
-			log.Printf("[cloud enumeration] aws %s: %v", region, err)
-			continue
+		if sel.needsGroups() {
+			var err error
+			groups, err = awsclient.ListSecurityGroups(ctx, api, region)
+			outcomes.Attempt(CloudTypeSecurityGroups, region, len(groups), err)
+			logCloudCollectorFailure(CloudTypeSecurityGroups, region, err)
 		}
-		groups, err := awsclient.ListSecurityGroups(ctx, api, region)
-		outcomes.Attempt(EnumTypeAWSSecurityGroups, region, len(groups), err)
-		if err != nil {
-			// Group membership is an attribute, not the inventory. Losing it
-			// must not lose the instances.
-			log.Printf("[cloud enumeration] aws %s: %v (instances will carry no security-group membership)", region, err)
-			groups = nil
-		}
-		instances, err := awsclient.ListInstances(ctx, api, region)
-		outcomes.Attempt(EnumTypeAWSInstances, region, len(instances), err)
-		if err != nil {
-			log.Printf("[cloud enumeration] aws %s: %v", region, err)
-			continue
+		if sel.Instances {
+			var err error
+			instances, gone, err = awsclient.ListInstancesWithTerminated(ctx, api, region)
+			outcomes.Attempt(CloudTypeComputeInstances, region, len(instances), err)
+			logCloudCollectorFailure(CloudTypeComputeInstances, region, err)
 		}
 
 		regional := buildAWSEnumerationPlan(instances, vpcs, subnets, groups)
-		plan.Networks = append(plan.Networks, regional.Networks...)
-		plan.Subnets = append(plan.Subnets, regional.Subnets...)
-		plan.Instances = append(plan.Instances, regional.Instances...)
-		for id := range regional.SecurityGroupIDs {
-			plan.SecurityGroupIDs[id] = true
+		for i := range regional.Instances {
+			regional.Instances[i].annotateListing(CloudListingKey(CloudTypeComputeInstances, region))
 		}
+		awsSecurityGroups(&regional, groups, region)
+		for _, inst := range gone {
+			if inst.ARN != "" {
+				plan.Terminal = append(plan.Terminal, cloudTerminalResource{ResourceID: inst.ARN, State: normalizeProviderState("aws", inst.State)})
+			}
+		}
+		plan.merge(regional)
 	}
 	return plan, nil
 }
@@ -96,7 +93,14 @@ func (s *CloudDiscoveryService) enumerateAWS(ctx context.Context, client *awscli
 //
 // A pure function of its inputs: no client, no clock, no database. That is what
 // lets a test drive it from a recorded DescribeInstances response and assert
-// the exact facts, attributes and containment it produces.
+// the exact interfaces, addresses, prefixes, facts and attributes it produces.
+//
+// VPCs and subnets become prefixes (DCIM row 1.5f): each VPC CIDR block a
+// container-shaped prefix and each subnet a prefix, all carrying the VPC's ARN
+// as `cloud_network_ref`. Each instance's ENIs become `virtual` interfaces
+// named by their ENI id, with their private addresses (configured with the
+// subnet's length); the public address an ENI is associated with is the
+// NAT-outside side and is recorded as the instance's `nat_outside_addresses`.
 func buildAWSEnumerationPlan(
 	instances []awsclient.Instance,
 	vpcs []awsclient.VPC,
@@ -105,39 +109,25 @@ func buildAWSEnumerationPlan(
 ) cloudEnumerationPlan {
 	plan := cloudEnumerationPlan{Provider: "aws", Vendor: "AWS", SecurityGroupIDs: map[string]bool{}}
 
-	// vpc-id / subnet-id → canonical resource id, so a child can name its
-	// container by the same identity the container was recorded under.
+	// vpc-id / subnet-id → canonical resource id, so an instance and an ENI
+	// name their network by the same identity the prefix was recorded under.
 	vpcARN := make(map[string]string, len(vpcs))
 	subnetARN := make(map[string]string, len(subnets))
 
 	for _, vpc := range vpcs {
 		if vpc.ARN == "" {
-			// No account id means no ARN, and a VPC recorded under its bare
+			// No account id means no ARN, and a network named by its bare
 			// vpc-id would collide with the same id in another account.
 			continue
 		}
 		vpcARN[vpc.VPCID] = vpc.ARN
-		name := awsTagName(vpc.Tags, vpc.VPCID)
-		plan.Networks = append(plan.Networks, cloudEnumResource{
-			DeviceType:  DeviceTypeAWSVPC,
-			ResourceID:  vpc.ARN,
-			DisplayName: name,
-			Hostname:    name,
-			Facts: cloudPlacementFacts("aws", vpc.AccountID, vpc.Region, vpc.ARN,
-				vpc.VPCID, "", nil),
-			Attributes: mergeAttributes(
-				cloudResourceAttributes("aws", vpc.AccountID, vpc.Region),
-				map[string]any{"cidr_blocks": vpc.CIDRBlocks},
-			),
-			Tags: tagsToJSONB(vpc.Tags),
-			Metadata: map[string]interface{}{
-				"resource_type": "vpc",
-				"region":        vpc.Region,
-				"vpc_id":        vpc.VPCID,
-				"state":         vpc.State,
-				"is_default":    vpc.IsDefault,
-				"cidr_blocks":   vpc.CIDRBlocks,
-			},
+		plan.Networks = append(plan.Networks, cloudNetwork{
+			ResourceID: vpc.ARN,
+			NetworkRef: vpc.ARN,
+			Account:    vpc.AccountID,
+			Region:     vpc.Region,
+			Name:       awsTagName(vpc.Tags, vpc.VPCID),
+			CIDRs:      vpc.CIDRBlocks,
 		})
 	}
 
@@ -146,47 +136,23 @@ func buildAWSEnumerationPlan(
 			continue
 		}
 		subnetARN[sn.SubnetID] = sn.ARN
-		name := awsTagName(sn.Tags, sn.SubnetID)
-		plan.Subnets = append(plan.Subnets, cloudEnumResource{
-			DeviceType:  DeviceTypeAWSSubnet,
-			ResourceID:  sn.ARN,
-			DisplayName: name,
-			Hostname:    name,
-			ParentID:    vpcARN[sn.VPCID],
-			SegmentCIDR: sn.CIDRBlock,
-			// The subnet's network IS its parent; spelled out rather than
-			// derived so the recording path never has to know the shape.
-			CloudNetworkRef: vpcARN[sn.VPCID],
-			Facts: cloudPlacementFacts("aws", sn.AccountID, sn.Region, sn.ARN,
-				sn.VPCID, sn.SubnetID, nil),
-			Attributes: mergeAttributes(
-				cloudResourceAttributes("aws", sn.AccountID, sn.Region),
-				map[string]any{
-					"cidr_block":        sn.CIDRBlock,
-					"availability_zone": sn.AvailabilityZone,
-					// `is_public` is NOT set from MapPublicIpOnLaunch. The class
-					// schema defines it as "whether the subnet routes to an
-					// internet gateway", and auto-assign-public-IP is a
-					// different setting: a subnet can auto-assign and have no
-					// IGW route, or route to one and not auto-assign. Answering
-					// it needs ec2:DescribeRouteTables, which is a further IAM
-					// grant and a further call; until it is made, the attribute
-					// stays absent rather than carrying a near-miss.
-				},
-			),
-			Tags: tagsToJSONB(sn.Tags),
-			Metadata: map[string]interface{}{
-				"resource_type":           "subnet",
-				"region":                  sn.Region,
-				"vpc_id":                  sn.VPCID,
-				"subnet_id":               sn.SubnetID,
-				"cidr_block":              sn.CIDRBlock,
-				"availability_zone":       sn.AvailabilityZone,
-				"map_public_ip_on_launch": sn.MapPublicIPOnLaunch,
-				"state":                   sn.State,
-			},
+		var cidrs []string
+		if c := strings.TrimSpace(sn.CIDRBlock); c != "" {
+			cidrs = []string{c}
+		}
+		plan.Subnets = append(plan.Subnets, cloudNetwork{
+			ResourceID: sn.ARN,
+			// The subnet's ADDRESS SPACE is its VPC: two VPCs may use the same
+			// CIDR, and the identity scope of an address in this subnet must
+			// say which. A subnet whose VPC was not listed names no network.
+			NetworkRef: vpcARN[sn.VPCID],
+			Account:    sn.AccountID,
+			Region:     sn.Region,
+			Name:       awsTagName(sn.Tags, sn.SubnetID),
+			CIDRs:      cidrs,
 		})
 	}
+	lengths := subnetPrefixLengths(plan.Subnets)
 
 	// Group names, for the membership fact. An instance's own SecurityGroups
 	// list already carries id and name, so this index only fills in a name the
@@ -218,11 +184,18 @@ func buildAWSEnumerationPlan(
 			sgs = append(sgs, entry)
 		}
 
-		factValues := cloudPlacementFacts("aws", inst.AccountID, inst.Region, inst.ARN,
-			inst.VPCID, inst.SubnetID, sgs)
-		if ifaces := awsInterfaceFact(inst); len(ifaces) > 0 {
-			factValues[facts.KeyNetInterfaces] = ifaces
+		nics := make([]cloudNIC, 0, len(inst.Interfaces))
+		var natOutside []string
+		for _, ni := range inst.Interfaces {
+			nics = append(nics, cloudNIC{
+				Name: ni.Name, MAC: ni.MAC, State: ni.State, Addresses: ni.Addresses,
+				Subnet: subnetARN[firstNonEmpty(ni.SubnetID, inst.SubnetID)],
+			})
+			if ip := strings.TrimSpace(ni.PublicIP); ip != "" && !slices.Contains(natOutside, ip) {
+				natOutside = append(natOutside, ip)
+			}
 		}
+		network := vpcARN[inst.VPCID]
 
 		display := awsTagName(inst.Tags, inst.InstanceID)
 		plan.Instances = append(plan.Instances, cloudEnumResource{
@@ -242,17 +215,19 @@ func buildAWSEnumerationPlan(
 			// the metadata below, where it is a description rather than a key.
 			Hostname:  awsInstanceHostname(inst),
 			IPAddress: firstAddress(inst.PrivateIPs),
-			ParentID:  subnetARN[inst.SubnetID],
 			// The VPC, not the subnet: this is which ADDRESS SPACE the
-			// instance's private address is in, and two VPCs may use the same
-			// CIDR.
-			CloudNetworkRef: vpcARN[inst.VPCID],
-			Facts:           factValues,
+			// instance's private addresses are in, and two VPCs may use the
+			// same CIDR.
+			CloudNetworkRef: network,
+			Interfaces:      cloudInterfaces(nics, lengths),
+			Prefixes:        instancePrefixes(network, nics, plan.Networks, plan.Subnets),
+			Facts:           cloudPlacementFacts("aws", inst.AccountID, inst.Region, inst.ARN, sgs),
 			Attributes: mergeAttributes(
 				cloudResourceAttributes("aws", inst.AccountID, inst.Region),
 				map[string]any{
-					"instance_type": inst.InstanceType,
-					"image_id":      inst.ImageID,
+					"instance_type":         inst.InstanceType,
+					"image_id":              inst.ImageID,
+					"nat_outside_addresses": natOutside,
 					// operating_system / os_version are deliberately absent:
 					// EC2 states no guest OS. See the note on
 					// awsclient.Instance.
@@ -284,31 +259,6 @@ func buildAWSEnumerationPlan(
 		})
 	}
 	return plan
-}
-
-// awsInterfaceFact renders an instance's ENIs as the `net.interfaces` value.
-func awsInterfaceFact(inst awsclient.Instance) []map[string]any {
-	out := make([]map[string]any, 0, len(inst.Interfaces))
-	for _, iface := range inst.Interfaces {
-		entry := map[string]any{"name": iface.Name}
-		if iface.MAC != "" {
-			entry["mac"] = iface.MAC
-		}
-		if len(iface.Addresses) > 0 {
-			entry["addresses"] = iface.Addresses
-		}
-		switch strings.ToLower(iface.State) {
-		case "in-use", "attached", "available":
-			entry["state"] = "up"
-		case "detaching", "attaching":
-			entry["state"] = "unknown"
-		case "":
-		default:
-			entry["state"] = "unknown"
-		}
-		out = append(out, entry)
-	}
-	return out
 }
 
 // awsInstanceHostname is the name an instance ANSWERS TO, or "" when EC2 states

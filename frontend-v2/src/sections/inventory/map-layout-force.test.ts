@@ -58,7 +58,7 @@ describe('layoutGraph at scale', () => {
     expect(mean(1)).toBeLessThan(mean(2));
   });
 
-  it('tolerates self-edges, dangling edges, duplicate edges and nodes without depth', () => {
+  it('tolerates self-edges, edges to missing nodes, duplicate edges and nodes without depth', () => {
     const g = {
       nodes: Array.from({ length: 130 }, (_, i) => ({ id: `n${i}` })),
       edges: [

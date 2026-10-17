@@ -75,6 +75,8 @@ type FindingProducerJob struct {
 	config  *producers.ConfigurationProducer
 	hygiene *producers.HygieneProducer
 	drift   *producers.DriftProducer
+	// wireless is row 4.4's weak_wireless_auth pass, on the crypto producer's key.
+	wireless *producers.WirelessAuthProducer
 
 	// appDB is the RLS-subject handle the post-pass recompute runs on. The
 	// producers hold their own; this one is for the step that belongs to no
@@ -132,6 +134,11 @@ func NewFindingProducerJob(appDB, bypassDB *sql.DB) (*FindingProducerJob, error)
 		return nil, err
 	}
 
+	wireless, err := producers.NewWirelessAuthProducer(appDB)
+	if err != nil {
+		return nil, err
+	}
+
 	interval := 24 * time.Hour
 	if s := os.Getenv("FINDING_PRODUCER_INTERVAL"); s != "" {
 		if parsed, err := time.ParseDuration(s); err == nil && parsed > 0 {
@@ -153,6 +160,7 @@ func NewFindingProducerJob(appDB, bypassDB *sql.DB) (*FindingProducerJob, error)
 		config:          config,
 		hygiene:         hygiene,
 		drift:           drift,
+		wireless:        wireless,
 		appDB:           appDB,
 		bypassDB:        bypassDB,
 		logger:          log.New(log.Writer(), "[FindingProducerJob] ", log.LstdFlags),
@@ -386,6 +394,16 @@ func (j *FindingProducerJob) runTenant(ctx context.Context, tenantID uuid.UUID) 
 		j.logger.Printf("crypto tenant=%s raised=%d resolved=%d configurations=%d certificates=%d keys=%d assessed=%d unassessable=%d pqc_vulnerable=%d",
 			tenantID, run.Raised, run.Resolved, run.Configurations, run.Certificates,
 			run.Keys, run.Assessed, run.Unassessable, run.PQCVulnerable)
+	}
+
+	if run, err := j.wireless.Run(ctx, tenantID); err != nil {
+		ok = false
+		j.logger.Printf("ERROR: wireless producer failed for tenant %s: %v", tenantID, err)
+	} else if run.Raised > 0 || run.Resolved > 0 || run.Unassessed > 0 || run.Unserved > 0 {
+		// Unassessed and Unserved are logged: a LAN with no catalogue row to
+		// judge by, and a weak LAN no access point serves, are not "clean".
+		j.logger.Printf("wireless tenant=%s raised=%d resolved=%d lans=%d unassessed=%d unserved=%d",
+			tenantID, run.Raised, run.Resolved, run.LANs, run.Unassessed, run.Unserved)
 	}
 
 	if run, err := j.config.Run(ctx, tenantID); err != nil {

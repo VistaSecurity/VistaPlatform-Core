@@ -358,8 +358,8 @@ func TestSameDevice_Cond5_SameSegmentOrNone(t *testing.T) {
 			if !ok {
 				t.Fatal("a record with no segment (a declared one, say) may merge")
 			}
-			if !containsEvidence(ev, "no segment") {
-				t.Errorf("evidence %v, want it to say one record has no segment", ev)
+			if !containsEvidence(ev, "no prefix") {
+				t.Errorf("evidence %v, want it to say one record has no prefix", ev)
 			}
 		})
 	}
@@ -436,7 +436,7 @@ func TestSameDevice_EvidenceReadsAsAReason(t *testing.T) {
 	if !ok {
 		t.Fatal("control refused")
 	}
-	want := []string{"MAC address 02:00:5e:10:00:07", "seen directly by sensor:collector-1", "hostname laptop-7", "same segment"}
+	want := []string{"MAC address 02:00:5e:10:00:07", "seen directly by sensor:collector-1", "hostname laptop-7", "same prefix"}
 	for _, w := range want {
 		if !containsEvidence(ev, w) {
 			t.Errorf("evidence %q lacks %q", ev, w)

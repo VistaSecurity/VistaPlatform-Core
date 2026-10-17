@@ -69,6 +69,7 @@ func (*PaloAltoInterrogator) Interrogate(ctx context.Context, device DeviceInfo,
 			ClassHint: panClassHint(),
 		}
 	}
+	result.setNetworkManagementAddress(device)
 	return result, nil
 }
 
@@ -221,29 +222,36 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 		panEmitSystemFacts(result, info)
 	}
 
-	// Interfaces (non-fatal). The management interface is folded in from system
-	// info, so this still produces a fact when the op command is unavailable.
+	// Interfaces (non-fatal) — as objects (DCIM row 1.5c, paloalto_network.go),
+	// no longer the net.interfaces fact. The management interface is folded in
+	// from system info, so a device that refuses the op command still reports
+	// the interface it is managed on.
+	interfacesBody := ""
 	if body, err := c.getInterfaces(ctx); err != nil {
 		result.warn("show interface all", err, "Interfaces not collected (management interface only)")
-		if interfaces, ifErr := panInterfaces("", systemInfo); ifErr == nil && len(interfaces) > 0 {
-			result.addFact(factNetInterfaces, interfaces, ConfidenceReported)
-		}
-	} else if interfaces, err := panInterfaces(body, systemInfo); err != nil {
-		result.warnAs(WarningParseError, "show interface all", "Interfaces not collected", err.Error())
-	} else if len(interfaces) > 0 {
-		result.addFact(factNetInterfaces, interfaces, ConfidenceReported)
+	} else {
+		interfacesBody = body
 	}
 
 	// Neighbours: ARP (layer 3) and LLDP (layer 2). Both are facts; only LLDP
 	// also produces edges — an ARP entry is an address the firewall has spoken
-	// to, which is not the same claim as "these two are cabled together".
+	// to, which is not the same claim as "these two are cabled together". The
+	// ARP table is also the network observation's evidence about other hosts.
 	var neighbors []map[string]interface{}
+	arpBody := ""
 	if body, err := c.getARPTable(ctx); err != nil {
 		result.warn("show arp all", err, "ARP neighbours not collected")
 	} else if arp, err := panARPNeighbors(body); err != nil {
 		result.warnAs(WarningParseError, "show arp all", "ARP neighbours not collected", err.Error())
 	} else {
 		neighbors = append(neighbors, arp...)
+		arpBody = body
+	}
+
+	if network, err := panNetwork(interfacesBody, systemInfo, arpBody); err != nil {
+		result.warnAs(WarningParseError, "show interface all", "Interfaces not collected", err.Error())
+	} else {
+		result.setNetwork(network, "show interface all")
 	}
 
 	if body, err := c.getLLDPNeighbors(ctx); err != nil {
@@ -257,9 +265,17 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 		}
 	}
 
-	if len(neighbors) > 0 {
-		result.addFact(factNetNeighbors, neighbors, ConfidenceReported)
+	// LLDP rows are cable ends (DCIM row 3.3) on the network observation;
+	// only the ARP rows stay the net.neighbors fact.
+	cableEnds, arpOnly := neighborItemsAsNeighbors(neighbors)
+	result.addNeighbors(cableEnds, "", "show lldp neighbors all")
+	if len(arpOnly) > 0 {
+		result.addFact(factNetNeighbors, arpOnly, ConfidenceReported)
 	}
+
+	// IPsec tunnels with their IKE / IPsec crypto profiles (DCIM row 4.3,
+	// paloalto_vpn.go). Non-fatal.
+	c.collectPanTunnels(ctx, result)
 
 	// SSL decrypt profiles (non-fatal).
 	if profiles, err := c.getSSLDecryptProfiles(ctx); err != nil {

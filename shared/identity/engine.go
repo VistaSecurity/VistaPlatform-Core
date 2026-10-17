@@ -221,7 +221,7 @@ type Config struct {
 	// asset as an established one.
 	ProvisionalInventory bool
 
-	// DynamicScopes is the set of scope ids (network segments) whose addresses
+	// DynamicScopes is the set of scope ids (prefixes) whose addresses
 	// are handed out dynamically. An ip_address never matches within one:
 	// today's DHCP lease is tomorrow's other host, and matching on it merges
 	// two machines (ADR-0002 D3).
@@ -2327,6 +2327,16 @@ func nameCandidates(obs Observation, ids []Identifier) []string {
 }
 
 func primaryAddressFor(obs Observation, ids []Identifier) string {
+	// The management address first (DCIM row 1.5): the address an operator
+	// reaches the device at is its primary, whatever order the collector
+	// listed its interfaces in.
+	if m := obs.ManagementAddress; m != "" {
+		for _, id := range ids {
+			if id.Kind == KindIPAddress && id.Value == m {
+				return m
+			}
+		}
+	}
 	for _, id := range ids {
 		if id.Kind == KindIPAddress {
 			return id.Value

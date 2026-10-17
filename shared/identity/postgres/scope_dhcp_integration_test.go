@@ -11,56 +11,56 @@ import (
 )
 
 // TestIntegration_ScopeForAddress_DHCPPosture pins how the persistent scope
-// resolver reads a segment's DHCP posture for identity.
+// resolver reads a prefix's DHCP posture for identity (DCIM row 1.6).
 //
-// A segment learned from a device that reported the network but not whether
-// it serves DHCP is stored `dhcp: unknown` with no `dynamic` flag. For identity
-// that must read as dynamic — in every later run and every other intake, not
-// only in the interrogation that learned it — or a bare address on it can join
-// two devices that held the same lease. A segment nobody said anything about
-// (an operator's, no metadata) stays non-dynamic: that default is the safe one
-// for silence, and it is not what `unknown` is.
+// A prefix a collector learned without saying whether the network serves DHCP
+// (`dhcp_managed` NULL, source measured) must read as dynamic — in every later
+// run and every other intake — or a bare address on it can join two devices
+// that held the same lease. A prefix a person declared and said nothing about
+// stays static: that default is the safe one for silence, and it is not what
+// an unmeasured network is. A stated posture is read as stated.
+//
+// Mutation: change scope.go's `coalesce(dhcp_managed, source_kind <>
+// 'declared')` default and the silent rows go red.
 func TestIntegration_ScopeForAddress_DHCPPosture(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
 
-	segments := []struct {
-		cidr, metadata string
-		wantDynamic    bool
+	prefixes := []struct {
+		cidr, sourceKind string
+		dhcp             *bool
+		wantDynamic      bool
 	}{
-		{"10.61.1.0/24", `{"source":"interrogation","dhcp":"unknown"}`, true},
-		{"10.61.2.0/24", `{"source":"interrogation","dhcp":"enabled","dynamic":true}`, true},
-		{"10.61.3.0/24", `{"source":"interrogation","dhcp":"disabled","dynamic":false}`, false},
-		{"10.61.4.0/24", `{}`, false},
-		{"10.61.5.0/24", `{"source":"unifi","dynamic":false}`, false},
-		// A measured answer that later gained an unknown key cannot happen
-		// (the intake never overwrites known with unknown), but if it did the
-		// conservative reading wins.
-		{"10.61.6.0/24", `{"dhcp":"unknown","dynamic":false}`, true},
+		{"10.61.1.0/24", "measured", nil, true},
+		{"10.61.2.0/24", "measured", boolPtr(true), true},
+		{"10.61.3.0/24", "measured", boolPtr(false), false},
+		{"10.61.4.0/24", "declared", nil, false},
+		{"10.61.5.0/24", "declared", boolPtr(true), true},
+		{"10.61.6.0/24", "imported", nil, true},
 	}
 	ids := map[string]string{}
-	for _, s := range segments {
+	for _, p := range prefixes {
 		var id string
-		if err := db.QueryRow(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata)
-			VALUES($1,$2,'cidr',$2,'private','production',true,$3::jsonb) RETURNING id::text`, tenant, s.cidr, s.metadata).Scan(&id); err != nil {
+		if err := db.QueryRow(`INSERT INTO prefixes(tenant_id,prefix,source_kind,status,dhcp_managed)
+			VALUES($1,$2::cidr,$3,'active',$4) RETURNING id::text`, tenant, p.cidr, p.sourceKind, p.dhcp).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
-		ids[s.cidr] = id
+		ids[p.cidr] = id
 	}
 	repo := pgrepo.New(db)
-	for _, s := range segments {
-		p := netip.MustParsePrefix(s.cidr)
-		addr := p.Addr().Next().Next()
+	for _, p := range prefixes {
+		pf := netip.MustParsePrefix(p.cidr)
+		addr := pf.Addr().Next().Next()
 		scope, dynamic, err := repo.ScopeForAddress(context.Background(), tenant.String(), addr, "")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if scope != ids[s.cidr] || scope == identity.ScopeTenantDefault {
-			t.Errorf("%s: scope = %q, want the segment %q", addr, scope, ids[s.cidr])
+		if scope != ids[p.cidr] || scope == identity.ScopeTenantDefault {
+			t.Errorf("%s: scope = %q, want the prefix %q", addr, scope, ids[p.cidr])
 		}
-		if dynamic != s.wantDynamic {
-			t.Errorf("%s in %s: dynamic = %v, want %v", addr, s.metadata, dynamic, s.wantDynamic)
+		if dynamic != p.wantDynamic {
+			t.Errorf("%s in a %s prefix (dhcp %v): dynamic = %v, want %v", addr, p.sourceKind, p.dhcp, dynamic, p.wantDynamic)
 		}
 	}
 }

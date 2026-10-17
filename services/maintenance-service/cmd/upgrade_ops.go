@@ -31,6 +31,9 @@ type upgradeInputs struct {
 	AuditMW    *auditmiddleware.Middleware
 	// PullSecret reads the registry credential cosign uses; nil = anonymous.
 	PullSecret updates.SecretReader
+	// TrustEnv is the trust bundle's environment for subprocesses
+	// (SSL_CERT_FILE); nil without EXTRA_TRUSTED_CA_PATH.
+	TrustEnv []string
 }
 
 // upgradeConfigFromEnv reads what the chart renders into the pod.
@@ -54,6 +57,7 @@ func newUpgradeService(cfg upgrade.Config, db *sql.DB, client kubernetes.Interfa
 	pullSecret := os.Getenv(updates.EnvPullSecret)
 	verifier := upgrade.Cosign{
 		IdentityRegexp: os.Getenv("MAINTENANCE_VERIFICATION_IDENTITY_REGEXP"),
+		ExtraEnv:       in.TrustEnv,
 		DockerConfig: func(ctx context.Context) []byte {
 			if pullSecret == "" || in.PullSecret == nil {
 				return nil

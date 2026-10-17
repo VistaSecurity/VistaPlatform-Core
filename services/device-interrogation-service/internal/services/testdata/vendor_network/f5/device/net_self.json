@@ -1,0 +1,23 @@
+{
+  "items": [
+    {
+      "name": "self-ext",
+      "fullPath": "/Common/self-ext",
+      "address": "198.51.100.10/24",
+      "vlan": "/Common/external",
+      "allowService": "none"
+    },
+    {
+      "name": "self-int",
+      "fullPath": "/Common/self-int",
+      "address": "10.50.201.5%2/24",
+      "vlan": "/Common/internal"
+    },
+    {
+      "name": "self-srv",
+      "fullPath": "/Common/self-srv",
+      "address": "10.50.31.5/24",
+      "vlan": "/Common/servers"
+    }
+  ]
+}

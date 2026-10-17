@@ -25,7 +25,7 @@ import (
 // has been looking like?" — where "has been looking like" is everything
 // observed BEFORE a window that reaches `drift.baseline_days` back from now.
 //
-//	a class new to a network segment   → drift/new_class_in_segment  on the ASSET
+//	a class new to a prefix            → drift/new_class_in_segment  on the ASSET
 //	a protocol new to an asset         → drift/unexpected_protocol    on the ASSET
 //	a listening-port set that moved    → drift/port_profile_changed   on the ASSET
 //	a certificate issuer new to an asset → drift/new_issuer           on the ASSET
@@ -348,12 +348,12 @@ func (p *DriftProducer) readAssets(ctx context.Context, tx *sql.Tx, tenantID uui
 		SELECT a.id,
 		       coalesce(nullif(a.display_name, ''), nullif(a.hostname, ''), a.id::text),
 		       a.class_key,
-		       a.network_segment_id,
-		       coalesce(ns.name, ''),
+		       a.prefix_id,
+		       coalesce(pfx.prefix::text, ''),
 		       a.first_discovered_at
 		FROM assets a
-		LEFT JOIN network_segments ns
-		       ON ns.tenant_id = a.tenant_id AND ns.id = a.network_segment_id
+		LEFT JOIN prefixes pfx
+		       ON pfx.tenant_id = a.tenant_id AND pfx.id = a.prefix_id
 		WHERE a.tenant_id = $1
 		  AND a.deleted_at IS NULL
 		  AND a.asset_status NOT IN ('archived', 'denied')`, tenantID)
@@ -592,7 +592,7 @@ type segmentClass struct {
 // never held.
 //
 // One finding, not one per arriving asset. The registry's own title says "the
-// first {detail} seen in its network segment", and fifty printers landing on a
+// first {detail} seen in its prefix", and fifty printers landing on a
 // server VLAN in one afternoon is ONE thing to go and look at — the other
 // forty-nine are counted in the evidence rather than given a row each.
 func (p *DriftProducer) judgeNewClassInSegment(in *driftInput, run *DriftRun) []plannedDrift {
@@ -678,13 +678,16 @@ func (p *DriftProducer) judgeNewClassInSegment(in *driftInput, run *DriftRun) []
 
 		evidence := p.windowEvidence(in)
 		evidence["asset_id"] = first.id.String()
-		evidence["segment_id"] = k.segment.String()
+		// Evidence keys name the prefix (DCIM row 1.6). The finding KIND keeps
+		// its registered key, new_class_in_segment, which is a stable
+		// identifier, not a label.
+		evidence["prefix_id"] = k.segment.String()
 		if first.segmentName != "" {
-			evidence["segment_name"] = first.segmentName
+			evidence["prefix"] = first.segmentName
 		}
 		evidence["baseline"] = map[string]any{
-			"classes_in_segment":           sortedKeys(classesInBaseline[k.segment]),
-			"segment_assets_before_window": segmentBaseline[k.segment],
+			"classes_in_prefix":           sortedKeys(classesInBaseline[k.segment]),
+			"prefix_assets_before_window": segmentBaseline[k.segment],
 		}
 		evidence["observed"] = map[string]any{
 			"class":             k.class,

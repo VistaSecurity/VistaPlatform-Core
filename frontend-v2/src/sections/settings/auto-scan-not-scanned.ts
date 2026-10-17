@@ -9,6 +9,7 @@
 // tenant sees "Automatic scanning: on" over a sweep that will never scan a
 // host, which is the "reports success while doing nothing" shape the whole
 // feature has to avoid.
+import { NETWORKS_LENS_HREF } from '../inventory/lenses';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 
 export type NotScannedEntry = inventoryComponents['schemas']['AutoScanNotScanned'];
@@ -19,17 +20,18 @@ export interface NotScannedRow {
   /** One sentence on why, for the row's hint. */
   detail: string;
   count: number;
-  /** When set, the row offers "Register the segment to include these hosts", linking here. */
-  registerSegmentsHref?: string;
+  /** When set, the row offers "Add the prefix to include these hosts", linking here. */
+  registerPrefixesHref?: string;
 }
 
-/** Where a tenant registers a range as theirs. The sweep honours segments typed private, VPN or cloud. */
-export const SEGMENTS_SETTINGS_PATH = '/settings/segments';
+/** Where a tenant declares a range as theirs: Inventory → Networks (DCIM row
+ *  1.6). The sweep honours declared prefixes typed private, VPN or cloud. */
+export const NETWORKS_PATH = NETWORKS_LENS_HREF;
 
 interface ReasonCopy {
   label: string;
   detail: string;
-  /** True when registering a network segment would bring these hosts into scope. */
+  /** True when declaring a prefix would bring these hosts into scope. */
   registerable?: boolean;
 }
 
@@ -38,7 +40,7 @@ const REASONS: Record<string, ReasonCopy> = {
   public: {
     label: 'Public addresses',
     detail:
-      'Not inside a private range or a network segment you registered. If the range is yours, register it; otherwise this is the platform declining to scan a third party on a schedule.',
+      'Not inside a private range or a prefix you declared. If the range is yours, add it as a prefix; otherwise this is the platform declining to scan a third party on a schedule.',
     registerable: true,
   },
   carrier_grade_nat: {
@@ -84,7 +86,7 @@ const REASONS: Record<string, ReasonCopy> = {
   imported_without_scan_consent: {
     label: 'Imported, not cleared for scanning',
     detail:
-      'Known only from a connected system of record, that connection does not allow its assets to be actively scanned, and the address is not in a network segment you registered. Turn the setting on in the connection, register the range as a network segment, or scan them yourself from Inventory → All assets.',
+      'Known only from a connected system of record, that connection does not allow its assets to be actively scanned, and the address is not in a prefix you declared. Turn the setting on in the connection, add the range as a prefix, or scan them yourself from Inventory → All assets.',
   },
 };
 
@@ -104,7 +106,7 @@ function fallbackCopy(reason: string): ReasonCopy {
  * is to say what was left out.
  *
  * Order: the rows a tenant can act on first, then by count, then by label —
- * so the register-the-segment call to action is the first thing on the panel
+ * so the add-the-prefix call to action is the first thing on the panel
  * for the tenant it exists for.
  */
 export function describeNotScanned(entries: readonly NotScannedEntry[] | null | undefined): NotScannedRow[] {
@@ -117,12 +119,12 @@ export function describeNotScanned(entries: readonly NotScannedEntry[] | null | 
       label: copy.label,
       detail: copy.detail,
       count: entry.count,
-      ...(copy.registerable ? { registerSegmentsHref: SEGMENTS_SETTINGS_PATH } : {}),
+      ...(copy.registerable ? { registerPrefixesHref: NETWORKS_PATH } : {}),
     });
   }
   rows.sort((a, b) => {
-    const actA = a.registerSegmentsHref ? 0 : 1;
-    const actB = b.registerSegmentsHref ? 0 : 1;
+    const actA = a.registerPrefixesHref ? 0 : 1;
+    const actB = b.registerPrefixesHref ? 0 : 1;
     if (actA !== actB) return actA - actB;
     if (a.count !== b.count) return b.count - a.count;
     return a.label.localeCompare(b.label);

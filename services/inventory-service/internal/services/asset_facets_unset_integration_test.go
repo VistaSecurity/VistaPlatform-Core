@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestIntegration_FacetUnsetAndSegmentCountsMatchClicks(t *testing.T) {
+func TestIntegration_FacetUnsetAndPrefixCountsMatchClicks(t *testing.T) {
 	raw := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, raw)
 	tenant := testdb.NewTenant(t, raw)
@@ -18,16 +18,23 @@ func TestIntegration_FacetUnsetAndSegmentCountsMatchClicks(t *testing.T) {
 	segments := []uuid.UUID{uuid.New(), uuid.New()}
 	for i, id := range segments {
 		cidr := []string{"192.0.2.0/24", "198.51.100.0/24"}[i]
-		if _, err := raw.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Same label','cidr',$3,'production')`, id, tenant, cidr); err != nil {
+		if _, err := raw.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Same label',$3::cidr,'production','declared','active')`, id, tenant, cidr); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i, owner := range []any{nil, "", "ops@example.test"} {
-		var segment any
+		var segment, bu any
 		if i < 2 {
 			segment = segments[i]
 		}
-		if _, err := raw.Exec(`INSERT INTO assets(id,tenant_id,class_key,class_path,asset_status,owner_email,business_unit,site,network_segment_id) VALUES($1,$2,'server','hardware.computer.server','monitoring',$3,$3,$3,$4)`, uuid.New(), tenant, owner, segment); err != nil {
+		if i == 2 {
+			bu = seedBusinessUnit(t, raw, tenant, "ops@example.test")
+		}
+		var site any
+		if s, ok := owner.(string); ok {
+			site = testdb.EnsureSite(t, raw, tenant, s)
+		}
+		if _, err := raw.Exec(`INSERT INTO assets(id,tenant_id,class_key,class_path,asset_status,owner_email,business_unit_id,site_id,prefix_id) VALUES($1,$2,'server','hardware.computer.server','monitoring',$3,$5,$6,$4)`, uuid.New(), tenant, owner, segment, bu, site); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -57,24 +64,24 @@ func TestIntegration_FacetUnsetAndSegmentCountsMatchClicks(t *testing.T) {
 			t.Fatalf("%s click diverged: %+v", field, selected)
 		}
 	}
-	buckets, err := svc.GetAssetFacets(tenant, models.AssetFilters{}, "segment", 50)
+	buckets, err := svc.GetAssetFacets(tenant, models.AssetFilters{}, "prefix", 50)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(buckets) != 3 {
-		t.Fatalf("segment groups=%+v", buckets)
+		t.Fatalf("prefix groups=%+v", buckets)
 	}
 	for _, b := range buckets {
-		query := "segment_id:" + b.Key
-		if b.Key == "Unsegmented" {
-			query = "not exists(segment_id)"
+		query := "prefix_id:" + b.Key
+		if b.Key == "Unknown" {
+			query = "not exists(prefix_id)"
 		}
-		selected, err := svc.GetAssetFacets(tenant, models.AssetFilters{Query: query}, "segment", 50)
+		selected, err := svc.GetAssetFacets(tenant, models.AssetFilters{Query: query}, "prefix", 50)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(selected) != 1 || selected[0].Key != b.Key || selected[0].Count != b.Count {
-			t.Fatalf("segment click diverged: %+v", selected)
+			t.Fatalf("prefix click diverged: %+v", selected)
 		}
 	}
 }

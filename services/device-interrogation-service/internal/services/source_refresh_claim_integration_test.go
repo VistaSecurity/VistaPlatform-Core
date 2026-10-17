@@ -22,7 +22,7 @@ func sourceClaimFixture(t *testing.T, db *sql.DB, agentLane bool) (*JobQueueServ
 	if _, err = db.Exec(`UPDATE assets SET asset_status='monitoring' WHERE tenant_id=$1 AND id=$2`, tenant, device.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active) VALUES($1,$2,'Claim guard network','cidr','192.0.2.0/24','production',true)`, uuid.New(), tenant); err != nil {
+	if _, err = db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Claim guard network','192.0.2.0/24'::cidr,'production','declared','active')`, uuid.New(), tenant); err != nil {
 		t.Fatal(err)
 	}
 	var agent *uuid.UUID

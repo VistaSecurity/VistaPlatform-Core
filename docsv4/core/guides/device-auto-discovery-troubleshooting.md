@@ -19,7 +19,7 @@ reported apart.
 
 **If "Into inventory" matches "Discovered":** the assets did materialize, and
 this is the approval workflow behaving as designed. Discovered assets land as
-`pending_approval` unless an auto-approval rule matches their network segment.
+`pending_approval` unless an auto-approval rule matches their prefix.
 Look in **Discovery → Approvals**, not Inventory. See
 [Asset approval workflow](../operate/troubleshooting/asset-approval-workflow-issues.md).
 

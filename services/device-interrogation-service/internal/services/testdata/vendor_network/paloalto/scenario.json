@@ -1,0 +1,10 @@
+{
+  "vendor": "paloalto",
+  "device_type": "palo_alto",
+  "hostname": "fw-dc-01.corp.example.test",
+  "transport": "rest",
+  "management_ip": "10.30.0.5",
+  "management_port": 443,
+  "tenant_segments": [],
+  "provenance": "SYNTHESISED for the DCIM row 1.5c parity test, in the PAN-OS `show interface all` / `show arp all` shapes of the package's unit-test fixtures: an aggregate (ae1) of two ports with two tagged sub-interfaces, one in a non-default virtual router, an untrust port, the management interface and an ARP table. The <ae_member> list follows the hw entry shape; no real capture of an aggregate is in the corpus. A secret is planted in the system info's snmp-community, which nothing binds."
+}

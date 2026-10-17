@@ -257,6 +257,7 @@ export const NON_SERVICE_ENTRIES = new Map([
   ['shared', 'shared'],
   ['shared-rbac', 'shared/rbac'],
   ['license-issue', 'tools/license-issue'],
+  ['devicetype-import', 'tools/devicetype-import'],
 ]);
 
 // ---- what SHOULD be covered: every services/*/ with a go.mod -----------------

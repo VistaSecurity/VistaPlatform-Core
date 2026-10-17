@@ -12,7 +12,7 @@ import {
   assetIdentity, assetLocation, assetRisk, assetService, attr, classDeclares,
   classIcon, classLabel, confidenceLabel, endpointCount, handshakeRefusal, identifierKindLabel,
   operatingSystem, primaryAddress, primaryAddressPort, primaryEndpoint,
-  relativeSeen, sourceKindLabel, stripMask,
+  relativeSeen, sitePlacementLabel, sourceKindLabel, stripMask,
   type AssetLike,
 } from './asset-shape';
 
@@ -181,15 +181,15 @@ describe('assetIdentity', () => {
 
 describe('assetLocation', () => {
   it('splits the environment badge from the path', () => {
-    expect(assetLocation({ environment: 'production', network_segment_name: 'DMZ', region: 'us-east-1' }))
-      .toEqual({ environment: 'production', path: 'DMZ · us-east-1' });
+    expect(assetLocation({ environment: 'production', prefix: '10.20.0.0/24', region: 'us-east-1' }))
+      .toEqual({ environment: 'production', path: '10.20.0.0/24 · us-east-1' });
   });
 
-  it('falls back to the business unit when there is no segment', () => {
-    expect(assetLocation({ business_unit: 'Payments' }).path).toBe('Payments');
+  it('falls back to the business unit when there is no prefix', () => {
+    expect(assetLocation({ business_unit: { id: 'b1', name: 'Payments', slug: 'payments' } }).path).toBe('Payments');
   });
 
-  it('is null/null when nothing is known — the cell then reads "unknown", not "no segment"', () => {
+  it('is null/null when nothing is known — the cell then reads "unknown", not "no network"', () => {
     expect(assetLocation({})).toEqual({ environment: null, path: null });
   });
 });
@@ -340,5 +340,13 @@ describe('handshakeRefusal', () => {
     expect(handshakeRefusal({ protocol: 'TLS', tls_handshake_outcome: null })).toBeNull();
     expect(handshakeRefusal({ protocol: 'TLS', tls_handshake_outcome: 'negotiated' })).toBeNull();
     expect(handshakeRefusal(null)).toBeNull();
+  });
+});
+
+describe('sitePlacementLabel (DCIM 2.1)', () => {
+  it('is "Site › Location" with the location path inside the site, the site alone, or nothing', () => {
+    expect(sitePlacementLabel({ site: { id: 's', name: 'HQ' }, location: { id: 'l', name: 'Cage 7', path: 'HQ / Hall 2 / Cage 7' } })).toBe('HQ › Hall 2 › Cage 7');
+    expect(sitePlacementLabel({ site: { id: 's', name: 'HQ' }, location: null })).toBe('HQ');
+    expect(sitePlacementLabel({ site: null, location: null })).toBe('');
   });
 });

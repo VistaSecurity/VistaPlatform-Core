@@ -61,7 +61,12 @@ type edgeRouter struct {
 // gateway-links route.
 // The certificate-trust read rides the same internal prefix and is
 // pinned here too.
-var internalEdgePaths = []string{sightingsEdgePath, sightingclient.GatewayLinksPath, trustAnchorsEdgePath}
+var internalEdgePaths = []string{sightingsEdgePath, sightingclient.GatewayLinksPath, trustAnchorsEdgePath, ciExportDCIMEdgePath}
+
+// ciExportDCIMEdgePath is the DCIM CI export (row 5.7): the integration
+// service's CMDB push reads racks, prefixes, IP addresses, circuits, VLANs,
+// interfaces and sites through it, and it must never be reachable at the edge.
+const ciExportDCIMEdgePath = "/api/v1/inventory-service/internal/ci-export/dcim/rack"
 
 const trustAnchorsEdgePath = "/api/v1/inventory-service/internal/trust/anchors"
 

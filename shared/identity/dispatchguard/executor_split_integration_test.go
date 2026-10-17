@@ -34,7 +34,7 @@ func TestIntegration_IdentityGuard_ObserverAndExecutorAuthorizedSeparately(t *te
 	}
 	exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"discovery_auto_scan":{"enabled":true,"protocols":["TLS"],"ports":[443]},"identity_admission":{"mode":"enforce"},"identity_enrichment":{"enabled":true}}')`, tenant)
 	segment := uuid.New()
-	exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'target','cidr','10.190.0.0/24','production')`, segment, tenant)
+	exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'target','10.190.0.0/24','production','declared','active')`, segment, tenant)
 	collector := func(tenant uuid.UUID, address string) uuid.UUID {
 		t.Helper()
 		id := uuid.New()

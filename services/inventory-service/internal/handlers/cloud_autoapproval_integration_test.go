@@ -1,23 +1,24 @@
 package handlers
 
-// Pins auto-approval of CLOUD discoveries end to end, over a real Postgres:
-// segment configuration → generated rule row → the real discovery import,
-// which classifies the placeholder-addressed cloud resource by its cloud
-// segment and evaluates the rules itself ( WP3) → the status the asset
-// lands as.
+// Account-level auto-approval and the `hosted_on` edge for the cloud
+// resources that reach inventory only as FINDINGS (buckets, databases, key
+// stores), end to end over a real Postgres through the real discovery import
+// route (asset-inventory ADR-0009 D1, D5).
 //
-// Two things were broken and both are covered here, because fixing either
-// alone leaves cloud auto-approval half-working:
+// What changed, and what these pin:
 //
-//  1. Both writers of discovery_auto_approval_rules stamped
-//     "source": "sensor_discoveries" and no API could author a rule by hand, so
-//     the evaluator rejected every cloud discovery before ownership or segment
-//     were considered — its "cloud_discovery" and "all" branches were dead code.
-//  2. A cloud resource with no address of its own (a KMS key, a bucket, a
-//     managed database) is written with an unspecified-address placeholder.
-//     That address is neither RFC 1918 nor inside any CIDR segment, so
-//     ownership resolved to third_party and was then forced to "unknown" —
-//     which no segment rule can match, whatever its source condition says.
+//  1. The segment editor's "Cloud discoveries" source is gone. It never fired
+//     (the cloud intake never evaluated rules), and a segment is the wrong
+//     boundary for a resource with no address. A segment configured with it —
+//     or with no source term at all — no longer approves a cloud resource.
+//  2. Cloud resources are approved by the ACCOUNT's rule,
+//     `source:cloud and cloud.account_id="<id>"`, which device-interrogation-
+//     service derives from the integration's auto_approve_resources setting.
+//     The import puts the finding's account on the observation; shared/approval
+//     decides.
+//  3. Every resolved cloud resource hangs off its account asset with a
+//     measured `hosted_on` edge, including an addressless bucket whose ARN
+//     names no account (the integration's account is used).
 //
 // Skips without TEST_DATABASE_URL (nightly test-backend / make
 // test-integration-db).
@@ -26,41 +27,21 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/approval"
+	"github.com/vistasecurity/vistaplatform/shared/cloudaccount"
 )
 
-// cloudFixture is the REAL discovery import (routePipelineFixture) — the
-// route discovery-processor posts every finding to, which now classifies the
-// finding and evaluates the rules itself ( WP3). It replaced a fixture
-// over the deleted network-segments/classify-asset route.
-type cloudFixture struct {
-	*routePipelineFixture
-	approv *approval.Service
-}
+const testCloudAccount = "111122223333"
 
-func newCloudFixture(t *testing.T) *cloudFixture {
-	t.Helper()
-	f := newRoutePipelineFixture(t)
-	return &cloudFixture{routePipelineFixture: f, approv: approval.NewService(f.raw)}
-}
-
-// cloudSegment is the segment a cloud resource in aws/us-east-1 resolves to —
-// the same FindOrCreateCloudSegment the import's classification calls.
-func (f *cloudFixture) cloudSegment(t *testing.T) *models.NetworkSegment {
-	t.Helper()
-	seg, err := f.segSvc.FindOrCreateCloudSegment(f.tenant, "aws", "us-east-1", "", "production")
-	if err != nil || seg == nil {
-		t.Fatalf("cloud segment: %v", err)
-	}
-	return seg
-}
-
-// importCloud imports one placeholder-addressed cloud resource through the
-// real import route, the way discovery-processor forwards a cloud-API row,
-// and returns the status its new asset landed as and the rule credited.
-func (f *cloudFixture) importCloud(t *testing.T, name string) (string, string) {
+// importCloudKey imports one placeholder-addressed KMS key through the real
+// import route, the way discovery-processor forwards a cloud-API row, and
+// returns the status its asset landed as and the rule credited.
+func (f *routePipelineFixture) importCloudKey(t *testing.T, account, name string) (string, string) {
 	t.Helper()
 	resp := f.importFindings(t, map[string]interface{}{
 		"hostname":   name,
@@ -73,7 +54,7 @@ func (f *cloudFixture) importCloud(t *testing.T, name string) (string, string) {
 			"cloud_provider":   "aws",
 			"cloud_region":     "us-east-1",
 			"environment":      "production",
-			"device_id":        "arn:aws:kms:us-east-1:123456789012:key/" + name,
+			"arn":              "arn:aws:kms:us-east-1:" + account + ":key/" + name,
 			"confidence":       0.95,
 			"at_rest":          true,
 		},
@@ -81,145 +62,152 @@ func (f *cloudFixture) importCloud(t *testing.T, name string) (string, string) {
 	return resp.AssetStatuses[0], resp.Results[0].AutoApprovalRuleID
 }
 
-// classificationOf is the classification the import computes for a cloud
-// resource in seg: internal, on that segment.
-func classificationOf(seg *models.NetworkSegment) *approval.Classification {
-	id, name := seg.ID, seg.Name
-	return &approval.Classification{Ownership: "internal", Type: seg.NetworkType, SegmentID: &id, SegmentName: &name}
-}
-
-// setSegmentAutoApproval turns auto-approve on for the segment the cloud
-// resources resolve to, with the given sources, and regenerates the rules —
-// exactly what Settings → Infrastructure → Network Segments does on save.
-func (f *cloudFixture) setSegmentAutoApproval(t *testing.T, segID uuid.UUID, sources []string) {
+// importBucket imports an S3 bucket: an ARN with NO account in it, read
+// through an integration that names the account.
+func (f *routePipelineFixture) importBucket(t *testing.T, integrationID uuid.UUID, name string) (string, string) {
 	t.Helper()
-	seg, err := f.segSvc.GetByID(f.tenant, segID)
-	if err != nil || seg == nil {
-		t.Fatalf("load segment %s: %v", segID, err)
+	resp := f.importFindings(t, map[string]interface{}{
+		"hostname":   name,
+		"ip_address": "0.0.0.0",
+		"asset_type": "object_storage",
+		"protocol":   "",
+		"raw_data": map[string]interface{}{
+			"source":           "cloud_discovery",
+			"discovery_method": "cloud_api",
+			"cloud_provider":   "aws",
+			"cloud_region":     "us-east-1",
+			"device_type":      "aws_s3_bucket",
+			"arn":              "arn:aws:s3:::" + name,
+			"integration_id":   integrationID.String(),
+			"confidence":       0.8,
+			"at_rest":          true,
+		},
+	})
+	return resp.AssetStatuses[0], resp.Results[0].AssetID
+}
+
+// accountRule writes the rule device-interrogation-service derives from an
+// integration's auto_approve_resources setting.
+func (f *routePipelineFixture) accountRule(t *testing.T, account string, active bool) {
+	t.Helper()
+	q, err := approval.ValidateRuleQuery(approval.CloudAccountApprovalQuery(account))
+	if err != nil {
+		t.Fatalf("account rule: %v", err)
 	}
-	on := true
-	if _, err := f.segSvc.Update(f.tenant, segID, models.NetworkSegmentInput{
-		Name: seg.Name, SegmentType: seg.SegmentType, Value: seg.Value,
-		NetworkType: seg.NetworkType, Environment: seg.Environment,
-		LocationID:             seg.LocationID,
-		AutoApproveDiscoveries: &on,
-		AutoApproveSources:     sources,
-	}); err != nil {
-		t.Fatalf("update segment %s: %v", segID, err)
-	}
-	if err := f.segSvc.ManageAutoApprovalRules(f.tenant, uuid.Nil); err != nil {
-		t.Fatalf("regenerate auto-approval rules: %v", err)
+	if _, err := f.raw.Exec(`INSERT INTO discovery_auto_approval_rules (tenant_id, name, query, is_active)
+		VALUES ($1, 'Auto-approve cloud resources', $2, $3)`, f.tenant, q, active); err != nil {
+		t.Fatalf("insert account rule: %v", err)
 	}
 }
 
-// The positive case. A cloud resource with no address of its own resolves
-// ownership from its cloud segment, and a segment whose auto-approval includes
-// the cloud source approves it.
-func TestIntegration_CloudDiscovery_AutoApprovedWhenSegmentIncludesCloudSource(t *testing.T) {
-	f := newCloudFixture(t)
+// cloudIntegration seeds the tenant's AWS integration for the account.
+func (f *routePipelineFixture) cloudIntegration(t *testing.T, account string) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	if _, err := f.raw.Exec(`INSERT INTO platform_integrations
+		(id, tenant_id, integration_name, integration_type, provider, status, account_id)
+		VALUES ($1, $2, $3, 'aws', 'cloud', 'connected', $4)`, id, f.tenant, "aws-"+id.String()[:8], account); err != nil {
+		t.Fatalf("seed integration: %v", err)
+	}
+	return id
+}
 
-	seg := f.cloudSegment(t)
-	f.setSegmentAutoApproval(t, seg.ID, []string{models.AutoApproveSourceCloud})
+// accountAsset declares the account asset the way the integration create path
+// does — a declared `cloud_account` keyed aws:<account> — and approves it.
+func (f *routePipelineFixture) accountAsset(t *testing.T, account string) uuid.UUID {
+	t.Helper()
+	assets := services.NewAssetService(&database.DB{DB: sqlx.NewDb(f.raw, "postgres")})
+	name := cloudaccount.DisplayName("aws", account)
+	a, err := assets.CreateAsset(f.tenant, models.AssetInput{
+		ClassKey:    cloudaccount.ClassKey,
+		DisplayName: &name,
+		Identifiers: []models.AssetIdentifierInput{{Kind: "cloud_resource_id", Value: cloudaccount.ResourceID("aws", account)}},
+	})
+	if err != nil {
+		t.Fatalf("declare account asset: %v", err)
+	}
+	if err := assets.ApproveAssets(f.tenant, []uuid.UUID{a.ID}, uuid.Nil); err != nil {
+		t.Fatalf("approve account asset: %v", err)
+	}
+	return a.ID
+}
 
-	status, ruleID := f.importCloud(t, "key-approved")
+// hostedOn reads the hosted_on edge from a resource, if any.
+func (f *routePipelineFixture) hostedOn(t *testing.T, from string) (to, status string) {
+	t.Helper()
+	err := f.raw.QueryRow(`SELECT to_asset_id::text, status FROM asset_relationships
+		WHERE tenant_id = $1 AND from_asset_id = $2 AND type = 'hosted_on'`, f.tenant, from).Scan(&to, &status)
+	if err != nil {
+		return "", ""
+	}
+	return to, status
+}
+
+// TestIntegration_CloudIntake_CallsApprovalWithAccountScope: the import puts
+// the finding's account on the observation, so the account's rule approves a
+// resource in it — and only in it. Mutation: drop the line that sets
+// CloudAccountID in pipelineApproval and the in-account key lands pending.
+func TestIntegration_CloudIntake_CallsApprovalWithAccountScope(t *testing.T) {
+	f := newRoutePipelineFixture(t)
+	f.accountRule(t, testCloudAccount, true)
+
+	status, ruleID := f.importCloudKey(t, testCloudAccount, "key-in-account")
+	if status != "monitoring" || ruleID == "" {
+		t.Fatalf("a key in the auto-approving account landed %q (rule %q), want monitoring credited to the account rule — "+
+			"the import did not put cloud.account_id on the observation", status, ruleID)
+	}
+	if status, ruleID := f.importCloudKey(t, "999988887777", "key-elsewhere"); status != "pending_approval" || ruleID != "" {
+		t.Fatalf("a key in ANOTHER account landed %q (rule %q); an account rule must not reach past its account", status, ruleID)
+	}
+}
+
+// An inactive account rule (the integration's switch is off) approves nothing.
+func TestIntegration_CloudIntake_InactiveAccountRule_LeavesPending(t *testing.T) {
+	f := newRoutePipelineFixture(t)
+	f.accountRule(t, testCloudAccount, false)
+	if status, ruleID := f.importCloudKey(t, testCloudAccount, "key-switch-off"); status != "pending_approval" || ruleID != "" {
+		t.Fatalf("landed %q (rule %q) with the account's auto-approve off", status, ruleID)
+	}
+}
+
+// TestIntegration_CloudIntake_EmitsHostedOnToAccount (bucket half; the
+// instance half is device-interrogation-service's): an addressless bucket
+// whose ARN names no account hangs off the account of the integration that
+// read it. Pending while the bucket is pending; active once approved by the
+// account rule. Mutation: remove linkCloudAccount's call and both go red.
+func TestIntegration_CloudIntake_EmitsHostedOnToAccount(t *testing.T) {
+	f := newRoutePipelineFixture(t)
+	integ := f.cloudIntegration(t, testCloudAccount)
+	account := f.accountAsset(t, testCloudAccount)
+
+	status, bucket := f.importBucket(t, integ, "bucket-pending-"+uuid.NewString()[:6])
+	if status != "pending_approval" {
+		t.Fatalf("bucket landed %q with no account rule, want pending_approval", status)
+	}
+	if to, st := f.hostedOn(t, bucket); to != account.String() || st != "pending" {
+		t.Fatalf("pending bucket's hosted_on = (%q, %q), want (%s, pending)", to, st, account)
+	}
+
+	f.accountRule(t, testCloudAccount, true)
+	status, bucket = f.importBucket(t, integ, "bucket-approved-"+uuid.NewString()[:6])
 	if status != "monitoring" {
-		t.Fatalf("a cloud discovery on a segment that auto-approves cloud landed %q, want monitoring — "+
-			"a placeholder address must not decide whose network a cloud resource is on", status)
+		t.Fatalf("bucket in the auto-approving account landed %q, want monitoring (account from the integration)", status)
 	}
-	if ruleID == "" {
-		t.Fatal("the import approved the cloud resource but credited no rule")
-	}
-}
-
-// The negative case, and the one that keeps the setting honest: the same cloud
-// discovery, the same auto-approving segment, sources set to sensor only.
-func TestIntegration_CloudDiscovery_NotAutoApprovedWhenSegmentIsSensorOnly(t *testing.T) {
-	f := newCloudFixture(t)
-
-	seg := f.cloudSegment(t)
-	f.setSegmentAutoApproval(t, seg.ID, []string{models.AutoApproveSourceSensor})
-
-	if status, ruleID := f.importCloud(t, "key-sensor-only"); status != "pending_approval" || ruleID != "" {
-		t.Fatalf("a cloud discovery landed %q (rule %q) on a segment whose auto-approval covers sensor discoveries only", status, ruleID)
+	if to, st := f.hostedOn(t, bucket); to != account.String() || st != "active" {
+		t.Fatalf("approved bucket's hosted_on = (%q, %q), want (%s, active)", to, st, account)
 	}
 }
 
-// The upgrade case. A segment configured before this setting existed carries no
-// stored sources. It must keep meaning exactly what it meant when the tenant
-// switched it on — sensor discoveries — and must not start admitting cloud
-// assets on the strength of an upgrade nobody asked for.
-func TestIntegration_PreExistingSegment_DoesNotStartAutoApprovingCloud(t *testing.T) {
-	f := newCloudFixture(t)
-
-	segID := f.cloudSegment(t).ID
-
-	// Turn auto-approve on, then strip the sources key straight out of the row
-	// to reproduce a segment written before the setting existed.
-	f.setSegmentAutoApproval(t, segID, []string{models.AutoApproveSourceCloud})
-	f.stripStoredSources(t, segID)
-	if err := f.segSvc.ManageAutoApprovalRules(f.tenant, uuid.Nil); err != nil {
-		t.Fatalf("regenerate auto-approval rules: %v", err)
+// A prefix rule never approves a cloud resource (ADR-0009 D5, DCIM row 1.6):
+// an auto-approving `cloud` prefix generates a `source:sensor` rule, and only
+// the account decides a cloud listing.
+func TestIntegration_PrefixAutoApproval_DoesNotCoverCloud(t *testing.T) {
+	f := newRoutePipelineFixture(t)
+	body := []byte(`{"prefix":"10.0.0.0/8","network_type":"cloud","auto_approve_discoveries":true,"auto_approve_sources":["sensor","cloud"]}`)
+	if _, err := services.NewIPAMService(f.raw).Create(handlerIPAMCtx(), f.tenant, "prefixes", body); err != nil {
+		t.Fatalf("declare cloud prefix: %v", err)
 	}
-
-	seg, err := f.segSvc.GetByID(f.tenant, segID)
-	if err != nil || seg == nil {
-		t.Fatalf("reload segment: %v", err)
-	}
-	if !seg.AutoApproveDiscoveries {
-		t.Fatal("fixture lost the auto-approve flag; the rest of this test would pass vacuously")
-	}
-	if len(seg.AutoApproveSources) != 1 || seg.AutoApproveSources[0] != models.AutoApproveSourceSensor {
-		t.Fatalf("a segment with no stored sources read back as %v, want [sensor]", seg.AutoApproveSources)
-	}
-
-	if status, _ := f.importCloud(t, "key-pre-existing"); status != "pending_approval" {
-		t.Fatalf("a segment configured before the per-source setting existed started auto-approving cloud assets (landed %q)", status)
-	}
-}
-
-// Sensor discoveries on a cloud-enabled segment still behave: turning cloud on
-// must widen the rule, not swap it.
-func TestIntegration_SegmentWithBothSources_ApprovesSensorAndCloud(t *testing.T) {
-	f := newCloudFixture(t)
-
-	seg := f.cloudSegment(t)
-	f.setSegmentAutoApproval(t, seg.ID,
-		[]string{models.AutoApproveSourceSensor, models.AutoApproveSourceCloud})
-
-	if status, _ := f.importCloud(t, "key-both"); status != "monitoring" {
-		t.Fatalf("a cloud discovery landed %q on a segment covering both sources, want monitoring", status)
-	}
-
-	// A sensor discovery is one with no cloud_api marker in its metadata.
-	sensorAuto, _, err := f.approv.EvaluateAutoApprovalWithRules(f.rules(t),
-		approval.Discovery{TenantID: f.tenant}.WithConfidence(0.9), classificationOf(seg))
-	if err != nil {
-		t.Fatalf("evaluate sensor: %v", err)
-	}
-	if !sensorAuto {
-		t.Fatal("enabling cloud coverage stopped sensor discoveries from being auto-approved — the setting must widen the rule, not replace it")
-	}
-}
-
-func (f *cloudFixture) rules(t *testing.T) []*approval.Rule {
-	t.Helper()
-	rules, err := f.approv.GetActiveRulesForTenant(f.tenant)
-	if err != nil {
-		t.Fatalf("load rules: %v", err)
-	}
-	if len(rules) == 0 {
-		t.Fatal("no active auto-approval rules for the tenant; the fixture did not generate one")
-	}
-	return rules
-}
-
-// stripStoredSources removes the per-source key from a segment's metadata,
-// reproducing a row written before the setting existed.
-func (f *cloudFixture) stripStoredSources(t *testing.T, segID uuid.UUID) {
-	t.Helper()
-	if _, err := f.raw.Exec(
-		`UPDATE network_segments SET metadata = metadata - $1 WHERE id = $2 AND tenant_id = $3`,
-		models.AutoApproveSourcesKey, segID, f.tenant); err != nil {
-		t.Fatalf("strip stored sources: %v", err)
+	if status, ruleID := f.importCloudKey(t, testCloudAccount, "key-in-prefix"); status != "pending_approval" || ruleID != "" {
+		t.Fatalf("a prefix rule approved a cloud resource (landed %q, rule %q)", status, ruleID)
 	}
 }

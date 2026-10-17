@@ -157,7 +157,7 @@ proposals — which is correct.
 one key, `network_segments.metadata.dynamic`, and that key has three authors with
 a precedence between them: **operator** (Network Segments → edit, `PUT …
 dhcp: true|false|null`) **>** **measured** (device-interrogation read a
-controller's network list — `ensureVLANSegments`, on *whatever* segment matches
+controller's network list — `ensureVLANPrefixes`, on *whatever* segment matches
 the CIDR, not only the ones it created) **>** **inferred** (inventory-service saw a
 DHCP ACK assign an address inside the segment, at most once a day, never `false`).
 A lower source never overwrites a higher one; the same source overwrites itself.
@@ -1091,6 +1091,79 @@ deleted in #2374 WP7) and now goes through `AttachDecidedEndpoints`.
 The review table's ownership rule (`SuggestObservation`: ready to confirm when
 nothing owns an identifier of the row, link-existing when exactly one linkable
 asset does, needs-review otherwise) shares the owner query with the decision.
+
+## Addresses live on interfaces (DCIM row 1.4, ADR-0010 D3)
+
+"An asset's addresses are the addresses of its interfaces, and identity reads
+them from there." The engine still reasons in identifiers — `ip_address` and
+`mac_address` are identity **concepts**, and every class's
+`identifier_precedence` in `standards/asset-classes.yaml` keeps naming them —
+but the SQL repository resolves them from the DCIM tables:
+
+| Kind | Stored as | Looked up by |
+|---|---|---|
+| `ip_address` | an `ip_addresses` row (global VRF) assigned to one of the asset's `interfaces`; **never** an `asset_identifiers` row. The row's `identity_scope`, `address_assignment`, `device_confirmed_at` and `identity_confidence` carry what the identifier row carried. | `ip_addresses JOIN interfaces` on the host part, within the scope. A row with no identity scope (declared or imported through IPAM) is the VRF's answer for every scope. A row on **no** interface names no asset; the first asset seen at it adopts it. |
+| `mac_address` | still an `asset_identifiers` row (DATA_MODEL §9: "the kind stays for mac"), **and** the interface's MAC (`interfaces.mac_address`, further MACs in `mac_addresses`). | the identifier rows ∪ `interfaces.mac_address` ∪ `mac_addresses.mac` ∪ the ARP-seen `ip_addresses.mac_address` of an assigned address — so a MAC a person or an interrogation put on a second interface matches too. |
+
+Which interface a value goes under is one rule for both stores
+(`interfaces.go`: `PlanInterfaces` + `ResolveInterfaces`):
+
+- an identifier carrying an interface name (`Identifier.Interface`, from
+  `SightedIdentifier.Interface`) goes under that name, canonicalised by
+  `shared/dcim/ifnames` (`Gi0/1` and `GigabitEthernet0/1` are one interface);
+- a MAC naming none gets an interface of its own; an address naming none goes
+  under the observation's only such interface, else its only interface, else
+  one of its own;
+- an interface nobody named is **synthetic**: `observed-<n>`, type `other`,
+  measured, flagged by `source_ref = identity:synthetic` (the table has no
+  attributes column; a tenant's custom fields are the tenant's). A later report
+  that names the interface carrying its MAC **renames** it rather than adding a
+  second interface for the same NIC.
+
+After filing, the asset's `primary_ip4_id` / `primary_ip6_id` are set by rule
+when nobody chose them (`PickPrimaryIP`: the stated `primary_address`, else a
+management interface's address, else the first non-link-local one), and its
+endpoints' `asset_endpoints.ip_address_id` link the address rows.
+
+Scope: `SegmentSnapshot.Prefixes` (the tenant's IPAM prefixes in the global
+VRF) are read **before** network segments — an address is scoped to its
+longest-matching prefix, and `prefixes.dhcp_managed` is the dynamic-address
+input (NULL on a learned prefix reads dynamic, on a declared one static, the
+segment rule). Segments answer only for an address in no prefix, until row 1.6
+retires them.
+
+Readers outside the repository that want an asset's identifiers of every kind
+select from `shared/identity/identifiersql.All` (`.Addresses` for addresses
+alone) — query fragments, not a view. The query compiler builds the same union
+with bound parameters. `TestNoGoCodeInsertsAddressIdentifiers` fails if any Go
+file but `postgres/repository.go` inserts into `asset_identifiers`, or if its
+attach stops skipping addresses.
+
+## Interfaces, prefixes and VLANs on the observation (DCIM row 1.5)
+
+A sighting carries what its collector saw of the device's interfaces —
+`Interfaces []ObservedInterface` (each with `Addresses []ObservedAddress`),
+`Prefixes []ObservedPrefix`, `VLANs []ObservedVLAN` and a `ManagementAddress`
+(`observed_network.go`). `Intake` normalises them and folds every interface's
+MAC and global-VRF addresses into the identifiers, named by the interface, so
+row 1.4's filing rule files them; the address in a named VRF is never an
+identifier. `Engine.Resolve`, once the observation landed on an asset it may
+write to (matched, created, provisional, or a conflict's own pending asset —
+not supporting or held evidence), hands the rest to
+`ObservedNetworkRepository.RecordObservedNetwork` on the same transaction: the
+measured interface fields, parent/LAG/mode/VLANs where empty, prefixes and
+VLANs with `UpsertObservedPrefix`'s semantics, named-VRF addresses, the
+configured address length. A store that does not implement it records only
+the identity half (the in-memory store). The management address is the
+created asset's stated primary when it is one of its addresses.
+
+Every intake adapter proves its projection with
+`identitytest.RunAdapterParity(t, adapter, fixtures)`: a recorded vendor
+response produces exactly the expected interfaces, addresses, prefixes, VLANs
+and primary IPs; a re-observation adds no row and moves every
+`observation_count` by one; a secret planted in the response reaches no
+tenant table. The design note is the row 1.5a addendum of
+`docsv4/internal/developer/design/asset-inventory/identity-intake.md`.
 
 ## Invariants
 

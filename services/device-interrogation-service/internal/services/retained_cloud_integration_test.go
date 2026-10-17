@@ -154,7 +154,6 @@ func TestIntegration_RetainedCloudEnumerationPreservesFactsAndDeclaredAttributes
 	}
 	plan := awsEnumerationPlanForTest(t)
 	resource := plan.Instances[0]
-	resource.ParentID = "arn:aws:ec2:us-east-1:123456789012:subnet/future-parent"
 	resource.Attributes["region"] = "observed-region"
 	_, err = svc.recordCloudResource(ctx, tenant, integration, "AWS", resource)
 	var retained *identity.RetainedObservation
@@ -178,31 +177,11 @@ func TestIntegration_RetainedCloudEnumerationPreservesFactsAndDeclaredAttributes
 	if err := restarted.ReplayRetainedCloudContext(ctx, tenant); err != nil {
 		t.Fatal(err)
 	}
-	var pending int
-	if err := db.QueryRow(`SELECT count(*) FROM identity_observation_cloud_contexts WHERE tenant_id=$1 AND materialized_at IS NULL AND last_error='cloud parent identity unresolved'`, tenant).Scan(&pending); err != nil || pending != 1 {
-		t.Fatalf("unresolved parent evidence lost: %d %v", pending, err)
-	}
-	if _, err := db.Exec(`UPDATE tenant_admin_settings SET config='{"identity_admission":{"mode":"disabled"}}' WHERE tenant_id=$1`, tenant); err != nil {
-		t.Fatal(err)
-	}
-	parent, err := svc.devices.CreateDevice(ctx, tenant, models.CreateDeviceRequest{DeviceType: DeviceTypeAWSSubnet, Hostname: stringPtr("parent.example.test"), Metadata: map[string]interface{}{"cloud_resource_id": resource.ParentID}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE tenant_admin_settings SET config='{"identity_admission":{"mode":"enforce"}}' WHERE tenant_id=$1`, tenant); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE identity_observation_cloud_contexts SET next_attempt_at=now() WHERE tenant_id=$1`, tenant); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		if err := restarted.ReplayRetainedCloudContext(ctx, tenant); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// No containment edge is replayed (row 1.5f): an instance's network is
+	// prefix containment of its addresses, not a subnet asset's edge.
 	var edges int
-	if err := db.QueryRow(`SELECT count(*) FROM asset_relationships WHERE tenant_id=$1 AND from_asset_id=$2 AND to_asset_id=$3 AND type='contains'`, tenant, parent.ID, target.ID).Scan(&edges); err != nil || edges != 1 {
-		t.Fatalf("retained containment lost: %d %v", edges, err)
+	if err := db.QueryRow(`SELECT count(*) FROM asset_relationships WHERE tenant_id=$1 AND to_asset_id=$2 AND type='contains'`, tenant, target.ID).Scan(&edges); err != nil || edges != 0 {
+		t.Fatalf("replay wrote a containment edge: %d %v", edges, err)
 	}
 	var region string
 	if err := db.QueryRow(`SELECT attributes->>'region' FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, target.ID).Scan(&region); err != nil || region != "operator-region" {

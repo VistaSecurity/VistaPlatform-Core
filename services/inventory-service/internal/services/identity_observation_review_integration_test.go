@@ -49,6 +49,13 @@ func seedOwnerAsset(t *testing.T, db *sql.DB, tenant uuid.UUID, hostname, status
 		t.Fatal(err)
 	}
 	for _, o := range owns {
+		if o[0] == "ip_address" {
+			// Row 1.4: an address is held on one of the asset's interfaces.
+			if _, err := db.Exec(testdb.SeedAssetAddressSQL, tenant, id, o[1], o[2], "measured", "test"); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if _, err := db.Exec(`INSERT INTO asset_identifiers(tenant_id,asset_id,kind,value,scope) VALUES($1,$2,$3,$4,NULLIF($5,''))`, tenant, id, o[0], o[1], o[2]); err != nil {
 			t.Fatal(err)
 		}
@@ -209,7 +216,7 @@ func TestIntegration_ObservationReview_NamesAreTenantScoped(t *testing.T) {
 	app := testdb.ConnectAsAppRole(t, db.DB.DB)
 	testdb.WithSchemaShareLock(t, db.DB.DB, func() {
 		tenantB := testdb.NewTenant(t, db.DB.DB)
-		segment := seedSegment(t, db, tenantA, "Head office LAN", "192.0.2.0/24")
+		segment := seedPrefix(t, db, tenantA, "Head office LAN", "192.0.2.0/24")
 		sensor := uuid.New()
 		if _, err := db.Exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status) VALUES($1,$2,'Head office sensor','linux','1','datacenter_host','active')`, sensor, tenantA); err != nil {
 			t.Fatal(err)
@@ -232,10 +239,10 @@ func TestIntegration_ObservationReview_NamesAreTenantScoped(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if a.NetworkName == nil || *a.NetworkName != "Head office LAN" || a.SourceName != "Head office sensor" {
+				if a.NetworkName == nil || *a.NetworkName != "192.0.2.0/24" || a.SourceName != "Head office sensor" {
 					t.Fatalf("own names not resolved: network=%v source=%q", a.NetworkName, a.SourceName)
 				}
-				if !strings.Contains(a.SuggestedReason, "on Head office LAN (Head office sensor)") || uuidRE.MatchString(a.SuggestedReason) {
+				if !strings.Contains(a.SuggestedReason, "on 192.0.2.0/24 (Head office sensor)") || uuidRE.MatchString(a.SuggestedReason) {
 					t.Fatalf("suggested reason %q", a.SuggestedReason)
 				}
 				page, err := pool.svc.ListIdentityObservationsFiltered(ctx, tenantB, ObservationListFilter{State: "unresolved", Page: 1, PageSize: 50})
@@ -267,8 +274,8 @@ func TestIntegration_ObservationReview_FiltersCountsSortPaging(t *testing.T) {
 	testdb.WithSchemaShareLock(t, db.DB.DB, func() {
 		ctx := context.Background()
 		svc := NewAssetService(db)
-		office := seedSegment(t, db, tenant, "Office", "192.0.2.0/24")
-		lab := seedSegment(t, db, tenant, "Lab", "198.51.100.0/24")
+		office := seedPrefix(t, db, tenant, "Office", "192.0.2.0/24")
+		lab := seedPrefix(t, db, tenant, "Lab", "198.51.100.0/24")
 		sensor := uuid.New()
 		if _, err := db.Exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status) VALUES($1,$2,'Rack sensor','linux','1','datacenter_host','active')`, sensor, tenant); err != nil {
 			t.Fatal(err)
@@ -340,7 +347,7 @@ func TestIntegration_ObservationReview_FiltersCountsSortPaging(t *testing.T) {
 		if host := list(ObservationListFilter{Needs: []string{NeedsReadyToConfirm}, Sort: "host"}); host.Observations[0].ID != readyIDs[4] || host.Observations[4].ID != readyIDs[0] {
 			t.Fatalf("host sort: %s … %s", host.Observations[0].ID, host.Observations[4].ID)
 		}
-		if net := list(ObservationListFilter{Sort: "network"}); net.Observations[0].NetworkName == nil || *net.Observations[0].NetworkName != "Lab" {
+		if net := list(ObservationListFilter{Sort: "network"}); net.Observations[0].NetworkName == nil || *net.Observations[0].NetworkName != "192.0.2.0/24" {
 			t.Fatalf("network sort first=%v", net.Observations[0].NetworkName)
 		}
 		bySort := list(ObservationListFilter{Sort: "needs"})
@@ -382,7 +389,7 @@ func TestIntegration_ObservationBulk_MixedOutcomesAndAudit(t *testing.T) {
 		svc := NewAssetService(db)
 		actor := seedUser(t, db, tenant)
 		other := testdb.NewTenant(t, db.DB.DB)
-		segment := seedSegment(t, db, tenant, "Home", "192.0.2.0/24")
+		segment := seedPrefix(t, db, tenant, "Home", "192.0.2.0/24")
 		if _, err := db.Exec(`INSERT INTO tenant_entitlements(tenant_id,item_id,override_value,reason)
 		 SELECT $1,id,'{"quantity":1}'::jsonb,'bulk regression' FROM billable_items WHERE key='max_assets'`, tenant); err != nil {
 			t.Fatal(err)

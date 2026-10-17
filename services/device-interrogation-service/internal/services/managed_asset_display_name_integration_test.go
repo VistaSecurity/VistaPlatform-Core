@@ -41,10 +41,8 @@ func TestIntegration_DeclaredNameWinsTheDisplayLabel(t *testing.T) {
 		assetID, tenant, measuredLabel); err != nil {
 		t.Fatalf("seed asset: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, `
-		INSERT INTO public.asset_identifiers (tenant_id, asset_id, kind, value, scope, source_kind, source_ref, confidence)
-		VALUES ($1, $2, 'ip_address', '192.0.2.1', 'tenant', 'measured', 'sensor', 1)`,
-		tenant, assetID); err != nil {
+	if _, err := db.ExecContext(ctx, testdb.SeedAssetAddressSQL,
+		tenant, assetID, "192.0.2.1", "tenant", "measured", "sensor"); err != nil {
 		t.Fatalf("seed identifier: %v", err)
 	}
 

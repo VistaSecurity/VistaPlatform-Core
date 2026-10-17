@@ -215,7 +215,7 @@ func (s *AssetService) hostObservationIntake(tenantID uuid.UUID, f IngestFinding
 
 // hostObservationIntakeIn is hostObservationIntake scoped against an import
 // request's one segment snapshot ( F4).
-func (s *AssetService) hostObservationIntakeIn(segs *importSegments, tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) (identity.IntakeResult, error) {
+func (s *AssetService) hostObservationIntakeIn(segs *importPrefixes, tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) (identity.IntakeResult, error) {
 	verified := false
 	if agentID := strings.TrimSpace(ho.AgentID); agentID != "" {
 		if sensorID, err := uuid.Parse(agentID); err == nil && s.db != nil && f.SourceSensorID != nil && *f.SourceSensorID == agentID {
@@ -526,7 +526,7 @@ func (s *AssetService) ingestHostObservation(ctx context.Context, tenantID uuid.
 
 // ingestHostObservationIn is ingestHostObservation answering its segment
 // questions from an import request's one read of them ( F4).
-func (s *AssetService) ingestHostObservationIn(ctx context.Context, segs *importSegments, tenantID uuid.UUID, f IngestFinding, assetStatus string) (identity.Resolution, error) {
+func (s *AssetService) ingestHostObservationIn(ctx context.Context, segs *importPrefixes, tenantID uuid.UUID, f IngestFinding, assetStatus string) (identity.Resolution, error) {
 	ho, ok := hostObservationPayload(f)
 	if !ok {
 		return identity.Resolution{}, fmt.Errorf("finding is marked %s but carries no readable host_observation payload", KindHostObservation)
@@ -621,17 +621,18 @@ func dhcpAssignedAddresses(ho *hostobs.HostObservation) []netip.Addr {
 	return out
 }
 
-// inferDHCPPosture records, on the segment covering an address a DHCP ACK
-// assigned, that the network hands out addresses — at the LOWEST rank, below
-// what a device measured and what an operator said.
+// inferDHCPPosture records, on the prefix covering an address a DHCP ACK
+// assigned, that the network hands out addresses — only where nobody has
+// said, so what an operator said or a device measured first stands
+// (shared/identity/postgres RecordPrefixPosture).
 //
 // Best effort, and it must stay that way. The observation this rides on has
 // already been resolved and committed; a failure here costs one note about a
-// segment, which the next ACK repeats, and must never turn into a failed
+// prefix, which the next ACK repeats, and must never turn into a failed
 // ingest that the sensor then retries. It is logged, not returned.
 //
 // It reports whether it wrote a posture, so an import request holding a
-// segment snapshot knows to read it again.
+// prefix snapshot knows to read it again.
 func (s *AssetService) inferDHCPPosture(ctx context.Context, tenantID uuid.UUID, ho *hostobs.HostObservation, observedAt time.Time) (wrote bool) {
 	addrs := dhcpAssignedAddresses(ho)
 	if len(addrs) == 0 || s.db == nil || s.db.DB == nil {
@@ -656,24 +657,22 @@ func (s *AssetService) inferDHCPPosture(ctx context.Context, tenantID uuid.UUID,
 		}
 		scope, _, err := s.identityRepo.ScopeForAddress(ctx, tenantID.String(), addr, "")
 		if err != nil {
-			log.Printf("[AssetService] tenant %s: resolving the segment of DHCP-assigned %s failed (the observation is unaffected): %v", tenantID, addr, err)
+			log.Printf("[AssetService] tenant %s: resolving the prefix of DHCP-assigned %s failed (the observation is unaffected): %v", tenantID, addr, err)
 			continue
 		}
-		segmentID, err := uuid.Parse(scope)
+		prefixID, err := uuid.Parse(scope)
 		if err != nil || done[scope] {
-			// The tenant default scope is not a segment; there is nothing to mark.
+			// The tenant default scope is not a prefix; there is nothing to mark.
 			continue
 		}
 		done[scope] = true
 		err = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-			r, e := pgidentity.RecordSegmentPosture(ctx, tx, tenantID.String(), segmentID.String(),
-				pgidentity.PostureInferred, true, pgidentity.PostureEvidence{ObservedAt: observedAt},
-				pgidentity.SkipIfSourceStatedSince(now.Add(-dhcpInferenceThrottle)))
-			wrote = wrote || (e == nil && r.Written)
+			w, e := pgidentity.RecordPrefixPosture(ctx, tx, tenantID.String(), prefixID.String(), true)
+			wrote = wrote || (e == nil && w)
 			return e
 		})
 		if err != nil {
-			log.Printf("[AssetService] tenant %s: recording inferred DHCP posture for segment %s failed (the observation is unaffected): %v", tenantID, segmentID, err)
+			log.Printf("[AssetService] tenant %s: recording inferred DHCP posture for prefix %s failed (the observation is unaffected): %v", tenantID, prefixID, err)
 		}
 	}
 	return wrote
@@ -700,16 +699,13 @@ func (s *AssetService) hostObservationContextInput(tenantID uuid.UUID, f IngestF
 	return s.hostObservationContextInputIn(nil, tenantID, f, ho)
 }
 
-func (s *AssetService) hostObservationContextInputIn(segs *importSegments, tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) models.AssetInput {
+func (s *AssetService) hostObservationContextInputIn(_ *importPrefixes, _ uuid.UUID, f IngestFinding, ho *hostobs.HostObservation) models.AssetInput {
 
 	ctxInput := models.AssetInput{
 		Metadata: hostObservationMetadata(f, ho),
 	}
 	ownership := hostObservationOwnership
 	ctxInput.AssetOwnership = &ownership
-	if tags, _ := s.getTagsForAssetIn(segs, tenantID, hostObservationPrimaryAddress(ho), hostObservationBestName(ho)); len(tags) > 0 {
-		ctxInput.Tags = mergeTags(models.JSONB{}, tags)
-	}
 
 	return ctxInput
 }

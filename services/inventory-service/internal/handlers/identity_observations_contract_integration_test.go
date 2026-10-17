@@ -40,7 +40,7 @@ func TestIntegration_ContractObservationReviewResponses(t *testing.T) {
 			t.Fatal(err)
 		}
 		segment, sensor := uuid.New(), uuid.New()
-		if _, err := raw.Exec(`INSERT INTO network_segments (id, tenant_id, name, segment_type, value, environment) VALUES ($1,$2,'Office LAN','cidr','192.0.2.0/24','production')`, segment, tenant); err != nil {
+		if _, err := raw.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Office LAN','192.0.2.0/24'::cidr,'production','declared','active')`, segment, tenant); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := raw.Exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status) VALUES($1,$2,'Office sensor','linux','1','datacenter_host','active')`, sensor, tenant); err != nil {
@@ -95,7 +95,7 @@ func TestIntegration_ContractObservationReviewResponses(t *testing.T) {
 			t.Fatalf("page %s", page)
 		}
 		first := decoded.Observations[0]
-		if first.NetworkName == nil || *first.NetworkName != "Office LAN" || first.SourceName != "Office sensor" {
+		if first.NetworkName == nil || *first.NetworkName != "192.0.2.0/24" || first.SourceName != "Office sensor" {
 			t.Fatalf("names %v %q", first.NetworkName, first.SourceName)
 		}
 		// No UUID anywhere a person reads, and the host key is shortened for

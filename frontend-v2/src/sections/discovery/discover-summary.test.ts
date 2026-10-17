@@ -46,7 +46,7 @@ describe('describeMaterialization', () => {
 
   it('always states the one auto-approval rule', () => {
     const s = describeMaterialization(1, { findings: 1, queued: 1, auto_approved: 1, pending_approval: 0, awaiting_processing: 0 });
-    expect(s.note).toContain('network segments with auto-approve enabled');
+    expect(s.note).toContain('prefixes with auto-approve enabled');
   });
 
   // Suppressed rows matched an asset the tenant already archived or denied —

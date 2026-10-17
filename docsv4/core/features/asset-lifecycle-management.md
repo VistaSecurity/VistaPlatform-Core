@@ -44,7 +44,7 @@ escalate at **30**, **90** and **180** days.
 
 ## The Stale lens
 
-Each row shows the asset, its class, its network segment, its status and how many
+Each row shows the asset, its class, its prefix, its status and how many
 days it has been quiet. Click a row to open the asset's page.
 
 **Tick rows** — or tick the header to select the page, then **Select all *N*
@@ -175,7 +175,7 @@ it is gone; restore something from archived years later if it comes back.
 ## Reading the lens honestly
 
 - **A long stale list on a new deployment is usually a coverage problem, not a
-  decommissioning backlog.** Check that the segments those assets live in are
+  decommissioning backlog.** Check that the prefixes those assets live in are
   actually being scanned before you archive a few hundred rows.
 - **Rescan before you archive.** It costs one click per page and it turns a guess
   into a measurement.
@@ -195,7 +195,7 @@ on a sample asset is actually old — an asset a sensor keeps re-observing is no
 stale however dead the service on it is.
 
 **Rescan finds nothing.** Confirm the asset is reachable from a sensor in its
-segment at all, and find the job under **Discovery → Discovery Jobs**. A rescan
+prefix at all, and find the job under **Discovery → Discovery Jobs**. A rescan
 that cannot get a packet to the host reports the same silence as a host that is
 gone.
 
@@ -209,4 +209,4 @@ backlog clears over several nights rather than in one.
 - [Discovery](./discovery.md) — what does the observing
 - [Asset approval](./asset-approval.md) — how assets get into inventory in the first place
 - [Findings](./findings.md) — the inventory-hygiene findings staleness raises
-- [Operational context](./operational-context.md) — locations and network segments
+- [Operational context](./operational-context.md) — locations and prefixes

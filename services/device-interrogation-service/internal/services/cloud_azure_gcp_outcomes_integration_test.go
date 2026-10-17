@@ -48,7 +48,7 @@ func seedEncryptedCloudIntegration(t *testing.T, owner *sql.DB, tenant uuid.UUID
 	if err != nil {
 		t.Fatal(err)
 	}
-	config := map[string]interface{}{EnumerateComputeConfigKey: false}
+	config := map[string]interface{}{}
 	for k, v := range plain {
 		config[k] = v
 	}
@@ -110,7 +110,14 @@ func TestIntegration_AzureDiscovery_OneCollectorFailingDoesNotAbortTheRun(t *tes
 					"services":  map[string]interface{}{"blob": map[string]interface{}{"enabled": true}},
 				}},
 			}}})
-		case strings.HasSuffix(p, "/providers/Microsoft.Network/loadBalancers"), strings.HasSuffix(p, "/providers/Microsoft.Sql/servers"):
+		case strings.HasSuffix(p, "/providers/Microsoft.Network/virtualNetworks"):
+			// The enumeration half (ADR-0009 D3): one listing refused…
+			armError(w, http.StatusForbidden, "AuthorizationFailed", "The client does not have authorization to perform action 'Microsoft.Network/virtualNetworks/read'.")
+		case strings.HasSuffix(p, "/providers/Microsoft.Network/loadBalancers"), strings.HasSuffix(p, "/providers/Microsoft.Sql/servers"),
+			// …and the others answering, empty.
+			strings.HasSuffix(p, "/providers/Microsoft.Network/networkSecurityGroups"),
+			strings.HasSuffix(p, "/providers/Microsoft.Network/networkInterfaces"),
+			strings.HasSuffix(p, "/providers/Microsoft.Compute/virtualMachines"):
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": []interface{}{}})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -128,9 +135,10 @@ func TestIntegration_AzureDiscovery_OneCollectorFailingDoesNotAbortTheRun(t *tes
 		Services:                     map[cloud.ServiceName]cloud.ServiceConfiguration{cloud.ResourceManager: {Audience: srv.URL, Endpoint: srv.URL}},
 	}, srv.Client())}
 
-	types := []string{"application_gateway", "load_balancer", "key_vault", "storage_account", "sql_database"}
+	// The whole run, enumeration included: one selection (ADR-0009 D3).
+	types := []string{CloudTypeComputeInstances, CloudTypeNetworks, "application_gateway", "load_balancer", "key_vault", "storage_account", "sql_database"}
 	rec := NewCloudOutcomeRecorder(types)
-	out, err := svc.DiscoverResourceEvidence(WithCloudOutcomes(context.Background(), rec), tenant, integration, "azure", types, nil, nil)
+	out, err := svc.DiscoverResources(WithCloudOutcomes(context.Background(), rec), tenant, integration, "azure", types, nil, nil)
 	if err != nil {
 		t.Fatalf("one refused collector aborted the Azure run: %v", err)
 	}
@@ -145,13 +153,39 @@ func TestIntegration_AzureDiscovery_OneCollectorFailingDoesNotAbortTheRun(t *tes
 			t.Errorf("%s outcome = %+v, want failed / access_denied / AuthorizationFailed", rt, o)
 		}
 	}
-	for rt, found := range map[string]int{"load_balancer": 0, "storage_account": 1, "sql_database": 0} {
+	for rt, found := range map[string]int{"load_balancer": 0, "storage_account": 1, "sql_database": 0, CloudTypeComputeInstances: 0} {
 		if o := got[rt]; o.Status != CloudTypeSucceeded || o.Found != found {
 			t.Errorf("%s outcome = %+v, want succeeded with %d found", rt, o, found)
 		}
 	}
+	// The enumeration listing's grid row: refused, with the provider's code.
+	if o := got[CloudTypeNetworks]; o.Status != CloudTypeFailed || len(o.Regions) != 1 || o.Regions[0].Region != cloudScopeGlobal ||
+		o.Regions[0].Failure == nil || o.Regions[0].Failure.Code != "AuthorizationFailed" {
+		t.Errorf("networks outcome = %+v, want one failed global row / AuthorizationFailed", o)
+	}
 	if rec.Verdict() != CloudRunPartial {
 		t.Errorf("verdict = %s, want partial", rec.Verdict())
+	}
+
+	// ADR-0009 D6: the account records coverage for what completed and for
+	// nothing that was refused.
+	var raw []byte
+	if err := owner.QueryRow(`SELECT f.value FROM asset_facts f JOIN asset_identifiers i ON i.asset_id = f.asset_id AND i.tenant_id = f.tenant_id
+		WHERE f.tenant_id = $1 AND f.key = 'cloud.enumeration_coverage' AND i.kind = 'cloud_resource_id' AND i.value = $2`,
+		tenant, "azure:"+outcomeTestSubscription).Scan(&raw); err != nil {
+		t.Fatalf("account coverage: %v", err)
+	}
+	var coverage map[string]string
+	_ = json.Unmarshal(raw, &coverage)
+	for _, want := range []string{"compute_instances@global", "storage_account@global"} {
+		if coverage[want] == "" {
+			t.Errorf("coverage lacks %s: %v", want, coverage)
+		}
+	}
+	for _, refused := range []string{"networks@global", "key_vault@global", "application_gateway@global"} {
+		if _, ok := coverage[refused]; ok {
+			t.Errorf("coverage records refused listing %s", refused)
+		}
 	}
 }
 

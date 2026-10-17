@@ -87,10 +87,14 @@ func metricsFor(t *testing.T, tenant uuid.UUID, band healthbands.Band) models.He
 	}
 	switch band {
 	case healthbands.Failing:
-		// Slow, idle, 50% compliance, no cost efficiency.
-		m.AvgResponseTime, m.ErrorRate, m.ComplianceScore = 1000, 0.05, 50
+		// Slow, idle and non-compliant. Cost efficiency is no longer measured
+		// after resource-tracker retirement, so compliance must keep this
+		// fixture below the failing-band threshold on the three-factor index.
+		m.AvgResponseTime, m.ErrorRate, m.ComplianceScore = 1000, 0.05, 0
 	case healthbands.Poor:
-		m.AvgResponseTime, m.ErrorRate, m.ComplianceScore, m.CostEfficiency = 1000, 0.05, 100, 100
+		// Cost efficiency is intentionally ignored. Modest business activity
+		// keeps this fixture in Poor instead of falling through to Failing.
+		m.AvgResponseTime, m.ErrorRate, m.ComplianceScore, m.ActiveUsers = 1000, 0.05, 100, 1000
 	case healthbands.Excellent:
 		m.AvgResponseTime, m.Throughput, m.Uptime, m.ComplianceScore = 100, 1000, 99.99, 100
 		m.ActiveUsers, m.APICalls, m.UserEngagement, m.CostEfficiency = 1000, 10000, 100, 100

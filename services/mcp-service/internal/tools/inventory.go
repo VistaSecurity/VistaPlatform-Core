@@ -41,7 +41,7 @@ const queryLanguagePrimer = "" +
 	"`software:(…)`, `finding:(…)`, `identifier:(…)`. " +
 	"Dates: `now`, `now-30d`, `now+7d` (units s m h d w mo y). There is no null literal — use `exists(field)`.\n" +
 	"FIELD NAMESPACES: bare names are first-class asset columns (class, display_name, hostname, " +
-	"primary_address, environment, business_unit, owner_email, support_group, site, region, zone, " +
+	"primary_address, environment, business_unit, owner_email, support_group, site (site.region, site.group), location, region, zone, " +
 	"status, ownership, stale_status, source, risk, risk_score, risk_assessed_by, confidence_score, " +
 	"first_seen, last_seen); `attr.` a class attribute (attr.os_version); `fact.` a registered fact key " +
 	"(fact.os.name); `id.` an identifier kind (id.serial_number, id.mac, id.any); `tag.` a tenant tag " +

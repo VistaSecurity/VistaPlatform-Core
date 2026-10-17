@@ -396,8 +396,8 @@ func TestIntegration_PlanUnits_AuthorizationIsRecheckedBeforeEveryPacket(t *test
 		t.Fatalf("units = %v, want three cleared", st)
 	}
 	for _, excluded := range []string{"10.183.9.10/32", "10.183.9.22/32"} {
-		if _, err := f.raw.Exec(`INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment, is_active, metadata)
-			VALUES ($1, $2, 'cidr', $2, 'private', 'production', true, '{"sensitive": "true"}')`, f.tenant, excluded); err != nil {
+		if _, err := f.raw.Exec(`INSERT INTO prefixes (tenant_id, description, prefix, network_type, environment, sensitive)
+			VALUES ($1, $2::text, $2::text::cidr, 'private', 'production', true)`, f.tenant, excluded); err != nil {
 			t.Fatal(err)
 		}
 	}

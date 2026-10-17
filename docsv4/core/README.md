@@ -46,6 +46,21 @@ The core surfaces, in the order a tenant meets them:
 - [Getting Started](./features/getting-started.md) — the onboarding checklist
 - [The Dashboard](./features/dashboard.md) — the two heroes (cryptographic posture and assets monitored) and what each number means
 - [Inventory & Lenses](./features/inventory-and-lenses.md) — the unified inventory and its switchable lenses
+- [Networks, VLANs and IP addresses](./inventory/networks.md) — the prefix tree, utilisation, free space, VLANs, VRFs and Find
+- [Sites and locations](./inventory/sites.md) — regions, site groups, sites and the locations inside them; placing assets; the site page
+- [Racks and placement](./inventory/racks.md) — racks, rack types and reservations; placing an asset at a unit and face; the placement rules
+- [Cabling](./inventory/cabling.md) — cables, the faceplate, port traces, and LLDP/CDP proposals you approve
+- [Circuits](./inventory/circuits.md) — providers, circuits and their terminations
+- [Virtualization](./inventory/virtualization.md) — clusters, hosts, virtual machines and disks
+- [VPN](./inventory/vpn.md) — tunnels and the IKE and IPsec policies behind them
+- [Wireless](./inventory/wireless.md) — wireless LANs and links
+- [Custom fields](./inventory/custom-fields.md) — your own validated fields on objects
+- [Config contexts](./inventory/config-contexts.md) — JSON merged per asset
+- [Saved filters and export templates](./inventory/saved-filters-and-export-templates.md)
+- [Changes and journal](./inventory/changes-and-journal.md) — who changed what, and dated notes
+- [Business Units](./inventory/business-units.md) — nested owners on assets and prefixes
+- [Contacts](./inventory/contacts.md) — contacts, roles, assignments and image attachments
+- [Bulk import and export](./inventory/import-export.md) — CSV import with dry run and CSV export for every infrastructure object
 - [Asset Classes & Identification Rules](./features/asset-classes.md) — the class taxonomy, identifier precedence, and the auto-accept threshold
 - [Asset Approval](./features/asset-approval.md)
 - [Asset Lifecycle Management](./features/asset-lifecycle-management.md)
@@ -55,6 +70,8 @@ The core surfaces, in the order a tenant meets them:
 - [Global Search](./features/global-search.md) — the ⌘K quick-find palette
 - [The Map](./features/map.md) — two views: the neighbourhood graph around one asset (with the impact overlay and GraphML/Cytoscape export) and the tenant-wide topology tree
 - [Relationships](./features/relationships.md) — how assets are connected, and what breaks if one changes
+- [Interfaces](./inventory/interfaces.md) — an asset's physical and virtual interfaces, LAGs and VLAN modes
+- [Device types](./inventory/device-types.md) — the hardware catalogue, importing from the device-type library, and applying a type's interfaces to an asset
 - [Findings](./features/findings.md) — what a finding is, who produces them, and what "open" means
 - [Remediation](./features/remediation.md) — Alerts, the ticket Queue, and migration Plans
 

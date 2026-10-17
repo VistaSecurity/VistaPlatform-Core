@@ -51,7 +51,7 @@ export function ScopesPage({ meta }: { meta: SettingsNavItem }) {
 
   return (
     <SPage
-      eyebrow="Policies" title="Scopes" job={meta.job}
+      eyebrow="Risk & Compliance" title="Scopes" job={meta.job}
       actions={
         <PermissionGate permission={TENANT_PERMISSIONS.compliance.update}>
           <button className="ui-btn sm accent" onClick={() => setModal({ kind: 'create' })}><Icon name="plus" size={14} />New scope</button>

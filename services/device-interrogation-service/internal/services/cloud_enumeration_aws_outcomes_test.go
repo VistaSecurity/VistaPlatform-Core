@@ -18,8 +18,9 @@ import (
 // job shows. The REAL enumerateAWS runs the REAL SDK paginators against a
 // local EC2 query-API fake.
 //
-// MUTATION-VERIFIED: drop the outcomes.Attempt call after ListInstances and
-// the refusal is invisible again (no ec2_instances outcome).
+// MUTATION-VERIFIED: drop the outcomes.Attempt call after
+// ListInstancesWithTerminated and the refusal is invisible again (no
+// compute_instances outcome, no eu-west-1 row in the grid).
 func TestEnumerateAWS_MissingDescribePermissionIsRecorded(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -43,6 +44,12 @@ func TestEnumerateAWS_MissingDescribePermissionIsRecorded(t *testing.T) {
 			_, _ = w.Write([]byte(`<DescribeSubnetsResponse ` + ns + `><requestId>r</requestId><subnetSet/></DescribeSubnetsResponse>`))
 		case "DescribeSecurityGroups":
 			_, _ = w.Write([]byte(`<DescribeSecurityGroupsResponse ` + ns + `><requestId>r</requestId><securityGroupInfo/></DescribeSecurityGroupsResponse>`))
+		case "DescribeRegions":
+			_, _ = w.Write([]byte(`<DescribeRegionsResponse ` + ns + `><requestId>r</requestId><regionInfo>` +
+				`<item><regionName>us-east-1</regionName><optInStatus>opt-in-not-required</optInStatus></item>` +
+				`<item><regionName>eu-west-1</regionName><optInStatus>opt-in-not-required</optInStatus></item>` +
+				`<item><regionName>af-south-1</regionName><optInStatus>not-opted-in</optInStatus></item>` +
+				`</regionInfo></DescribeRegionsResponse>`))
 		case "DescribeInstances":
 			_, _ = w.Write([]byte(`<DescribeInstancesResponse ` + ns + `><requestId>r</requestId><reservationSet/></DescribeInstancesResponse>`))
 		default:
@@ -59,14 +66,21 @@ func TestEnumerateAWS_MissingDescribePermissionIsRecorded(t *testing.T) {
 	}
 	client := awsclient.NewClientFromConfig(cfg, "123456789012", "us-east-1")
 
-	rec := NewCloudOutcomeRecorder([]string{"kms"})
-	if _, err := (&CloudDiscoveryService{}).enumerateAWS(WithCloudOutcomes(context.Background(), rec), client, []string{"us-east-1", "eu-west-1"}); err != nil {
+	rec := NewCloudOutcomeRecorder([]string{"kms", CloudTypeComputeInstances})
+	ctx := WithCloudOutcomes(context.Background(), rec)
+	// The regions come from the account, not from the request (ADR-0009 D3):
+	// the opted-out region is not read.
+	regions := discoverRegionsWith(ctx, client.EC2ClientForRegion("us-east-1"), "us-east-1")
+	if strings.Join(regions, ",") != "eu-west-1,us-east-1" {
+		t.Fatalf("discovered regions = %v, want the two enabled ones", regions)
+	}
+	if _, err := (&CloudDiscoveryService{}).enumerateAWS(ctx, client, regions, selectEnumeration([]string{CloudTypeComputeInstances})); err != nil {
 		t.Fatalf("enumerateAWS: %v", err)
 	}
 
 	var instances *CloudResourceTypeOutcome
 	for _, o := range rec.Outcomes() {
-		if o.ResourceType == EnumTypeAWSInstances {
+		if o.ResourceType == CloudTypeComputeInstances {
 			o := o
 			instances = &o
 		}
@@ -75,7 +89,24 @@ func TestEnumerateAWS_MissingDescribePermissionIsRecorded(t *testing.T) {
 		t.Fatal("a refused DescribeInstances left no outcome — the job would read as 'no instances'")
 	}
 	if instances.Status != CloudTypePartial || instances.ScopesSucceeded != 1 || instances.ScopesAttempted != 2 {
-		t.Errorf("ec2_instances = %+v, want partial, 1 of 2 regions", *instances)
+		t.Errorf("compute_instances = %+v, want partial, 1 of 2 regions", *instances)
+	}
+	// The grid: one row per region, the refused one failed with the
+	// provider's code, the other succeeded with its (zero) count.
+	rows := map[string]CloudRegionOutcome{}
+	for _, row := range instances.Regions {
+		rows[row.Region] = row
+	}
+	if r := rows["eu-west-1"]; r.Status != CloudTypeFailed || r.Failure == nil || r.Failure.Code != "UnauthorizedOperation" {
+		t.Errorf("eu-west-1 row = %+v, want failed / UnauthorizedOperation", r)
+	}
+	if r := rows["us-east-1"]; r.Status != CloudTypeSucceeded || r.Found != 0 {
+		t.Errorf("us-east-1 row = %+v, want succeeded with 0", r)
+	}
+	// Coverage: only the region that answered completely may later be read
+	// as proof that a resource is gone.
+	if got := strings.Join(rec.Covered(), ","); !strings.Contains(got, "compute_instances@us-east-1") || strings.Contains(got, "compute_instances@eu-west-1") {
+		t.Errorf("covered = %q, want us-east-1 and not eu-west-1", got)
 	}
 	if len(instances.Failures) != 1 || instances.Failures[0].Scope != "eu-west-1" ||
 		instances.Failures[0].Code != "UnauthorizedOperation" || instances.Failures[0].Reason != CloudFailureAccessDenied {

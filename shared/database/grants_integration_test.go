@@ -225,7 +225,7 @@ func assertSchemaGrants(t *testing.T, fresh *sql.DB, after string) {
 		  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		 WHERE n.nspname IN ('public','audit') AND c.relkind IN ('v','m')
 		   AND NOT has_table_privilege('crypto_app', c.oid, 'SELECT')
-		   AND c.relname NOT IN ('mv_location_finding_summary','mv_remediation_queue','tenant_cost_summary')
+		   AND c.relname NOT IN ('mv_site_finding_summary','mv_remediation_queue','tenant_cost_summary')
 		 ORDER BY 1`)
 
 	// The deliberate narrowings must have SURVIVED the relocated blanket grant —
@@ -233,7 +233,7 @@ func assertSchemaGrants(t *testing.T, fresh *sql.DB, after string) {
 	assertNone(t, fresh, after, "cross-tenant matviews still readable by crypto_app", `
 		SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		 WHERE n.nspname = 'public'
-		   AND c.relname IN ('mv_location_finding_summary','mv_remediation_queue','tenant_cost_summary')
+		   AND c.relname IN ('mv_site_finding_summary','mv_remediation_queue','tenant_cost_summary')
 		   AND has_table_privilege('crypto_app', c.oid, 'SELECT')
 		 ORDER BY 1`)
 
@@ -242,9 +242,9 @@ func assertSchemaGrants(t *testing.T, fresh *sql.DB, after string) {
 	assertNone(t, fresh, after, "expected grants missing after the narrowing REVOKEs", `
 		SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		 WHERE n.nspname = 'public' AND (
-		       (c.relname IN ('mv_location_finding_summary_tenant','mv_remediation_queue_tenant')
+		       (c.relname IN ('mv_site_finding_summary_tenant','mv_remediation_queue_tenant')
 		        AND NOT has_table_privilege('crypto_app', c.oid, 'SELECT'))
-		    OR (c.relname IN ('mv_location_finding_summary','mv_remediation_queue','tenant_cost_summary')
+		    OR (c.relname IN ('mv_site_finding_summary','mv_remediation_queue','tenant_cost_summary')
 		        AND NOT has_table_privilege('crypto_bypass', c.oid, 'SELECT')))
 		 ORDER BY 1`)
 }

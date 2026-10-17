@@ -2,7 +2,7 @@ package services
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
 	"github.com/google/uuid"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
@@ -17,34 +17,29 @@ func TestIntegration_UniFiExistingDHCPAndPreparationFailure(t *testing.T) {
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
 	var segment string
-	if err := db.QueryRow(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata) VALUES($1,'Operator LAN','cidr','192.0.2.0/24','private','production',true,'{"operator":"keep"}') RETURNING id`, tenant).Scan(&segment); err != nil {
+	if err := db.QueryRow(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,source_kind,status) VALUES($1,'Operator LAN','192.0.2.0/24'::cidr,'private','production','declared','active') RETURNING id`, tenant).Scan(&segment); err != nil {
 		t.Fatal(err)
 	}
 	sink := NewObservationSink(db)
 	ctx := context.Background()
 	vlans := []map[string]any{{"subnet": "192.0.2.1/24", "name": "Controller LAN", "dhcp_enabled": true}}
-	if err := sink.ensureVLANSegments(ctx, tenant, uuid.New(), vlans); err != nil {
+	if err := sink.ensureVLANPrefixes(ctx, tenant, uuid.New(), vlans); err != nil {
 		t.Fatal(err)
 	}
-	var name, metadata string
-	if err := db.QueryRow(`SELECT name,metadata::text FROM network_segments WHERE id=$1`, segment).Scan(&name, &metadata); err != nil {
+	var name string
+	var dhcp sql.NullBool
+	if err := db.QueryRow(`SELECT description, dhcp_managed FROM prefixes WHERE id=$1`, segment).Scan(&name, &dhcp); err != nil {
 		t.Fatal(err)
 	}
-	// The operator's segment keeps its name and its own metadata — and, since
-	//learns what the controller MEASURED about DHCP on it. Before, it
-	// stayed silent and addresses kept deciding identity on a DHCP network.
-	if name != "Operator LAN" || !strings.Contains(metadata, "keep") {
-		t.Fatalf("operator segment overwritten: %s %s", name, metadata)
+	// The operator's prefix keeps its description — and, since, learns
+	// what the controller MEASURED about DHCP on it where nobody had said.
+	// Before, it stayed silent and addresses kept deciding identity on a DHCP
+	// network.
+	if name != "Operator LAN" {
+		t.Fatalf("operator prefix overwritten: %s", name)
 	}
-	var meta map[string]any
-	if err := json.Unmarshal([]byte(metadata), &meta); err != nil {
-		t.Fatal(err)
-	}
-	if meta["dynamic"] != true || meta["dynamic_source"] != "measured" {
-		t.Fatalf("the controller's answer did not reach the operator-declared segment: %s", metadata)
-	}
-	if ev, _ := meta["dynamic_evidence"].(map[string]any); ev["observed_at"] == nil || ev["source_asset_id"] == nil {
-		t.Fatalf("a measurement carries no evidence of where it came from: %s", metadata)
+	if !dhcp.Valid || !dhcp.Bool {
+		t.Fatalf("the controller's answer did not reach the operator-declared prefix: %v", dhcp)
 	}
 	// The posture the controller measured is now the segment's STORED
 	// posture, which is all Intake reads ( item 7: no per-run overlay).
@@ -68,7 +63,7 @@ func TestIntegration_UniFiLeaseReuseDoesNotJoinClients(t *testing.T) {
 	db := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, db)
 	tenant := testdb.NewTenant(t, db)
-	if _, err := db.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active) VALUES($1,'Existing LAN','cidr','192.0.2.0/24','private','production',true)`, tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,source_kind,status) VALUES($1,'Existing LAN','192.0.2.0/24'::cidr,'private','production','declared','active')`, tenant); err != nil {
 		t.Fatal(err)
 	}
 	sink := NewObservationSink(db)

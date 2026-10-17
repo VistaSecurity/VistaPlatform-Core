@@ -180,9 +180,10 @@ describe('resourceTypeLabel', () => {
     }
   });
 
-  it('names the AWS account-enumeration calls a run reports', () => {
-    expect(resourceTypeLabel('ec2_instances')).toBe('EC2 instances');
-    expect(resourceTypeLabel('vpcs')).toBe('VPCs');
+  it('names the account inventory listings a run reports', () => {
+    expect(resourceTypeLabel('compute_instances')).toBe('Compute instances');
+    expect(resourceTypeLabel('networks')).toBe('Networks (prefixes)');
+    expect(resourceTypeLabel('region_discovery')).toBe('Region discovery');
   });
 });
 

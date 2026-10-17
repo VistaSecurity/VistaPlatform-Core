@@ -1076,7 +1076,7 @@ export interface components {
             reported_dns_interfaces?: string[];
             /** @description Supported commands reported by the current sensor binary in its authenticated heartbeat. Missing reports clear prior capabilities. */
             reported_capabilities?: string[];
-            /** @description Full host NIC inventory the sensor reports in its heartbeat; populates the UI interface picker. Distinct from network_interfaces (the monitored subset). */
+            /** @description Full host interface inventory the sensor reports in its heartbeat; populates the UI interface picker. Distinct from network_interfaces (the monitored subset). */
             available_interfaces: string[] | null;
             tags: string[] | null;
             ip_address: string | null;
@@ -1102,7 +1102,7 @@ export interface components {
             /**
              * @description Every IP the sensor host reported, with its prefix. Present on the
              *     single-sensor read only (the list endpoint omits it). A capture host
-             *     is often multi-homed and watching several segments at once, which
+             *     is often multi-homed and watching several networks at once, which
              *     `ip_address` — the primary, i.e. the address the host reaches the
              *     platform from — cannot express on its own.
              */

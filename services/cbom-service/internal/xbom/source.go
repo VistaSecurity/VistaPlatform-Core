@@ -13,6 +13,7 @@ import (
 
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
 	sharedfindings "github.com/vistasecurity/vistaplatform/shared/findings"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // Source reads the inventory tables an xBOM is assembled from.
@@ -110,8 +111,8 @@ func (s *Source) loadAssets(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID,
 		       ), ''),
 		       COALESCE(display_name, ''), COALESCE(hostname, ''),
 		       COALESCE(host(primary_address), ''),
-		       COALESCE(environment::text, ''), COALESCE(business_unit, ''),
-		       COALESCE(owner_email, ''), COALESCE(site, ''),
+		       COALESCE(environment::text, ''), COALESCE((SELECT bu.name FROM public.business_units bu WHERE bu.id = assets.business_unit_id), ''),
+		       COALESCE(owner_email, ''), COALESCE((SELECT st.name FROM public.sites st WHERE st.id = assets.site_id), ''),
 		       COALESCE(region, ''), COALESCE(zone, ''),
 		       asset_status, asset_ownership, risk_score,
 		       (COALESCE(cardinality(risk_assessed_by), 0) > 0 OR risk_score > 0),
@@ -150,7 +151,7 @@ func (s *Source) loadAssets(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID,
 func (s *Source) loadIdentifiers(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, ids interface{}, snap *Snapshot) error {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT asset_id, kind, value, COALESCE(scope, '')
-		FROM public.asset_identifiers
+		FROM (`+identifiersql.All+`) ai
 		WHERE tenant_id = $1 AND asset_id = ANY($2)
 		ORDER BY asset_id, kind, value, COALESCE(scope, '')
 	`, tenantID, ids)

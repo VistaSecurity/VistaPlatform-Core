@@ -3,6 +3,7 @@
 import { useQuery } from '@tanstack/react-query';
 import type { complianceEnginePaths } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
+import { businessUnitName } from '../inventory/asset-shape';
 import type { ComplianceFinding, CryptoRisk } from './model';
 import { unwrap } from '../../lib/api-result';
 
@@ -281,7 +282,7 @@ export function useAssetFacts(enabled = true) {
           map.set(String(rec.id), {
             hostname: (rec.hostname as string) || '—',
             environment: (rec.environment as string) || 'unspecified',
-            businessUnit: (rec.business_unit as string) || 'Unassigned',
+            businessUnit: businessUnitName(rec.business_unit) || 'Unassigned',
             assetType: (rec.asset_type as string) || 'unknown',
             riskScore: typeof rec.risk_score === 'number' ? rec.risk_score : 0,
           });

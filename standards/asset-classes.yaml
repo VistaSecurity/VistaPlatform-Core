@@ -151,9 +151,11 @@ classes:
         model:
           type: string
           description: Manufacturer model designation.
-        asset_tag:
-          type: string
-          description: Organisation's own inventory tag, if one is affixed.
+        # `asset_tag` was an attribute here until DCIM row 2.2 promoted it to
+        # the `assets.asset_tag` column (with `assets.serial`): racks, modules
+        # and inventory items carry both uniformly and the NetBox sync keys on
+        # them. `vendor` and `model` stay: they are what a collector reported;
+        # the catalogue link is `assets.device_type_id`.
 
   - key: computer
     parent: hardware
@@ -714,27 +716,9 @@ classes:
           type: string
           description: Orchestrator namespace the container runs in.
 
-  - key: cluster
-    parent: virtual
-    label: Cluster
-    description: A group of nodes managed as one scheduling or failover unit.
-    icon: Boxes
-    cmdb_ci_type: cmdb_ci_cluster
-    cyclonedx_type: platform
-    legacy_asset_type: service
-    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn, hostname]
-    attribute_schema:
-      type: object
-      properties:
-        orchestrator:
-          type: string
-          description: Cluster technology, e.g. kubernetes, vsphere, nomad.
-        orchestrator_version:
-          type: string
-          description: Version of that technology.
-        node_count:
-          type: integer
-          description: Member nodes reported by the cluster.
+  # `cluster` was a leaf here until DCIM row 4.2 (ADR-0010 D8): a cluster is
+  # the `clusters` object (Inventory → Clusters), never an asset. Hypervisors
+  # join one through cluster_hosts and VMs through assets.cluster_id.
 
   - key: hypervisor
     parent: virtual
@@ -782,6 +766,14 @@ classes:
         region:
           type: string
           description: Provider region.
+        provider_type:
+          type: string
+          description: >-
+            The provider's own type string for the resource, e.g.
+            AWS::EC2::Instance, Microsoft.Compute/virtualMachines,
+            compute.googleapis.com/Instance — the key of the class's
+            `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query
+            language.
         # NB: the provider-native resource id (ARN, Azure resource id, GCP
         # self-link) is deliberately NOT an attribute here. It is the
         # `cloud_resource_id` identifier kind and belongs in asset_identifiers,
@@ -801,6 +793,14 @@ classes:
     identifier_precedence:
       [agent_id, sensor_id, cloud_resource_id, cmdb_sys_id, ssh_host_key_fingerprint,
        fqdn, hostname, ip_address]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::EC2::Instance", provider: aws, aliases: [aws_ec2_instance, ec2] }
+      - { type: "Microsoft.Compute/virtualMachines", provider: azure, aliases: [azure_vm] }
+      - { type: "compute.googleapis.com/Instance", provider: gcp, aliases: [gcp_compute_instance] }
+    resource_type_aliases: [instance, compute_instance, virtual_machine, vm]
     attribute_schema:
       type: object
       properties:
@@ -816,6 +816,14 @@ classes:
         os_version:
           type: string
           description: Guest OS version string.
+        nat_outside_addresses:
+          type: array
+          items:
+            type: string
+          description: >-
+            Public addresses the provider translates onto this instance's
+            private ones (the NAT-outside side), as the provider states them.
+            The private side is an ip_address on the instance's ENI interface.
 
   - key: managed_database
     parent: cloud_resource
@@ -826,6 +834,14 @@ classes:
     cyclonedx_type: application
     legacy_asset_type: service
     identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::RDS::DBInstance", provider: aws, aliases: [aws_rds_instance, rds, rds_instance] }
+      - { type: "Microsoft.Sql/servers/databases", provider: azure, aliases: [azure_sql_database, sql_database] }
+      - { type: "sqladmin.googleapis.com/Instance", provider: gcp, aliases: [gcp_cloudsql_instance, cloudsql_instance] }
+    resource_type_aliases: [database, managed_database, db_instance]
     attribute_schema:
       type: object
       properties:
@@ -847,6 +863,14 @@ classes:
     cyclonedx_type: data
     legacy_asset_type: service
     identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::S3::Bucket", provider: aws, aliases: [aws_s3_bucket, s3, s3_bucket] }
+      - { type: "Microsoft.Storage/storageAccounts", provider: azure, aliases: [azure_storage_account, storage_account] }
+      - { type: "storage.googleapis.com/Bucket", provider: gcp, aliases: [gcp_storage_bucket, gcs_bucket] }
+    resource_type_aliases: [bucket, object_storage, blob, storage_bucket]
     attribute_schema:
       type: object
       properties:
@@ -870,6 +894,14 @@ classes:
     cyclonedx_type: platform
     legacy_asset_type: service
     identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::KMS::Key", provider: aws, aliases: [aws_kms, kms] }
+      - { type: "Microsoft.KeyVault/vaults/keys", provider: azure, aliases: [azure_keyvault_key] }
+      - { type: "cloudkms.googleapis.com/CryptoKey", provider: gcp, aliases: [gcp_kms_crypto_key, crypto_key] }
+    resource_type_aliases: [key_vault, keyvault, key_store, keyring]
     attribute_schema:
       type: object
       properties:
@@ -893,6 +925,17 @@ classes:
     cyclonedx_type: platform
     legacy_asset_type: appliance
     identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::ElasticLoadBalancingV2::LoadBalancer", provider: aws, aliases: [aws_alb, aws_nlb, alb, nlb] }
+      - { type: "AWS::ElasticLoadBalancing::LoadBalancer", provider: aws, aliases: [aws_elb, elb] }
+      - { type: "Microsoft.Network/applicationGateways", provider: azure, aliases: [azure_application_gateway, application_gateway] }
+      - { type: "Microsoft.Network/loadBalancers", provider: azure, aliases: [azure_load_balancer] }
+      - { type: "compute.googleapis.com/TargetHttpsProxy", provider: gcp, aliases: [gcp_https_load_balancer] }
+      - { type: "compute.googleapis.com/TargetSslProxy", provider: gcp, aliases: [gcp_ssl_proxy, ssl_proxy] }
+    resource_type_aliases: [load_balancer, cloud_load_balancer]
     attribute_schema:
       type: object
       properties:
@@ -916,6 +959,12 @@ classes:
     cyclonedx_type: application
     legacy_asset_type: service
     identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::ApiGatewayV2::Api", provider: aws, aliases: [aws_api_gateway] }
+    resource_type_aliases: [api_gateway, apigateway]
     attribute_schema:
       type: object
       properties:
@@ -935,6 +984,12 @@ classes:
     cyclonedx_type: platform
     legacy_asset_type: service
     identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::CloudFront::Distribution", provider: aws, aliases: [aws_cloudfront, cloudfront] }
+    resource_type_aliases: [cdn, cdn_distribution]
     attribute_schema:
       type: object
       properties:
@@ -953,6 +1008,14 @@ classes:
     cyclonedx_type: application
     legacy_asset_type: service
     identifier_precedence: [cloud_resource_id, cmdb_sys_id]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::Lambda::Function", provider: aws, aliases: [aws_lambda_function, lambda] }
+      - { type: "Microsoft.Web/sites", provider: azure, aliases: [azure_function_app] }
+      - { type: "cloudfunctions.googleapis.com/Function", provider: gcp, aliases: [gcp_cloud_function] }
+    resource_type_aliases: [function, serverless_function]
     attribute_schema:
       type: object
       properties:
@@ -965,48 +1028,199 @@ classes:
         memory_mb:
           type: integer
           description: Configured memory in mebibytes.
-
-  - key: virtual_network
-    parent: cloud_resource
-    label: Virtual network
-    description: >-
-      A provider-managed network (VPC, VNet). CycloneDX has no network
-      component type, so it is emitted as `platform`.
-    icon: Waypoints
-    cmdb_ci_type: cmdb_ci_network
-    cyclonedx_type: platform
-    legacy_asset_type: service
-    identifier_precedence: [cloud_resource_id, cmdb_sys_id]
-    attribute_schema:
-      type: object
-      properties:
-        cidr_blocks:
+        handler:
+          type: string
+          description: Entry point the provider invokes, e.g. index.handler.
+        environment_variable_names:
           type: array
           items:
             type: string
-          description: CIDR blocks assigned to the network.
+          description: >-
+            The NAMES of the function's environment variables — never their
+            values, which routinely hold credentials. The value is never
+            persisted anywhere (the collector projects names only).
+        role_names:
+          type: array
+          items:
+            type: string
+          description: >-
+            Names of the identities the function runs as (AWS execution role,
+            Azure managed identity, GCP service account) — names only, never
+            a credential.
 
-  - key: subnet
+  - key: container_cluster
     parent: cloud_resource
-    label: Subnet
-    description: A subdivision of a virtual network.
-    icon: Share2
-    cmdb_ci_type: cmdb_ci_ip_network
+    label: Container cluster
+    description: >-
+      A provider-managed Kubernetes control plane (EKS, AKS, GKE). Holds the
+      next generation of workloads; inventoried by its own resource id, never
+      by the nodes' addresses (ADR-0009 D2 Tier 1).
+    icon: Container
+    cmdb_ci_type: cmdb_ci_kubernetes_cluster
     cyclonedx_type: platform
     legacy_asset_type: service
-    identifier_precedence: [cloud_resource_id, cmdb_sys_id]
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::EKS::Cluster", provider: aws, aliases: [aws_eks_cluster, eks] }
+      - { type: "Microsoft.ContainerService/managedClusters", provider: azure, aliases: [azure_aks_cluster, aks] }
+      - { type: "container.googleapis.com/Cluster", provider: gcp, aliases: [gcp_gke_cluster, gke] }
+    resource_type_aliases: [container_cluster, kubernetes_cluster]
     attribute_schema:
       type: object
       properties:
-        cidr_block:
+        kubernetes_version:
           type: string
-          description: CIDR block of the subnet.
-        availability_zone:
+          description: Control-plane Kubernetes version the provider reports.
+        endpoint_access:
           type: string
-          description: Provider availability zone.
-        is_public:
+          enum: [public, private, public_and_private, unknown]
+          description: Whether the API server endpoint is reachable from the internet.
+
+  - key: secret_store
+    parent: cloud_resource
+    label: Secret store
+    description: >-
+      A stored secret in a provider's secrets manager (AWS Secrets Manager,
+      Azure Key Vault secrets, GCP Secret Manager). Its posture — rotation,
+      the key that encrypts it — is inventoried; the secret value never is.
+    icon: Lock
+    cmdb_ci_type: null
+    cyclonedx_type: data
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::SecretsManager::Secret", provider: aws, aliases: [aws_secretsmanager_secret, secretsmanager] }
+      - { type: "Microsoft.KeyVault/vaults/secrets", provider: azure, aliases: [azure_keyvault_secret] }
+      - { type: "secretmanager.googleapis.com/Secret", provider: gcp, aliases: [gcp_secret] }
+    resource_type_aliases: [secret_store, secret]
+    attribute_schema:
+      type: object
+      properties:
+        rotation_enabled:
           type: boolean
-          description: Whether the subnet routes to an internet gateway.
+          description: Whether the provider rotates the secret on a schedule.
+        last_rotated_at:
+          type: string
+          description: When the provider last rotated it (RFC 3339), when it says.
+        encryption_key_ref:
+          type: string
+          description: >-
+            The provider's reference to the key that encrypts the secret (a KMS
+            key ARN, a Key Vault key, a Cloud KMS key name), or empty for the
+            provider's own default key.
+
+  - key: dns_zone
+    parent: cloud_resource
+    label: DNS zone
+    description: >-
+      A provider-hosted DNS zone (Route 53 hosted zone, Azure DNS zone, Cloud
+      DNS managed zone). Zones name the services certificates are issued for,
+      so a zone carries the inventory's certificate names under it as an
+      attribute.
+    icon: Globe
+    cmdb_ci_type: null
+    cyclonedx_type: platform
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::Route53::HostedZone", provider: aws, aliases: [aws_route53_hosted_zone, route53] }
+      - { type: "Microsoft.Network/dnszones", provider: azure, aliases: [azure_dns_zone] }
+      - { type: "dns.googleapis.com/ManagedZone", provider: gcp, aliases: [gcp_dns_managed_zone] }
+    resource_type_aliases: [dns_zone, hosted_zone]
+    attribute_schema:
+      type: object
+      properties:
+        zone_name:
+          type: string
+          description: The zone's domain, e.g. example.com.
+        visibility:
+          type: string
+          enum: [public, private, unknown]
+          description: Whether the zone answers on the internet or only inside networks.
+        record_count:
+          type: integer
+          description: Number of record sets the provider reports.
+        certificate_names:
+          type: array
+          items:
+            type: string
+          description: >-
+            Names (subject CN / SAN) of certificates in this tenant's inventory
+            that fall under the zone, bounded. A cross-reference, not a link:
+            the certificate rows stay where they are.
+
+  - key: security_group
+    parent: cloud_resource
+    label: Security group
+    description: >-
+      A provider security group, network security group or firewall rule set
+      (ADR-0009 D2, D4): the exposure boundary resources are members of
+      (`member_of`). Membership and identity only — the rules are never
+      collected.
+    icon: ShieldCheck
+    cmdb_ci_type: null
+    cyclonedx_type: platform
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id, cmdb_sys_id]
+    # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
+    # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
+    # own spellings (device types `<provider>_*`, resource types otherwise).
+    provider_types:
+      - { type: "AWS::EC2::SecurityGroup", provider: aws, aliases: [aws_security_group] }
+      - { type: "Microsoft.Network/networkSecurityGroups", provider: azure, aliases: [azure_network_security_group, nsg] }
+      - { type: "compute.googleapis.com/Firewall", provider: gcp, aliases: [gcp_firewall] }
+    resource_type_aliases: [security_group]
+    attribute_schema:
+      type: object
+      properties:
+        network_ref:
+          type: string
+          description: >-
+            The provider id of the network the group belongs to (a VPC ARN, a
+            GCP network), when it belongs to one.
+
+  # `virtual_network` and `subnet` were fixed leaves here until DCIM row 1.5f
+  # (asset-inventory ADR-0009 amendment: a VPC / VNet / GCP
+  # network is a container prefix and its subnets are prefixes in IPAM, each
+  # with `cloud_network_ref`; an instance's private address is an ip_address
+  # on its ENI interface. A network is an address space, not a configuration
+  # item, so neither is an asset class any more.
+
+  - key: cloud_account
+    parent: cloud_resource
+    label: Cloud Account
+    description: >-
+      The account, subscription or project a tenant connected through a cloud
+      integration (ADR-0009 D1). Declared, never discovered: it exists because
+      a person added an integration for it, and every resource read through
+      that account hangs off it with a `hosted_on` edge. `provider` and
+      `account_id` are inherited from cloud_resource.
+    icon: Cloud
+    cmdb_ci_type: cmdb_ci_cloud_service_account
+    cyclonedx_type: platform
+    legacy_asset_type: service
+    identifier_precedence: [cloud_resource_id]
+    attribute_schema:
+      type: object
+      properties:
+        # The name the integration gives the account is the asset's own
+        # display_name, not an attribute: the generator reserves that name
+        # (it is the assets.display_name column, and a second home for it
+        # would need a rule for which wins).
+        integration_ids:
+          type: array
+          items:
+            type: string
+          description: The cloud integrations that read this account; several may.
 
   # === application =========================================================
   - key: application

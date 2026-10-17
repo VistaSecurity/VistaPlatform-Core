@@ -1,10 +1,11 @@
 // Import-from-spreadsheet wizard. Upload a CSV/XLSX, map its columns to
-// asset or network-segment fields, validate client-side, then bulk-create via
-// the inventory-service /bulk endpoints. Two targets share one wizard:
-//   - "segments" → POST /network-segments/bulk  (scan targets)
+// asset or prefix fields, validate client-side, then create the rows. Two
+// targets share one wizard:
+//   - "prefixes" → POST /ipam/prefixes, one row at a time (DCIM row 1.6: the
+//                  tenant's networks are IPAM prefixes)
 //   - "assets"   → POST /infrastructure-assets/bulk  (CI records)
 // Launched from the Discovery command center (both targets) and from
-// Settings → Network Segments (locked to "segments").
+// Inventory (locked to "assets").
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
@@ -16,10 +17,10 @@ import { Modal, ModalField, ModalSelect, Icon } from '../../components/ui';
 import { unwrap } from '../../lib/api-result';
 
 type AssetInput = inventoryComponents['schemas']['AssetInput'];
-type NetworkSegmentInput = inventoryComponents['schemas']['NetworkSegmentInput'];
+type PrefixCreateInput = inventoryComponents['schemas']['PrefixCreateInput'];
 type BulkImportResult = inventoryComponents['schemas']['BulkImportResult'];
 
-export type ImportTarget = 'assets' | 'segments';
+export type ImportTarget = 'assets' | 'prefixes';
 
 type Phase = 'type' | 'upload' | 'map' | 'preview' | 'result';
 
@@ -83,6 +84,12 @@ export const ASSET_FIELDS: FieldSpec[] = [
   },
   { key: 'mac_address', label: 'MAC address (identifier)', identifier: true, guess: ['mac address', 'mac addr', 'macaddress', 'mac', 'hardware address'] },
   { key: 'serial_number', label: 'Serial number (identifier)', identifier: true, guess: ['serial number', 'serial no', 'serialnumber', 'serial', 'sn', 'service tag'] },
+  // The interface the row's IP and MAC are on (DCIM row 1.5f). Guessed BEFORE
+  // `display_name` for the same reason the identifiers are: its `name` guess
+  // would otherwise swallow an "Interface Name" column.
+  { key: 'interface', label: 'Interface name', guess: ['interface name', 'interface', 'port name'] },
+  { key: 'prefix_length', label: 'Prefix length', guess: ['prefix length', 'prefix_length', 'prefix len', 'mask length', 'masklen', 'netmask bits'] },
+  { key: 'vlan', label: 'VLAN', guess: ['vlan id', 'vlan', 'vid'] },
   { key: 'display_name', label: 'Display name', guess: ['display name', 'asset name', 'label', 'name'] },
   { key: 'environment', label: 'Environment', enumOptions: ['production', 'staging', 'development', 'test'], guess: ['environment', 'env', 'tier'] },
   { key: 'operating_system', label: 'Operating system', guess: ['operating system', 'os', 'platform'] },
@@ -92,15 +99,11 @@ export const ASSET_FIELDS: FieldSpec[] = [
   { key: 'description', label: 'Description', guess: ['description', 'notes', 'comment', 'desc'] },
 ];
 
-const SEGMENT_FIELDS: FieldSpec[] = [
-  { key: 'name', label: 'Name', required: true, guess: ['name', 'segment', 'label', 'description'] },
-  { key: 'value', label: 'Value (CIDR / range / domain)', required: true, guess: ['value', 'cidr', 'subnet', 'range', 'network', 'address', 'ip'] },
-  { key: 'segment_type', label: 'Segment type', required: true, enumOptions: ['cidr', 'ip_range', 'domain', 'cloud_vpc'], guess: ['segment type', 'segment_type', 'type'] },
-  { key: 'network_type', label: 'Network type', required: true, enumOptions: ['private', 'public', 'vpn', 'cloud'], guess: ['network type', 'network_type', 'network', 'scope'] },
+const PREFIX_FIELDS: FieldSpec[] = [
+  { key: 'prefix', label: 'Prefix (CIDR)', required: true, guess: ['prefix', 'cidr', 'network', 'range', 'address', 'ip'] },
+  { key: 'description', label: 'Description', guess: ['description', 'name', 'label', 'notes', 'comment'] },
+  { key: 'network_type', label: 'Network type', required: true, enumOptions: ['private', 'public', 'vpn', 'cloud'], guess: ['network type', 'network_type', 'scope'] },
   { key: 'environment', label: 'Environment', required: true, enumOptions: ['production', 'staging', 'development', 'test'], guess: ['environment', 'env', 'tier'] },
-  { key: 'business_unit', label: 'Business unit', guess: ['business unit', 'business_unit', 'bu', 'department', 'team'] },
-  { key: 'owner_email', label: 'Owner email', guess: ['owner email', 'owner', 'email', 'contact'] },
-  { key: 'description', label: 'Description', guess: ['description', 'notes', 'comment'] },
 ];
 
 export type Row = Record<string, unknown>;
@@ -157,6 +160,73 @@ function cellStr(v: unknown): string {
 
 const CIDR_RE = /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/;
 
+// The header row of the downloadable asset template. Every header auto-maps
+// onto its field (import-modal.assets.test.ts pins it).
+export const ASSET_TEMPLATE_HEADERS = [
+  'Class', 'Hostname', 'FQDN', 'IP address', 'Prefix length', 'MAC address', 'Interface', 'VLAN',
+  'Serial number', 'Display name', 'Environment', 'Operating system', 'Owner email', 'Description',
+];
+
+/** The asset import template: the header row and one example row. */
+export function assetTemplateCSV(): string {
+  const example = [
+    'server', 'app-01', 'app-01.example.com', '192.0.2.10', '24', 'b4:96:91:0a:00:01', 'eth0', '20',
+    'SN-0001', 'App server 01', 'production', 'Ubuntu 24.04', 'owner@example.com', 'Order service',
+  ];
+  return `${ASSET_TEMPLATE_HEADERS.join(',')}\n${example.join(',')}\n`;
+}
+
+type AssetInterfaceInput = inventoryComponents['schemas']['AssetInterfaceInput'];
+
+/** The interface a row declares, or undefined when it names none. A row with an
+ *  IP or MAC but no interface name still files them on an interface — the
+ *  platform names it — but a prefix length or VLAN has nowhere to go. */
+export function rowInterface(get: (key: string) => string): { iface?: AssetInterfaceInput; error: string | null } {
+  const name = get('interface');
+  const ip = get('ip_address');
+  const mac = get('mac_address');
+  const plen = get('prefix_length');
+  const vlan = get('vlan');
+  let prefixLength: number | undefined;
+  if (plen) {
+    prefixLength = Number(plen.replace(/^\//, ''));
+    if (!Number.isInteger(prefixLength) || prefixLength < 0 || prefixLength > 128) {
+      return { error: `“${plen}” is not a prefix length (0–128)` };
+    }
+  }
+  let vid: number | undefined;
+  if (vlan) {
+    vid = Number(vlan);
+    if (!Number.isInteger(vid) || vid < 1 || vid > 4094) return { error: `“${vlan}” is not a VLAN id (1–4094)` };
+  }
+  if (!name) return { error: null };
+  return {
+    iface: {
+      name,
+      mac_address: mac || undefined,
+      untagged_vlan: vid,
+      addresses: ip ? [{ address: ip, prefix_length: prefixLength }] : undefined,
+    },
+    error: null,
+  };
+}
+
+/** One line describing a row's interface for the preview. */
+export function describeRowInterface(a: AssetInput): string {
+  const ifc = a.interfaces?.[0];
+  if (ifc) {
+    const parts = [ifc.name];
+    const addr = ifc.addresses?.[0];
+    if (addr) parts.push(addr.prefix_length !== undefined ? `${addr.address}/${addr.prefix_length}` : addr.address);
+    if (ifc.untagged_vlan) parts.push(`VLAN ${ifc.untagged_vlan}`);
+    if (ifc.mac_address) parts.push(ifc.mac_address);
+    return parts.join(' · ');
+  }
+  const ids = a.identifiers ?? [];
+  if (ids.some((i) => i.kind === 'ip_address' || i.kind === 'mac_address')) return 'named by the platform';
+  return '—';
+}
+
 // Build a typed input object for one spreadsheet row from the column mapping and
 // enum defaults. Returns the object plus a per-row validation error (or null).
 export function buildAsset(row: Row, mapping: Record<string, string>, defaults: Record<string, string>): { input: AssetInput; error: string | null } {
@@ -183,10 +253,15 @@ export function buildAsset(row: Row, mapping: Record<string, string>, defaults: 
   const os = get('operating_system');
   if (os && classDeclaresOs(classKey)) attributes.operating_system = os;
 
+  // The row's interface (DCIM row 1.5f): its name, MAC, IP at its prefix
+  // length and its VLAN become a declared interface carrying the address.
+  const { iface, error: ifaceError } = rowInterface(get);
+
   const input: AssetInput = {
     class_key: classKey,
     display_name: displayName || undefined,
     identifiers: identifiers.length > 0 ? identifiers : undefined,
+    ...(iface ? { interfaces: [iface] } : {}),
     ...(Object.keys(attributes).length > 0 ? { attributes } : {}),
     environment: get('environment') || undefined,
     support_group: get('support_group') || undefined,
@@ -203,6 +278,8 @@ export function buildAsset(row: Row, mapping: Record<string, string>, defaults: 
     if (!displayName) error = 'a service needs a name';
   } else if (identifiers.length === 0) {
     error = 'at least one identifier is required (FQDN, hostname, IP, MAC or serial)';
+  } else if (ifaceError) {
+    error = ifaceError;
   }
   return { input, error };
 }
@@ -220,39 +297,57 @@ function isServiceClass(classKey: string): boolean {
   return !!cls && (cls.path === 'service' || cls.path.startsWith('service.'));
 }
 
-function buildSegment(row: Row, mapping: Record<string, string>, defaults: Record<string, string>): { input: NetworkSegmentInput; error: string | null } {
+function buildPrefix(row: Row, mapping: Record<string, string>, defaults: Record<string, string>): { input: PrefixCreateInput; error: string | null } {
   const get = (key: string) => {
     const col = mapping[key];
     const v = col ? cellStr(row[col]) : '';
     return v || defaults[key] || '';
   };
-  const name = get('name');
-  const value = get('value');
-  const segType = get('segment_type');
+  const prefix = get('prefix');
   const netType = get('network_type');
   const env = get('environment');
-  const input: NetworkSegmentInput = {
-    name,
-    value,
-    segment_type: segType,
-    network_type: netType,
-    environment: env,
-    business_unit: get('business_unit') || undefined,
-    owner_email: get('owner_email') || undefined,
-    description: get('description') || undefined,
+  const input: PrefixCreateInput = {
+    prefix,
+    description: get('description') || null,
+    network_type: netType || null,
+    environment: (env || null) as PrefixCreateInput['environment'],
   };
   let error: string | null = null;
-  if (!name) error = 'name is required';
-  else if (!value) error = 'value is required';
-  else if (!segType || !netType || !env) error = 'segment type, network type and environment are required';
-  else if (segType === 'cidr' && !CIDR_RE.test(value)) error = `"${value}" is not a valid CIDR`;
-  else if (segType === 'ip_range' && !value.includes('-')) error = `"${value}" is not an IP range (expected start-end)`;
+  if (!prefix) error = 'prefix is required';
+  else if (!netType || !env) error = 'network type and environment are required';
+  else if (!CIDR_RE.test(prefix) && !prefix.includes(':')) error = `"${prefix}" is not a valid CIDR`;
   return { input, error };
+}
+
+/** Creates the prefixes one at a time through the IPAM API — the route a
+ *  person's own create takes, so the change log, the approval rule and the
+ *  scan-scope checks behave exactly as for a prefix added in Inventory →
+ *  Networks. An identity conflict (the CIDR is already a prefix) is a skipped
+ *  row, not a failure. */
+async function importPrefixes(rows: PrefixCreateInput[]): Promise<BulkImportResult> {
+  const out: BulkImportResult = { created: 0, skipped: 0, failed: 0, results: [] };
+  for (const [index, body] of rows.entries()) {
+    const { data, error, response } = await clients.inventory.POST('/ipam/prefixes', { body });
+    if (data?.data?.id) {
+      out.created++;
+      out.results.push({ index, status: 'created', id: data.data.id });
+      continue;
+    }
+    const reason = (error as { error?: { message?: string } } | undefined)?.error?.message ?? `HTTP ${response.status}`;
+    if (response.status === 409) {
+      out.skipped++;
+      out.results.push({ index, status: 'skipped_duplicate', reason: 'This prefix already exists' });
+    } else {
+      out.failed++;
+      out.results.push({ index, status: 'error', reason });
+    }
+  }
+  return out;
 }
 
 const TARGET_LABEL: Record<ImportTarget, string> = {
   assets: 'infrastructure assets',
-  segments: 'network segments',
+  prefixes: 'prefixes',
 };
 
 export function ImportSpreadsheetModal({
@@ -268,7 +363,7 @@ export function ImportSpreadsheetModal({
   const fileRef = useRef<HTMLInputElement>(null);
 
   const [phase, setPhase] = useState<Phase>(lockedTarget ? 'upload' : 'type');
-  const [target, setTarget] = useState<ImportTarget>(lockedTarget ?? 'segments');
+  const [target, setTarget] = useState<ImportTarget>(lockedTarget ?? 'prefixes');
   const [fileName, setFileName] = useState('');
   const [columns, setColumns] = useState<string[]>([]);
   const [rows, setRows] = useState<Row[]>([]);
@@ -277,12 +372,12 @@ export function ImportSpreadsheetModal({
   const [parseErr, setParseErr] = useState<string | null>(null);
   const [result, setResult] = useState<BulkImportResult | null>(null);
 
-  const fields = target === 'assets' ? ASSET_FIELDS : SEGMENT_FIELDS;
+  const fields = target === 'assets' ? ASSET_FIELDS : PREFIX_FIELDS;
 
   useEffect(() => {
     if (open) {
       setPhase(lockedTarget ? 'upload' : 'type');
-      setTarget(lockedTarget ?? 'segments');
+      setTarget(lockedTarget ?? 'prefixes');
       setFileName('');
       setColumns([]);
       setRows([]);
@@ -374,7 +469,7 @@ export function ImportSpreadsheetModal({
     if (target === 'assets') {
       return rows.map((r) => buildAsset(r, mapping, defaults));
     }
-    return rows.map((r) => buildSegment(r, mapping, defaults));
+    return rows.map((r) => buildPrefix(r, mapping, defaults));
   }, [rows, mapping, defaults, target]);
 
   const validRows = built.filter((b) => !b.error);
@@ -393,17 +488,14 @@ export function ImportSpreadsheetModal({
         }), 'Import failed', { requireData: true });
         return data as BulkImportResult;
       }
-      const data = unwrap(await clients.inventory.POST('/network-segments/bulk', {
-        body: { rows: payloadRows as NetworkSegmentInput[] },
-      }), 'Import failed', { requireData: true });
-      return data as BulkImportResult;
+      return importPrefixes(payloadRows as PrefixCreateInput[]);
     },
     onSuccess: (data) => {
       setResult(data);
       setPhase('result');
       toast.success(`Imported ${data.created} ${TARGET_LABEL[target]}${data.unresolved ? `; retained ${data.unresolved} unresolved observations` : ''}`);
       void qc.invalidateQueries({ queryKey: ['inventory'] });
-      void qc.invalidateQueries({ queryKey: ['settings', 'network-segments'] });
+      void qc.invalidateQueries({ queryKey: ['ipam'] });
       void qc.invalidateQueries({ queryKey: ['discovery'] });
       void qc.invalidateQueries({ queryKey: ['identity-observations'] });
       void qc.invalidateQueries({ queryKey: ['identity-summary'] });
@@ -443,10 +535,10 @@ export function ImportSpreadsheetModal({
     secondary = <button className="ui-btn" onClick={() => setPhase('upload')}>Back</button>;
   } else if (phase === 'preview') {
     // The submit permission follows the target's route, not the wizard:
-    // POST /infrastructure-assets/bulk is assets.create, POST
-    // /network-segments/bulk is settings.update.
+    // POST /infrastructure-assets/bulk is assets.create, POST /ipam/prefixes
+    // is ipam.manage.
     primary = (
-      <PermissionGate permission={target === 'assets' ? TENANT_PERMISSIONS.assets.create : TENANT_PERMISSIONS.settings.update}>
+      <PermissionGate permission={target === 'assets' ? TENANT_PERMISSIONS.assets.create : TENANT_PERMISSIONS.ipam.manage}>
         <button className="ui-btn accent" disabled={validRows.length === 0 || busy} onClick={() => importM.mutate()}>
           {busy ? 'Importing…' : `Import ${validRows.length} ${validRows.length === 1 ? 'row' : 'rows'}`}
         </button>
@@ -465,7 +557,7 @@ export function ImportSpreadsheetModal({
       size="lg"
       tone="accent"
       icon="upload"
-      eyebrow={target === 'assets' ? 'Discovery · Import' : 'Network Segments · Import'}
+      eyebrow={target === 'assets' ? 'Discovery · Import' : 'Networks · Import'}
       title="Import from spreadsheet"
       description={`Upload a CSV or Excel file and map its columns to create ${TARGET_LABEL[target]} in bulk.`}
       primary={primary}
@@ -474,10 +566,10 @@ export function ImportSpreadsheetModal({
     >
       {phase === 'type' && (
         <div style={{ display: 'grid', gap: 10 }}>
-          <TargetCard active={target === 'segments'} onClick={() => setTarget('segments')} icon="network"
-            title="Network segments" desc="CIDRs, IP ranges or domains to scan for crypto assets." />
+          <TargetCard active={target === 'prefixes'} onClick={() => setTarget('prefixes')} icon="network"
+            title="Networks (prefixes)" desc="Your networks as CIDR prefixes — the ranges Discovery scans for crypto assets." />
           <TargetCard active={target === 'assets'} onClick={() => setTarget('assets')} icon="server"
-            title="Infrastructure assets" desc="Known servers / devices (hostname, IP, owner) as CI records." />
+            title="Infrastructure assets" desc="Known servers / devices (hostname, IP, owner) as asset records." />
         </div>
       )}
 
@@ -494,6 +586,11 @@ export function ImportSpreadsheetModal({
             <div style={{ fontSize: 12, color: 'var(--app-t2)', marginTop: 8 }}>
               <Icon name="check" size={12} /> {fileName} — {rows.length} row{rows.length === 1 ? '' : 's'}, {columns.length} columns detected.
             </div>
+          )}
+          {target === 'assets' && (
+            <button type="button" className="ui-btn sm" style={{ marginTop: 10 }} onClick={downloadAssetTemplate}>
+              <Icon name="download" size={12} /> Download a template (CSV)
+            </button>
           )}
         </ModalField>
       )}
@@ -533,6 +630,11 @@ export function ImportSpreadsheetModal({
             <Stat label="Total rows" value={rows.length} tone="var(--app-t2)" />
           </div>
           <PreviewTable target={target} built={built} />
+          {target === 'assets' && (mapping.prefix_length || mapping.vlan) && !mapping.interface && (
+            <div style={{ fontSize: 11.5, color: 'var(--warn-strong)', marginTop: 8 }}>
+              Prefix length and VLAN are kept only for a row that names its interface — map an Interface column to keep them.
+            </div>
+          )}
           {invalidRows.length > 0 && (
             <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 8 }}>
               Invalid rows are skipped, not imported. Go Back to fix the mapping or your spreadsheet.
@@ -552,9 +654,9 @@ export function ImportSpreadsheetModal({
           {(result.skipped > 0 || result.failed > 0 || !!result.unresolved) && (
             <ResultTable result={result} />
           )}
-          {target === 'segments' && result.created > 0 && (
+          {target === 'prefixes' && result.created > 0 && (
             <div style={{ fontSize: 12, color: 'var(--app-t2)', marginTop: 12 }}>
-              <Icon name="radar" size={12} /> Next: run a discovery scan on these segments from the Command Center to find crypto assets.
+              <Icon name="radar" size={12} /> Next: run a discovery scan on these prefixes from the Command Center to find crypto assets.
             </div>
           )}
           {target === 'assets' && (() => {
@@ -579,6 +681,16 @@ export function ImportSpreadsheetModal({
       )}
     </Modal>
   );
+}
+
+/** Save the asset import template, built client-side. */
+function downloadAssetTemplate() {
+  const url = URL.createObjectURL(new Blob([assetTemplateCSV()], { type: 'text/csv' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'asset-import-template.csv';
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ---- small presentational helpers ----
@@ -612,7 +724,7 @@ function Stat({ label, value, tone }: { label: string; value: number; tone: stri
   );
 }
 
-function PreviewTable({ target, built }: { target: ImportTarget; built: { input: AssetInput | NetworkSegmentInput; error: string | null }[] }) {
+function PreviewTable({ target, built }: { target: ImportTarget; built: { input: AssetInput | PrefixCreateInput; error: string | null }[] }) {
   const shown = built.slice(0, 8);
   return (
     <div className="panel" style={{ borderRadius: 12, overflow: 'auto', maxHeight: 260 }}>
@@ -621,9 +733,9 @@ function PreviewTable({ target, built }: { target: ImportTarget; built: { input:
           <tr style={{ position: 'sticky', top: 0, background: 'var(--app-panel)' }}>
             <th style={thStyle}>#</th>
             {target === 'assets' ? (
-              <><th style={thStyle}>Name</th><th style={thStyle}>Identifiers</th><th style={thStyle}>Class</th></>
+              <><th style={thStyle}>Name</th><th style={thStyle}>Identifiers</th><th style={thStyle}>Interface</th><th style={thStyle}>Class</th></>
             ) : (
-              <><th style={thStyle}>Name</th><th style={thStyle}>Value</th><th style={thStyle}>Seg type</th></>
+              <><th style={thStyle}>Prefix</th><th style={thStyle}>Description</th><th style={thStyle}>Network type</th></>
             )}
             <th style={thStyle}>Status</th>
           </tr>
@@ -631,14 +743,14 @@ function PreviewTable({ target, built }: { target: ImportTarget; built: { input:
         <tbody>
           {shown.map((b, i) => {
             const a = b.input as AssetInput;
-            const s = b.input as NetworkSegmentInput;
+            const s = b.input as PrefixCreateInput;
             return (
               <tr key={i} style={{ borderTop: '1px solid var(--app-border)' }}>
                 <td style={tdStyle}>{i + 1}</td>
                 {target === 'assets' ? (
-                  <><td style={tdStyle}>{a.display_name || a.identifiers?.[0]?.value || '—'}</td><td style={tdStyle}>{(a.identifiers ?? []).map((i) => `${i.kind}=${i.value}`).join(', ') || '—'}</td><td style={tdStyle}>{a.class_key ? (ASSET_CLASSES[a.class_key as (typeof ASSET_CLASS_KEYS)[number]]?.label ?? a.class_key) : '—'}</td></>
+                  <><td style={tdStyle}>{a.display_name || a.identifiers?.[0]?.value || '—'}</td><td style={tdStyle}>{(a.identifiers ?? []).map((i) => `${i.kind}=${i.value}`).join(', ') || '—'}</td><td style={tdStyle}>{describeRowInterface(a)}</td><td style={tdStyle}>{a.class_key ? (ASSET_CLASSES[a.class_key as (typeof ASSET_CLASS_KEYS)[number]]?.label ?? a.class_key) : '—'}</td></>
                 ) : (
-                  <><td style={tdStyle}>{s.name || '—'}</td><td style={tdStyle}>{s.value || '—'}</td><td style={tdStyle}>{s.segment_type || '—'}</td></>
+                  <><td style={tdStyle}>{s.prefix || '—'}</td><td style={tdStyle}>{s.description || '—'}</td><td style={tdStyle}>{s.network_type || '—'}</td></>
                 )}
                 <td style={{ ...tdStyle, color: b.error ? 'var(--warn-strong)' : 'var(--ok)' }}>{b.error ? b.error : 'ok'}</td>
               </tr>

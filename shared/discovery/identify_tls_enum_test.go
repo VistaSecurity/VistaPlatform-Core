@@ -99,8 +99,8 @@ func startVersionServer(t *testing.T, minV, maxV uint16, auth tls.ClientAuthType
 func identifyVia(t *testing.T, port int, realAddr string, suspect bool, opts IdentifyOptions) (Observation, *recordingDialer) {
 	t.Helper()
 	rec := &recordingDialer{remap: map[uint16]string{uint16(port): realAddr}}
-	s := newIdentifyScanner(t, rec)
-	obs, err := s.Identify(context.Background(), hostScan(enumTarget, suspect, port), opts)
+	s := newLoadTolerantIdentifyScanner(t, rec)
+	obs, err := s.Identify(context.Background(), hostScan(enumTarget, suspect, port), loadTolerantOpts(opts))
 	if err != nil {
 		t.Fatal(err)
 	}

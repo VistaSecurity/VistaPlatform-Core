@@ -96,8 +96,7 @@ based on network segmentation policies.
 ### Inventory Onboarding
 Already have an inventory? Bring it in without re-typing:
 
-- **Spreadsheet import** — upload a CSV or Excel file to bulk-create network
-  segments (scan targets) or infrastructure assets, with column mapping and
+- **Spreadsheet import** — upload a CSV or Excel file to bulk-create prefixes (scan targets) or infrastructure assets, with column mapping and
   duplicate-safe validation
 - **CMDB pull** *(Enterprise)* — import server records from a connected CMDB
   (ServiceNow, Device42, SolarWinds, Oomnitza) as pending-approval assets

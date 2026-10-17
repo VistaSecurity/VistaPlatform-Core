@@ -88,6 +88,13 @@ func ToObservations(rep *Report) (*di.InterrogateResult, error) {
 	}
 
 	// --- interfaces ---------------------------------------------------------
+	// The WIRE carrier of the host's interfaces, in the net.interfaces shape
+	// every agent version sends. Since DCIM row 1.5 the platform no longer
+	// stores it as a fact (the key is `retired` in standards/fact-keys.yaml):
+	// device-interrogation-service turns it into identity.ObservedInterfaces
+	// on the host's sighting, and the identity engine writes `interfaces` and
+	// `ip_addresses` from them.
+	//
 	// Emitted as []map[string]any rather than as []Interface on purpose: the
 	// redactor has no reflection fallback by design, so a typed struct would be
 	// structurally invisible to Sanitize (see deviceinterrogation/redact.go).
@@ -363,6 +370,24 @@ func projectInterfaces(ifaces []Interface) []map[string]any {
 		}
 		if len(i.DynamicAddresses) > 0 {
 			entry["dynamic_addresses"] = append([]string(nil), i.DynamicAddresses...)
+		}
+		if i.MTU > 0 {
+			entry["mtu"] = i.MTU
+		}
+		if i.SpeedMbps > 0 {
+			entry["speed"] = i.SpeedMbps
+		}
+		if i.Kind != "" {
+			entry["kind"] = i.Kind
+		}
+		if i.Parent != "" {
+			entry["parent"] = i.Parent
+		}
+		if i.VLAN > 0 {
+			entry["vlan"] = i.VLAN
+		}
+		if i.LAG != "" {
+			entry["lag"] = i.LAG
 		}
 		out = append(out, entry)
 	}

@@ -46,7 +46,7 @@ import (
 
 // Key is the key inside `tenant_admin_settings.config` this block lives under.
 //
-// It sits beside `discovery_auto_scan` and `network_spaces` because that is where
+// It sits beside `discovery_auto_scan` because that is where
 // this platform's tenant-admin settings live, and a second home for one number
 // would be a second thing to back up, migrate and reason about. The table
 // carries an audit trigger (`log_tenant_admin_settings_change`), so a change to

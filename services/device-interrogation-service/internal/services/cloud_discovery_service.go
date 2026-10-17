@@ -49,6 +49,11 @@ type CloudDiscoveryService struct {
 	// page uses, so a bucket found here and the same bucket named anywhere else
 	// resolve to one asset.
 	devices *DeviceService
+	// accounts declares the tenant's cloud account assets and derives the
+	// account auto-approval rules (ADR-0009 D1, D5). Synced at the start of
+	// every run, so a run after an upgrade finds its account asset and rule
+	// even if nobody has edited the integration since.
+	accounts *CloudAccountService
 	// azureOptions / gcpOptions are empty in production. A test sets them to
 	// point the real provider clients at a local server.
 	azureOptions []azureclient.Option
@@ -61,11 +66,13 @@ type CloudDiscoveryService struct {
 // tenant-scoped transactions, and integration reads use explicit tenant/shared
 // predicates on bypassDB. Pre-flip both handles resolve to the same connection.
 func NewCloudDiscoveryService(db, bypassDB *sql.DB, masterKey string) *CloudDiscoveryService {
+	devices := NewDeviceServiceWithKey(db, masterKey)
 	return &CloudDiscoveryService{
 		db:        db,
 		bypassDB:  bypassDB,
 		masterKey: masterKey,
-		devices:   NewDeviceServiceWithKey(db, masterKey),
+		devices:   devices,
+		accounts:  &CloudAccountService{db: db, devices: devices},
 	}
 }
 
@@ -128,6 +135,9 @@ func (s *CloudDiscoveryService) DiscoverAWSResources(ctx context.Context, tenant
 		"rds": {regional: true, collect: func(ctx context.Context, region string) ([]models.Device, error) {
 			return storage.DiscoverRDSEncryption(ctx, tenantID, awsClient, []string{region})
 		}},
+	}
+	for t, c := range awsTier1Collectors(s, tenantID, integrationID, awsClient) {
+		collectors[t] = c
 	}
 	for _, lbType := range []string{"alb", "elb", "nlb"} {
 		lbType := lbType
@@ -1016,7 +1026,8 @@ func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx
 // An at-rest resource HAS a cryptographic posture (a bucket's default
 // encryption, an RDS instance's storage key) and belongs in the findings
 // pipeline carrying `at_rest: true`; it simply has no endpoint. An EC2
-// instance, a VPC and a subnet have neither. Putting them through the findings
+// instance has neither (and a VPC or a subnet is no asset at all since DCIM row
+// 1.5f: it is a prefix). Putting them through the findings
 // pipeline would produce a row per resource that describes no measurement, and
 // the pipeline's only honest reading of a protocol-less, at-rest-less row is
 // the TLS:443 default, which is a fabrication.
@@ -1025,14 +1036,8 @@ func (s *CloudDiscoveryService) writeSensorDiscoveriesTx(ctx context.Context, tx
 // (cloud_enumeration.go), which is where an asset that is only an asset belongs.
 var inventoryOnlyDeviceTypes = map[string]bool{
 	DeviceTypeAWSEC2Instance:     true,
-	DeviceTypeAWSVPC:             true,
-	DeviceTypeAWSSubnet:          true,
 	DeviceTypeAzureVM:            true,
-	DeviceTypeAzureVNet:          true,
-	DeviceTypeAzureSubnet:        true,
 	DeviceTypeGCPComputeInstance: true,
-	DeviceTypeGCPNetwork:         true,
-	DeviceTypeGCPSubnetwork:      true,
 }
 
 // keyInventoryDeviceTypes are the cloud KMS keys: an AWS KMS key, an Azure Key
@@ -1316,20 +1321,7 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 		}
 	}
 
-	input := deviceObservationInput{
-		DeviceType:      device.DeviceType,
-		Hostname:        derefStr(device.Hostname),
-		IPAddress:       derefStr(device.IPAddress),
-		ManagementURL:   derefStr(device.ManagementURL),
-		SerialNumber:    derefStr(device.SerialNumber),
-		CloudResourceID: firstNonEmpty(resourceID, cloudResourceIDFromMetadata(device.Metadata)),
-		CloudNetworkRef: cloudNetworkRef,
-		DiscoveryMethod: device.DiscoveryMethod,
-		Source:          cloudSource(device.Vendor),
-		Admission:       identity.AdmissionEvidence{Authoritative: true, ReceiptID: receipt},
-		ObservedAt:      now,
-	}
-	sighting, err := deviceSighting(device.TenantID, deviceSightingInput{deviceObservationInput: input, Channel: identity.ChannelAPI})
+	sighting, err := cloudResourceSighting(ctx, device, resourceID, cloudNetworkRef, receipt, now)
 	if err != nil {
 		recordCloudOutcome(ctx, resourceID, identity.Resolution{}, false, err)
 		return err
@@ -1410,10 +1402,16 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 		if err := s.devices.applyDeviceFields(ctx, r, device.TenantID, assetID, fields); err != nil {
 			return err
 		}
-		if extra == nil {
-			return nil
+		if extra != nil {
+			if err := extra(r, assetID); err != nil {
+				return err
+			}
 		}
-		return extra(r, assetID)
+		// The account half of the intake (ADR-0009 D1, D5): approval by the
+		// account's rule, then the `hosted_on` edge to the account asset.
+		// Here, in the funnel every collector goes through, so no collector
+		// can be added that skips it.
+		return s.cloudResourceRecorded(ctx, r, device, assetID, firstNonEmpty(resourceID, cloudResourceIDFromMetadata(device.Metadata)), &pending)
 	})
 	recordCloudOutcome(ctx, firstNonEmpty(resourceID, cloudResourceIDFromMetadata(device.Metadata)), res, pending, err)
 	if err != nil {
@@ -1432,6 +1430,35 @@ func (s *CloudDiscoveryService) upsertDeviceAssetWith(
 // measurement, because the provider's API answered about its own resource.
 // `cloud:<provider>` is the producer shape ADR-0003 D3 names and the string the
 // `observation` query target's `source` facet matches on.
+// cloudResourceSighting is the sighting a cloud resource is resolved by: the
+// provider's authoritative listing of it, over the API channel, keyed on its
+// resource id. An enumerated instance's ENIs, addresses and the prefixes it
+// sits in (the cloudEnumResource in ctx) travel on it (DCIM row 1.5f), and the
+// engine records them. Pure — the adapter parity test drives it.
+func cloudResourceSighting(ctx context.Context, device *models.Device, resourceID, cloudNetworkRef, receipt string, now time.Time) (identity.Sighting, error) {
+	input := deviceObservationInput{
+		DeviceType:      device.DeviceType,
+		Hostname:        derefStr(device.Hostname),
+		IPAddress:       derefStr(device.IPAddress),
+		ManagementURL:   derefStr(device.ManagementURL),
+		SerialNumber:    derefStr(device.SerialNumber),
+		CloudResourceID: firstNonEmpty(resourceID, cloudResourceIDFromMetadata(device.Metadata)),
+		CloudNetworkRef: cloudNetworkRef,
+		DiscoveryMethod: device.DiscoveryMethod,
+		Source:          cloudSource(device.Vendor),
+		Admission:       identity.AdmissionEvidence{Authoritative: true, ReceiptID: receipt},
+		ObservedAt:      now,
+	}
+	sighting, err := deviceSighting(device.TenantID, deviceSightingInput{deviceObservationInput: input, Channel: identity.ChannelAPI})
+	if err != nil {
+		return identity.Sighting{}, err
+	}
+	if enumerated, ok := ctx.Value(cloudEnumerationContextKey{}).(*cloudEnumResource); ok {
+		sighting = withEnumeratedNetwork(sighting, enumerated)
+	}
+	return sighting, nil
+}
+
 func cloudSource(vendor *string) identity.Source {
 	ref := "cloud"
 	provider := cloudProviderForDevice(models.Device{Vendor: vendor})
@@ -1501,6 +1528,9 @@ func azureCloudCollectors(s *CloudDiscoveryService, tenantID, integrationID uuid
 	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
 		return storage.DiscoverAzureSQLDatabases(ctx, tenantID, azureClient)
 	}}, "sql_database", "sql", "cloudsql")
+	for t, c := range azureTier1Collectors(s, tenantID, integrationID, azureClient) {
+		collectors[t] = c
+	}
 	return collectors
 }
 
@@ -1848,6 +1878,9 @@ func gcpCloudCollectors(s *CloudDiscoveryService, tenantID, integrationID uuid.U
 	add(cloudCollector{collect: func(ctx context.Context, _ string) ([]models.Device, error) {
 		return storage.DiscoverGCPCloudSQLInstances(ctx, tenantID, gcpCli)
 	}}, "cloudsql", "sql", "cloud_sql")
+	for t, c := range gcpTier1Collectors(s, tenantID, integrationID, gcpCli) {
+		collectors[t] = c
+	}
 	return collectors
 }
 

@@ -54,10 +54,10 @@ package autoscan
 // runs, not stored, because the tenant changes it at any time.
 //
 // Where the rule applies (owner decision,: only to an address in
-// PRIVATE space the tenant has not declared. An address inside a network
-// segment a person registered (declared, not learned —
+// PRIVATE space the tenant has not declared. An address inside a prefix a
+// person declared (not learned, not imported —
 // dispatchguard.SegmentDeclaresAutomaticScope) is already vouched for by that
-// registration, and an import-only asset there is eligible without connection
+// declaration, and an import-only asset there is eligible without connection
 // consent. The callers apply that narrowing, since only they know the address
 // being scanned; this predicate answers only "import-only without consent".
 
@@ -105,6 +105,14 @@ func ImportedWithoutConsentSQL(a string) string {
 	    SELECT 1 FROM asset_identifiers ii
 	      JOIN source_scan_consents sc ON sc.tenant_id = ii.tenant_id AND sc.source_ref = ii.source_ref AND sc.allow_active_scan
 	     WHERE ii.tenant_id = {a}.tenant_id AND ii.asset_id = {a}.id AND ii.source_kind = 'imported')
+	AND NOT EXISTS (
+	    -- An address is an ip_addresses row on one of the asset's interfaces
+	    -- (DCIM row 1.4), not an identifier row.
+	    SELECT 1 FROM ip_addresses ipi
+	      JOIN interfaces ifi ON ifi.tenant_id = ipi.tenant_id AND ifi.id = ipi.assigned_id
+	      JOIN source_scan_consents sc ON sc.tenant_id = ipi.tenant_id AND sc.source_ref = ipi.source_ref AND sc.allow_active_scan
+	     WHERE ipi.tenant_id = {a}.tenant_id AND ipi.assigned_kind = 'interface' AND ifi.asset_id = {a}.id
+	       AND ipi.source_kind = 'imported')
 	AND NOT EXISTS (
 	    SELECT 1 FROM asset_facts fi
 	      JOIN source_scan_consents sc ON sc.tenant_id = fi.tenant_id AND sc.source_ref = fi.source_ref AND sc.allow_active_scan

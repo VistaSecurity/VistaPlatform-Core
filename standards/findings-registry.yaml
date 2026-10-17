@@ -242,6 +242,29 @@ producers:
           Classification is the denylist in pqc_readiness.go — a subject not
           classified is unclassified, never assumed safe.
 
+      - key: weak_wireless_auth
+        severity_model: fixed
+        default_severity: from-catalogue
+        score: 0
+        score_source: catalogue
+        subject_types: [asset]
+        feeds_risk: true
+        title_template: "{subject} {detail}"
+        guidance: >-
+          Move the wireless LAN named in the finding to WPA2 or WPA3 with the
+          AES (CCMP) cipher only. Open networks, WEP and TKIP give a listener in
+          range little or no protection. If a legacy client forces TKIP or WEP,
+          put that client on its own SSID and VLAN with no route to anything
+          that matters, then replace it. Re-read the controller afterwards to
+          confirm the LAN reports the new authentication.
+        description: >-
+          An access point serves a wireless LAN whose authentication is open or
+          whose cipher is TKIP or WEP. The subject is the access point asset
+          (the LAN itself is not an asset); the evidence names each SSID. The
+          cipher is scored by its algorithms-catalogue row (wireless_lans.
+          algorithm_id), so editing the row changes the score. A LAN whose
+          cipher is `auto` or unrecorded is not assessed and raises nothing.
+
   # --- eol ------------------------------------------------------------------
   - key: eol
     label: End of life
@@ -510,7 +533,7 @@ producers:
   - key: drift
     label: Drift
     description: >-
-      Compares the current population of a segment or an asset against its
+      Compares the current population of a prefix or an asset against its
       recent baseline window and reports what changed. Rule-based defaults
       first; the ADR-0008 drift seam may propose more later.
     catalogue: none
@@ -522,14 +545,14 @@ producers:
         score_source: fixed
         subject_types: [asset]
         feeds_risk: true
-        title_template: "{subject} is the first {detail} seen in its network segment"
+        title_template: "{subject} is the first {detail} seen in its prefix"
         guidance: >-
-          Confirm whether the asset belongs on this segment. If it does,
+          Confirm whether the asset belongs on this network. If it does,
           nothing needs fixing and the finding can be resolved. If it does
-          not, move it — an unexpected class on a segment is usually either a
+          not, move it — an unexpected class on a network is usually either a
           misconfigured port or something nobody meant to plug in.
         description: >-
-          An asset of a class never before seen in this network segment was
+          An asset of a class never before seen in this prefix was
           observed. A printer on a server VLAN is worth a look; an OT device on
           a corporate VLAN is worth a call.
       - key: unexpected_protocol
@@ -607,3 +630,35 @@ producers:
           A certificate was observed from an issuer not seen for this subject
           in the baseline window. A changed issuer is either a planned CA
           migration or an interception.
+
+  # --- topology ---------------------------------------------------------------
+  - key: topology
+    label: Topology
+    description: >-
+      Compares what the network says about its own cabling — LLDP and CDP
+      neighbour tables read by interrogation (DCIM row 3.3,
+      inventory-service cable_intake.go) — against the cables people declared.
+    catalogue: none
+    kinds:
+      - key: cable_drift
+        severity_model: fixed
+        default_severity: medium
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject}'s cabling differs from what its neighbours report ({detail})"
+        guidance: >-
+          Open the asset's Interfaces tab and compare each port named in the
+          finding with the neighbour the device reports on it. If the device
+          was re-patched on purpose, update the cable so the record matches the
+          network; if the cable record is right, find out what is plugged into
+          that port instead. The finding resolves on the next interrogation in
+          which the neighbours agree with the cables, or as soon as one of
+          those cables is changed.
+        description: >-
+          An LLDP or CDP neighbour observed on a port contradicts an active
+          cable on that port (or on the far port the neighbour names): the
+          cable's far end, followed through any patch panels, is a different
+          device or port. Evidence lists each contradicted port with both ends.
+          Inventory accuracy, not exposure, so it does not feed risk.

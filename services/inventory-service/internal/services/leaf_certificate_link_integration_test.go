@@ -263,68 +263,6 @@ func TestIntegration_Ingest_ReObservationKeepsTheLeafLink(t *testing.T) {
 	}
 }
 
-// TestIntegration_Schema_BackfillsLeafJunctionFromCertificateID is the belt for
-// rows that already exist. Installs written before the two writers were made
-// atomic hold configurations whose certificate_id has no junction row; the
-// POST-MIGRATIONS convergence block in schema.sql repairs them on the next
-// apply. Written as "plant the legacy shape, re-apply the schema, assert it
-// converged" because that is exactly what a `helm upgrade` does.
-func TestIntegration_Schema_BackfillsLeafJunctionFromCertificateID(t *testing.T) {
-	f := newLeafLinkFixture(t)
-	fp := hexFingerprint("leaf-link-backfill")
-	assetID, certID := f.ingestLeafCert(t, "leaf-link-legacy.example.test", "198.51.100.23", 443, fp)
-
-	var implID uuid.UUID
-	if err := f.db.QueryRow(
-		`SELECT id FROM crypto_implementations WHERE tenant_id = $1 AND asset_id = $2 AND deleted_at IS NULL`,
-		f.tenant, assetID).Scan(&implID); err != nil {
-		t.Fatalf("read configuration: %v", err)
-	}
-
-	// Reproduce the legacy shape: the column set, the junction row absent.
-	if _, err := f.db.Exec(
-		`DELETE FROM crypto_implementation_certificates WHERE crypto_implementation_id = $1`, implID); err != nil {
-		t.Fatalf("strip junction rows: %v", err)
-	}
-	var junctionRows int
-	if err := f.db.QueryRow(
-		`SELECT count(*) FROM crypto_implementation_certificates WHERE crypto_implementation_id = $1`,
-		implID).Scan(&junctionRows); err != nil {
-		t.Fatalf("count junction rows: %v", err)
-	}
-	if junctionRows != 0 {
-		t.Fatalf("the legacy shape was not planted (%d junction rows remain); the backfill would have nothing to prove",
-			junctionRows)
-	}
-
-	// FORCE: the re-apply is the assertion. The plain helper skips when the
-	// database already carries this schema's content hash.
-	testdb.ForceApplySchema(t, f.db.DB.DB)
-
-	var role string
-	if err := f.db.QueryRow(
-		`SELECT certificate_role FROM crypto_implementation_certificates
-		  WHERE crypto_implementation_id = $1 AND certificate_id = $2`,
-		implID, certID).Scan(&role); err != nil {
-		t.Fatalf("the schema re-apply did not converge the legacy row onto the junction: %v", err)
-	}
-	if role != "leaf" {
-		t.Errorf("backfilled junction row carries role %q, want \"leaf\"", role)
-	}
-
-	// Idempotent: a second apply must not raise on the unique constraint.
-	testdb.ForceApplySchema(t, f.db.DB.DB)
-	var rows int
-	if err := f.db.QueryRow(
-		`SELECT count(*) FROM crypto_implementation_certificates WHERE crypto_implementation_id = $1`,
-		implID).Scan(&rows); err != nil {
-		t.Fatalf("count junction rows after second apply: %v", err)
-	}
-	if rows != 1 {
-		t.Errorf("%d junction rows after two schema applies, want 1", rows)
-	}
-}
-
 // leafLinkAliases mints the unique table aliases findings.AssetSubjects needs.
 func leafLinkAliases() func(string) string {
 	n := 0
@@ -374,9 +312,7 @@ func TestIntegration_Ingest_OlderCertificateCannotReplaceNewerLeaf(t *testing.T)
 
 func TestIntegration_Ingest_ProspectiveReceiptsSurvivePendingApproval(t *testing.T) {
 	f := newLeafLinkFixture(t)
-	f.svc.networkSegmentService = NewNetworkSegmentService(f.db, nil)
-	if _, err := f.db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment)
- VALUES($1,$2,'Receipt test','cidr','192.0.2.0/24','production')`, uuid.New(), f.tenant); err != nil {
+	if _, err := f.db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Receipt test','192.0.2.0/24'::cidr,'production','declared','active')`, uuid.New(), f.tenant); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.db.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}')

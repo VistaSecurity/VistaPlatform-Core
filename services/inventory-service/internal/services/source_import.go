@@ -12,7 +12,7 @@ package services
 //
 // It is deliberately about SOURCES, not about any one connector. What it
 // guarantees is the inventory's side of an import — admission, identity,
-// approval, provenance, the tenant-wins rules on a segment the tenant already
+// approval, provenance, the tenant-wins rules on a prefix the tenant already
 // drew — and those are the same whichever system of record the data came from.
 // The mapping from a vendor's model to these shapes stays with the connector.
 //
@@ -45,20 +45,22 @@ import (
 	sharedservices "github.com/vistasecurity/vistaplatform/shared/services"
 )
 
-// Segment outcomes, one per submitted item.
+// Source network outcomes, one per submitted item. A source's networks are
+// written as global-VRF prefixes (DCIM row 1.6); the wire names (`segments`,
+// SourcePrefix) are the connector contract row 1.9 reworks.
 const (
-	// SourceSegmentCreated: a new on-premises cidr segment was written with
-	// the source's provenance.
-	SourceSegmentCreated = "created"
-	// SourceSegmentMatched: a segment with the same masked CIDR already
-	// existed. Its provenance was stamped and its metadata merged; nothing
-	// the tenant configured on it was touched.
-	SourceSegmentMatched = "matched"
-	// SourceSegmentTooBroad: the prefix is too broad to be anybody's segment
+	// SourcePrefixCreated: a new global-VRF prefix was written with the
+	// source's provenance.
+	SourcePrefixCreated = "created"
+	// SourcePrefixMatched: a prefix with the same masked CIDR already
+	// existed in the global table. Its provenance was stamped and its NetBox
+	// id recorded; nothing the tenant configured on it was touched.
+	SourcePrefixMatched = "matched"
+	// SourcePrefixTooBroad: the prefix is too broad to be anybody's
 	// (probeconsent.TooBroadToClaim) and matches no existing one. Not written.
-	SourceSegmentTooBroad = "too_broad"
-	// SourceSegmentError: the item could not be written; Error says why.
-	SourceSegmentError = "error"
+	SourcePrefixTooBroad = "too_broad"
+	// SourcePrefixError: the item could not be written; Error says why.
+	SourcePrefixError = "error"
 )
 
 // MaxSourceBatch bounds one request's items. A connector with more sends
@@ -71,32 +73,32 @@ var sourceEnvironments = map[string]bool{
 	"production": true, "staging": true, "development": true, "test": true,
 }
 
-// SourceSegment is one network segment a source declares.
-type SourceSegment struct {
+// SourcePrefix is one network a source declares, written as a prefix.
+type SourcePrefix struct {
 	// CIDR is the prefix. It is masked here, so "10.1.1.5/24" and
 	// "10.1.1.0/24" are the same network.
 	CIDR string `json:"cidr"`
-	// Name is used only when the segment is CREATED. A segment that already
-	// exists keeps the name the tenant gave it.
+	// Name is the created prefix's description when the source gives none.
+	// A prefix that already exists keeps what the tenant gave it.
 	Name string `json:"name"`
 	// Environment is one of production / staging / development / test, used
 	// only on create.
 	Environment string `json:"environment"`
 	// Description is used only on create.
 	Description string `json:"description,omitempty"`
-	// Metadata is the created segment's metadata.
+	// Metadata is the source's description of the network on create. Only
+	// `netbox_prefix_id` is kept — as the prefix's `external_ids.netbox`, the
+	// key the NetBox sync matches on (DCIM row 1.9); a prefix has no
+	// free-form metadata.
 	Metadata map[string]any `json:"metadata,omitempty"`
-	// MatchMetadata is merged into an EXISTING segment's metadata (`existing
-	// || incoming`). Separate from Metadata because what a source may add to
-	// a segment it did not create is narrower than what it writes on one it
-	// did.
+	// MatchMetadata is the same for a prefix that already existed.
 	MatchMetadata map[string]any `json:"match_metadata,omitempty"`
 	// SourceRef names the source record, e.g. `<producer>:<connection>:prefix:<id>`.
 	SourceRef string `json:"source_ref"`
 }
 
-// SourceSegmentResult is what happened to one submitted segment.
-type SourceSegmentResult struct {
+// SourcePrefixResult is what happened to one submitted network.
+type SourcePrefixResult struct {
 	CIDR    string `json:"cidr"`
 	Outcome string `json:"outcome"`
 	Error   string `json:"error,omitempty"`
@@ -228,96 +230,97 @@ func NewSourceImportService(db *database.DB, assets *AssetService) *SourceImport
 // Segments
 // ---------------------------------------------------------------------------
 
-// UpsertSegments writes a source's network segments, in order.
+// UpsertPrefixes writes a source's networks as prefixes, in order (DCIM row
+// 1.6: the source's networks used to be written as network segments).
 //
-// A segment that MATCHES an existing on-premises cidr segment by masked CIDR is
-// not duplicated: it is stamped with the source's provenance and its metadata is
-// merged, and NOTHING ELSE on it changes. Name, environment, auto-approval and
-// tags are the tenant's, and an import that overwrote them would undo deliberate
-// configuration on every scheduled run.
+// A network that MATCHES an existing on-premises global-VRF prefix by masked
+// CIDR is not duplicated: it is stamped with the source's provenance and its
+// NetBox id, and NOTHING ELSE on it changes. Description, environment,
+// auto-approval and scan posture are the tenant's, and an import that
+// overwrote them would undo deliberate configuration on every scheduled run.
 //
-// A cloud segment with the same CIDR is not a match: a segment's identity is
-// (tenant, value, cloud_network_ref), and a source prefix describes physical
-// address space that belongs to no VPC.
+// A cloud subnet prefix with the same CIDR is not a match: a source prefix
+// describes physical address space that belongs to no VPC.
 //
-// The error return is for the whole call (the existing segments could not be
+// The error return is for the whole call (the existing prefixes could not be
 // read); per-item failures are results, so one bad item does not cost the
 // others.
-func (s *SourceImportService) UpsertSegments(ctx context.Context, tenantID uuid.UUID, items []SourceSegment) ([]SourceSegmentResult, error) {
-	existing, err := s.onPremSegments(ctx, tenantID)
+func (s *SourceImportService) UpsertPrefixes(ctx context.Context, tenantID uuid.UUID, items []SourcePrefix) ([]SourcePrefixResult, error) {
+	existing, err := s.onPremPrefixes(ctx, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("could not read existing network segments: %w", err)
+		return nil, fmt.Errorf("could not read existing prefixes: %w", err)
 	}
-	out := make([]SourceSegmentResult, 0, len(items))
+	out := make([]SourcePrefixResult, 0, len(items))
 	for _, item := range items {
-		out = append(out, s.upsertSegment(ctx, tenantID, existing, item))
+		out = append(out, s.upsertSourcePrefix(ctx, tenantID, existing, item))
 	}
 	return out, nil
 }
 
-func (s *SourceImportService) upsertSegment(ctx context.Context, tenantID uuid.UUID,
-	existing map[string]uuid.UUID, item SourceSegment) SourceSegmentResult {
+func (s *SourceImportService) upsertSourcePrefix(ctx context.Context, tenantID uuid.UUID,
+	existing map[string]uuid.UUID, item SourcePrefix) SourcePrefixResult {
 
 	prefix, err := netip.ParsePrefix(strings.TrimSpace(item.CIDR))
 	if err != nil {
-		return SourceSegmentResult{CIDR: item.CIDR, Outcome: SourceSegmentError,
+		return SourcePrefixResult{CIDR: item.CIDR, Outcome: SourcePrefixError,
 			Error: fmt.Sprintf("%q is not a valid CIDR", item.CIDR)}
 	}
 	canonical := prefix.Masked().String()
-	res := SourceSegmentResult{CIDR: canonical}
-	fail := func(msg string) SourceSegmentResult {
-		res.Outcome, res.Error = SourceSegmentError, msg
+	res := SourcePrefixResult{CIDR: canonical}
+	fail := func(msg string) SourcePrefixResult {
+		res.Outcome, res.Error = SourcePrefixError, msg
 		return res
 	}
 	ref := strings.TrimSpace(item.SourceRef)
 	if ref == "" {
-		return fail("a source segment needs a source_ref")
+		return fail("a source network needs a source_ref")
 	}
 	if len(ref) > 200 {
 		return fail("source_ref is longer than 200 characters")
 	}
 
 	if id, ok := existing[canonical]; ok {
-		if err := s.markSegmentImported(ctx, tenantID, id, ref, item.MatchMetadata); err != nil {
+		if err := s.markPrefixImported(ctx, tenantID, id, ref, item.MatchMetadata); err != nil {
 			return fail(err.Error())
 		}
-		res.Outcome = SourceSegmentMatched
+		res.Outcome = SourcePrefixMatched
 		return res
 	}
 
-	// A segment is a claim of ownership, so an imported one is held to the
-	// rule a saved one is ( W5.13): nothing too broad to be anybody's.
-	// An EXISTING segment it matches is left alone either way (above).
+	// A prefix is a claim of ownership, so an imported one is held to the
+	// rule a declared one is ( W5.13): nothing too broad to be anybody's.
+	// An EXISTING prefix it matches is left alone either way (above).
 	if probeconsent.TooBroadToClaim(prefix) {
-		res.Outcome = SourceSegmentTooBroad
+		res.Outcome = SourcePrefixTooBroad
 		return res
 	}
 
-	name := strings.TrimSpace(item.Name)
-	if name == "" {
-		return fail("a new segment needs a name")
+	description := strings.TrimSpace(item.Description)
+	if description == "" {
+		description = strings.TrimSpace(item.Name)
 	}
-	if len(name) > 255 {
-		name = name[:255]
+	if description == "" {
+		return fail("a new network needs a name or a description")
 	}
 	env := strings.ToLower(strings.TrimSpace(item.Environment))
 	if !sourceEnvironments[env] {
 		return fail(fmt.Sprintf("environment %q is not one of production, staging, development, test", item.Environment))
 	}
-	if err := s.createSegment(ctx, tenantID, canonical, prefix, name, env, item.Description, item.Metadata, ref); err != nil {
+	if err := s.createSourcePrefix(ctx, tenantID, canonical, prefix, description, env, item.Metadata, ref); err != nil {
 		return fail(err.Error())
 	}
-	res.Outcome = SourceSegmentCreated
+	res.Outcome = SourcePrefixCreated
 	return res
 }
 
-// onPremSegments indexes this tenant's on-premises cidr segments by masked CIDR.
-func (s *SourceImportService) onPremSegments(ctx context.Context, tenantID uuid.UUID) (map[string]uuid.UUID, error) {
+// onPremPrefixes indexes this tenant's on-premises global-VRF prefixes by
+// masked CIDR.
+func (s *SourceImportService) onPremPrefixes(ctx context.Context, tenantID uuid.UUID) (map[string]uuid.UUID, error) {
 	out := map[string]uuid.UUID{}
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		rows, err := tx.QueryContext(ctx, `
-			SELECT id, value FROM network_segments
-			WHERE tenant_id = $1 AND segment_type = 'cidr' AND cloud_network_ref IS NULL`, tenantID)
+			SELECT id, prefix::text FROM prefixes
+			WHERE tenant_id = $1 AND vrf_id IS NULL AND cloud_network_ref IS NULL AND status <> 'rejected'`, tenantID)
 		if err != nil {
 			return err
 		}
@@ -328,9 +331,6 @@ func (s *SourceImportService) onPremSegments(ctx context.Context, tenantID uuid.
 			if err := rows.Scan(&id, &value); err != nil {
 				return err
 			}
-			// A segment whose value does not parse matches nothing and is
-			// skipped quietly — the same decision ScopeForAddress makes: the
-			// write path validates, so a bad row here is old data.
 			if p, perr := netip.ParsePrefix(strings.TrimSpace(value)); perr == nil {
 				out[p.Masked().String()] = id
 			}
@@ -343,10 +343,10 @@ func (s *SourceImportService) onPremSegments(ctx context.Context, tenantID uuid.
 // sourceNetworkType is measured, not declared: whether a prefix is in private
 // address space is a property of the prefix.
 //
-// It reads addrscope.MayAutoProbe, not IsTenantAddressable: a segment's
+// It reads addrscope.MayAutoProbe, not IsTenantAddressable: a prefix's
 // network_type "private" is what the automatic-scan gates read as ownership
-// (autoscan.AutomaticSegmentTypes), so an imported CGNAT prefix stays
-// "public" and does not become an unattended-scan target ( D1).
+// (autoscan.AutomaticPrefixTypes), so an imported CGNAT prefix stays "public"
+// and does not become an unattended-scan target ( D1).
 func sourceNetworkType(prefix netip.Prefix) string {
 	if addrscope.MayAutoProbe(prefix.Addr()) {
 		return "private"
@@ -354,43 +354,62 @@ func sourceNetworkType(prefix netip.Prefix) string {
 	return "public"
 }
 
-func (s *SourceImportService) createSegment(ctx context.Context, tenantID uuid.UUID, canonical string,
-	prefix netip.Prefix, name, env, description string, meta map[string]any, sourceRef string) error {
-
-	var descPtr *string
-	if d := strings.TrimSpace(description); d != "" {
-		descPtr = &d
+// sourceExternalIDs is the `external_ids` a source network contributes: the
+// NetBox prefix id, under the key the NetBox sync matches on.
+func sourceExternalIDs(meta map[string]any) string {
+	ext := map[string]any{}
+	if v, ok := meta["netbox_prefix_id"]; ok && v != nil {
+		ext["netbox"] = v
 	}
+	return sourceJSON(ext)
+}
+
+func (s *SourceImportService) createSourcePrefix(ctx context.Context, tenantID uuid.UUID, canonical string,
+	prefix netip.Prefix, description, env string, meta map[string]any, sourceRef string) error {
+
 	return database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO network_segments
-				(tenant_id, name, segment_type, value, network_type, environment,
-				 description, is_active, auto_approve_discoveries, tags, metadata,
-				 source_kind, source_ref)
-			VALUES ($1, $2, 'cidr', $3, $4, $5::environment_type, $6, true, false,
-			        '{}'::jsonb, $7::jsonb, 'imported', $8)
-			ON CONFLICT (tenant_id, value, coalesce(cloud_network_ref, ''::text)) DO NOTHING`,
-			tenantID, name, canonical, sourceNetworkType(prefix), env, descPtr,
-			sourceJSON(meta), sourceRef)
-		return err
+		res, err := tx.ExecContext(ctx, `
+			INSERT INTO prefixes
+				(tenant_id, prefix, network_type, environment, description,
+				 external_ids, source_kind, source_ref, status)
+			SELECT $1, $2::cidr, $3, $4, $5, $6::jsonb, 'imported', $7, 'active'
+			 WHERE NOT EXISTS (SELECT 1 FROM prefixes
+			                    WHERE tenant_id = $1 AND vrf_id IS NULL AND prefix = $2::cidr AND status <> 'rejected'
+			                      AND cloud_network_ref IS NULL)`,
+			tenantID, canonical, sourceNetworkType(prefix), env, description,
+			sourceExternalIDs(meta), sourceRef)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			// Another request created the on-premises prefix since this one
+			// read them. A cloud subnet with the same CIDR does not stop the
+			// insert: prefix identity includes the cloud network
+			// (prefixes_identity_uniq), and a NetBox prefix belongs to none.
+			return fmt.Errorf("%s was created concurrently; re-run the import to match it", canonical)
+		}
+		// The new prefix changes its parents' utilisation and its own: the
+		// cache the Networks lens reads (ipam_prefix.go).
+		return refreshChain(ctx, tx.Tx, tenantID, nil, canonical)
 	})
 }
 
-// markSegmentImported stamps provenance on a segment that already existed. It
-// touches provenance and metadata ONLY — the "empty never wins" rule applied to
-// a whole row: the tenant's name, environment, auto-approval and tags stay.
-func (s *SourceImportService) markSegmentImported(ctx context.Context, tenantID, segmentID uuid.UUID,
+// markPrefixImported stamps provenance on a prefix that already existed. It
+// touches provenance and the NetBox id ONLY — the "empty never wins" rule
+// applied to a whole row: the tenant's description, environment, auto-approval
+// and scan posture stay.
+func (s *SourceImportService) markPrefixImported(ctx context.Context, tenantID, prefixID uuid.UUID,
 	sourceRef string, meta map[string]any) error {
 
 	return database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			UPDATE network_segments
-			SET source_kind = 'imported',
-			    source_ref  = $1,
-			    metadata    = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
-			    updated_at  = now()
+			UPDATE prefixes
+			SET source_kind  = 'imported',
+			    source_ref   = $1,
+			    external_ids = COALESCE(external_ids, '{}'::jsonb) || $2::jsonb,
+			    updated_at   = now()
 			WHERE tenant_id = $3 AND id = $4`,
-			sourceRef, sourceJSON(meta), tenantID, segmentID)
+			sourceRef, sourceExternalIDs(meta), tenantID, prefixID)
 		return err
 	})
 }
@@ -755,7 +774,7 @@ func (s *SourceImportService) HardwareAssets(ctx context.Context, tenantID uuid.
 			       COALESCE(host(a.primary_address), ''),
 			       a.class_key,
 			       a.asset_status,
-			       COALESCE(a.site, ''),
+			       COALESCE(`+assetSiteNameSQL+`, ''),
 			       COALESCE((
 			         SELECT ai.value FROM asset_identifiers ai
 			         WHERE ai.tenant_id = a.tenant_id AND ai.asset_id = a.id

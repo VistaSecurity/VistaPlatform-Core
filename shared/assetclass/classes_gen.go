@@ -41,7 +41,6 @@ const (
 	KeyVirtual            Key = "virtual"
 	KeyVirtualMachine     Key = "virtual_machine"
 	KeyContainer          Key = "container"
-	KeyCluster            Key = "cluster"
 	KeyHypervisor         Key = "hypervisor"
 	KeyCloudResource      Key = "cloud_resource"
 	KeyComputeInstance    Key = "compute_instance"
@@ -52,8 +51,11 @@ const (
 	KeyApiGateway         Key = "api_gateway"
 	KeyCdnDistribution    Key = "cdn_distribution"
 	KeyServerlessFunction Key = "serverless_function"
-	KeyVirtualNetwork     Key = "virtual_network"
-	KeySubnet             Key = "subnet"
+	KeyContainerCluster   Key = "container_cluster"
+	KeySecretStore        Key = "secret_store"
+	KeyDnsZone            Key = "dns_zone"
+	KeySecurityGroup      Key = "security_group"
+	KeyCloudAccount       Key = "cloud_account"
 	KeyApplication        Key = "application"
 	KeyWebApplication     Key = "web_application"
 	KeyDatabaseInstance   Key = "database_instance"
@@ -415,17 +417,6 @@ var All = []Class{
 		LegacyAssetType:      "service",
 	},
 	{
-		Key:                  "cluster",
-		Parent:               "virtual",
-		Path:                 "virtual.cluster",
-		Label:                "Cluster",
-		Icon:                 "Boxes",
-		CMDBCIType:           "cmdb_ci_cluster",
-		CycloneDXType:        "platform",
-		IdentifierPrecedence: []string{"cloud_resource_id", "cmdb_sys_id", "fqdn", "hostname"},
-		LegacyAssetType:      "service",
-	},
-	{
 		Key:                  "hypervisor",
 		Parent:               "virtual",
 		Path:                 "virtual.hypervisor",
@@ -536,25 +527,58 @@ var All = []Class{
 		LegacyAssetType:      "service",
 	},
 	{
-		Key:                  "virtual_network",
+		Key:                  "container_cluster",
 		Parent:               "cloud_resource",
-		Path:                 "cloud_resource.virtual_network",
-		Label:                "Virtual network",
-		Icon:                 "Waypoints",
-		CMDBCIType:           "cmdb_ci_network",
+		Path:                 "cloud_resource.container_cluster",
+		Label:                "Container cluster",
+		Icon:                 "Container",
+		CMDBCIType:           "cmdb_ci_kubernetes_cluster",
+		CycloneDXType:        "platform",
+		IdentifierPrecedence: []string{"cloud_resource_id", "cmdb_sys_id", "fqdn"},
+		LegacyAssetType:      "service",
+	},
+	{
+		Key:                  "secret_store",
+		Parent:               "cloud_resource",
+		Path:                 "cloud_resource.secret_store",
+		Label:                "Secret store",
+		Icon:                 "Lock",
+		CMDBCIType:           "",
+		CycloneDXType:        "data",
+		IdentifierPrecedence: []string{"cloud_resource_id", "cmdb_sys_id"},
+		LegacyAssetType:      "service",
+	},
+	{
+		Key:                  "dns_zone",
+		Parent:               "cloud_resource",
+		Path:                 "cloud_resource.dns_zone",
+		Label:                "DNS zone",
+		Icon:                 "Globe",
+		CMDBCIType:           "",
 		CycloneDXType:        "platform",
 		IdentifierPrecedence: []string{"cloud_resource_id", "cmdb_sys_id"},
 		LegacyAssetType:      "service",
 	},
 	{
-		Key:                  "subnet",
+		Key:                  "security_group",
 		Parent:               "cloud_resource",
-		Path:                 "cloud_resource.subnet",
-		Label:                "Subnet",
-		Icon:                 "Share2",
-		CMDBCIType:           "cmdb_ci_ip_network",
+		Path:                 "cloud_resource.security_group",
+		Label:                "Security group",
+		Icon:                 "ShieldCheck",
+		CMDBCIType:           "",
 		CycloneDXType:        "platform",
 		IdentifierPrecedence: []string{"cloud_resource_id", "cmdb_sys_id"},
+		LegacyAssetType:      "service",
+	},
+	{
+		Key:                  "cloud_account",
+		Parent:               "cloud_resource",
+		Path:                 "cloud_resource.cloud_account",
+		Label:                "Cloud Account",
+		Icon:                 "Cloud",
+		CMDBCIType:           "cmdb_ci_cloud_service_account",
+		CycloneDXType:        "platform",
+		IdentifierPrecedence: []string{"cloud_resource_id"},
 		LegacyAssetType:      "service",
 	},
 	{

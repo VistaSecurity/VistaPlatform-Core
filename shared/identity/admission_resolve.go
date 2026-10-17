@@ -22,7 +22,26 @@ type ObservationRepository interface {
 	PreserveObservationDismissal(context.Context, Observation, string, AdmissionDecision) (bool, error)
 }
 
+// Resolve identifies an observation, writes it, and — once it resolved to an
+// asset it may write to — records the posture half of its network evidence
+// (interfaces, prefixes, VLANs; DCIM row 1.5) on the same repository, so the
+// interface rows the identity half filed and the measured fields beside them
+// land in one transaction.
 func (e *Engine) Resolve(ctx context.Context, obs Observation) (Resolution, error) {
+	res, err := e.resolveAdmitted(ctx, obs)
+	if err != nil {
+		return res, err
+	}
+	if err := e.recordObservedNetwork(ctx, obs, res); err != nil {
+		return Resolution{}, err
+	}
+	if err := e.recordObservedCluster(ctx, obs, res); err != nil {
+		return Resolution{}, err
+	}
+	return res, nil
+}
+
+func (e *Engine) resolveAdmitted(ctx context.Context, obs Observation) (Resolution, error) {
 	obs = canonicalSensorIdentity(obs)
 	if err := e.lockObservationIdentifiers(ctx, obs); err != nil {
 		return Resolution{}, err

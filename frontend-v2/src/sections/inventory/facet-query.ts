@@ -46,7 +46,7 @@ export type FacetKey =
   | 'identity'
   | 'environment'
   | 'site'
-  | 'segment'
+  | 'prefix'
   | 'owner'
   | 'business_unit'
   | 'tag'
@@ -62,7 +62,7 @@ export const FACET_FIELD: Readonly<Record<Exclude<FacetKey, 'class' | 'risk' | '
   identity: 'identity_status',
   environment: 'environment',
   site: 'site',
-  segment: 'segment_id',
+  prefix: 'prefix_id',
   owner: 'owner_email',
   business_unit: 'business_unit',
   provenance: 'source',
@@ -75,7 +75,7 @@ export const FACET_LABEL: Readonly<Record<FacetKey, string>> = {
   identity: 'Identity',
   environment: 'Environment',
   site: 'Site',
-  segment: 'Segment',
+  prefix: 'Prefix',
   owner: 'Owner',
   business_unit: 'Business unit',
   tag: 'Tag',
@@ -169,7 +169,7 @@ export interface FacetState {
   identity: string[];
   environment: string[];
   site: string[];
-  segment: string[];
+  prefix: string[];
   owner: string[];
   business_unit: string[];
   /** `key` or `key=value` entries, written `tag:key` / `tag.key:value`. */
@@ -190,7 +190,7 @@ export interface FacetState {
 
 export function emptyFacets(): FacetState {
   return {
-    status: [], identity: [], environment: [], site: [], segment: [], owner: [],
+    status: [], identity: [], environment: [], site: [], prefix: [], owner: [],
     business_unit: [], tag: [], risk: [], provenance: [], cert_trust: [], text: [],
   };
 }
@@ -200,7 +200,7 @@ export function emptyFacets(): FacetState {
 export function facetsEmpty(f: FacetState): boolean {
   return !f.class && f.findings === undefined
     && f.status.length === 0 && f.identity.length === 0 && f.environment.length === 0 && f.site.length === 0
-    && f.segment.length === 0 && f.owner.length === 0 && f.business_unit.length === 0
+    && f.prefix.length === 0 && f.owner.length === 0 && f.business_unit.length === 0
     && f.tag.length === 0 && f.risk.length === 0 && f.provenance.length === 0
     && f.cert_trust.length === 0 && f.text.length === 0;
 }
@@ -208,7 +208,7 @@ export function facetsEmpty(f: FacetState): boolean {
 /** How many individual selections are active, for the "N filters" badge. */
 export function facetCount(f: FacetState): number {
   return (f.class ? 1 : 0) + (f.findings === undefined ? 0 : 1)
-    + f.status.length + f.identity.length + f.environment.length + f.site.length + f.segment.length
+    + f.status.length + f.identity.length + f.environment.length + f.site.length + f.prefix.length
     + f.owner.length + f.business_unit.length + f.tag.length + f.risk.length
     + f.provenance.length + f.cert_trust.length + f.text.length;
 }
@@ -238,21 +238,15 @@ export function quoteValue(v: string): string {
  * and on a closed enum (`environment:Unknown`) the server answers 400.
  *
  * The language spells NULL as `not exists(field)`; string columns also
- * need `field=""` to match the empty values counted in this bucket. Segment
- * uses a different sentinel because the SQL does.
+ * need `field=""` to match the empty values counted in this bucket.
  */
 export const UNSET_BUCKET = 'Unknown';
-export const UNSEGMENTED_BUCKET = 'Unsegmented';
 
 // These facet columns group NULL and the empty string into the same bucket.
 const EMPTY_IS_UNSET = new Set(['owner_email', 'business_unit', 'support_group', 'site', 'region', 'zone']);
 
-function unsetBucketFor(field: string): string {
-  return field === 'segment_id' ? UNSEGMENTED_BUCKET : UNSET_BUCKET;
-}
-
-function isUnsetBucket(field: string, value: string): boolean {
-  return value === unsetBucketFor(field);
+function isUnsetBucket(_field: string, value: string): boolean {
+  return value === UNSET_BUCKET;
 }
 
 /**
@@ -401,7 +395,7 @@ export function facetsToQuery(f: FacetState, extra: string[] = []): string {
   // Ordered deliberately: clause order is preserved by the canonical form (§10),
   // so the query reads top-to-bottom in the same order as the rail's sections.
   const plain: Exclude<FacetKey, 'class' | 'risk' | 'tag' | 'findings' | 'cert_trust'>[] =
-    ['status', 'identity', 'environment', 'site', 'segment', 'owner', 'business_unit', 'provenance'];
+    ['status', 'identity', 'environment', 'site', 'prefix', 'owner', 'business_unit', 'provenance'];
   for (const key of plain) {
     const term = orTerm(FACET_FIELD[key], f[key]);
     if (term) terms.push(term);
@@ -503,7 +497,7 @@ function sameFieldOr(node: Node): { field: string; values: string[] } | null {
   return field === null ? null : { field, values };
 }
 
-/** `not exists(field)` — the rail's spelling of the Unknown / Unsegmented bucket. */
+/** `not exists(field)` — the rail's spelling of the Unknown bucket. */
 function notExistsField(node: Node): string | null {
   if (node.kind !== 'not' || node.child.kind !== 'exists') return null;
   return fieldPath(node.child.field);
@@ -516,7 +510,7 @@ function notExistsField(node: Node): string | null {
  */
 function fieldValues(node: Node): { field: string; values: string[] } | null {
   const absent = notExistsField(node);
-  if (absent) return EMPTY_IS_UNSET.has(absent) ? null : { field: absent, values: [unsetBucketFor(absent)] };
+  if (absent) return EMPTY_IS_UNSET.has(absent) ? null : { field: absent, values: [UNSET_BUCKET] };
   const grouped = sameFieldOr(node);
   if (grouped) return grouped;
   if (node.kind !== 'or') return null;
@@ -544,7 +538,7 @@ function fieldValues(node: Node): { field: string; values: string[] } | null {
   }
   if (field === null) return null;
   if (EMPTY_IS_UNSET.has(field) && sawAbsent !== sawEmpty) return null;
-  if (sawAbsent) values.push(unsetBucketFor(field));
+  if (sawAbsent) values.push(UNSET_BUCKET);
   return { field, values };
 }
 
@@ -588,7 +582,7 @@ export function queryToFacets(text: string): FacetRead {
     identity_status: 'identity',
     environment: 'environment',
     site: 'site',
-    segment_id: 'segment',
+    prefix_id: 'prefix',
     owner_email: 'owner',
     business_unit: 'business_unit',
     source: 'provenance',

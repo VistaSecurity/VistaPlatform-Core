@@ -87,17 +87,70 @@ var metadataProvenanceKeys = []string{
 // state is cleared off the resolution (createAssetResolved), not off a row
 // here.
 func (s *AssetService) applyAssetContext(tx *sqlx.Tx, tenantID, assetID uuid.UUID, in models.AssetInput, source identity.Source, outcome identity.Outcome) error {
+	// The Business Unit arrives as an id or, from an import, a name that is
+	// resolved or created. Blank is "not stated" here (empty never wins): only
+	// an explicit edit (UpdateAsset) may clear the assignment.
+	var buID *uuid.UUID
+	buSet := false
+	buRef := in.BusinessUnitID
+	if buRef != nil && strings.TrimSpace(*buRef) == "" {
+		buRef = nil
+	}
+	if buRef != nil || (in.BusinessUnit != nil && strings.TrimSpace(*in.BusinessUnit) != "") {
+		if err := s.exec(tx, tenantID, func(tx *sqlx.Tx) error {
+			var e error
+			buID, buSet, e = s.businessUnits.ResolveID(context.Background(), tx, tenantID, uuid.Nil, buRef, in.BusinessUnit, in.BusinessUnitExternalSystem, in.BusinessUnitExternalID, "imported", nil)
+			return e
+		}); err != nil {
+			return fmt.Errorf("resolve business unit: %w", businessUnitInputError(err))
+		}
+	}
+	// Placement (DCIM row 2.1). The create form names a site and a location
+	// by id; an import names a site by NAME, resolved to the tenant's site of
+	// that name (created when there is none). Blank is "not stated" here, as
+	// for every field above: only an explicit edit (UpdateAsset) clears.
+	var siteID, locID *uuid.UUID
+	placeSet := false
+	siteRef, locRef := blankAsNil(in.SiteID), blankAsNil(in.LocationID)
+	if siteRef != nil || locRef != nil || (in.Site != nil && strings.TrimSpace(*in.Site) != "") {
+		if err := s.exec(tx, tenantID, func(tx *sqlx.Tx) error {
+			ctx := context.Background()
+			if siteRef == nil && in.Site != nil && strings.TrimSpace(*in.Site) != "" {
+				id, err := s.siteService().ResolveSiteByName(ctx, tx, tenantID, uuid.Nil, *in.Site, "imported", nil)
+				if err != nil {
+					return err
+				}
+				if id != nil {
+					v := id.String()
+					siteRef = &v
+				}
+			}
+			var curSite, curLoc uuid.NullUUID
+			if err := tx.QueryRowContext(ctx, `SELECT site_id, location_id FROM assets WHERE tenant_id = $1 AND id = $2`, tenantID, assetID).Scan(&curSite, &curLoc); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			var e error
+			siteID, locID, placeSet, e = ResolveAssetPlacement(ctx, tx, nullUUIDPtr(curSite), nullUUIDPtr(curLoc), siteRef, locRef)
+			if e == nil && placeSet {
+				// A racked asset's site and location are its rack's (row 2.3).
+				e = CheckRackConsistencyTx(ctx, tx, tenantID, assetID, siteID, locID)
+			}
+			return e
+		}); err != nil {
+			return fmt.Errorf("resolve site: %w", siteInputError(err))
+		}
+	}
 	fields := []assetContextField{
 		{column: "environment", value: nullableEnum(in.Environment), set: in.Environment != nil},
-		{column: "business_unit", value: in.BusinessUnit, set: in.BusinessUnit != nil},
+		{column: "business_unit_id", value: buID, set: buSet},
 		{column: "owner_email", value: in.OwnerEmail, set: in.OwnerEmail != nil},
 		{column: "support_group", value: in.SupportGroup, set: in.SupportGroup != nil},
 		{column: "description", value: in.Description, set: in.Description != nil},
-		// Physical placement, as the supplying source names it (a NetBox site
-		// and its region, a CMDB location). Same "empty never wins" rule as
-		// every field above: nil is "not stated", so a later import that does
-		// not carry a site cannot blank the one a tenant set by hand.
-		{column: "site", value: in.Site, set: in.Site != nil},
+		// Physical placement (resolved above). Same "empty never wins" rule as
+		// every field: a later import that does not carry a site cannot blank
+		// the one a tenant set by hand.
+		{column: "site_id", value: siteID, set: placeSet},
+		{column: "location_id", value: locID, set: placeSet},
 		{column: "region", value: in.Region, set: in.Region != nil},
 	}
 
@@ -321,6 +374,30 @@ func historySourceRef(source identity.Source) string {
 // tenant-scoped transaction otherwise. It is the one place that decision is
 // made, so no write in this file can accidentally escape the engine's unit of
 // work by opening a second transaction.
+// siteService is the asset service's SiteService, created on first use for an
+// AssetService built as a struct literal (tests).
+func (s *AssetService) siteService() *SiteService {
+	if s.sites == nil {
+		s.sites = NewSiteService(s.db)
+	}
+	return s.sites
+}
+
+func blankAsNil(p *string) *string {
+	if p == nil || strings.TrimSpace(*p) == "" {
+		return nil
+	}
+	return p
+}
+
+func nullUUIDPtr(v uuid.NullUUID) *uuid.UUID {
+	if !v.Valid {
+		return nil
+	}
+	u := v.UUID
+	return &u
+}
+
 func (s *AssetService) exec(tx *sqlx.Tx, tenantID uuid.UUID, fn func(*sqlx.Tx) error) error {
 	if tx != nil {
 		return fn(tx)

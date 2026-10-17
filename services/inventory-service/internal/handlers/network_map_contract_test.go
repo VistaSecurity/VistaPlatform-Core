@@ -11,6 +11,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"net/http"
 	"strings"
 	"testing"
@@ -57,14 +58,18 @@ const networkMapPath = "/api/v2/inventory-service/infrastructure-assets/network-
 
 func sampleNetworkMap() *services.NetworkMap {
 	seg := uuid.New()
+	vid, vname := 120, "core"
 	return &services.NetworkMap{
-		Segments: []services.NetworkMapSegment{
-			{SegmentID: seg, Name: "Core VLAN", Value: "10.0.0.0/16", SegmentType: "cidr"},
+		Prefixes: []services.NetworkMapPrefix{
+			{PrefixID: seg, Prefix: "10.0.0.0/16", Description: "Core VLAN", VLANVID: &vid, VLANName: &vname,
+				Gateway:   &models.PrefixGateway{AssetID: uuid.New(), DisplayName: "core-gw", Address: "10.0.0.1"},
+				FHRPGroup: &models.FHRPGroupRef{ID: uuid.New(), Protocol: "vrrp2", GroupID: 10, Name: "core", VirtualAddress: "10.0.0.254"}},
+			{PrefixID: uuid.New(), Prefix: "10.8.0.0/16"},
 		},
 		Assets: []services.NetworkMapAsset{
 			{
 				AssetID: uuid.New(), DisplayName: "web-01", ClassKey: "server", Address: "10.0.0.5",
-				SegmentID: &seg, Site: "DC-East", AssetStatus: "monitoring",
+				PrefixID: &seg, Site: "DC-East", AssetStatus: "monitoring",
 				RiskScore: 82, RiskAssessed: true, ServiceCount: 3, CryptoServiceCount: 2,
 				Crypto: services.NetworkMapCrypto{
 					Components: []services.NetworkMapComponent{
@@ -79,7 +84,7 @@ func sampleNetworkMap() *services.NetworkMap {
 			// every optional/nullable path in one row.
 			{
 				AssetID: uuid.New(), DisplayName: "", ClassKey: "managed_database",
-				SegmentID: nil, Site: services.TopologyUnassignedSite, AssetStatus: "pending_approval",
+				PrefixID: nil, Site: services.TopologyUnassignedSite, AssetStatus: "pending_approval",
 				RiskScore: 0, RiskAssessed: false, CloudAccount: "123456789012", CloudRegion: "eu-west-1",
 				Crypto: services.NetworkMapCrypto{Components: []services.NetworkMapComponent{}},
 			},
@@ -107,7 +112,7 @@ func TestContract_GetNetworkMap_200(t *testing.T) {
 		t.Fatal("`network-map` routed into the `:id` parameter route")
 	}
 	for _, want := range []string{
-		`"segment_id":null`, `"risk_assessed":false`, `"strength":""`, `"observed":false`,
+		`"prefix_id":null`, `"risk_assessed":false`, `"strength":""`, `"observed":false`,
 		`"components":[]`, `"needs_migration":1`, `"asset_cap":5000`, `"site":"Unassigned"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -119,7 +124,7 @@ func TestContract_GetNetworkMap_200(t *testing.T) {
 func TestContract_GetNetworkMap_200_EmptyEstate(t *testing.T) {
 	sv := loadSpec(t)
 	empty := &services.NetworkMap{
-		Segments: []services.NetworkMapSegment{}, Assets: []services.NetworkMapAsset{},
+		Prefixes: []services.NetworkMapPrefix{}, Assets: []services.NetworkMapAsset{},
 		AssetCap: services.NetworkMapAssetCap,
 	}
 	w := do(newNetworkMapEngine(NewNetworkMapHandler(&stubNetworkMapStore{networkMap: empty})),
@@ -128,7 +133,7 @@ func TestContract_GetNetworkMap_200_EmptyEstate(t *testing.T) {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
 	sv.assertConforms(t, "NetworkMapResponse", w.Body.Bytes())
-	if !strings.Contains(w.Body.String(), `"segments":[]`) || !strings.Contains(w.Body.String(), `"assets":[]`) {
+	if !strings.Contains(w.Body.String(), `"prefixes":[]`) || !strings.Contains(w.Body.String(), `"assets":[]`) {
 		t.Errorf("empty arrays must serialise as []: %s", w.Body.String())
 	}
 }

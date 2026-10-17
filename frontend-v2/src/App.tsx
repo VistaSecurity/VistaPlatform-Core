@@ -16,6 +16,10 @@ import { ForgotPasswordPage } from './pages/forgot-password-page';
 import { AboutPage } from './pages/about-page';
 import { InventoryPage } from './sections/inventory/inventory-page';
 import { AssetPage } from './sections/inventory/asset-page';
+import { ClusterPage } from './sections/inventory/virtualization/cluster-page';
+import { SitePage } from './sections/inventory/sites/site-page';
+import { RackPage } from './sections/inventory/racks/rack-page';
+import { InfrastructureCatalogPage, InfrastructureOrganizationPage } from './sections/inventory/workspace-hubs';
 import { SensorsPage } from './sections/discovery/sensors-page';
 import { PlansPage } from './sections/remediation/plans-page';
 import { ProgressPage } from './sections/remediation/progress-page';
@@ -26,6 +30,7 @@ import { CommandCenterPage } from './sections/discovery/command-center';
 import { DevicesPage } from './sections/discovery/devices-page';
 import { ScansPage } from './sections/discovery/scans-page';
 import { NEVER_SCANNED_HREF } from './sections/inventory/builtin-views';
+import { NETWORKS_LENS_HREF } from './sections/inventory/lenses';
 import { CloudPage } from './sections/discovery/cloud-page';
 import { ApprovalsPage } from './sections/discovery/approvals-page';
 import { ObservationsPage } from './sections/discovery/observations-page';
@@ -35,8 +40,7 @@ import { DashboardPage } from './sections/dashboard/dashboard-page';
 import { AssetsDashboardPage } from './sections/dashboard/assets-dashboard';
 import { ComplianceDashboardPage } from './sections/dashboard/compliance-dashboard';
 import { PqcDashboardPage } from './sections/dashboard/pqc-dashboard';
-import { OverviewNextDashboardPage } from './sections/dashboard/overview-next-dashboard';
-import { SettingsPage, ProfilePage } from './sections/settings/settings-page';
+import { SettingsPage, WorkspacePage, ProfilePage } from './sections/settings/settings-page';
 import { FindingsPage } from './sections/findings/findings-page';
 import { PosturePage } from './sections/posture/posture-page';
 import { CbomPage } from './sections/cbom/cbom-page';
@@ -113,7 +117,7 @@ export default function App() {
           <Route path="/dashboard/assets" element={<AssetsDashboardPage />} />
           <Route path="/dashboard/compliance" element={<ComplianceDashboardPage />} />
           <Route path="/dashboard/pqc" element={<PqcDashboardPage />} />
-          <Route path="/dashboard/overview-next" element={<OverviewNextDashboardPage />} />
+          <Route path="/dashboard/overview-next" element={<Navigate to="/dashboard" replace />} />
           <Route path="/about" element={<AboutPage />} />
 
           {/* Discovery */}
@@ -143,6 +147,16 @@ export default function App() {
               show the asset. */}
           <Route path="/inventory/assets/:id" element={<AssetPage />} />
           <Route path="/inventory/assets/:id/:tab" element={<AssetPage />} />
+          <Route path="/inventory/clusters/:id" element={<ClusterPage />} />
+          {/* The site page (DCIM row 2.1); its nav home is the Sites lens. */}
+          <Route path="/inventory/sites/:id" element={<SitePage />} />
+          {/* The rack page (DCIM row 2.5); its nav home is the Racks lens. */}
+          <Route path="/inventory/racks/:id" element={<RackPage />} />
+          {/* Operational DCIM records belong to the tenant workspace, not the
+              Settings drawer.  The old /settings/:page URLs redirect here. */}
+          <Route path="/inventory/manage/organization" element={<InfrastructureOrganizationPage />} />
+          <Route path="/inventory/manage/catalog" element={<InfrastructureCatalogPage />} />
+          <Route path="/inventory/manage/:page" element={<WorkspacePage />} />
 
           {/* Risk & Compliance */}
           <Route path="/risk-compliance/posture" element={<PosturePage />} />
@@ -150,6 +164,8 @@ export default function App() {
           {/* CBOM — audit-grade compliance evidence (artifacts + comparison) */}
           <Route path="/risk-compliance/cbom" element={<CbomPage />} />
           <Route path="/risk-compliance/cbom/compare" element={<ComparePage />} />
+          <Route path="/risk-compliance/scopes" element={<WorkspacePage page="scopes" />} />
+          <Route path="/risk-compliance/audit" element={<WorkspacePage page="audit" />} />
           {/* Back-compat for the documented /cbom deep links */}
           <Route path="/cbom" element={<Navigate to="/risk-compliance/cbom" replace />} />
           <Route path="/cbom/compare" element={<Navigate to="/risk-compliance/cbom/compare" replace />} />
@@ -166,10 +182,15 @@ export default function App() {
           <Route path="/remediation/queue" element={<QueuePage />} />
           <Route path="/remediation/plans" element={<PlansPage />} />
           <Route path="/remediation/progress" element={<ProgressPage />} />
+          <Route path="/remediation/delivery" element={<WorkspacePage page="notification-history" />} />
 
           {/* Profile-dropdown surfaces */}
           <Route path="/getting-started" element={<GettingStartedPage />} />
           <Route path="/settings" element={<Navigate to="/settings/org-overview" replace />} />
+          {/* Settings → Network Segments was retired with the table (DCIM row
+              1.6): the tenant's networks are prefixes in Inventory → Networks,
+              and an old bookmark lands there rather than on an unknown page. */}
+          <Route path="/settings/segments" element={<Navigate to={NETWORKS_LENS_HREF} replace />} />
           <Route path="/settings/:page" element={<SettingsPage />} />
           <Route path="/profile" element={<Navigate to="/profile/personal" replace />} />
           <Route path="/profile/:page" element={<ProfilePage />} />

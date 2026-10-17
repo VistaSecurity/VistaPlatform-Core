@@ -32,7 +32,11 @@ func (*FortinetInterrogator) Interrogate(ctx context.Context, device DeviceInfo,
 		return nil, err
 	}
 	client := newFortinetClient(baseURL, creds.Username, creds.Password, creds.InsecureSkipVerify)
-	return client.interrogate(ctx)
+	result, err := client.interrogate(ctx)
+	if result != nil {
+		result.setNetworkManagementAddress(device)
+	}
+	return result, err
 }
 
 // fortinetClient handles a single Fortinet device.
@@ -95,6 +99,12 @@ func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, e
 		for _, tunnel := range tunnels {
 			result.Assets = append(result.Assets, c.convertIPSecToAsset(tunnel))
 		}
+		// The same tunnels as objects (DCIM row 4.3), with their child SAs.
+		phase2, err := c.getResults(ctx, "/api/v2/cmdb/vpn.ipsec/phase2-interface")
+		if err != nil {
+			result.warn("/api/v2/cmdb/vpn.ipsec/phase2-interface", err, "IPsec phase-2 proposals not collected")
+		}
+		c.addFortinetTunnels(result, tunnels, phase2)
 	}
 
 	if certs, err := c.getCertificates(ctx); err != nil {

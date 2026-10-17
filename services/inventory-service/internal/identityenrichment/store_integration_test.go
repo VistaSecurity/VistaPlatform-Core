@@ -304,7 +304,7 @@ func TestIntegration_EnrichmentScopeExplainsCollectorEligibility(t *testing.T) {
 	}{
 		{`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,network_interfaces,reported_dns_interfaces,reported_capabilities)
  VALUES($1,$2,'Sensor','windows','1.0','datacenter_host','active',$3,ARRAY['pcap-capture-name'],ARRAY['Ethernet'],ARRAY['identity_dns_v1'])`, []any{sensor, tenant, now}},
-		{`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'Test network','cidr','192.0.2.0/24',true,'production')`, []any{segment, tenant}},
+		{`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Test network','192.0.2.0/24'::cidr,'production','declared','active')`, []any{segment, tenant}},
 		{`INSERT INTO agent_addresses(sensor_id,interface_name,address,prefix_length,last_seen_at) VALUES($1,'Ethernet','192.0.2.10',24,$2),($1,'Wi-Fi','198.51.100.10',24,$2)`, []any{sensor, now}},
 	} {
 		if _, err := s.DB.Exec(q.sql, q.args...); err != nil {
@@ -337,11 +337,11 @@ func TestIntegration_EnrichmentScopeExplainsCollectorEligibility(t *testing.T) {
 	// The observer is on the target network and is therefore preferred as its
 	// own executor. (Npcap capture name and OS Ethernet name may differ.)
 	check(true, "", "")
-	exec(`UPDATE network_segments SET value='198.51.100.0/24' WHERE id=$1`, segment)
+	exec(`UPDATE prefixes SET prefix='198.51.100.0/24'::cidr WHERE id=$1`, segment)
 	// Wi-Fi holds an address in the new segment but is not an authorized DNS
 	// interface, so neither the observer nor any executor reaches it.
 	check(false, ReasonNoEligibleCollector, "collector_has_no_interface_in_target_network")
-	exec(`UPDATE network_segments SET value='192.0.2.0/24' WHERE id=$1`, segment)
+	exec(`UPDATE prefixes SET prefix='192.0.2.0/24'::cidr WHERE id=$1`, segment)
 	exec(`UPDATE agent_addresses SET prefix_length=NULL WHERE sensor_id=$1`, sensor)
 	check(false, ReasonNoEligibleCollector, "collector_has_no_interface_in_target_network")
 	exec(`UPDATE agent_addresses SET prefix_length=24,last_seen_at=$2 WHERE sensor_id=$1`, sensor, now.Add(-6*time.Minute))
@@ -422,7 +422,7 @@ func TestIntegration_EnrichmentRechecksExecutorAuthorizationBeforeDispatch(t *te
 		args []any
 	}{
 		{`UPDATE identity_observations SET evidence=$3,source_ref=$4,network_scope=$5 WHERE tenant_id=$1 AND id=$2`, []any{tenant, o.ID, string(evidence), o.Evidence.Source.Ref, segment.String()}},
-		{`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'VLAN B','cidr','198.51.100.0/24',true,'production')`, []any{segment, tenant}},
+		{`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'VLAN B','198.51.100.0/24'::cidr,'production','declared','active')`, []any{segment, tenant}},
 		{`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,network_interfaces,reported_capabilities,reported_dns_interfaces) VALUES($1,$2,'observer','linux','1.0','datacenter_host','active',$3,ARRAY['eth0'],ARRAY['identity_dns_v1'],ARRAY['eth0'])`, []any{observer, tenant, now}},
 		{`INSERT INTO agent_addresses(sensor_id,interface_name,address,prefix_length,last_seen_at) VALUES($1,'eth0','192.0.2.10',24,$2)`, []any{observer, now}},
 		{`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,network_interfaces,reported_capabilities,reported_dns_interfaces) VALUES($1,$2,'executor','linux','1.0','datacenter_host','active',$3,ARRAY['eth0'],ARRAY['identity_dns_v1'],ARRAY['eth0'])`, []any{executor, tenant, now}},
@@ -494,7 +494,7 @@ func TestIntegration_EnrichmentNeverPlansACollectorAddress(t *testing.T) {
 	}
 	exec(`UPDATE identity_observations SET evidence=$3,source_ref=$4,network_scope=$5 WHERE tenant_id=$1 AND id=$2`, tenant, o.ID, string(evidence), o.Evidence.Source.Ref, segment.String())
 	exec(`UPDATE tenant_admin_settings SET config='{"identity_enrichment":{"enabled":true},"identity_admission":{"mode":"enforce"},"discovery_auto_scan":{"enabled":true,"protocols":["TLS"],"ports":[443]}}' WHERE tenant_id=$1`, tenant)
-	exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'Test network','cidr','192.0.2.0/24',true,'production')`, segment, tenant)
+	exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Test network','192.0.2.0/24'::cidr,'production','declared','active')`, segment, tenant)
 	// The observer reports no DNS interface at all.
 	exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,reported_capabilities) VALUES($1,$2,'observer','windows','1.0','datacenter_host','active',$3,ARRAY['identity_dns_v1'])`, observer, tenant, now)
 	exec(`INSERT INTO agent_addresses(sensor_id,interface_name,address,prefix_length,last_seen_at) VALUES($1,'Ethernet 2','192.0.2.173',24,$2)`, observer, now)

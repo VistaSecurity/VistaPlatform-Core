@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -22,7 +23,7 @@ func TestSourceAssetWire_MapsEveryAllowlistedField(t *testing.T) {
 	}`), &w); err != nil {
 		t.Fatal(err)
 	}
-	in := w.item().Input
+	in := w.item("netbox").Input
 	for name, got := range map[string]*string{
 		"display_name": in.DisplayName, "hostname": in.Hostname, "ip_address": in.IPAddress,
 		"description": in.Description, "environment": in.Environment, "business_unit": in.BusinessUnit,
@@ -43,5 +44,44 @@ func TestSourceAssetWire_MapsEveryAllowlistedField(t *testing.T) {
 	}
 	if in.AssetStatus != nil {
 		t.Errorf("asset_status = %q; approval is the tenant's policy's answer, never a source's", *in.AssetStatus)
+	}
+}
+
+// A source's declared interfaces reach the asset input with the source's own
+// ids keyed by the request's producer (DCIM row 1.5f), and a field the wire
+// does not list (a NetBox custom field) does not. MUTATION: drop the
+// Interfaces mapping in item(), or key the ids by anything but the producer,
+// and this goes red.
+func TestSourceAssetWire_MapsDeclaredInterfaces(t *testing.T) {
+	var w sourceAssetWire
+	if err := json.Unmarshal([]byte(`{
+		"class_key": "switch",
+		"interfaces": [{
+			"name": "GigabitEthernet1/0/1", "type": "1000base-t", "mac_address": "00:1b:54:aa:bb:01",
+			"mtu": 9000, "enabled": true, "mode": "access", "untagged_vlan": 30, "external_id": "9001",
+			"custom_fields": {"psk": "PlantedWireSecret"},
+			"addresses": [{"address": "192.0.2.11/24", "vrf": "", "external_id": "7001"}]
+		}]
+	}`), &w); err != nil {
+		t.Fatal(err)
+	}
+	in := w.item("netbox").Input
+	if len(in.Interfaces) != 1 {
+		t.Fatalf("interfaces = %+v", in.Interfaces)
+	}
+	ifc := in.Interfaces[0]
+	if ifc.Name != "GigabitEthernet1/0/1" || ifc.Type != "1000base-t" || ifc.MACAddress != "00:1b:54:aa:bb:01" ||
+		ifc.MTU == nil || *ifc.MTU != 9000 || ifc.Enabled == nil || !*ifc.Enabled || ifc.Mode != "access" || ifc.UntaggedVLAN != 30 {
+		t.Errorf("interface = %+v", ifc)
+	}
+	if ifc.ExternalIDs["netbox"] != "9001" || len(ifc.ExternalIDs) != 1 {
+		t.Errorf("interface external ids = %v, want {netbox: 9001}", ifc.ExternalIDs)
+	}
+	if len(ifc.Addresses) != 1 || ifc.Addresses[0].Address != "192.0.2.11/24" || ifc.Addresses[0].ExternalIDs["netbox"] != "7001" {
+		t.Errorf("addresses = %+v", ifc.Addresses)
+	}
+	raw, _ := json.Marshal(in)
+	if strings.Contains(string(raw), "PlantedWireSecret") {
+		t.Error("an unlisted interface field reached the asset input")
 	}
 }

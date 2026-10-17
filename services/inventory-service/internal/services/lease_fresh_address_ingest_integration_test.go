@@ -22,6 +22,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // TestIntegration_LeaseFreshAddress_ProbeOfAMACConfirmedDeviceMatchesInsideDHCPSegment:
@@ -48,7 +49,7 @@ func TestIntegration_LeaseFreshAddress_ProbeOfAMACConfirmedDeviceMatchesInsideDH
 
 	// The router reported DHCP on this LAN, so the whole /24 is flagged
 	// dynamic — measured, not an operator's choice.
-	f.exec(`UPDATE network_segments SET metadata = '{"dynamic":true,"dynamic_source":"measured"}'::jsonb
+	f.exec(`UPDATE prefixes SET dhcp_managed = true
 	         WHERE tenant_id=$1 AND id=$2`, f.tenant, f.segA)
 	scope, dynamic, err := f.svc.identityRepo.ScopeForAddress(ctx, f.tenant.String(), netip.MustParseAddr(hostAddr), "")
 	if err != nil || scope != f.segA.String() || !dynamic {
@@ -93,7 +94,7 @@ func TestIntegration_LeaseFreshAddress_ProbeOfAMACConfirmedDeviceMatchesInsideDH
 		t.Fatalf("the MAC sighting resolved %s on %q, want created", created.Outcome, created.AssetID)
 	}
 	var deviceConfirmed time.Time
-	if err := f.raw.QueryRow(`SELECT device_confirmed_at FROM asset_identifiers
+	if err := f.raw.QueryRow(`SELECT device_confirmed_at FROM (`+identifiersql.All+`) ident_rows
 	   WHERE tenant_id=$1 AND kind='ip_address' AND value=$2`, f.tenant, hostAddr).Scan(&deviceConfirmed); err != nil {
 		t.Fatalf("the host's address row has no device confirmation: %v", err)
 	}
@@ -109,7 +110,7 @@ func TestIntegration_LeaseFreshAddress_ProbeOfAMACConfirmedDeviceMatchesInsideDH
 			probed.Outcome, probed.AssetID, created.AssetID)
 	}
 	var keyOwner string
-	if err := f.raw.QueryRow(`SELECT asset_id::text FROM asset_identifiers
+	if err := f.raw.QueryRow(`SELECT asset_id::text FROM (`+identifiersql.All+`) ident_rows
 	   WHERE tenant_id=$1 AND kind='ssh_host_key_fingerprint' AND value=$2`, f.tenant, hostKey).Scan(&keyOwner); err != nil || keyOwner != created.AssetID {
 		t.Fatalf("the host key is on %q (err %v), want attached to the host %s", keyOwner, err, created.AssetID)
 	}

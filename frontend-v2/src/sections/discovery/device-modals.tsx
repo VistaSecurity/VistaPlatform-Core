@@ -178,6 +178,9 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
   const [vendor, setVendor] = useState('');
   const [model, setModel] = useState('');
   const [ipAddress, setIpAddress] = useState('');
+  // Create mode only (DCIM row 1.5f): the interface the IP address is on.
+  const [macAddress, setMacAddress] = useState('');
+  const [interfaceName, setInterfaceName] = useState('');
   const [managementUrl, setManagementUrl] = useState('');
   const [serialNumber, setSerialNumber] = useState('');
   const [firmwareVersion, setFirmwareVersion] = useState('');
@@ -198,6 +201,8 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
     setVendor(device?.vendor ?? '');
     setModel(device?.model ?? '');
     setIpAddress(device?.ip_address ?? '');
+    setMacAddress('');
+    setInterfaceName('');
     setManagementUrl(device?.management_url ?? '');
     setSerialNumber(device?.serial_number ?? '');
     setFirmwareVersion(device?.firmware_version ?? '');
@@ -316,6 +321,8 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
         model: model.trim() || undefined,
         hostname: hostname.trim() || undefined,
         ip_address: ipAddress.trim() || undefined,
+        mac_address: macAddress.trim() || undefined,
+        interface_name: interfaceName.trim() || undefined,
         management_url: managementUrl.trim() || undefined,
         serial_number: serialNumber.trim() || undefined,
         firmware_version: firmwareVersion.trim() || undefined,
@@ -427,6 +434,14 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
               {!hostnameValid && <span role="alert" style={{ color: 'var(--danger-text)', fontSize: 12 }}>Use a DNS hostname without spaces (for example, edge-fw-01).</span>}
             </ModalField>
             <ModalField label="IP address"><ModalInput name="ip_address" value={ipAddress} onChange={(e) => setIpAddress(e.target.value)} placeholder="10.0.0.1" /></ModalField>
+            {!isEdit && (
+              <>
+                <ModalField label="MAC address"><ModalInput name="mac_address" value={macAddress} onChange={(e) => setMacAddress(e.target.value)} placeholder="optional" /></ModalField>
+                <ModalField label="Interface" hint="The interface the address is on. Leave blank and the platform names it.">
+                  <ModalInput name="interface_name" value={interfaceName} onChange={(e) => setInterfaceName(e.target.value)} placeholder="optional, e.g. port1" />
+                </ModalField>
+              </>
+            )}
             <ModalField label="Vendor"><ModalInput name="vendor" value={vendor} onChange={(e) => setVendor(e.target.value)} placeholder="F5" /></ModalField>
             <ModalField label="Model"><ModalInput name="model" value={model} onChange={(e) => setModel(e.target.value)} placeholder="BIG-IP" /></ModalField>
             <ModalField label="Serial number"><ModalInput name="serial_number" value={serialNumber} onChange={(e) => setSerialNumber(e.target.value)} placeholder="optional" /></ModalField>

@@ -20,11 +20,39 @@ package services
 // the platform's own collector wrote is an API listing), whether a sensor's
 // self-report checks out against the sensors table, and how a person's form
 // maps onto identifiers.
+//
+// # Interfaces and IP addresses (DCIM row 1.5, ADR-0010 D3)
+//
+// A sighting also carries what its collector saw of the device's interfaces,
+// and of the prefixes and VLANs around it: Sighting.Interfaces
+// ([]identity.ObservedInterface, each with its []identity.ObservedAddress),
+// Sighting.Prefixes, Sighting.VLANs and Sighting.ManagementAddress
+// (shared/identity/observed_network.go). Intake folds each interface's MAC and
+// global-VRF addresses into the identifiers, named by the interface; the
+// engine writes `interfaces`, `ip_addresses`, `prefixes` and `vlans` on the
+// resolving transaction. NO adapter calls InterfaceService or IPAMService —
+// the observation is the only way in, so every source files interfaces by one
+// rule.
+//
+// One function per source builds its slice of the sighting, beside the
+// sighting builder it belongs to, and nothing else: rows 1.5b–1.5f each ADD
+// theirs (UniFi, Cisco/Palo Alto/Fortinet/F5, SNMP, sensor/pcap, cloud and
+// NetBox/import) without restructuring the others. The device agent's host
+// inventory (1.5a) builds its interfaces in device-interrogation-service
+// (hostInventoryInterfaces, sightings.go) and posts the sighting to
+// /internal/sightings, which lands here. The network-device interrogations
+// (1.5c: Cisco, Palo Alto, Fortinet, F5) do the same from
+// vendorNetworkSighting (device-interrogation-service vendor_network.go),
+// and park their ARP evidence through shared/dcim/unresolved/pgunresolved.
+// Each adapter proves its projection with identitytest.RunAdapterParity over
+// a recorded vendor response.
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -69,7 +97,7 @@ func (s *AssetService) assessSighting(ctx context.Context, label string, sg iden
 
 // assessSightingIn is assessSighting scoped against the request's one segment
 // snapshot ( F4); a nil segs reads a snapshot for this sighting alone.
-func (s *AssetService) assessSightingIn(ctx context.Context, segs *importSegments, label string, sg identity.Sighting) (identity.IntakeResult, error) {
+func (s *AssetService) assessSightingIn(ctx context.Context, segs *importPrefixes, label string, sg identity.Sighting) (identity.IntakeResult, error) {
 	in, err := s.intake()
 	if err != nil {
 		return identity.IntakeResult{}, fmt.Errorf("identity intake unavailable: %w", err)
@@ -268,6 +296,7 @@ func declaredSighting(tenantID uuid.UUID, in models.AssetInput, source identity.
 			sg.Identifiers = append(sg.Identifiers, identity.SightedIdentifier{Kind: identity.KindName, Value: name})
 		}
 	}
+	declaredInterfaces(&sg, in.Interfaces)
 	for _, ep := range in.Endpoints {
 		transport := strings.TrimSpace(ep.Transport)
 		if transport == "" {
@@ -283,6 +312,54 @@ func declaredSighting(tenantID uuid.UUID, in models.AssetInput, source identity.
 		})
 	}
 	return sg, scoped, nil
+}
+
+// declaredInterfaces puts a declaration's interfaces on its sighting (DCIM row
+// 1.5f): the manual / spreadsheet / NetBox-import adapter of the row 1.5 seam.
+//
+// A named interface becomes an ObservedInterface — Intake folds its MAC and
+// global-VRF addresses into identifiers named by it, and the engine records
+// the rest — with the declaration's source (declared or imported). An unnamed
+// one becomes identifiers only, and the engine files them on an interface it
+// names. A VLAN with no mode is an access VLAN. Address sources are left
+// empty: the engine derives them from the sighting's.
+func declaredInterfaces(sg *identity.Sighting, ifaces []models.AssetInterfaceInput) {
+	for _, in := range ifaces {
+		name := strings.TrimSpace(in.Name)
+		mac := strings.TrimSpace(in.MACAddress)
+		if name == "" {
+			if mac != "" {
+				sg.Identifiers = append(sg.Identifiers, identity.SightedIdentifier{Kind: identity.KindMACAddress, Value: mac})
+			}
+			for _, a := range in.Addresses {
+				if v := strings.TrimSpace(a.Address); v != "" && strings.TrimSpace(a.VRF) == "" {
+					if p, err := netip.ParsePrefix(v); err == nil {
+						v = p.Addr().String()
+					}
+					sg.Identifiers = append(sg.Identifiers, identity.SightedIdentifier{Kind: identity.KindIPAddress, Value: v})
+				}
+			}
+			continue
+		}
+		o := identity.ObservedInterface{
+			Name:         name,
+			Type:         strings.TrimSpace(in.Type),
+			MAC:          mac,
+			MTU:          in.MTU,
+			Enabled:      in.Enabled,
+			Mode:         strings.TrimSpace(in.Mode),
+			UntaggedVLAN: in.UntaggedVLAN,
+		}
+		if o.UntaggedVLAN > 0 && o.Mode == "" {
+			o.Mode = "access"
+		}
+		for _, a := range in.Addresses {
+			if v := strings.TrimSpace(a.Address); v != "" {
+				o.Addresses = append(o.Addresses, identity.ObservedAddress{Address: v, PrefixLen: a.PrefixLength, VRF: strings.TrimSpace(a.VRF)})
+			}
+		}
+		sg.Interfaces = append(sg.Interfaces, o)
+	}
 }
 
 // withExplicitScopes appends the identifiers a declaration named with their
@@ -369,7 +446,7 @@ func hostObservationChannel(ho *hostobs.HostObservation, verifiedSelfReport bool
 func hostObservationSighting(tenantID uuid.UUID, f IngestFinding, ho *hostobs.HostObservation, verifiedSelfReport bool) identity.Sighting {
 	sg := identity.Sighting{
 		TenantID:         tenantID.String(),
-		Source:           hostObservationSource(f),
+		Source:           hostObservationSightingSource(f, ho, verifiedSelfReport),
 		Channel:          hostObservationChannel(ho, verifiedSelfReport),
 		ObservedAt:       hostObservationTime(f, ho),
 		ReceiptID:        rawDataString(f.RawData, "discovery_id"),
@@ -420,6 +497,12 @@ func hostObservationSighting(tenantID uuid.UUID, f IngestFinding, ho *hostobs.Ho
 			sg.Identifiers = append(sg.Identifiers, identity.SightedIdentifier{Kind: identity.KindIPAddress, Value: addr.String()})
 		}
 	}
+	if verifiedSelfReport {
+		sg.Interfaces = selfReportInterfaces(ho)
+	}
+	if p, ok := dhcpLeasePrefix(ho); ok {
+		sg.Prefixes = append(sg.Prefixes, p)
+	}
 	// The ARP decoder's evidence for the engine's floating-address rule. Only
 	// these two keys travel; the rest stay in the asset's metadata.
 	for _, key := range []string{"arp_gratuitous", "arp_operation"} {
@@ -431,6 +514,102 @@ func hostObservationSighting(tenantID uuid.UUID, f IngestFinding, ho *hostobs.Ho
 		}
 	}
 	return sg
+}
+
+// The passive half of DCIM row 1.5e: how a host observation's addresses reach
+// `ip_addresses`.
+//
+// A passive frame never says WHICH interface of the subject carried the MAC
+// and address it saw, so it sends them as identifiers naming no interface and
+// the engine files them together on one synthetic `observed-<n>` interface
+// (row 1.4's PlanInterfaces), renamed by MAC when a source that knows the name
+// reports it. The seam drops an ObservedInterface with no name (row 1.5a's
+// contract), so nothing passive is sent as one.
+//
+// What the protocol adds is provenance. `ip_addresses.last_seen_source` is
+// derived from the sighting's Source.Ref (pgidentity's lastSeenSource), so a
+// DHCP lease and an ARP binding name their protocol in the ref —
+// `sensor:<id>:dhcp`, `sensor:pcap:<id>:arp` — while Source.Origin keeps the
+// plain `sensor:<id>` that observations are grouped by, so splitting the ref
+// does not split one host's held observations into one per protocol.
+
+// hostObservationAddressProtocol is the protocol that bound the observation's
+// address to its MAC, in last_seen_source's vocabulary: "dhcp" for a lease
+// the server assigned or the client holds (a DISCOVER's wish is not one),
+// "arp" for an ARP binding, "" for everything else (mDNS, NBNS, DNS, LLDP and
+// CDP name a device without binding a lease — `passive`).
+func hostObservationAddressProtocol(ho *hostobs.HostObservation) string {
+	if ho == nil {
+		return ""
+	}
+	if slices.Contains(ho.Sources, hostobs.SourceDHCP) || ho.Source == hostobs.SourceDHCP {
+		if requestedOnly, _ := ho.Attributes["dhcp_address_requested_only"].(bool); !requestedOnly {
+			return hostobs.SourceDHCP
+		}
+	}
+	if slices.Contains(ho.Sources, hostobs.SourceARP) || ho.Source == hostobs.SourceARP {
+		return hostobs.SourceARP
+	}
+	return ""
+}
+
+// hostObservationSightingSource is hostObservationSource with the binding
+// protocol in the ref (see above). A self-report keeps its plain ref: it is
+// the host reading its own table, and the sensor-identity check matches the
+// ref exactly.
+func hostObservationSightingSource(f IngestFinding, ho *hostobs.HostObservation, verifiedSelfReport bool) identity.Source {
+	src := hostObservationSource(f)
+	if verifiedSelfReport || hostObservationIsSelfReport(f) {
+		return src
+	}
+	if proto := hostObservationAddressProtocol(ho); proto != "" {
+		src.Origin = src.Ref
+		src.Ref = src.Ref + ":" + proto
+	}
+	return src
+}
+
+// selfReportAddressSource is the last_seen_source of an address a sensor read
+// off its own host's interface table: the host's agent reporting itself.
+const selfReportAddressSource = "agent"
+
+// selfReportInterfaces projects a VERIFIED self-report's interface table onto
+// the intake seam: one ObservedInterface per named NIC, its MAC, and its
+// addresses with the configured length. The capture flag is not an interface
+// field (DATA_MODEL has none); it stays the `capture_interfaces` attribute in
+// the asset's metadata. Assignment stays unknown — the sensor's table does not
+// say static or leased, and a guess would pin a lease (owner decision 1).
+func selfReportInterfaces(ho *hostobs.HostObservation) []identity.ObservedInterface {
+	if ho == nil || len(ho.Interfaces) == 0 {
+		return nil
+	}
+	out := make([]identity.ObservedInterface, 0, len(ho.Interfaces))
+	for _, ifc := range ho.Interfaces {
+		o := identity.ObservedInterface{Name: ifc.Name, MAC: ifc.MAC}
+		for _, a := range ifc.Addresses {
+			o.Addresses = append(o.Addresses, identity.ObservedAddress{Address: a, Source: selfReportAddressSource})
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+// dhcpLeasePrefix is the prefix a DHCP ACK's subnet-mask option states
+// (shared/hostobs AttrDHCPSubnet): the network the server leases out of, so
+// DHCP-managed. It is a measurement by the network's own DHCP service, not
+// the host's view of its subnet, and it arrives pending like every measured
+// prefix. Its absence is "not said" — never a prefix guessed from a length.
+func dhcpLeasePrefix(ho *hostobs.HostObservation) (identity.ObservedPrefix, bool) {
+	if ho == nil || ho.Relayed() {
+		return identity.ObservedPrefix{}, false
+	}
+	raw, _ := ho.Attributes[hostobs.AttrDHCPSubnet].(string)
+	p, err := netip.ParsePrefix(strings.TrimSpace(raw))
+	if err != nil || !p.Addr().Is4() || p.Bits() <= 0 || p.Bits() >= 32 {
+		return identity.ObservedPrefix{}, false
+	}
+	managed := true
+	return identity.ObservedPrefix{Prefix: p.Masked().String(), DHCPManaged: &managed}, true
 }
 
 // DeclareFor resolves a declaration about ONE named asset — a connector's link

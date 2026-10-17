@@ -1,7 +1,7 @@
 package services_test
 
 // Scan-plan jobs ( WP3) through the REAL CreateJob and GetJob handlers
-// against a real Postgres: the per-target external depth cap (D3), the segment
+// against a real Postgres: the per-target external depth cap (D3), the prefix
 // that granted ownership, the probe budget (H19) and Auto routing (D7, H11).
 //
 // It lives beside the services package (as services_test) rather than in
@@ -116,14 +116,14 @@ func (f *planFixture) storedMode(t *testing.T, jobID string) (string, []string) 
 // D3 per target, through the real handler: a private /24 and a registered
 // public block run at the requested Thorough depth while an external host in
 // the SAME job runs at Standard, the downgrade is reported, the registered
-// target names its segment, and the target rows carry the planned ports.
+// target names its prefix, and the target rows carry the planned ports.
 func TestIntegration_ScanPlan_ExternalCapIsPerTarget(t *testing.T) {
 	t.Setenv(dispatchguard.EnvExternalTargetsEnabled, "true")
 	t.Setenv(shareddisc.EnvMaxJobProbes, "")
 	f := newPlanFixture(t)
-	var segmentID string
-	if err := f.db.QueryRow(`INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment, is_active)
-		VALUES ($1, 'dmz', 'cidr', '93.184.217.0/28', 'public', 'production', true) RETURNING id`, f.tenant).Scan(&segmentID); err != nil {
+	var prefixID string
+	if err := f.db.QueryRow(`INSERT INTO prefixes (tenant_id, prefix, description, network_type, environment, source_kind, status)
+		VALUES ($1, '93.184.217.0/28', 'dmz', 'public', 'production', 'declared', 'active') RETURNING id`, f.tenant).Scan(&prefixID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -144,8 +144,8 @@ func TestIntegration_ScanPlan_ExternalCapIsPerTarget(t *testing.T) {
 	if external.Class != shareddisc.ClassExternal || external.Depth != shareddisc.DepthStandard || external.TCPPortCount != shareddisc.StandardPorts().Len() {
 		t.Errorf("external host = %+v, want capped to standard", external)
 	}
-	if registered.Class != shareddisc.ClassRegisteredSegment || registered.SegmentID != segmentID || registered.Depth != shareddisc.DepthThorough {
-		t.Errorf("registered block = %+v, want thorough and segment %s", registered, segmentID)
+	if registered.Class != shareddisc.ClassRegisteredPrefix || registered.PrefixID != prefixID || registered.Depth != shareddisc.DepthThorough {
+		t.Errorf("registered block = %+v, want thorough and prefix %s", registered, prefixID)
 	}
 	if len(plan.DepthAdjustments) != 1 || plan.DepthAdjustments[0].Target != "93.184.216.34" ||
 		plan.DepthAdjustments[0].Applied != shareddisc.DepthStandard || !strings.Contains(plan.DepthAdjustments[0].Reason, "register the range if it is yours") {
@@ -182,7 +182,7 @@ func TestIntegration_ScanPlan_ExternalCapIsPerTarget(t *testing.T) {
 	f.r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/jobs/"+job.ID, nil))
 	var read jobWithPlan
 	_ = json.Unmarshal(w.Body.Bytes(), &read)
-	if w.Code != http.StatusOK || read.Plan == nil || len(read.Plan.Targets) != 3 || read.Plan.Targets[1].Depth != shareddisc.DepthStandard || read.Plan.Targets[2].SegmentID != segmentID {
+	if w.Code != http.StatusOK || read.Plan == nil || len(read.Plan.Targets) != 3 || read.Plan.Targets[1].Depth != shareddisc.DepthStandard || read.Plan.Targets[2].PrefixID != prefixID {
 		t.Fatalf("GET = %d plan %+v", w.Code, read.Plan)
 	}
 	if mode, _ := f.storedMode(t, job.ID); mode != "async" {

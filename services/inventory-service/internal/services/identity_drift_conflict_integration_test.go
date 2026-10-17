@@ -40,6 +40,7 @@ import (
 	invevents "github.com/vistasecurity/vistaplatform/inventory-service/internal/events"
 	sharedevents "github.com/vistasecurity/vistaplatform/shared/events"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 const (
@@ -71,7 +72,7 @@ func driftFinding(f *provisionalFixture, at time.Time, protocol string, raw map[
 
 func (f *provisionalFixture) identifierOwners(kind, value string) []string {
 	f.t.Helper()
-	rows, err := f.raw.Query(`SELECT asset_id::text FROM asset_identifiers WHERE tenant_id=$1 AND kind=$2 AND lower(value)=lower($3) ORDER BY asset_id`, f.tenant, kind, value)
+	rows, err := f.raw.Query(`SELECT asset_id::text FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind=$2 AND lower(value)=lower($3) ORDER BY asset_id`, f.tenant, kind, value)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -188,7 +189,7 @@ func TestIntegration_StableNetworkDrift_DifferentDeviceBindingNeedsReview(t *tes
 					}
 				}
 				var algs string
-				if err := f.raw.QueryRow(`SELECT string_agg(coalesce(key_algorithm, '?'), ',' ORDER BY key_algorithm) FROM asset_identifiers
+				if err := f.raw.QueryRow(`SELECT string_agg(coalesce(key_algorithm, '?'), ',' ORDER BY key_algorithm) FROM (`+identifiersql.All+`) ident_rows
 					WHERE tenant_id=$1 AND asset_id=$2 AND kind=$3`, f.tenant, asset, tc.kind).Scan(&algs); err != nil {
 					t.Fatal(err)
 				}

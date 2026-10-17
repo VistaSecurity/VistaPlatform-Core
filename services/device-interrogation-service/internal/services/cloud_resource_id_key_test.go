@@ -63,8 +63,6 @@ var cloudResourceIDKeyByDeviceType = map[string]string{
 	"aws_cloudfront":  "distribution_id",
 	// AWS enumeration writes the canonical key for everything it records.
 	"aws_ec2_instance": "cloud_resource_id",
-	"aws_vpc":          "cloud_resource_id",
-	"aws_subnet":       "cloud_resource_id",
 
 	// Azure — the ARM resource path, under two spellings depending on which
 	// collector wrote it. The storage/SQL collectors reuse the provider-neutral
@@ -75,8 +73,6 @@ var cloudResourceIDKeyByDeviceType = map[string]string{
 	"azure_sql_database":        "arn",
 	"azure_keyvault_key":        "cloud_resource_id",
 	"azure_vm":                  "cloud_resource_id",
-	"azure_virtual_network":     "cloud_resource_id",
-	"azure_subnet":              "cloud_resource_id",
 
 	// GCP — the selfLink, or the provider-neutral `arn` field for the storage
 	// collectors (which carry `gs://…` and `gcp:cloudsql:…`).
@@ -86,8 +82,24 @@ var cloudResourceIDKeyByDeviceType = map[string]string{
 	"gcp_cloudsql_instance":   "arn",
 	"gcp_kms_crypto_key":      "cloud_resource_id",
 	"gcp_compute_instance":    "cloud_resource_id",
-	"gcp_network":             "cloud_resource_id",
-	"gcp_subnetwork":          "cloud_resource_id",
+
+	// The Tier-1 classes and security groups (DCIM row 4.6) are recorded
+	// through the enumeration funnel, which writes the canonical key.
+	"aws_lambda_function":          "cloud_resource_id",
+	"azure_function_app":           "cloud_resource_id",
+	"gcp_cloud_function":           "cloud_resource_id",
+	"aws_eks_cluster":              "cloud_resource_id",
+	"azure_aks_cluster":            "cloud_resource_id",
+	"gcp_gke_cluster":              "cloud_resource_id",
+	"aws_secretsmanager_secret":    "cloud_resource_id",
+	"azure_keyvault_secret":        "cloud_resource_id",
+	"gcp_secret":                   "cloud_resource_id",
+	"aws_route53_hosted_zone":      "cloud_resource_id",
+	"azure_dns_zone":               "cloud_resource_id",
+	"gcp_dns_managed_zone":         "cloud_resource_id",
+	"aws_security_group":           "cloud_resource_id",
+	"azure_network_security_group": "cloud_resource_id",
+	"gcp_firewall":                 "cloud_resource_id",
 }
 
 // cloudDeviceTypeScanExclusions are strings that match the device-type shape but

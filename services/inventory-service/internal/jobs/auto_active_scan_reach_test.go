@@ -15,7 +15,7 @@ import (
 	sharedautoscan "github.com/vistasecurity/vistaplatform/shared/autoscan"
 )
 
-func seg(cidr, kind string) autoscan.Segment { return autoscan.Segment{Value: cidr, NetworkType: kind} }
+func seg(cidr, kind string) autoscan.Prefix { return autoscan.Prefix{Value: cidr, NetworkType: kind} }
 
 func collectorOn(name string, ifaces ...string) identityenrichment.Collector {
 	var ps []netip.Prefix
@@ -39,41 +39,41 @@ func TestDecidePlatformTargets(t *testing.T) {
 		wantSkipped  bool
 	}{
 		{"eligible sensor in the segment runs it", autoScanReachability{
-			Segments: []autoscan.Segment{seg("192.0.2.0/24", "private")}, Collectors: []identityenrichment.Collector{siteSensor, otherSensor}, HasLiveSensors: true},
+			Prefixes: []autoscan.Prefix{seg("192.0.2.0/24", "private")}, Collectors: []identityenrichment.Collector{siteSensor, otherSensor}, HasLiveSensors: true},
 			true, "192.0.2.50", false, "site", false},
 		{"cloud segment, no sensor: skipped", autoScanReachability{
-			Segments: []autoscan.Segment{seg("198.51.100.0/24", "cloud")}, Collectors: []identityenrichment.Collector{siteSensor}, HasLiveSensors: true},
+			Prefixes: []autoscan.Prefix{seg("198.51.100.0/24", "cloud")}, Collectors: []identityenrichment.Collector{siteSensor}, HasLiveSensors: true},
 			true, "198.51.100.7", false, "", true},
 		{"cloud segment, tenant has no sensors at all: still skipped", autoScanReachability{
-			Segments: []autoscan.Segment{seg("198.51.100.0/24", "cloud")}},
+			Prefixes: []autoscan.Prefix{seg("198.51.100.0/24", "cloud")}},
 			true, "198.51.100.7", false, "", true},
 		{"cloud segment is skipped even with the prefer-sensor switch off", autoScanReachability{
-			Segments: []autoscan.Segment{seg("198.51.100.0/24", "cloud")}, HasLiveSensors: true},
+			Prefixes: []autoscan.Prefix{seg("198.51.100.0/24", "cloud")}, HasLiveSensors: true},
 			false, "198.51.100.7", false, "", true},
 		{"private segment, other live sensors none reaching: skipped", autoScanReachability{
-			Segments: []autoscan.Segment{seg("198.51.100.0/24", "private")}, Collectors: []identityenrichment.Collector{siteSensor}, HasLiveSensors: true},
+			Prefixes: []autoscan.Prefix{seg("198.51.100.0/24", "private")}, Collectors: []identityenrichment.Collector{siteSensor}, HasLiveSensors: true},
 			true, "198.51.100.7", false, "", true},
 		{"private segment, tenant has no sensors at all: platform", autoScanReachability{
-			Segments: []autoscan.Segment{seg("198.51.100.0/24", "private")}},
+			Prefixes: []autoscan.Prefix{seg("198.51.100.0/24", "private")}},
 			true, "198.51.100.7", true, "", false},
 		{"vpn segment, other live sensors none reaching: skipped", autoScanReachability{
-			Segments: []autoscan.Segment{seg("198.51.100.0/24", "vpn")}, HasLiveSensors: true},
+			Prefixes: []autoscan.Prefix{seg("198.51.100.0/24", "vpn")}, HasLiveSensors: true},
 			true, "198.51.100.7", false, "", true},
 		{"vpn segment, no sensors at all: platform", autoScanReachability{
-			Segments: []autoscan.Segment{seg("198.51.100.0/24", "vpn")}},
+			Prefixes: []autoscan.Prefix{seg("198.51.100.0/24", "vpn")}},
 			true, "198.51.100.7", true, "", false},
 		{"no registered segment, tenant has sensors: skipped", autoScanReachability{HasLiveSensors: true},
 			true, "198.51.100.7", false, "", true},
 		{"no registered segment, no sensors: platform", autoScanReachability{},
 			true, "198.51.100.7", true, "", false},
 		{"switch off: private host stays on the platform despite sensors", autoScanReachability{
-			Segments: []autoscan.Segment{seg("198.51.100.0/24", "private")}, HasLiveSensors: true},
+			Prefixes: []autoscan.Prefix{seg("198.51.100.0/24", "private")}, HasLiveSensors: true},
 			false, "198.51.100.7", true, "", false},
 		{"the sensor's own address is never handed to itself", autoScanReachability{
-			Segments: []autoscan.Segment{seg("192.0.2.0/24", "private")}, Collectors: []identityenrichment.Collector{siteSensor}, HasLiveSensors: true},
+			Prefixes: []autoscan.Prefix{seg("192.0.2.0/24", "private")}, Collectors: []identityenrichment.Collector{siteSensor}, HasLiveSensors: true},
 			true, "192.0.2.10", false, "", true},
 		{"most specific segment wins (cloud /28 inside a private /24)", autoScanReachability{
-			Segments: []autoscan.Segment{seg("198.51.100.0/24", "private"), seg("198.51.100.0/28", "cloud")}},
+			Prefixes: []autoscan.Prefix{seg("198.51.100.0/24", "private"), seg("198.51.100.0/28", "cloud")}},
 			true, "198.51.100.7", false, "", true},
 	}
 	for _, c := range cases {
@@ -110,7 +110,7 @@ func TestSweepTenant_DoesNotProbeUnreachableTargetsFromThePlatform(t *testing.T)
 	site := collectorOn("site", "192.0.2.10/24")
 	j := routedJob(store, d, &fakeRouter{plan: sensorrouting.Plan{Platform: []string{"198.51.100.7", "192.0.2.50"}}})
 	j.SetReach(fakeReach{r: autoScanReachability{
-		Segments:       []autoscan.Segment{seg("198.51.100.0/24", "cloud"), seg("192.0.2.0/24", "private")},
+		Prefixes:       []autoscan.Prefix{seg("198.51.100.0/24", "cloud"), seg("192.0.2.0/24", "private")},
 		Collectors:     []identityenrichment.Collector{site},
 		HasLiveSensors: true,
 	}})

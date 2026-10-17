@@ -127,6 +127,13 @@ func snmpTestMIB() []snmpTestValue {
 
 		// LLDP: one neighbour on local port 1.
 		snmpTestOctet(snmpOIDLLDPLocPortID+".1", "Gi1/0/1"),
+		// Its management address rides in lldpRemManAddrTable's index
+		// (timeMark.localPortNum.remIndex.subtype(1=ipv4).len.octets).
+		snmpTestInt(snmpOIDLLDPRemManAddrIfSubtype+".0.1.1.1.4.198.51.100.20", snmpTagInteger, 2),
+		// CDP: one neighbour on ifIndex 2, an NX-OS device id with its serial.
+		snmpTestOctet(snmpOIDCDPCacheDeviceID+".2.1", "dist-sw-2(FOX1234ABCD)"),
+		snmpTestOctet(snmpOIDCDPCacheDevicePort+".2.1", "Ethernet1/48"),
+		{oid: snmpOIDCDPCacheAddress + ".2.1", tag: snmpTagOctetString, raw: []byte{198, 51, 100, 21}},
 		snmpTestMAC(snmpOIDLLDPRemChassisID+".0.1.1", 0x00, 0x1b, 0x17, 0x00, 0x00, 0xaa),
 		snmpTestOctet(snmpOIDLLDPRemPortID+".0.1.1", "Gi1/0/24"),
 		snmpTestOctet(snmpOIDLLDPRemPortDesc+".0.1.1", "uplink to core-sw-1"),
@@ -332,47 +339,57 @@ func TestSNMPInterrogator_CollectsOpsFactsAndTopology(t *testing.T) {
 		t.Errorf("sysObjectID enterprise 9 did not produce a class hint: %+v", result.DeviceIdentity)
 	}
 
-	// --- interfaces -------------------------------------------------------
-	interfaces := factValue(t, result, factNetInterfaces).([]map[string]interface{})
+	// --- interfaces (DCIM row 1.5d: Network, not a fact) -------------------
+	if hasFact(result, factNetInterfaces) {
+		t.Errorf("net.interfaces is retired for SNMP but was emitted: %v", factKeys(result))
+	}
+	if result.Network == nil {
+		t.Fatal("no network observation was emitted")
+	}
+	interfaces := result.Network.Interfaces
 	if len(interfaces) != 3 {
 		t.Fatalf("expected three interfaces, got %+v", interfaces)
 	}
-	// Numerically ordered: ifIndex 2 before ifIndex 10.
-	if interfaces[0]["name"] != "Gi1/0/1" || interfaces[1]["name"] != "Gi1/0/2" || interfaces[2]["name"] != "Vl1" {
-		t.Errorf("interfaces are not in ifIndex order: %+v", interfaces)
+	// Numerically ordered (ifIndex 2 before ifIndex 10), named in the vendor's
+	// long form.
+	if interfaces[0].Name != "GigabitEthernet1/0/1" || interfaces[1].Name != "GigabitEthernet1/0/2" || interfaces[2].Name != "Vlan1" {
+		t.Errorf("interfaces are not in ifIndex order or not canonical: %+v", interfaces)
 	}
 	first := interfaces[0]
-	if first["mac"] != "00:1b:17:00:00:01" || first["state"] != "up" || first["admin_state"] != "up" || first["speed"] != 1000 {
+	if first.MAC != "00:1b:17:00:00:01" || first.OperStatus != "up" || first.Enabled == nil || !*first.Enabled ||
+		first.SpeedKbps == nil || *first.SpeedKbps != 1_000_000 {
 		t.Errorf("ifTable projection wrong: %+v", first)
 	}
 	second := interfaces[1]
-	if second["state"] != "down" || second["admin_state"] != "down" {
+	if second.OperStatus != "down" || second.Enabled == nil || *second.Enabled {
 		t.Errorf("a shut interface must record both states: %+v", second)
 	}
-	if _, hasMAC := second["mac"]; hasMAC {
+	if second.MAC != "" {
 		t.Errorf("the all-zero ifPhysAddress was stored as a MAC: %+v", second)
 	}
-	if second["speed"] != 100 {
-		t.Errorf("ifSpeed fallback (bits/s → Mbit/s) wrong: %+v", second)
+	if second.SpeedKbps == nil || *second.SpeedKbps != 100_000 {
+		t.Errorf("ifSpeed fallback (bits/s → kbit/s) wrong: %+v", second)
 	}
 
 	// --- neighbours and edges --------------------------------------------
+	// The ARP entry stays the net.neighbors fact; LLDP and CDP rows are cable
+	// ends on the network observation (DCIM row 3.3).
 	neighbors := factValue(t, result, factNetNeighbors).([]map[string]interface{})
-	if len(neighbors) != 2 {
-		t.Fatalf("expected one LLDP and one ARP neighbour, got %+v", neighbors)
+	if len(neighbors) != 1 || neighbors[0]["protocol"] != "arp" {
+		t.Fatalf("expected only the ARP neighbour in net.neighbors, got %+v", neighbors)
 	}
-	var lldp, arp map[string]interface{}
-	for _, n := range neighbors {
-		switch n["protocol"] {
-		case "lldp":
-			lldp = n
-		case "arp":
-			arp = n
-		}
+	arp := neighbors[0]
+	if result.Network == nil || len(result.Network.Neighbors) != 2 {
+		t.Fatalf("expected one LLDP and one CDP neighbour on the network observation, got %+v", result.Network)
 	}
-	if lldp["remote_name"] != "dist-sw-1.example.net" || lldp["remote_mac"] != "00:1b:17:00:00:aa" ||
-		lldp["remote_port"] != "Gi1/0/24" || lldp["local_port"] != "Gi1/0/1" {
-		t.Errorf("LLDP projection wrong: %+v", lldp)
+	lldp, cdp := result.Network.Neighbors[0], result.Network.Neighbors[1]
+	if lldp != (ObservedNeighbor{Protocol: "lldp", LocalInterface: "GigabitEthernet1/0/1", RemoteChassisID: "00:1b:17:00:00:aa",
+		RemotePortID: "Gi1/0/24", RemotePortDescr: "uplink to core-sw-1", RemoteSystemName: "dist-sw-1.example.net", RemoteMgmtAddress: "198.51.100.20"}) {
+		t.Errorf("lldpRemTable projection wrong: %+v", lldp)
+	}
+	if cdp != (ObservedNeighbor{Protocol: "cdp", LocalInterface: "GigabitEthernet1/0/2", RemotePortID: "Ethernet1/48",
+		RemoteSystemName: "dist-sw-2", RemoteMgmtAddress: "198.51.100.21"}) {
+		t.Errorf("cdpCacheTable projection wrong: %+v", cdp)
 	}
 	if arp["remote_mac"] != "00:1b:17:00:00:bb" || arp["remote_address"] != "198.51.100.1" {
 		t.Errorf("ARP projection wrong: %+v", arp)

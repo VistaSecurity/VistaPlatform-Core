@@ -212,8 +212,8 @@ func (f *previewFixture) sensor(t *testing.T, name string, online bool, network 
 func (f *previewFixture) registerPublicSegment(t *testing.T, cidr string) string {
 	t.Helper()
 	var id string
-	if err := f.db.QueryRow(`INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment, is_active)
-		VALUES ($1, 'dmz', 'cidr', $2, 'public', 'production', true) RETURNING id`, f.tenant, cidr).Scan(&id); err != nil {
+	if err := f.db.QueryRow(`INSERT INTO prefixes (tenant_id, description, prefix, network_type, environment)
+		VALUES ($1, 'dmz', $2, 'public', 'production') RETURNING id`, f.tenant, cidr).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	return id

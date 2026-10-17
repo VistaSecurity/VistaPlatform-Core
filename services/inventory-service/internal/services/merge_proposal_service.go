@@ -864,6 +864,9 @@ type fkRef struct{ table, column string }
 var (
 	assetReferrers = []fkRef{
 		{"identity_observations", "asset_id"},
+		// A cable end's denormalised asset (DCIM row 3.2): the component it
+		// sits on moves to the survivor, so the filter column follows.
+		{"cable_terminations", "asset_id"},
 		// The class timeline follows the asset. A merge is two records of one
 		// thing becoming one, so the classes the duplicate was believed to be
 		// are part of the survivor's history — and the FK is ON DELETE CASCADE,
@@ -881,9 +884,15 @@ var (
 		// asset, so a plain UPDATE cannot collide.
 		{"deferred_crypto_findings", "asset_id"},
 		// The network a merged-away device was the gateway of is routed by
-		// the survivor. Its candidacies on other networks follow it
-		// too, after this list runs (pgidentity.RepointGatewayCandidates).
-		{"network_segments", "gateway_asset_id"},
+		// the survivor (the prefix's gateway, DCIM row 1.6).
+		{"prefixes", "gateway_asset_id"},
+		// A child device in the duplicate's device bay is in the survivor's
+		// (DCIM row 2.3, assets.parent_asset_id). The survivor itself, were it
+		// the duplicate's child, is unparented first ("child parent" below).
+		{"assets", "parent_asset_id"},
+		// The chassis the duplicate was master of is mastered by the survivor
+		// (DCIM row 2.4; membership itself moves in hardware_merge.go).
+		{"virtual_chassis", "master_asset_id"},
 	}
 	endpointReferrers = []fkRef{
 		{"crypto_implementations", "endpoint_id"},
@@ -909,6 +918,19 @@ var (
 // when the thing was seen is lost. Then the source row goes.
 func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid.UUID, managementSelected ...bool) error {
 	if err := moveMergePolymorphicChildren(ctx, tx, tenantID, from, to); err != nil {
+		return err
+	}
+	// Interfaces (DCIM row 1.2): same-name pairs collide; see interface_merge.go.
+	if err := moveMergeInterfaces(ctx, tx, tenantID, from, to); err != nil {
+		return err
+	}
+	// Port components (DCIM row 3.1): same-name pairs collide; see component_merge.go.
+	if err := moveMergeComponents(ctx, tx, tenantID, from, to); err != nil {
+		return err
+	}
+	// Module bays, modules, inventory items, chassis membership (DCIM row
+	// 2.4): same-name pairs collide; see hardware_merge.go.
+	if err := moveMergeHardware(ctx, tx, tenantID, from, to); err != nil {
 		return err
 	}
 
@@ -1092,6 +1114,21 @@ func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid
 		                SELECT tenant_id, $3, producer, assessed_at FROM moved
 		                ON CONFLICT (tenant_id, asset_id, producer)
 		                DO UPDATE SET assessed_at = GREATEST(producer_assessments.assessed_at, EXCLUDED.assessed_at)`},
+		// The survivor cannot become its own parent (assets_parent_asset_check)
+		// when it sat in the duplicate's device bay.
+		{"child parent", `UPDATE assets SET parent_asset_id = NULL, device_bay_id = NULL
+		                   WHERE tenant_id = $1 AND id = $3 AND parent_asset_id = $2`},
+		// Rack placement (DCIM row 2.3): an unracked survivor takes the
+		// duplicate's rack position (and the rack's site and location); the
+		// duplicate then leaves the rack, so a merged-away record never holds
+		// units. A survivor already racked keeps its own position.
+		{"rack placement", `UPDATE assets s SET rack_id = l.rack_id, position = l.position, face = l.face,
+		                           site_id = l.site_id, location_id = l.location_id
+		                      FROM assets l
+		                     WHERE s.tenant_id = $1 AND s.id = $3 AND l.tenant_id = $1 AND l.id = $2
+		                       AND s.rack_id IS NULL AND l.rack_id IS NOT NULL`},
+		{"rack placement (duplicate)", `UPDATE assets SET rack_id = NULL, position = NULL, face = NULL
+		                                 WHERE tenant_id = $1 AND id = $2 AND $3::uuid IS NOT NULL`},
 	}
 
 	// Every OTHER table that names an asset. These five carry ON DELETE SET
@@ -1123,12 +1160,6 @@ func moveAssetChildren(ctx context.Context, tx *sqlx.Tx, tenantID, from, to uuid
 			return fmt.Errorf("merge: move %s: %w", step.what, err)
 		}
 	}
-	// After network_segments.gateway_asset_id moved above: a survivor that is
-	// now a network's gateway is no longer a candidate for it.
-	if err := pgidentity.RepointGatewayCandidates(ctx, tx, tenantID.String(), from.String(), to.String()); err != nil {
-		return fmt.Errorf("merge: %w", err)
-	}
-
 	if err := moveAssetEdges(ctx, tx, tenantID, from, to); err != nil {
 		return err
 	}

@@ -216,3 +216,23 @@ describe('the band ladder', () => {
     expect(CVSS_LADDER.bands()).toEqual(LADDER.bands());
   });
 });
+
+describe('the cf. namespace (QUERY_LANGUAGE §15.5, DCIM row 5.1)', () => {
+  it('publishes the tenant custom field names it is given, for autocomplete', () => {
+    const cat = newRegistryCatalog({ customFieldNames: ['owner_team', 'Bad Name'] });
+    const names = cat.fields('asset').map((f) => f.name);
+    expect(names).toContain('cf.owner_team');
+    expect(names).not.toContain('cf.Bad Name');
+    expect(cat.fields('interface').map((f) => f.name)).toContain('cf.owner_team');
+  });
+
+  it('resolves any well-formed name as a keyword over custom_fields, loaded or not', () => {
+    const r = newRegistryCatalog().resolve('asset', ['cf', 'owner_team']);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.field.type).toBe('keyword');
+      expect(r.field.accessor).toEqual({ kind: 'jsonb', jsonColumn: 'custom_fields', key: 'owner_team' });
+    }
+    expect(newRegistryCatalog().resolve('certificate', ['cf', 'owner_team']).ok).toBe(false);
+  });
+});

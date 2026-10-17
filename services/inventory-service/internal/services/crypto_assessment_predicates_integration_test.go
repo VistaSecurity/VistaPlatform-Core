@@ -212,25 +212,23 @@ func pqTextArray(v []string) interface{} {
 	return out + "}"
 }
 
-// TestIntegration_LocationSummary_BandsRiskScore is the B-18 regression. The
-// asset rows deliberately keep the stored risk_level at its DEFAULT
-// ('Informational') — which is what every real row looks like, since nothing
-// writes it — so the counters can only be right if they band risk_score.
-func TestIntegration_LocationSummary_BandsRiskScore(t *testing.T) {
+// TestIntegration_SiteSummary_BandsRiskScore is the B-18 regression, on the
+// per-site summary that replaced the per-location one (DCIM row 2.1): the
+// counters can only be right if they band risk_score, because nothing has ever
+// written a stored risk level.
+func TestIntegration_SiteSummary_BandsRiskScore(t *testing.T) {
 	db, tenant := newPredicateFixture(t)
 
 	loc := uuid.New()
-	if _, err := db.Exec(`
-		INSERT INTO locations (id, tenant_id, name, location_type, full_path, created_at, updated_at)
-		VALUES ($1,$2,'HQ','datacenter','HQ',NOW(),NOW())`, loc, tenant); err != nil {
-		t.Fatalf("insert location: %v", err)
+	if _, err := db.Exec(`INSERT INTO sites (id, tenant_id, name, slug) VALUES ($1,$2,'HQ','hq')`, loc, tenant); err != nil {
+		t.Fatalf("insert site: %v", err)
 	}
 
 	insertScored := func(hostname string, score int) {
 		t.Helper()
 		if _, err := db.Exec(`
-			INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, location_id, risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', $4, $5, NOW(), NOW(), NOW(), NOW())`,
+			INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, site_id, risk_score, environment, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, 'server', 'hardware.computer.server', 'monitoring', $4, $5, 'production', NOW(), NOW(), NOW(), NOW())`,
 			uuid.New(), tenant, hostname, loc, score); err != nil {
 			t.Fatalf("insert asset %s: %v", hostname, err)
 		}
@@ -258,12 +256,19 @@ func TestIntegration_LocationSummary_BandsRiskScore(t *testing.T) {
 			"reported Informational forever. The band belongs to models.RiskBands, derived from risk_score.")
 	}
 
-	sum, err := (&LocationService{db: db}).GetLocationSummary(tenant, loc)
-	if err != nil {
-		t.Fatalf("GetLocationSummary: %v", err)
+	if _, err := db.Exec(`SELECT refresh_operational_views()`); err != nil {
+		t.Fatalf("refresh operational views: %v", err)
 	}
-	if sum == nil {
-		t.Fatal("GetLocationSummary returned nil")
+	envs, err := NewOperationalService(db).GetSiteEnvironments(tenant, loc)
+	if err != nil {
+		t.Fatalf("GetSiteEnvironments: %v", err)
+	}
+	if len(envs) != 1 {
+		t.Fatalf("got %d environments, want 1 (production)", len(envs))
+	}
+	sum := envs[0]
+	if sum.AssetCount != 6 {
+		t.Errorf("AssetCount = %d, want 6", sum.AssetCount)
 	}
 	if sum.CriticalFindings != 2 {
 		t.Errorf("CriticalFindings = %d, want 2", sum.CriticalFindings)
@@ -276,27 +281,25 @@ func TestIntegration_LocationSummary_BandsRiskScore(t *testing.T) {
 	}
 }
 
-// TestIntegration_LocationAssets_ReportBandedRiskLevel proves the asset list
-// under a location reports the banded level rather than the constant column.
-func TestIntegration_LocationAssets_ReportBandedRiskLevel(t *testing.T) {
+// TestIntegration_SiteEnvironmentAssets_ReportBandedRiskLevel proves the asset
+// list of a site's environment reports the banded level rather than a constant.
+func TestIntegration_SiteEnvironmentAssets_ReportBandedRiskLevel(t *testing.T) {
 	db, tenant := newPredicateFixture(t)
 
 	loc := uuid.New()
-	if _, err := db.Exec(`
-		INSERT INTO locations (id, tenant_id, name, location_type, full_path, created_at, updated_at)
-		VALUES ($1,$2,'DC1','datacenter','DC1',NOW(),NOW())`, loc, tenant); err != nil {
-		t.Fatalf("insert location: %v", err)
+	if _, err := db.Exec(`INSERT INTO sites (id, tenant_id, name, slug) VALUES ($1,$2,'DC1','dc1')`, loc, tenant); err != nil {
+		t.Fatalf("insert site: %v", err)
 	}
 	if _, err := db.Exec(`
-		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, location_id, risk_score, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1, $2, 'banded.example.test', 'server', 'hardware.computer.server', 'monitoring', $3, 92, NOW(), NOW(), NOW(), NOW())`,
+		INSERT INTO assets (id, tenant_id, hostname, class_key, class_path, asset_status, site_id, risk_score, environment, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, 'banded.example.test', 'server', 'hardware.computer.server', 'monitoring', $3, 92, 'production', NOW(), NOW(), NOW(), NOW())`,
 		uuid.New(), tenant, loc); err != nil {
 		t.Fatalf("insert asset: %v", err)
 	}
 
-	assets, _, err := (&LocationService{db: db}).GetLocationAssets(tenant, loc)
+	assets, _, err := NewOperationalService(db).GetEnvironmentAssets(tenant, loc, "production", 1, 20)
 	if err != nil {
-		t.Fatalf("GetLocationAssets: %v", err)
+		t.Fatalf("GetEnvironmentAssets: %v", err)
 	}
 	if len(assets) != 1 {
 		t.Fatalf("got %d assets, want 1", len(assets))

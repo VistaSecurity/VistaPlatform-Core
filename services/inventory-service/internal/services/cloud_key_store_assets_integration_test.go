@@ -25,6 +25,7 @@ package services
 // Skips without TEST_DATABASE_URL (make test-integration-db).
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"testing"
@@ -34,7 +35,9 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
-	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/approval"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
+	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -133,6 +136,9 @@ func kmsCount(t *testing.T, raw *sql.DB, q string, args ...any) int {
 func TestIntegration_KMSCloudKeys_FiveKeysYieldFiveRowsAndFiveKeyStores(t *testing.T) {
 	svc, raw, tenant := kmsKeyStoreFixture(t)
 	keys := kmsFiveKeys()
+	// The AWS account is declared (an integration names it), so the AWS key
+	// can be placed under the account's site (DCIM row 2.1).
+	declareCloudAccountAsset(t, raw, tenant, "aws", "111122223333")
 
 	for run := 1; run <= 2; run++ {
 		kmsIngest(t, svc, tenant, keys)
@@ -166,15 +172,21 @@ func TestIntegration_KMSCloudKeys_FiveKeysYieldFiveRowsAndFiveKeyStores(t *testi
 		}
 	}
 
-	// The AWS key lands in its region's cloud segment, as the queue put it.
-	var seg sql.NullString
+	// The AWS key lands in its region's location under its account's site
+	// (DCIM row 2.1, ADR-0009 D1), and is scoped to no prefix: a key has no
+	// address a prefix could contain (DCIM rows 1.5f, 1.6).
+	var locName, siteRef, prefix sql.NullString
 	if err := raw.QueryRow(`
-		SELECT s.value FROM assets a JOIN network_segments s ON s.id = a.network_segment_id
-		 WHERE a.tenant_id=$1 AND a.class_key='key_store' AND a.hostname=$2`, tenant, keys[0].KeyID).Scan(&seg); err != nil {
-		t.Fatalf("read the AWS key store's segment: %v", err)
+		SELECT l.name, s.source_ref, a.prefix_id::text FROM assets a
+		  LEFT JOIN locations l ON l.id = a.location_id LEFT JOIN sites s ON s.id = a.site_id AND s.id = l.site_id
+		 WHERE a.tenant_id=$1 AND a.class_key='key_store' AND a.hostname=$2`, tenant, keys[0].KeyID).Scan(&locName, &siteRef, &prefix); err != nil {
+		t.Fatalf("read the AWS key store's placement: %v", err)
 	}
-	if seg.String == "" {
-		t.Errorf("the AWS key store has no cloud segment")
+	if locName.String != "us-east-1" || siteRef.String != "cloud_account:aws:111122223333" {
+		t.Errorf("the AWS key store is in location %q of site %q, want us-east-1 under the account's site", locName.String, siteRef.String)
+	}
+	if prefix.Valid {
+		t.Errorf("the AWS key store is scoped to prefix %s; a key has no network", prefix.String)
 	}
 }
 
@@ -225,20 +237,16 @@ func TestIntegration_KMSCloudKeys_MatchesAKeyStoreTheQueueCreated(t *testing.T) 
 }
 
 // Approval is the tenant's rules over the same projection the processor
-// evaluated: a rule on the AWS region's cloud segment approves the AWS key;
-// keys with no region (Azure, GCP) had no segment then and have none now, so
-// they wait in Approvals.
+// evaluated, with the key's ACCOUNT on the observation (ADR-0009 D5): the
+// account rule for the AWS key's account approves it; the Azure and GCP keys
+// are in other accounts and wait in Approvals.
 func TestIntegration_KMSCloudKeys_ApprovalFollowsTheTenantsRules(t *testing.T) {
 	svc, raw, tenant := kmsKeyStoreFixture(t)
 	keys := kmsFiveKeys()
 
-	seg, err := svc.networkSegmentService.FindOrCreateCloudSegment(tenant, "aws", "us-east-1", "", "production")
-	if err != nil {
-		t.Fatalf("cloud segment: %v", err)
-	}
 	if _, err := raw.Exec(`INSERT INTO discovery_auto_approval_rules (tenant_id, name, query, is_active)
-		VALUES ($1, 'aws us-east-1', $2, true)`,
-		tenant, segmentApprovalQuery([]string{models.AutoApproveSourceCloud}, seg.NetworkType, seg.ID.String())); err != nil {
+		VALUES ($1, 'aws account', $2, true)`,
+		tenant, approval.CloudAccountApprovalQuery(keys[0].AccountID)); err != nil {
 		t.Fatalf("insert rule: %v", err)
 	}
 
@@ -307,4 +315,24 @@ func TestIntegration_KMSCloudKeys_AssetCarriesAndRefreshesAttributes(t *testing.
 	if n := kmsCount(t, raw, `SELECT count(*) FROM assets WHERE tenant_id=$1 AND class_key='key_store' AND deleted_at IS NULL`, tenant); n != 1 {
 		t.Errorf("%d Key Store assets after the refresh, want 1", n)
 	}
+}
+
+// declareCloudAccountAsset is the account asset an integration declares
+// (device-interrogation's CloudAccountService): class cloud_account, keyed by
+// its cloud_resource_id.
+func declareCloudAccountAsset(t *testing.T, raw *sql.DB, tenant uuid.UUID, provider, account string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	repo := pgidentity.New(raw)
+	ref, err := repo.CreateAsset(ctx, tenant.String(), identity.NewAsset{
+		ClassKey: "cloud_account", DisplayName: "Account " + account, Status: "monitoring",
+		Source: identity.Source{Kind: identity.SourceDeclared, Ref: "integration:test"},
+	})
+	if err != nil {
+		t.Fatalf("declare account asset: %v", err)
+	}
+	if _, err := repo.AttachIdentifiers(ctx, ref, []identity.Identifier{{Kind: identity.KindCloudResourceID, Value: provider + ":" + account, Confidence: 1}}); err != nil {
+		t.Fatalf("account identifier: %v", err)
+	}
+	return uuid.MustParse(ref.ID)
 }

@@ -88,8 +88,8 @@ type IdentityObservation struct {
 	// The review table's fields, resolved server-side so the UI never
 	// joins a UUID to a name or re-derives what a row needs.
 	//
-	// NetworkName is the configured segment's name for NetworkScope, null when
-	// the scope is the tenant default or names no segment of this tenant.
+	// NetworkName is the CIDR of the prefix NetworkScope names, null when the
+	// scope is the tenant default or names no prefix of this tenant.
 	NetworkName *string `json:"network_name"`
 	// SourceName is the collector's name for a `sensor:<id>`-shaped SourceRef,
 	// else a fixed label for the kind of source. Never the raw ref.
@@ -177,19 +177,19 @@ func (s *AssetService) UsesIdentityAdmission(ctx context.Context, tenant uuid.UU
 }
 
 // identityObservationColumns are read through observationReadFrom, which joins
-// the segment and the collector so a page resolves its names in the same
+// the prefix and the collector so a page resolves its names in the same
 // tenant-scoped statement as its rows: no query per row, and a name can only
 // come from a row the tenant's own predicate (and RLS) admits. The join keys
 // also carry tenant_id, so a scope or source_ref naming ANOTHER tenant's
-// segment or sensor finds nothing rather than that tenant's name.
+// prefix or sensor finds nothing rather than that tenant's name.
 const identityObservationColumns = `o.id,o.source_kind,o.source_ref,o.collector_version,o.network_scope,o.evidence,
  o.admission_reasons,o.state,o.asset_id,o.proposal_id,o.first_seen_at,o.last_seen_at,o.occurrence_count,
- o.enrichment_state,o.enrichment_reason,o.last_attempt_at,o.next_attempt_at,ns.name,s.name,
+ o.enrichment_state,o.enrichment_reason,o.last_attempt_at,o.next_attempt_at,pfx.prefix::text,s.name,
  (o.state='linked' AND o.resolution_outcome IS NOT DISTINCT FROM 'supporting'),
  ` + observationOwnersJSONSQL
 
 const observationReadFrom = ` FROM identity_observations o
- LEFT JOIN network_segments ns ON ns.tenant_id=o.tenant_id AND ns.id::text=o.network_scope
+ LEFT JOIN prefixes pfx ON pfx.tenant_id=o.tenant_id AND pfx.id::text=o.network_scope
  LEFT JOIN sensors s ON s.tenant_id=o.tenant_id AND s.id::text=(regexp_match(o.source_ref, ` + sourceSensorRefSQL + `))[1]`
 
 func scanIdentityObservation(row interface{ Scan(...any) error }, now time.Time) (IdentityObservation, error) {
@@ -297,7 +297,7 @@ var observationSorts = map[string]string{
 	"last_seen_desc": `o.last_seen_at DESC, o.id`,
 	"last_seen_asc":  `o.last_seen_at ASC, o.id`,
 	"host":           `lower(COALESCE(NULLIF(o.evidence->>'hostname',''), jsonb_path_query_first(o.evidence, '$.identifiers[*] ? (@.kind == "ip_address").value') #>> '{}')) NULLS LAST, o.last_seen_at DESC, o.id`,
-	"network":        `lower(ns.name) NULLS LAST, o.last_seen_at DESC, o.id`,
+	"network":        `pfx.prefix NULLS LAST, o.last_seen_at DESC, o.id`,
 	"needs":          observationNeedsOrderSQL + `, o.last_seen_at DESC, o.id`,
 }
 
@@ -305,7 +305,7 @@ var observationSorts = map[string]string{
 // evidence, the network's name and the collector's name. Built from the
 // identifier and endpoint arrays rather than evidence::text so a search for
 // "tcp" or a key name does not match every row.
-const observationSearchSQL = `concat_ws(' ', o.evidence->>'hostname', o.evidence->>'display_name', ns.name, s.name,
+const observationSearchSQL = `concat_ws(' ', o.evidence->>'hostname', o.evidence->>'display_name', pfx.prefix::text, pfx.description, s.name,
  (SELECT string_agg(x->>'value', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(o.evidence->'identifiers')='array' THEN o.evidence->'identifiers' ELSE '[]'::jsonb END) x
    WHERE x->>'kind' IN ('ip_address','hostname','fqdn','mac_address')),
  (SELECT string_agg(e->>'address', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(o.evidence->'endpoints')='array' THEN o.evidence->'endpoints' ELSE '[]'::jsonb END) e))`

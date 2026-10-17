@@ -3,6 +3,7 @@ package updates
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -77,6 +78,9 @@ type RegistryTags struct {
 	PullSecretName string
 	ReadSecret     SecretReader
 	Log            logrus.FieldLogger
+	// Transport carries the extra trusted CA (EXTRA_TRUSTED_CA_PATH); nil is
+	// Go's default transport and the public trust store.
+	Transport http.RoundTripper
 }
 
 // ListTags implements TagSource.
@@ -98,7 +102,7 @@ func (r RegistryTags) ListTags(ctx context.Context) ([]string, error) {
 			creds = Credentials{}
 		}
 	}
-	return NewLister(r.Source, creds).ListTags(ctx)
+	return NewLister(r.Source, creds, r.Transport).ListTags(ctx)
 }
 
 func (r RegistryTags) log() logrus.FieldLogger {
@@ -130,6 +134,9 @@ type EnvSettings struct {
 	ChartSource        string
 	PullSecretName     string
 	NotesBaseURL       string
+	// Transport is the registry client's RoundTripper: the trust bundle's when
+	// EXTRA_TRUSTED_CA_PATH is set (main wires it), else nil for the default.
+	Transport http.RoundTripper
 	// Warnings are problems with the configuration that fell back to a default.
 	Warnings []string
 }
@@ -175,7 +182,7 @@ func (f failingTags) ListTags(context.Context) ([]string, error) { return nil, f
 // status row.
 func NewService(settings EnvSettings, running string, store Store, locker Locker, read SecretReader, log logrus.FieldLogger) *Service {
 	src, err := ParseSource(settings.ChartSource)
-	var tags TagSource = RegistryTags{Source: src, PullSecretName: settings.PullSecretName, ReadSecret: read, Log: log}
+	var tags TagSource = RegistryTags{Source: src, PullSecretName: settings.PullSecretName, ReadSecret: read, Log: log, Transport: settings.Transport}
 	if err != nil {
 		tags = failingTags{err: err}
 	}

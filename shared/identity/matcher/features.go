@@ -60,7 +60,7 @@ type Side struct {
 	// [FeatureNameGeneric].
 	GenericNames []string
 
-	// Segment is the network segment (scope) this side belongs to, empty when
+	// Segment is the prefix (scope) this side belongs to, empty when
 	// unknown.
 	Segment string
 
@@ -157,7 +157,7 @@ const (
 	// other. A printer is not a firewall.
 	FeatureClassConflict = "class_conflict"
 
-	// FeatureSegmentMatch / FeatureSegmentConflict — same network segment, or
+	// FeatureSegmentMatch / FeatureSegmentConflict — same prefix, or
 	// two different known ones. A hostname agreeing ACROSS segments is the
 	// second commonest false positive: every segment has a `db01`.
 	FeatureSegmentMatch    = "segment_match"

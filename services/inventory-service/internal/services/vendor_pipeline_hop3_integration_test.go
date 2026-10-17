@@ -111,7 +111,6 @@ func ingestVendorHop2(t *testing.T, db *database.DB, s pipelinetest.Scenario, ho
 	svc := NewAssetService(db)
 	// Wired as cmd/main.go wires it, so the import classifies over the
 	// segments seeded below — the one classifier ( WP3).
-	svc.SetEnrichmentServices(NewNetworkSegmentService(db, nil), nil)
 
 	// The tenant as hop 1 left it: its registered networks and the segments
 	// the interrogation learned.
@@ -119,22 +118,18 @@ func ingestVendorHop2(t *testing.T, db *database.DB, s pipelinetest.Scenario, ho
 	for _, seg := range s.TenantSegments {
 		id := uuid.New()
 		segmentIDs[seg.CIDR] = id
-		if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment,is_active)
-			VALUES($1,$2,$3,'cidr',$4,'production',true)`, id, tenant, seg.Name, seg.CIDR); err != nil {
+		if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,$3,$4::cidr,'production','declared','active')`, id, tenant, seg.Name, seg.CIDR); err != nil {
 			t.Fatalf("seed segment %s: %v", seg.CIDR, err)
 		}
 	}
 	device := uuid.New()
-	for _, seg := range hop2.LearnedSegments {
-		meta := pipelinetest.Substitute(pipelinetest.Canonical(t, seg.Metadata), s.ManagementPort,
-			pipelinetest.PlaceholderDeviceAssetID, device.String())
-		metaJSON, _ := json.Marshal(meta)
+	for _, p := range hop2.LearnedPrefixes {
 		id := uuid.New()
-		segmentIDs[seg.Value] = id
-		if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,network_type,environment,is_active,metadata)
-			VALUES($1,$2,$3,$4,$5,$6,'production',true,$7::jsonb)`,
-			id, tenant, "Learned "+seg.Value, seg.SegmentType, seg.Value, seg.NetworkType, string(metaJSON)); err != nil {
-			t.Fatalf("seed learned segment %s: %v", seg.Value, err)
+		segmentIDs[p.Value] = id
+		if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,network_type,environment,source_kind,status,dhcp_managed)
+			VALUES($1,$2,$3,$4::cidr,NULLIF($5,''),'production','measured','pending',$6)`,
+			id, tenant, "Learned "+p.Value, p.Value, p.NetworkType, p.DHCPManaged); err != nil {
+			t.Fatalf("seed learned prefix %s: %v", p.Value, err)
 		}
 	}
 
@@ -243,10 +238,9 @@ func insertPipelineAssets(t *testing.T, db *database.DB, tenant, device uuid.UUI
 	// it IS in a segment, and CreateDevice scopes an address to the segment
 	// that contains it — so that is the scope it gets here.
 	applianceScope := ""
-	if seg, err := NewNetworkSegmentService(db, nil).GetSegmentForIP(tenant, &s.ManagementIP, nil); err != nil {
-		t.Fatalf("segment for %s: %v", s.ManagementIP, err)
-	} else if seg != nil {
-		applianceScope = seg.ID.String()
+	if err := db.QueryRow(`SELECT id::text FROM prefixes WHERE tenant_id=$1 AND vrf_id IS NULL AND prefix >>= $2::inet
+		ORDER BY masklen(prefix) DESC LIMIT 1`, tenant, s.ManagementIP).Scan(&applianceScope); err != nil && err != sql.ErrNoRows {
+		t.Fatalf("prefix for %s: %v", s.ManagementIP, err)
 	}
 	labels := map[uuid.UUID]string{}
 	for i, rec := range records {
@@ -280,14 +274,42 @@ func insertPipelineAssets(t *testing.T, db *database.DB, tenant, device uuid.UUI
 				scope = &applianceScope
 			} else if ident.Scope != nil {
 				sc := *ident.Scope
-				if cidr, ok := strings.CutPrefix(sc, "segment:"); ok {
+				if cidr, ok := strings.CutPrefix(sc, "prefix:"); ok {
 					segID, known := segmentIDs[cidr]
 					if !known {
-						t.Fatalf("%s identifier scoped to segment %s, which this tenant does not have", rec.Label, cidr)
+						t.Fatalf("%s identifier scoped to prefix %s, which this tenant does not have", rec.Label, cidr)
 					}
 					sc = segID.String()
 				}
+				// DCIM row 1.5c: a network device's interfaces taught hop 1's
+				// engine its connected prefixes; recreate the one the scope
+				// names, as the engine recorded it (global table).
+				if cidr, ok := strings.CutPrefix(sc, "prefix:"); ok {
+					var prefixID uuid.UUID
+					if err := db.QueryRow(`
+						WITH ins AS (
+							INSERT INTO prefixes (tenant_id, prefix) VALUES ($1, $2::cidr)
+							ON CONFLICT DO NOTHING RETURNING id)
+						SELECT id FROM ins
+						UNION ALL
+						SELECT id FROM prefixes WHERE tenant_id = $1 AND prefix = $2::cidr AND vrf_id IS NULL
+						LIMIT 1`, tenant, cidr).Scan(&prefixID); err != nil {
+						t.Fatalf("recreate prefix %s: %v", cidr, err)
+					}
+					sc = prefixID.String()
+				}
 				scope = &sc
+			}
+			if ident.Kind == "ip_address" {
+				// Row 1.4: an address is held on one of the asset's interfaces.
+				sc := ""
+				if scope != nil {
+					sc = *scope
+				}
+				if _, err := db.Exec(testdb.SeedAssetAddressSQL, tenant, id, resolve(ident.Value), sc, ident.SourceKind, ""); err != nil {
+					t.Fatalf("insert %s address %s: %v", rec.Label, ident.Value, err)
+				}
+				continue
 			}
 			if _, err := db.Exec(`INSERT INTO asset_identifiers (tenant_id, asset_id, kind, value, scope, source_kind)
 				VALUES ($1, $2, $3, $4, $5, $6)`, tenant, id, ident.Kind, resolve(ident.Value), scope, ident.SourceKind); err != nil {

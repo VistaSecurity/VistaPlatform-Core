@@ -1325,15 +1325,23 @@ func (p *CryptoProducer) write(ctx context.Context, tenantID uuid.UUID, planned 
 // cryptoKinds is every kind this producer emits, which is also every kind it
 // sweeps. Derived from the registry rather than listed, so a kind added to the
 // `crypto` producer without a sweep here is impossible.
+//
+// Except the kinds another pass writes under the same producer key: this pass
+// does not assert them, so sweeping them would resolve what that pass raised
+// (and that pass would re-raise it, resurfacing it every run).
 var cryptoKinds = func() []string {
 	var out []string
 	for _, k := range findings.All {
-		if k.Producer == findings.ProducerCrypto {
+		if k.Producer == findings.ProducerCrypto && !sweptByAnotherPass[k.Key] {
 			out = append(out, k.Key)
 		}
 	}
 	return out
 }()
+
+// sweptByAnotherPass are `crypto` kinds a different pass owns: row 4.4's
+// WirelessAuthProducer raises and sweeps weak_wireless_auth.
+var sweptByAnotherPass = map[string]bool{findings.KindWeakWirelessAuth: true}
 
 // severityForScore bands a score and spells the band the way
 // findings_severity_check does.

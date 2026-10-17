@@ -127,7 +127,7 @@ func TestIntegration_Resolve_OfflineObserverFallsThroughToALiveSegmentSensorNeve
 	if len(plan.Groups) != 2 {
 		t.Fatalf("groups = %+v, want branch-sensor and edge-sensor only", plan.Groups)
 	}
-	if g := byName["branch-sensor"]; strings.Join(g.Targets, ",") != "198.51.100.42" || g.Reasons["198.51.100.42"] != ReasonSegment {
+	if g := byName["branch-sensor"]; strings.Join(g.Targets, ",") != "198.51.100.42" || g.Reasons["198.51.100.42"] != ReasonPrefix {
 		t.Errorf("branch-sensor = %+v, want 198.51.100.42 by same_segment", g)
 	}
 	if g := byName["edge-sensor"]; strings.Join(g.Targets, ",") != "198.51.100.50" || g.Reasons["198.51.100.50"] != ReasonObserved {

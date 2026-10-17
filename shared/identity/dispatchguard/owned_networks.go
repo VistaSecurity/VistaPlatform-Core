@@ -19,22 +19,23 @@ import (
 //
 // It lists:
 //
-//   - every active CIDR segment the tenant DECLARED that grants ownership for
-//     a scan a person asked for ([SegmentGrantsOwnership] with automatic=false),
-//     except segments marked sensitive or active-probes-disabled, and except
+//   - every live global-VRF prefix the tenant DECLARED that grants ownership
+//     for a scan a person asked for ([SegmentGrantsOwnership] with
+//     automatic=false, via [probeconsent.PrefixClaim]), except prefixes marked
+//     sensitive or active-probes-disabled, and except
 //     prefixes wholly inside private address space (the sensor already owns
 //     those). Enrichment is automatic, yet it takes the manual-scan reading of
-//     a PUBLIC segment on purpose: the unattended sweep refuses public space
+//     a PUBLIC prefix on purpose: the unattended sweep refuses public space
 //     because it would go looking for hosts, whereas enrichment only ever
 //     reaches a service the tenant's own hosts were already talking to, inside
 //     a range the tenant said is theirs. That is the owner's "owned assets ...
 //     they configure within their own tenant".
 //   - never a prefix too broad to be anybody's ([probeconsent.TooBroadToClaim]:
 //     shorter than /8 for IPv4 or /16 for IPv6, /0 above all).
-//   - LEARNED segments never. A firewall reporting its ISP transit /30 is not
-//     a claim of ownership (see [SegmentGrantsOwnership]). A learned segment a
-//     person has CLAIMED is no longer read as learned (learnedSegmentSQL) and
-//     is listed like a declared one.
+//   - LEARNED prefixes never. A firewall reporting its ISP transit /30 is not
+//     a claim of ownership (see [SegmentGrantsOwnership]). A learned prefix a
+//     person has CLAIMED is no longer read as learned (prefixScopeSQL) and is
+//     listed like a declared one.
 //   - every endpoint the tenant ELEVATED from an external connection to a
 // monitored asset whose asset still exists and is monitored. The
 //     elevation path keeps a promoted asset current by refreshing it in place
@@ -42,12 +43,12 @@ import (
 //     the re-discovery that carries the certificate — without this, elevating
 //     a vendor endpoint would freeze its certificate at whatever was captured
 //     before the click.
-//   - as EXCLUDED: every segment marked sensitive or active-probes-disabled
+//   - as EXCLUDED: every prefix marked sensitive or active-probes-disabled
 //     (learned or declared) and the tenant's automatic-scan exclusions — the
 //     same exclusions LoadTargetScope applies to dispatched scans. The sensor
 //     lets an exclusion beat everything, including the third-party opt-in.
 //
-// Call it inside a tenant-scoped transaction: network_segments, assets and
+// Call it inside a tenant-scoped transaction: prefixes, assets and
 // external_connections are all RLS tables.
 func OwnedNetworks(tx Queryer, tenantID string) (probeconsent.OwnedNetworks, error) {
 	out := probeconsent.OwnedNetworks{Prefixes: []string{}, Endpoints: []string{}, Excluded: []string{}}
@@ -69,42 +70,39 @@ func OwnedNetworks(tx Queryer, tenantID string) (probeconsent.OwnedNetworks, err
 		return probeconsent.OwnedNetworks{Prefixes: []string{}, Endpoints: []string{}, Excluded: excludedList(), Incomplete: true}, err
 	}
 
-	// Segments first: they carry exclusions, and reading them before anything
+	// Prefixes first: they carry exclusions, and reading them before anything
 	// that can fail on bad tenant data means an incomplete answer still names
-	// every segment the tenant marked sensitive or probes-disabled.
-	var segmentRaw []byte
-	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('value',value,'network_type',network_type,'learned',`+learnedSegmentSQL+`,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, tenantID).Scan(&segmentRaw); err != nil {
+	// every prefix the tenant marked sensitive or probes-disabled.
+	var prefixRaw []byte
+	if err := tx.QueryRow(prefixScopeSQL, tenantID).Scan(&prefixRaw); err != nil {
 		return incomplete(err)
 	}
-	var segments []struct {
+	var prefixes []struct {
 		Value       string
 		NetworkType string `json:"network_type"`
 		Learned     bool
 		Blocked     bool
 	}
-	if err := json.Unmarshal(segmentRaw, &segments); err != nil {
+	if err := json.Unmarshal(prefixRaw, &prefixes); err != nil {
 		return incomplete(err)
 	}
 	owned := map[netip.Prefix]bool{}
-	for _, seg := range segments {
-		prefix, err := netip.ParsePrefix(seg.Value)
+	for _, pr := range prefixes {
+		prefix, err := netip.ParsePrefix(pr.Value)
 		if err != nil {
 			continue
 		}
 		prefix = prefix.Masked()
-		switch {
-		case seg.Blocked:
-			// Learned or declared, a segment marked sensitive or
-			// active-probes-disabled is never probed automatically — the
-			// conservative direction needs no statement of ownership.
+		isOwned, isExcluded := probeconsent.PrefixClaim{
+			Prefix:          prefix,
+			Declared:        !pr.Learned,
+			GrantsOwnership: SegmentGrantsOwnership(PrefixNetworkType(pr.NetworkType, prefix), false, false),
+			Blocked:         pr.Blocked,
+		}.Contribution()
+		if isExcluded {
 			excluded[prefix] = true
-		case seg.Learned || !SegmentGrantsOwnership(seg.NetworkType, false, false):
-			// Not a claim of ownership.
-		case probeconsent.TooBroadToClaim(prefix):
-			// Nobody owns 0.0.0.0/0 or a /7 of the internet (owner decision
-			// on). inventory-service now refuses to save one; a segment
-			// saved before that is simply not ownership here.
-		case !probeconsent.WhollyOwnedByAddressClass(prefix):
+		}
+		if isOwned {
 			owned[prefix] = true
 		}
 	}

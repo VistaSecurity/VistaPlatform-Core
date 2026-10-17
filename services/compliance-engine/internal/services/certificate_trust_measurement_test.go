@@ -89,8 +89,13 @@ func TestTrustStatusVocabularyMatchesSchema(t *testing.T) {
 	if i < 0 {
 		t.Fatal("schema.sql has no certificates_trust_status_check")
 	}
+	// The CHECK sits on one line of the CREATE TABLE (the 5.0.0 baseline folded
+	// the guarded ALTER that used to add it), so it ends at the line's end; the
+	// statement's ";" is further down, past the table's other constraints.
 	check := schema[i:]
-	check = check[:strings.Index(check, ";")]
+	if end := strings.IndexAny(check, ";\n"); end >= 0 {
+		check = check[:end]
+	}
 	for _, status := range allTrustStatuses {
 		if !strings.Contains(check, "'"+status+"'") {
 			t.Errorf("status %q is not in the schema CHECK", status)

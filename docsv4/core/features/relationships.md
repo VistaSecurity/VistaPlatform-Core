@@ -24,7 +24,7 @@ Two things about this number are worth knowing.
 
 **It only counts dependency relationships, not network connections.** Nine of the ten relationship types carry impact. `connects_to` — an observed network conversation — is the one that does not. Two machines exchanging packets tells you nothing about whether one stops working when the other does, and because almost every asset connects to something, counting those would make nearly every answer "the entire estate," which is the same as no answer at all.
 
-**Each relationship is followed the way its own meaning points.** Ask what breaks if a wireless controller dies and you get the access points it manages; ask it of a virtual network and you get the subnets it contains; ask it of a server and you get the applications that run on it. That sounds obvious, and it is the point: the platform tracks which way round each relationship type works, rather than assuming they all point the same way (ADR-0003 D5 as amended 2026-09-12 — before that amendment, asking what depended on a controller or a network returned nothing at all).
+**Each relationship is followed the way its own meaning points.** Ask what breaks if a wireless controller dies and you get the access points it manages; ask it of a cluster and you get the nodes it contains; ask it of a server and you get the applications that run on it. That sounds obvious, and it is the point: the platform tracks which way round each relationship type works, rather than assuming they all point the same way (ADR-0003 D5 as amended 2026-09-12 — before that amendment, asking what depended on a controller or a network returned nothing at all).
 
 **A business service you have declared is included, and the answer stops there.** If you have recorded that an asset `impacts` a business service, that service appears in the blast radius. The platform does not carry on through it into everything else the service touches — a blast-radius answer that ends at "…and therefore the whole company" helps nobody.
 
@@ -73,7 +73,7 @@ Inferred relationships are highlighted, and they are the only kind that always w
 | **depends on** | used by | An application and its database | the database's answer lists the application |
 | **connects to** | connected from | An observed network connection | not counted |
 | **member of** | members | A node in a cluster, an access point on its controller | the cluster's answer lists the node |
-| **contains** | contained by | A virtual network and its subnets | the network's answer lists the subnets |
+| **contains** | contained by | A cluster and its nodes | the cluster's answer lists the nodes |
 | **manages** | managed by | A controller and the things it manages | the controller's answer lists what it manages |
 | **sends data to** | receives data from | A declared data flow between applications | the receiver's answer lists the sender |
 | **impacts** | impacted by | An asset and a business service | the asset's answer lists the service, and stops there |
@@ -127,7 +127,7 @@ A measured relationship goes away when the thing that saw it stops seeing it. It
 
 You do not have to create relationships by hand. They arrive from:
 
-- **Sensors and cloud discovery** — observed connections, cloud containment (a resource in its account, a subnet in its network), controller-to-device adoption.
+- **Sensors and cloud discovery** — observed connections, a cloud resource in its account, controller-to-device adoption. (A cloud instance's network is the prefix its address falls in, not an edge.)
 - **Device interrogation** — uplinks and neighbour tables from switches and controllers.
 - **CMDB imports** — if you sync a CMDB, its relationship types map onto these ten.
 - **The platform's own inference** — as proposals, never applied automatically.

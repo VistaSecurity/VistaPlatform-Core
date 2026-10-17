@@ -2,6 +2,7 @@ package deviceinterrogation
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -192,7 +193,7 @@ func peerWithHostname(result *InterrogateResult, hostname string) *PeerRef {
 
 func TestUnifiNetworkFacts_ProjectsLANsAndDropsDHCPDetail(t *testing.T) {
 	result := &InterrogateResult{}
-	unifiEmitNetworkFacts(result, unifiNetworkConfFixture())
+	unifiEmitNetworkFacts(result, unifiNetworkConfFixture(), true)
 
 	assertObservationsValid(t, "unifi networkconf", result)
 	assertNoPoison(t, "unifi networkconf", result)
@@ -247,7 +248,7 @@ func TestUnifiDeviceObservations_EmitsOpsFactsAndTopology(t *testing.T) {
 	result := &InterrogateResult{}
 	controller := unifiControllerPeer("unifi.example.net", map[string]interface{}{"controller_name": "HQ Controller"})
 
-	unifiEmitDeviceObservations(result, unifiSwitchFixture(), controller, unifiVLANByNetworkID(confs))
+	unifiEmitDeviceObservations(result, unifiSwitchFixture(), controller, unifiVLANByNetworkID(confs), unifiWLANIndex{})
 
 	assertObservationsValid(t, "unifi device", result)
 	assertNoPoison(t, "unifi device", result)
@@ -287,15 +288,21 @@ func TestUnifiDeviceObservations_EmitsOpsFactsAndTopology(t *testing.T) {
 	if byName["eth0"]["mac"] != "78:8a:20:4b:ee:41" {
 		t.Errorf("ethernet_table MAC lost: %+v", byName["eth0"])
 	}
-	uplink := byName["Uplink"]
+	// The management address lands on the interface carrying the device's MAC.
+	if addrs, _ := byName["eth0"]["addresses"].([]string); len(addrs) != 1 || addrs[0] != "192.0.2.11" {
+		t.Errorf("management address not on eth0: %+v", byName["eth0"])
+	}
+	// Ports are named by their number, not by the operator's label
+	// ("Uplink", "Camera 1"), which describes what is plugged in.
+	uplink := byName["Port 1"]
 	if uplink["state"] != "up" || uplink["admin_state"] != "up" || uplink["speed"] != 1000 {
 		t.Errorf("port state lost: %+v", uplink)
 	}
 	if uplink["vlan"] != nil {
 		t.Errorf("the untagged default network gave a port a VLAN id: %+v", uplink)
 	}
-	camera := byName["Camera 1"]
-	if camera["vlan"] != 20 {
+	camera := byName["Port 2"]
+	if camera["vlan"] != 20 || camera["mode"] != "access" {
 		t.Errorf("native_networkconf_id was not resolved to a VLAN: %+v", camera)
 	}
 	if camera["state"] != "down" || camera["admin_state"] != "down" {
@@ -306,11 +313,17 @@ func TestUnifiDeviceObservations_EmitsOpsFactsAndTopology(t *testing.T) {
 	}
 
 	// --- neighbours -------------------------------------------------------
+	// The one real LLDP neighbour (the all-zero chassis id is a placeholder)
+	// and the wired uplink, as cable ends (DCIM row 3.3).
 	neighbors := factValue(t, result, factNetNeighbors).([]map[string]interface{})
-	if len(neighbors) != 1 {
-		t.Fatalf("expected the one real LLDP neighbour (the all-zero chassis id is a placeholder), got %+v", neighbors)
+	if len(neighbors) != 2 {
+		t.Fatalf("expected the LLDP neighbour and the wired uplink, got %+v", neighbors)
 	}
 	n := neighbors[0]
+	if up := neighbors[1]; up["protocol"] != "lldp" || up["local_port"] != "Port 1" || up["remote_port"] != "Port 24" ||
+		up["remote_mac"] != "00:1b:17:00:00:01" {
+		t.Errorf("wired uplink neighbour wrong: %+v", up)
+	}
 	if n["protocol"] != "lldp" || n["remote_mac"] != "00:1b:17:00:00:01" ||
 		n["remote_name"] != "core-sw-1.example.net" || n["remote_port"] != "Gi1/0/24" || n["local_port"] != "Uplink" {
 		t.Errorf("LLDP neighbour projection wrong: %+v", n)
@@ -320,9 +333,11 @@ func TestUnifiDeviceObservations_EmitsOpsFactsAndTopology(t *testing.T) {
 	}
 
 	// --- edges ------------------------------------------------------------
+	// Controller membership only: the wired uplink is a cable now, not a
+	// member_of edge with port names (row 3.3).
 	memberships := relationshipsOfType(result, relTypeMemberOf)
-	if len(memberships) != 2 {
-		t.Fatalf("expected member_of edges to the controller and to the uplink switch, got %+v", memberships)
+	if len(memberships) != 1 {
+		t.Fatalf("expected the one member_of edge to the controller, got %+v", memberships)
 	}
 	var adoption, uplinkEdge RelationshipObservation
 	for _, rel := range memberships {
@@ -339,11 +354,8 @@ func TestUnifiDeviceObservations_EmitsOpsFactsAndTopology(t *testing.T) {
 	if adoption.Peer.ClassHint != "wireless_controller" {
 		t.Errorf("controller class hint = %q", adoption.Peer.ClassHint)
 	}
-	if uplinkEdge.Peer.Identifier(IdentifierMACAddress) != "00:1b:17:00:00:01" {
-		t.Errorf("uplink edge peer wrong: %+v", uplinkEdge.Peer)
-	}
-	if uplinkEdge.Attributes["local_port"] != "Port 1" || uplinkEdge.Attributes["remote_port"] != "Port 24" {
-		t.Errorf("uplink port attributes lost: %+v", uplinkEdge.Attributes)
+	if uplinkEdge.Type != "" {
+		t.Errorf("a wired uplink still wrote a member_of edge: %+v", uplinkEdge)
 	}
 
 	connections := relationshipsOfType(result, relTypeConnectsTo)
@@ -392,8 +404,8 @@ func TestUnifiDeviceObservations_TwoDevicesKeepDistinctSubjects(t *testing.T) {
 
 	result := &InterrogateResult{}
 	vlans := unifiVLANByNetworkID(confs)
-	unifiEmitDeviceObservations(result, sw, controller, vlans)
-	unifiEmitDeviceObservations(result, ap, controller, vlans)
+	unifiEmitDeviceObservations(result, sw, controller, vlans, unifiWLANIndex{})
+	unifiEmitDeviceObservations(result, ap, controller, vlans, unifiWLANIndex{})
 
 	// The whole-result gate: two subjects means two hw.serial facts, which
 	// would be a duplicate under one subject.
@@ -462,7 +474,7 @@ func TestUnifiDeviceObservations_UnadoptedDeviceIsNotAMember(t *testing.T) {
 
 	result := &InterrogateResult{}
 	controller := unifiControllerPeer("192.0.2.1", nil)
-	unifiEmitDeviceObservations(result, device, controller, nil)
+	unifiEmitDeviceObservations(result, device, controller, nil, unifiWLANIndex{})
 
 	if edges := relationshipsOfType(result, relTypeMemberOf); len(edges) != 0 {
 		t.Errorf("an unadopted device was recorded as a member of the controller: %+v", edges)
@@ -480,7 +492,7 @@ func TestUnifiDeviceObservations_SkipsDevicesWithNoIdentifier(t *testing.T) {
 		"mac":     "00:00:00:00:00:00",
 		"model":   "U7LR",
 		"adopted": true,
-	}, unifiControllerPeer("192.0.2.1", nil), nil)
+	}, unifiControllerPeer("192.0.2.1", nil), nil, unifiWLANIndex{})
 
 	if len(result.Facts) != 0 || len(result.Relationships) != 0 {
 		t.Errorf("facts were emitted for a device nothing can resolve: %v / %+v", factKeys(result), result.Relationships)
@@ -738,7 +750,7 @@ func unifiGatewayFixture() map[string]interface{} {
 // (the WAN addresses go missing).
 func TestUnifiDeviceSubject_CarriesWANAddressesAndNothingElseOfTheWAN(t *testing.T) {
 	result := &InterrogateResult{}
-	unifiEmitDeviceObservations(result, unifiGatewayFixture(), unifiControllerPeer("192.0.2.1", nil), nil)
+	unifiEmitDeviceObservations(result, unifiGatewayFixture(), unifiControllerPeer("192.0.2.1", nil), nil, unifiWLANIndex{})
 
 	assertObservationsValid(t, "unifi gateway", result)
 	assertNoPoison(t, "unifi gateway", result)
@@ -778,6 +790,82 @@ func TestUnifiDeviceSubject_DownWANAddsNothing(t *testing.T) {
 	for _, id := range subject.Identifiers {
 		if id.Kind == IdentifierIPAddress && id.Value != "192.0.2.1" {
 			t.Errorf("a down WAN contributed the address %q", id.Value)
+		}
+	}
+}
+
+// DCIM row 1.5b: the interface projection reads four more nested tables —
+// vap_table, network_table, and more of port_table and the WAN objects — and
+// each stays on its allowlist: the SSID passphrase, a network's RADIUS
+// secret, a port's auth key and the WAN's PPPoE password are planted and must
+// not appear in any fact. The readers copy named fields only, so widening an
+// allowlist alone changes nothing a test can see; what this pins is that no
+// reader hands the vendor object on. To mutation-test: copy the raw vap_table
+// entry into the interface item in unifiInterfaces (poison appears).
+func TestUnifiInterfaces_NewTablesStayOnTheirAllowlists(t *testing.T) {
+	device := unifiGatewayFixture()
+	device["wan1"] = map[string]interface{}{
+		"ip": "203.0.113.10", "netmask": "255.255.255.0", "ifname": "eth8", "mac": "74:ac:b9:00:00:09", "up": true,
+		"gateway": poison, "x_pppoe_password": poison,
+	}
+	device["ethernet_table"] = []interface{}{
+		map[string]interface{}{"name": "eth0", "mac": "74:ac:b9:00:00:01"},
+		map[string]interface{}{"name": "eth8", "mac": "74:ac:b9:00:00:09"},
+	}
+	device["port_table"] = []interface{}{
+		map[string]interface{}{"port_idx": float64(9), "name": "Port 9", "ifname": "eth8", "media": "GE", "up": true,
+			"enable": true, "speed": float64(1000), "x_port_auth_key": poison, "poe_mode": poison},
+	}
+	device["network_table"] = []interface{}{
+		map[string]interface{}{"name": "LAN", "purpose": "corporate", "ip_subnet": "192.0.2.1/24", "enabled": true,
+			"x_radius_secret": poison, "dhcpd_dns_1": poison},
+		map[string]interface{}{"name": "IoT", "purpose": "corporate", "ip_subnet": "198.51.100.1/24", "vlan": float64(20)},
+		map[string]interface{}{"name": "WAN", "purpose": "wan", "ip_subnet": "203.0.113.10/24"},
+	}
+	device["vap_table"] = []interface{}{
+		map[string]interface{}{"name": "ra0", "radio": "ng", "essid": "Corp", "bssid": "74:ac:b9:00:00:20", "up": true,
+			"x_passphrase": poison, "wlan_psk": poison},
+	}
+	result := &InterrogateResult{}
+	unifiEmitDeviceObservations(result, device, unifiControllerPeer("192.0.2.1", nil), map[string]int{}, unifiWLANIndex{})
+
+	assertObservationsValid(t, "unifi gateway interfaces", result)
+	assertNoPoison(t, "unifi gateway interfaces", result)
+
+	byName := map[string]map[string]interface{}{}
+	for _, iface := range factValue(t, result, factNetInterfaces).([]map[string]interface{}) {
+		byName[iface["name"].(string)] = iface
+	}
+	if got := fmt.Sprintf("%v %v", byName["Port 9"]["addresses"], byName["Port 9"]["mac"]); got != "[203.0.113.10/24] 74:ac:b9:00:00:09" {
+		t.Errorf("the WAN did not land on the port it is: %+v", byName["Port 9"])
+	}
+	if _, ok := byName["eth8"]; ok {
+		t.Errorf("eth8 is Port 9's kernel name, not a second interface: %+v", byName)
+	}
+	if got := fmt.Sprintf("%v %v %v", byName["br20"]["addresses"], byName["br20"]["vlan"], byName["br20"]["static_addresses"]); got != "[198.51.100.1/24] 20 [198.51.100.1/24]" {
+		t.Errorf("br20 = %+v", byName["br20"])
+	}
+	if _, ok := byName["br0"]; !ok {
+		t.Errorf("the untagged LAN's bridge is missing: %+v", byName)
+	}
+	if byName["ra0"]["type"] != "ieee802.11n" {
+		t.Errorf("ra0 = %+v", byName["ra0"])
+	}
+	// The gateway's address on the LAN is held by br0; the management address
+	// is not written twice.
+	if addrs, _ := byName["eth0"]["addresses"].([]string); len(addrs) != 0 {
+		t.Errorf("eth0 carries %v; 192.0.2.1 is br0's", addrs)
+	}
+}
+
+// A WAN that is down adds no interface address.
+func TestUnifiInterfaces_DownWANAddsNoInterface(t *testing.T) {
+	device := unifiGatewayFixture()
+	device["wan1"] = map[string]interface{}{"ip": "0.0.0.0"}
+	device["wan2"] = map[string]interface{}{"ip": ""}
+	for _, iface := range unifiInterfaces(device, nil, unifiWLANIndex{}) {
+		if iface["addresses"] != nil {
+			t.Errorf("a down WAN contributed an interface address: %+v", iface)
 		}
 	}
 }

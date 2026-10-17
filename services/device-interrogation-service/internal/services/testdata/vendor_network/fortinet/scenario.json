@@ -1,0 +1,10 @@
+{
+  "vendor": "fortinet",
+  "device_type": "fortigate",
+  "hostname": "fw-branch-02.corp.example.test",
+  "transport": "rest",
+  "management_ip": "203.0.113.2",
+  "management_port": 443,
+  "tenant_segments": [],
+  "provenance": "SYNTHESISED for the DCIM row 1.5c parity test, in the FortiOS shapes of the package's unit-test fixtures: a WAN port, an aggregate of two ports carrying two VLAN interfaces (one in a non-root VDOM), the monitor view keyed by name, and the monitor/network/arp list. Secrets are planted in the cmdb interface's password and psksecret, which the typed projection has no field for."
+}

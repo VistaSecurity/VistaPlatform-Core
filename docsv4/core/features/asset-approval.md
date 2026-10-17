@@ -7,7 +7,7 @@ The Asset Approval Workflow allows tenants to review and approve/deny assets dis
 Every discovered asset takes the same path, whatever found it:
 1. **Automatically processed** — discovery jobs, sensors and cloud discovery all
    feed one pipeline. There is no import step.
-2. **Auto-approved** if the asset is on a network segment with auto-approve
+2. **Auto-approved** if the asset is on a prefix with auto-approve
    enabled, or is a host the tenant's own device agent runs on
 3. **Reviewed** by security teams (everything else)
 4. **Approved** to move to `monitoring` status
@@ -17,12 +17,12 @@ Every discovered asset takes the same path, whatever found it:
 
 An asset skips the queue in exactly two situations:
 
-1. **It falls inside a network segment you defined with auto-approve enabled**
-   (Settings → Infrastructure → Network Segments). That toggle is off by
+1. **It falls inside a prefix you defined with auto-approve enabled**
+   (Inventory → Networks). That toggle is off by
    default. The rule does not depend on how the asset was found: creating one
    by hand, importing a spreadsheet, pulling from a CMDB, or running a discovery
    scan all land in **Discovery → Approvals** unless the address is on an
-   auto-approving segment, in which case all of them go straight to
+   auto-approving prefix, in which case all of them go straight to
    `monitoring`.
 2. **It is a host your own device agent runs on.** When an agent reports a
    [host inventory](./host-inventory.md) of the machine it is installed on, the
@@ -42,34 +42,55 @@ An asset skips the queue in exactly two situations:
 
 Nothing else promotes an asset.
 
-### Which discoveries a segment auto-approves
+### What a prefix auto-approves
 
-Turning auto-approve on opens a second choice: **which discovery sources** it
-covers.
+A prefix's auto-approve covers **sensor discoveries**: anything
+observed on the network — passive sensor capture, active scans, device
+interrogation, manual creation, spreadsheet and CMDB import — whose address
+falls in the prefix.
 
-| Source | Covers |
-|---|---|
-| **Sensor discoveries** | Anything observed on the network — passive sensor capture, active scans, device interrogation, manual creation, spreadsheet and CMDB import |
-| **Cloud discoveries** | Resources read from your cloud accounts through the provider APIs you connected (AWS, Azure, GCP) |
+It does **not** cover cloud resources. A prefix is the wrong boundary for
+them: most cloud resources (KMS keys, buckets, managed databases, CDN
+distributions) have no address to put in a prefix, and a VPC is not what you
+consent to. Earlier releases offered a "Cloud discoveries" source on the
+prefix editor; it never took effect, and it is gone.
 
-Both are unchecked-by-default in the sense that matters: **an existing segment
-covers sensor discoveries only**, exactly as it did before this setting existed.
-Cloud coverage is something you tick on purpose, per segment. A new cloud VPC
-segment is the one exception — it can only ever be matched by cloud
-discoveries, so its sources start as cloud (with auto-approve itself still off).
+### Cloud resources are auto-approved per account
 
-Understand what you are opting into. A cloud discovery comes from your own
-account, read with credentials you supplied, which is a higher-trust source than
-a sensor watching whatever traffic crosses a wire — that is why it can be
-auto-approved at all. But it is still inventory admitted without a human
-looking: enable it for a segment when you want everything the platform finds in
-that cloud account monitored automatically, not as a way to shorten a backlog.
+When you add a cloud integration (Discovery → Cloud → Connect integration), the
+AWS account, Azure subscription or GCP project it reads becomes a **Cloud
+Account** asset in your inventory — approved by the act of adding it, because
+you said the account is yours. Every resource the platform reads from that
+account hangs off it: open the account's asset page and its **Relationships**
+tab lists what it hosts.
 
-Cloud resources are matched to a segment by the **account and region** they live
-in, not by an IP address — most of them (KMS keys, buckets, managed databases)
-have no address of their own. Each provider/region (or VPC, where the resource
-reports one) gets its own segment, created the first time a resource is found
-there, and its auto-approve toggle is per-segment like any other.
+Each integration has an **Auto-approve resources** switch, on its card under
+Discovery → Cloud. It is **on by default**:
+
+> Resources discovered in this account are approved automatically. You
+> supplied the credentials, so ownership is not in doubt.
+
+With it on, a resource discovered in the account goes straight to monitoring
+instead of waiting in Discovery → Approvals. Turn it off and they wait for you
+like any other discovery. Two integrations reading the same account share one
+Cloud Account asset; the account auto-approves while either of them has the
+switch on.
+
+Three things auto-approval never does:
+
+- **It never merges.** A resource whose identifiers already belong to two
+  different assets still produces a merge proposal in Approvals for you to
+  decide.
+- **It never reaches past the account.** A resource whose own id names a
+  different account (shared into yours from elsewhere) is approved only by that
+  account's switch.
+- **It never deletes the account.** Removing an integration keeps the Cloud
+  Account asset; it stops being refreshed and goes stale by your stale-asset
+  policy.
+
+An AWS integration created without an account id learns it the first time you
+**Test connection**; until then the card says the account is not known yet and
+nothing is auto-approved.
 
 The one deliberate exception is **elevating an external connection** (Inventory
 → Connections → Elevate): that is an explicit, confirmed click on a specific
@@ -99,6 +120,20 @@ Inventory shows nothing — the work is waiting in **Discovery → Approvals**.
 The Inventory page shows a pending-approval banner with the count and a link
 to the queue whenever assets are waiting.
 
+## Prefixes, interfaces and sync conflicts
+
+Assets are not the only thing that waits for a person.
+
+- **Interfaces and IP addresses** found on an asset still waiting in Approvals
+  are **Pending** and follow the asset: approve the asset and they become part
+  of the inventory; deny it and they are discarded with it.
+- **Prefixes** discovery learns about (a cloud account's networks, a range a
+  sensor sees traffic in) arrive with a **Pending approval** chip in
+  **Inventory -> Networks**. Open the prefix and approve it there, or claim it
+  as yours. A prefix with auto-approve on admits everything inside it, as
+  described above.
+
+
 ## Workflow
 
 ### 1. Asset Discovery
@@ -111,7 +146,7 @@ Assets are discovered through:
 
 **Sensor Discoveries:**
 - Automatically processed within seconds of submission
-- Network space classification applied automatically
+- Prefix classification applied automatically
 - Auto-approval rules evaluated automatically
 - Assets created with `monitoring` (if auto-approved) or `pending_approval` status
 - No manual import required
@@ -119,7 +154,7 @@ Assets are discovered through:
 **Cloud Discoveries:**
 - Automatically processed within seconds of discovery
 - Written to `sensor_discoveries` table (unified pipeline)
-- Network segment classification applied automatically
+- Prefix classification applied automatically
 - Auto-approval rules evaluated automatically
 - Assets created with `monitoring` (if auto-approved) or `pending_approval` status
 - **Appear in Discovery Approvals modal alongside sensor discoveries**
@@ -127,9 +162,9 @@ Assets are discovered through:
 
 **Discovery Jobs:**
 - Findings flow into the same pipeline as sensor discoveries, server-side
-- Network segment classification applied automatically
+- Prefix classification applied automatically
 - Auto-approval rules evaluated automatically
-- Assets created with `monitoring` (if on an auto-approving segment) or `pending_approval` status
+- Assets created with `monitoring` (if on an auto-approving prefix) or `pending_approval` status
 - No manual import required — the job's detail on Discovery → Discovery Jobs
   reports where the findings went and links to Discovery → Approvals
 
@@ -165,7 +200,7 @@ product.
   no network endpoint — an object store, a declared service — shows a blank
   address, which is the truth rather than a missing value.
 - Its **class** (Server, Switch, Object storage …), from the class taxonomy
-- Its network segment or business unit
+- Its prefix or business unit
 - Its **source** — see below
 - The platform's confidence, when it recorded one. Asset confidence is stored as a 0–100 percentage, so a stored value of `1` is displayed as 1%, not guessed to mean 100%.
 - When it was found
@@ -220,7 +255,7 @@ signals it weighs are things like:
 | A scope-local identifier matches | hostname or address agreeing — real evidence, but only alongside agreement about *where* |
 | How many kinds agree | one serial is strong and narrow; a MAC, an FQDN and a hostname agreeing is corroboration from several angles |
 | The names are alike | and, separately, whether they differ **only in a trailing number** — `web01` and `web02` are the commonest thing that looks identical and is not |
-| Same or different network segment | every segment has a `db01` |
+| Same or different prefix | every prefix has a `db01` |
 | Same or different vendor and model | a disagreement is real evidence of two things |
 | How close in time the sightings are | |
 | Whether two *different kinds* of source agree | a sensor and your CMDB both saying so is not the same as one collector saying it twice |
@@ -280,8 +315,7 @@ the one act nobody approved is always visible to somebody:
   unless you set a threshold.
 - **Merged by rule** — two records that fixed rules (no score, no model) were
   *sure* are one device. The row shows the evidence in plain sentences, for
-  example "same MAC address seen directly by a sensor" and "same network
-  segment", and a link to the asset the records were merged into, whose
+  example "same MAC address seen directly by a sensor" and "same prefix", and a link to the asset the records were merged into, whose
   **History** records what was folded in. **On by default.**
 
 **What "sure" means.** The rule merges two existing records only when *all* of
@@ -294,7 +328,7 @@ these hold:
   a device just because the device later used the same address — addresses are
   handed out again. (A record that is *nothing but* that address is merged: it
   was only ever the device's address.)
-- both records are on the **same network segment**, or one of them (typically a
+- both records are on the **same prefix**, or one of them (typically a
   record you typed in) has none;
 - **nothing contradicts it** — two different serial numbers, cloud resource ids
   or agent ids are always two devices;
@@ -523,7 +557,7 @@ Cloud Discoveries:
                     monitoring or denied
 
 Discovery Jobs:
-  discovered → pending_approval (or monitoring if on an auto-approve segment)
+  discovered → pending_approval (or monitoring if on an auto-approve prefix)
                               ↓
                          [manual review]
                               ↓
@@ -531,13 +565,13 @@ Discovery Jobs:
 ```
 
 **Auto-Approval:**
-- Sensor and cloud discoveries can both be auto-approved, per network segment
-- Configured per network segment: **Settings → Infrastructure** → edit a
-  segment → "Auto-approve discoveries", then pick which sources it covers —
-  sensor discoveries, cloud discoveries, or both. The toggle is **off by
-  default**, so a fresh tenant reviews everything, and a segment that was
-  already auto-approving covers **sensor discoveries only** until you tick
-  cloud.
+- Sensor discoveries are auto-approved per prefix: **Inventory →
+  Networks** → open a prefix → **Edit** → "Auto-approve what sensors discover in
+  this prefix". The toggle is
+  **off by default**, so a fresh tenant reviews everything.
+- Cloud resources are auto-approved per **account**: the "Auto-approve
+  resources" switch on each integration under **Discovery → Cloud**, **on by
+  default** (see [Cloud resources are auto-approved per account](#cloud-resources-are-auto-approved-per-account)).
 - Auto-approved assets skip the pending approval step (their certificates and
   crypto configurations materialize immediately)
 - Auto-approved assets show "Auto" badge in the approvals page
@@ -668,7 +702,7 @@ Filter assets by approval status:
 ## Best Practices
 
 1. **Review Before Approving**: Always review asset details before approval
-2. **Use Network Spaces**: Classify assets into network spaces during approval
+2. **Define prefixes first**: An asset is placed in the prefix its address falls in
 3. **Bulk Operations**: Use bulk approve/deny for efficiency
 4. **Document Denials**: Document reasons for denying assets
 5. **Regular Review**: Periodically review denied assets for changes
@@ -683,4 +717,4 @@ Filter assets by approval status:
 ## Related Documentation
 
 - [Discovery Feature](./discovery.md) - Discovery job workflow
-- [Operational Context](./operational-context.md) - Network segments, which decide ownership and auto-approval
+- [Operational Context](./operational-context.md) - Prefixes, which decide ownership and auto-approval

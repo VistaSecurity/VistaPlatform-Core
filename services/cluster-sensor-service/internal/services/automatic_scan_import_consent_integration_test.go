@@ -34,7 +34,7 @@ func TestIntegration_AutomaticScanImportConsentAtQueueAndPlatformClaim(t *testin
 				t.Fatal(err)
 			}
 			if tc.segment != "" {
-				if _, err := f.raw.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active) VALUES($1,'declared','cidr',$2,'private','production',true)`, f.tenant, tc.segment); err != nil {
+				if _, err := f.raw.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment) VALUES($1,'declared',$2,'private','production')`, f.tenant, tc.segment); err != nil {
 					t.Fatal(err)
 				}
 			}

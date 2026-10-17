@@ -102,34 +102,3 @@ func TestVlanSegmentSpecs(t *testing.T) {
 		})
 	}
 }
-
-// TestVlanSegmentMetadata pins what a learned segment records about itself:
-// an unknown posture is written as unknown and never as `dynamic`, which
-// ScopeForAddress and every other reader take as a measured answer.
-func TestVlanSegmentMetadata(t *testing.T) {
-	unknown := vlanSegmentMetadata(vlanSegmentSpec{DHCP: dhcpUnknown}, "fortinet", "asset-1")
-	if _, has := unknown["dynamic"]; has {
-		t.Fatalf("unknown posture wrote dynamic: %v", unknown)
-	}
-	if unknown["dhcp"] != "unknown" || unknown["source"] != segmentSourceInterrogation ||
-		unknown["source_device_type"] != "fortinet" || unknown["source_asset_id"] != "asset-1" {
-		t.Fatalf("unknown metadata = %v", unknown)
-	}
-	// A measured posture is recorded as the device's own word (`dhcp`) and NEVER
-	// as `dynamic`: that key has three authors with a precedence between them,
-	// and this is not the place to write it (see pgidentity.RecordSegmentPosture).
-	if on := vlanSegmentMetadata(vlanSegmentSpec{DHCP: dhcpEnabled}, "unifi", "a"); on["dhcp"] != "enabled" {
-		t.Fatalf("enabled metadata = %v", on)
-	}
-	if off := vlanSegmentMetadata(vlanSegmentSpec{DHCP: dhcpDisabled}, "unifi", "a"); off["dhcp"] != "disabled" {
-		t.Fatalf("disabled metadata = %v", off)
-	}
-	for _, p := range []dhcpPosture{dhcpEnabled, dhcpDisabled, dhcpUnknown} {
-		if meta := vlanSegmentMetadata(vlanSegmentSpec{DHCP: p}, "unifi", "a"); meta["dynamic"] != nil || meta["dynamic_source"] != nil {
-			t.Fatalf("%s: the metadata refresh wrote the effective posture itself, outside the precedence rule: %v", p, meta)
-		}
-	}
-	if bare := vlanSegmentMetadata(vlanSegmentSpec{DHCP: dhcpUnknown}, "", "a"); bare["source_device_type"] != nil {
-		t.Fatalf("an asset with no device type must not record an empty one: %v", bare)
-	}
-}

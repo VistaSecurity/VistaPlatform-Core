@@ -15,7 +15,7 @@
 //
 // There is deliberately NO import step. Findings reach inventory server-side,
 // through the same ingestion queue the sensors feed, and the pipeline applies
-// the tenant's segment auto-approval rules.
+// the tenant's prefix auto-approval rules.
 import { useEffect, useRef, useState } from 'react';
 import { useDebouncedValue } from '@vistasecurity/primitives/shared';
 import { useNavigate } from 'react-router';
@@ -233,7 +233,7 @@ function PreviewPanel({ view, onRunFromPlatform }: { view: PreviewView; onRunFro
               {adj.targets.length > LIST_MAX && <div style={muted}>and {adj.targets.length - LIST_MAX} more</div>}
               {adj.registerHint && (
                 <div style={{ ...muted, marginTop: 4 }}>
-                  If a range is yours, register it under Settings → Infrastructure → Network Segments and it is scanned at the depth you choose.
+                  If a range is yours, add it as a prefix under Inventory → Networks and it is scanned at the depth you choose.
                 </div>
               )}
             </div>
@@ -438,7 +438,7 @@ export function DiscoverAssetsModal({ open, onClose }: { open: boolean; onClose:
         <>
           <ModalField
             label="Targets"
-            hint={`One per line or comma-separated: IP addresses, CIDR blocks, ranges, hostnames or URLs (max 1000). For IPv6, list addresses — an IPv6 network is too large to sweep.${targetCount > 0 ? ` ${targetCount} entered.` : ''}`}
+            hint={`One per line or comma-separated: IP addresses, prefixes (CIDR), ranges, hostnames or URLs (max 1000). For IPv6, list addresses — an IPv6 network is too large to sweep.${targetCount > 0 ? ` ${targetCount} entered.` : ''}`}
           >
             <textarea
               data-autofocus
@@ -638,7 +638,7 @@ function StartedPanel({ job, form }: { job: DiscoveryJob; form: DiscoverForm }) 
       {row('Job', <span className="mono">{shortId(job.id)}</span>)}
       <div style={{ ...muted, marginTop: 12, lineHeight: 1.55 }}>
         You can close this dialog — the scan does not depend on it. Discovery Jobs shows its progress and lets you stop it.
-        What it finds flows into your inventory as it is processed: hosts on a network segment marked auto-approve are monitored
+        What it finds flows into your inventory as it is processed: hosts in a prefix marked auto-approve are monitored
         straight away, everything else waits in Discovery → Approvals. An address that sends no answer is reported as no answer,
         not as empty — it may be down, filtered, or out of the scanner&apos;s reach.
       </div>

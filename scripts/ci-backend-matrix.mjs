@@ -63,6 +63,7 @@ export const NON_SERVICE_LEGS = new Map([
   ['shared', 'shared'],
   ['shared/rbac', 'shared-rbac'],
   ['tools/license-issue', 'license-issue'],
+  ['tools/devicetype-import', 'devicetype-import'],
 ]);
 
 /** The module directories in go.work's `use` directive(s), repo-relative, in file order. */

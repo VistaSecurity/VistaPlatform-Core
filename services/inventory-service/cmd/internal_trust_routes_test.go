@@ -30,7 +30,7 @@ func TestInternalTrustRoute_SignedTenantOnly(t *testing.T) {
 	store := &recordingTrustStore{}
 	r := gin.New()
 	mountSourceImportRoutes(r, handlers.NewSourceImportHandler(nil), handlers.NewCIExportHandler(nil),
-		handlers.NewInternalTrustHandler(store), sourceTestSecret)
+		handlers.NewInternalTrustHandler(store), handlers.NewDCIMSyncHandler(nil), handlers.NewDCIMImportHandler(nil), sourceTestSecret)
 	const path = "/api/v1/inventory-service/internal/trust/anchors"
 
 	tenant := uuid.New()

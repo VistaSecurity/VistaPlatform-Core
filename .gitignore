@@ -228,3 +228,6 @@ lab-fixtures.yaml
 # Real seed.sql is staged at package time (scripts/stage-chart-sql.sh); the render
 # tests stage a placeholder (scripts/stage-chart-seed-stub.sh). Never commit it.
 charts/vistaplatform/files/schema/seed.sql
+
+# DCIM scale-fixture budget report (make test-dcim-scale)
+/build/dcim-scale/

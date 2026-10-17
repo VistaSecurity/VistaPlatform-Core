@@ -18,7 +18,7 @@ import type { OpenAsset } from './drawers';
 import { FACET_LEVELS, FacetRail } from './facet-rail';
 import { applyFacetChange, queryToFacets, type FacetState } from './facet-query';
 import { QueryChip, QueryEditor, ServerQueryErrors } from './query-editor';
-import { SavedViews } from './saved-views';
+import { SavedFilters } from './saved-filters';
 import { IdentityStatus } from './identity-status';
 import { IdentityCoverage } from '../discovery/observations-page';
 import { NO_SELECTION, isSelected, pageState, toggleRow, togglePage, type AssetSelection } from './asset-selection';
@@ -356,7 +356,7 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
           <Icon name="database" size={17} style={{ color: 'var(--accent)' }} />All assets
         </h2>
         <QueryEditor value={query} onChange={(q) => { onQueryChange(q); onPageChange(1); }} busy={assetsQ.isFetching} />
-        <SavedViews query={query} onApply={(q) => { onQueryChange(q); onPageChange(1); }} />
+        <SavedFilters kind="asset" builtins query={query} onApply={(q) => { onQueryChange(q); onPageChange(1); }} />
         <span className="mono" style={{ fontSize: 12.5, color: 'var(--app-t3)' }}>
           {assetsQ.isLoading ? 'loading…' : `${total} asset${total === 1 ? '' : 's'}`}
           {assetsQ.isFetching && !assetsQ.isLoading ? ' · refreshing' : ''}

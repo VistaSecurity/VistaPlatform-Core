@@ -25,6 +25,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/cluster-sensor-service/internal/models"
 	shareddisc "github.com/vistasecurity/vistaplatform/shared/discovery"
 	"github.com/vistasecurity/vistaplatform/shared/identity/dispatchguard"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/sensordispatch"
 )
 
@@ -76,7 +77,7 @@ func planScanJob(tx *sql.Tx, tenantID string, req *models.CreateDiscoveryJobRequ
 	chosen *dispatchSensor, resolved []dispatchguard.ResolvedTarget, verdicts []dispatchguard.TargetVerdict, metadata map[string]interface{}, now time.Time) (*shareddisc.ScanPlan, error) {
 	inputs := make([]shareddisc.PlanTargetInput, len(verdicts))
 	for i, v := range verdicts {
-		inputs[i] = shareddisc.PlanTargetInput{Target: v.Target, Class: shareddisc.TargetClass(v.Class), SegmentID: v.SegmentID,
+		inputs[i] = shareddisc.PlanTargetInput{Target: v.Target, Class: shareddisc.TargetClass(v.Class), PrefixID: v.PrefixID,
 			SNICandidates: sniCandidatesForTarget(req.SNICandidates, v.Target)}
 	}
 	// req.Ports holds only what a target named explicitly (a URL's :8443),
@@ -195,7 +196,7 @@ func loadAutoFleet(tx *sql.Tx, tenantID string) ([]sensordispatch.FleetSensor, e
 		       ), '{}'::text[]),
 		       COALESCE((
 		           SELECT array_agg(DISTINCT ai.value)
-		           FROM asset_identifiers ai
+		           FROM (`+identifiersql.Addresses+`) ai
 		           WHERE ai.tenant_id = s.tenant_id AND ai.asset_id = s.asset_id AND ai.kind = 'ip_address'
 		       ), '{}'::text[])
 		FROM sensors s

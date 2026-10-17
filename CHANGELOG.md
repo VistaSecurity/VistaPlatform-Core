@@ -7,7 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.6.0-rc.1] - 2026-10-14
+## [5.0.0-rc.3] - 2026-10-16
+
+**Version 5.0.0 is the DCIM release: Vista Platform is now an asset inventory, map and
+DCIM, with cryptographic posture laid over every rack, faceplate and map.** Sites, racks and
+U positions, device types and modules, interfaces, IPAM, cables with tracing, circuits,
+virtualisation, VPN and wireless are all first-class, discovered where a collector can
+measure them and entered by hand where it cannot. The model follows NetBox 4.3.5 on purpose.
+
+**5.0.0 is a fresh install on both product lines. There is no upgrade path from 4.x; existing
+4.x installations are not carried forward (see the use-at-your-own-risk notice).** Both lines
+are cut from the same commit: `v5.0.0` (commercial) and `core-v5.0.0` (Core).
+
+### Highlights
+
+- **Racks, sites and device types.** **Inventory → Racks** draws front and rear elevations
+  with drag-to-place and reservations; **Settings → Infrastructure** holds Sites, Business
+  Units, Device Types (a 154-type seeded catalogue plus a library importer), Module Types,
+  Manufacturers, Device Roles and Platforms.
+- **Interfaces and IPAM.** Every asset's addresses live on its interfaces. **Inventory →
+  Networks and VLANs** replaces network segments with prefixes, ranges, VRFs and VLANs, with
+  utilisation and free space. Sensors, the device agent, SNMP, Cisco, Palo Alto, FortiGate,
+  F5 and UniFi all report interfaces, addresses, prefixes and VLANs as objects.
+- **Cables, faceplates and tracing.** **Inventory → Cabling**, a faceplate on each asset's
+  Ports tab, Connect, a bulk cable editor, and traces through patch panels from either end,
+  tinted by the cryptography seen behind each port. LLDP and CDP neighbours become proposed
+  cables you approve in **Discovery → Approvals**; a declared cable LLDP contradicts raises a
+  finding.
+- **Circuits, virtualisation, VPN and wireless.** Providers and circuits with terminations,
+  clusters with hosts, tunnels with IKE/IPsec policy, and WLANs and links.
+- **Cloud as DCIM.** A cloud account is an asset you approve once; VPCs and subnets are
+  prefixes, not assets.
+- **Custom fields, config contexts, saved filters, export templates, contacts, and the
+  Changes lens** for every DCIM object, plus bulk CSV import and export under
+  **Settings → Infrastructure → Import**.
+- **MCP read tools** for interfaces, IPAM and Business Units.
+
+### Upgrading
+
+There is nothing to upgrade from: install 5.0.0 onto an empty database. Anything encrypted
+under the retired v0/v1 key derivation is undecryptable, so credentials must be re-entered
+and sensors re-enrolled. The `[Unreleased]` entries above record every removed route and
+renamed concept; they move to `docsv4/core/releases/5.0.0.md` when 5.0.0 is cut.
+
+### Editions
+
+**Core** includes everything above. **Enterprise** adds the connectors: the NetBox two-way
+sync (Business Units, IPAM, interfaces, ports and cables, circuits, virtualisation, VPN and
+wireless, each class behind its own switch), Device42 import, and CMDB sync of racks,
+prefixes, IPs, circuits and VLANs. The authoritative list of what each edition includes is
+generated: [`docsv4/core/editions.md`](docsv4/core/editions.md).
+
+### Verify
+
+Core: the signing identity *is* the workflow that built it (chart included):
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v5.0.0 \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the chart, substitute `oci://ghcr.io/vistasecurity/vistaplatform:5.0.0`.
+Enterprise and MSP customers verify against the commercial release workflow's identity; the
+command `helm install` prints carries the exact regexp.
+
+<!-- release-notes-end -->
+
+## [4.6.0] - 2026-10-14
 
 **Version 4.6.0 adds platform maintenance to the admin console — backups, new-release
 notices and a one-click update — retires `resource-tracker-service`, and aligns the

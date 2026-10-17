@@ -11,10 +11,15 @@ package services
 // rather than nothing. TestDefaultCloudResourceTypes_MatchDiscoverModal keeps
 // the two lists identical, so "scheduled" and "clicked Discover" cannot
 // quietly come to mean different collections.
+//
+// The default is EVERYTHING the platform collects for the provider, the
+// enumeration listings included (asset-inventory ADR-0009 D3: "an inventory
+// that silently skips types is the failure CIS Control 1 names"). An operator
+// opts out per type; nothing is opt-in.
 var defaultCloudResourceTypes = map[string][]string{
-	"aws":   {"alb", "elb", "nlb", "api_gateway", "cloudfront", "kms", "s3", "rds"},
-	"azure": {"application_gateway", "load_balancer", "key_vault", "storage_account", "sql_database"},
-	"gcp":   {"load_balancer", "ssl_proxy", "kms", "storage", "cloudsql"},
+	"aws":   {CloudTypeComputeInstances, CloudTypeNetworks, CloudTypeSecurityGroups, CloudTypeServerlessFunctions, CloudTypeContainerClusters, CloudTypeSecretStores, CloudTypeDNSZones, "alb", "elb", "nlb", "api_gateway", "cloudfront", "kms", "s3", "rds"},
+	"azure": {CloudTypeComputeInstances, CloudTypeNetworks, CloudTypeSecurityGroups, CloudTypeServerlessFunctions, CloudTypeContainerClusters, CloudTypeSecretStores, CloudTypeDNSZones, "application_gateway", "load_balancer", "key_vault", "storage_account", "sql_database"},
+	"gcp":   {CloudTypeComputeInstances, CloudTypeNetworks, CloudTypeSecurityGroups, CloudTypeServerlessFunctions, CloudTypeContainerClusters, CloudTypeSecretStores, CloudTypeDNSZones, "load_balancer", "ssl_proxy", "kms", "storage", "cloudsql"},
 }
 
 // DefaultCloudResourceTypes returns a fresh copy of the manual-run resource-type

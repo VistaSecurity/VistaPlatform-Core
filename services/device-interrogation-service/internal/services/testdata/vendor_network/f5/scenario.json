@@ -1,0 +1,10 @@
+{
+  "vendor": "f5",
+  "device_type": "f5",
+  "hostname": "lb-02.corp.example.test",
+  "transport": "rest",
+  "management_ip": "198.51.100.10",
+  "management_port": 443,
+  "tenant_segments": [],
+  "provenance": "SYNTHESISED for the DCIM row 1.5c parity test, in the iControl REST shapes of the package's unit-test and pipeline fixtures: a copper port untagged in one VLAN, a two-port LACP trunk tagged in two, self IPs (one in route domain 2), the route-domain list and the ARP table. sys/version and sys/hardware are the pipeline fixtures with the serial changed. A secret is planted in an interface description, which the typed projection has no field for."
+}

@@ -234,7 +234,7 @@ func (p *HygieneProducer) read(ctx context.Context, tenantID uuid.UUID, run *Hyg
 			       a.asset_status,
 			       a.class_key,
 			       (COALESCE(NULLIF(btrim(a.owner_email), ''), NULLIF(btrim(a.support_group), '')) IS NOT NULL),
-			       (COALESCE(NULLIF(btrim(a.site), ''), NULLIF(btrim(a.region), ''), NULLIF(btrim(a.zone), ''), a.location_id::text) IS NOT NULL),
+			       (COALESCE(a.site_id::text, NULLIF(btrim(a.region), ''), NULLIF(btrim(a.zone), ''), a.location_id::text) IS NOT NULL),
 			       a.last_seen_at
 			FROM assets a
 			WHERE a.tenant_id = $1

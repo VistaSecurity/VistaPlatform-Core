@@ -57,10 +57,22 @@ type Repository struct {
 	// [Repository.SetTLSCertificates] recorded, keyed tenant|asset.
 	tlsCerts map[string][]string
 
-	// segments are the tenant's network segments, keyed by CIDR, for
-	// [Repository.ScopeForAddress]. Empty is the normal state and the
-	// interesting one: a tenant with no segments must still get a usable scope.
-	segments map[string][]memSegment
+	// prefixes are the tenant's IPAM prefixes ([Repository.AddPrefix],
+	// [Repository.AddSegment]) for [Repository.ScopeForAddress]. Empty is the
+	// normal state and the interesting one: a tenant with no prefixes must
+	// still get a usable scope.
+	prefixes map[string][]identity.NetworkSegment
+
+	// posture is each prefix's DHCP posture, keyed tenant|scope; absent is
+	// "nobody has said" (`prefixes.dhcp_managed IS NULL`).
+	posture map[string]bool
+	// learned marks a prefix a collector reported rather than a person
+	// declared, keyed tenant|scope ([Repository.AddLearnedPrefix]).
+	learned map[string]bool
+
+	// unassigned are addresses an IPAM row holds with no interface
+	// ([Repository.AddUnassignedAddress]): they name no asset.
+	unassigned map[string]bool
 
 	// provScopes is the answer [Repository.ProvisionalScope] gives for a
 	// segment, keyed tenant|segment. Written through
@@ -81,29 +93,6 @@ type ProvisionalScopeAnswer struct {
 	// Reason is one of the identity package's reason constants and is what the
 	// observation records when Eligible is false. It is ignored when eligible.
 	Reason string
-}
-
-// memSegment is one configured network segment: its type and literal (a CIDR
-// or a domain pattern), the scope id an identifier inside it carries, and its
-// DHCP posture.
-type memSegment struct {
-	segType string
-	value   string
-	scope   string
-	// dynamic is the EFFECTIVE posture — what the SQL store keeps in
-	// `metadata->>'dynamic'`.
-	dynamic bool
-	// bySource is each posture source's own statement, the twin of the SQL
-	// store's `dynamic_by_source`. Nil until [Repository.StateSegmentPosture]
-	// first writes: a segment registered with a bare `dynamic` is a LEGACY row,
-	// and the first posture write folds that bare value in as the operator's
-	// (segment_posture.go's rule for a row with no `source`).
-	bySource map[string]bool
-	// networkRef is the cloud network (VPC / VNet) the segment belongs to,
-	// empty for a LAN segment. It is part of the segment's identity on the SQL
-	// side (the unique index is over it), and it is here so this store can run
-	// the same scoping contract.
-	networkRef string
 }
 
 type asset struct {
@@ -134,6 +123,11 @@ type asset struct {
 	// segments at all.
 	segment    string
 	attributes map[string]any
+
+	// ifaces are the asset's interfaces (DCIM row 1.4): where its MACs and
+	// addresses are filed, by [identity.ResolveInterfaces] — the same rule the
+	// SQL store applies — so the contract can read both back the same way.
+	ifaces []identity.StoredInterface
 }
 
 // SetAttributes records the comparable class attributes of an existing asset.
@@ -205,7 +199,10 @@ func New() *Repository {
 		props:         make(map[string]identity.MergeProposal),
 		propState:     make(map[string]proposalState),
 		announcements: make(map[string]*identity.AnnouncementRecord),
-		segments:      make(map[string][]memSegment),
+		posture:       make(map[string]bool),
+		learned:       make(map[string]bool),
+		prefixes:      make(map[string][]identity.NetworkSegment),
+		unassigned:    make(map[string]bool),
 		provScopes:    make(map[string]ProvisionalScopeAnswer),
 	}
 }
@@ -239,6 +236,9 @@ func (r *Repository) FindByIdentifier(_ context.Context, tenantID string, kind i
 		if m.key == k {
 			out = append(out, m.ref)
 		}
+	}
+	if kind == identity.KindMACAddress {
+		out = r.withInterfaceMACOwners(tenantID, value, out)
 	}
 	return out, nil
 }
@@ -322,6 +322,7 @@ func (r *Repository) CreateAsset(_ context.Context, tenantID string, in identity
 		a.putIdentifier(id)
 		r.owners[ownerKey(tenantID, id)] = ref
 	}
+	a.fileInterfaces(in.Identifiers)
 	for _, ep := range in.Endpoints {
 		a.putEndpoint(ep)
 	}
@@ -412,6 +413,7 @@ func (r *Repository) AttachIdentifiers(_ context.Context, ref identity.AssetRef,
 		}
 		r.owners[ownerKey(ref.TenantID, id)] = a.ref
 	}
+	a.fileInterfaces(ids)
 	return added, nil
 }
 
@@ -925,120 +927,88 @@ type multiOwner struct {
 	ref identity.AssetRef
 }
 
-// AddSegment registers a network segment for a tenant, so
-// [Repository.ScopeForAddress] has something to resolve against. Keyed by CIDR,
-// which is how the SQL side stores the commonest segment type.
+// AddSegment registers a declared prefix for a tenant under a caller-chosen
+// scope id, so [Repository.ScopeForAddress] has something to resolve against.
+// A more specific prefix wins, the same rule the SQL lookup applies.
 //
-// A more specific prefix wins, the same rule the SQL lookup applies: a /28
-// carved out of a /24 is the more precise answer about where an address is.
-//
-// `dynamic` is stored the way the SQL contract adapter stores it: as a bare
-// LEGACY value with no source, which the first [Repository.StateSegmentPosture]
-// folds in as the operator's statement.
+// `dynamic` true is a stated DHCP posture; false is "nobody has said", which on
+// a declared prefix reads as static — the SQL store's
+// `coalesce(dhcp_managed, source_kind <> 'declared')`.
 func (r *Repository) AddSegment(tenantID, cidr, scope string, dynamic bool) error {
 	return r.AddCloudSegment(tenantID, cidr, scope, dynamic, "")
 }
 
-// AddCloudSegment is AddSegment for a segment that belongs to a cloud network.
+// AddCloudSegment is AddSegment for a prefix that belongs to a cloud network.
 //
 // Two VPCs may use the same CIDR, so the network ref is what tells their
-// segments apart — the same thing the SQL store's unique index does.
+// prefixes apart.
 func (r *Repository) AddCloudSegment(tenantID, cidr, scope string, dynamic bool, networkRef string) error {
 	p, err := netip.ParsePrefix(cidr)
 	if err != nil {
-		return fmt.Errorf("memory: segment %q is not a CIDR: %w", cidr, err)
+		return fmt.Errorf("memory: prefix %q is not a CIDR: %w", cidr, err)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.segments[tenantID] = append(r.segments[tenantID], memSegment{
-		segType: identity.SegmentTypeCIDR, value: p.Masked().String(),
-		scope: scope, dynamic: dynamic, networkRef: strings.TrimSpace(networkRef),
+	r.prefixes[tenantID] = append(r.prefixes[tenantID], identity.NetworkSegment{
+		ID: scope, Type: identity.SegmentTypeCIDR, Value: p.Masked().String(),
+		CloudNetworkRef: strings.TrimSpace(networkRef),
 	})
+	if dynamic {
+		r.posture[tenantID+"|"+scope] = true
+	}
 	return nil
 }
 
-// AddDomainSegment registers a `domain` segment: a name pattern
-// (shared/network.MatchesDomainPattern) that scopes a hostname no address
-// placed. It implements identitytest.DomainSegmentWriter.
-func (r *Repository) AddDomainSegment(tenantID, pattern, scope string) error {
-	if strings.TrimSpace(pattern) == "" {
-		return fmt.Errorf("memory: domain segment %q has an empty pattern", scope)
+// AddLearnedPrefix registers a prefix a collector reported (`source_kind =
+// 'measured'`) with no DHCP posture stated, under a caller-chosen scope id. It
+// implements identitytest.PrefixPostureWriter.
+func (r *Repository) AddLearnedPrefix(tenantID, cidr, scope string) error {
+	if err := r.AddSegment(tenantID, cidr, scope, false); err != nil {
+		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.segments[tenantID] = append(r.segments[tenantID], memSegment{
-		segType: identity.SegmentTypeDomain, value: strings.TrimSpace(pattern), scope: scope,
-	})
+	r.learned[tenantID+"|"+scope] = true
 	return nil
 }
 
-// postureRank is the in-memory twin of the precedence the SQL store applies
-// in ONE statement (shared/identity/postgres/segment_posture.go): operator >
-// measured > inferred. The contract (identitytest.RunIntakeContract) holds the
-// two to the same answers, so a reordering on either side fails a test.
-func postureRank(source string) int {
-	switch source {
-	case "operator":
-		return 3
-	case "measured":
-		return 2
-	case "inferred":
-		return 1
-	}
-	return 0
-}
-
-// StateSegmentPosture records one source's statement of a segment's DHCP
-// posture — `dynamic` nil withdraws that source's statement — and recomputes
-// the effective value from the highest-ranked source still speaking, or false
-// when none is. It implements identitytest.SegmentPostureWriter, and it is the
-// only way this store's effective posture changes after registration.
-func (r *Repository) StateSegmentPosture(tenantID, scope, source string, dynamic *bool) error {
-	if postureRank(source) == 0 {
-		return fmt.Errorf("memory: unknown posture source %q", source)
-	}
+// RecordPrefixPosture is the in-memory twin of
+// shared/identity/postgres.RecordPrefixPosture: a DHCP posture is written only
+// where nobody has said yet, so the first statement — a person's through the
+// IPAM API, or a collector's — stands. It implements
+// identitytest.PrefixPostureWriter.
+func (r *Repository) RecordPrefixPosture(tenantID, scope string, dynamic bool) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	segs := r.segments[tenantID]
-	for i := range segs {
-		if segs[i].scope != scope {
+	for _, p := range r.prefixes[tenantID] {
+		if p.ID != scope {
 			continue
 		}
-		seg := &segs[i]
-		if seg.bySource == nil {
-			// The legacy fold: a bare value with no recorded source is an
-			// operator's, as segment_posture.go reads it.
-			seg.bySource = map[string]bool{"operator": seg.dynamic}
+		key := tenantID + "|" + scope
+		if _, said := r.posture[key]; said {
+			return false, nil
 		}
-		if dynamic == nil {
-			delete(seg.bySource, source)
-		} else {
-			seg.bySource[source] = *dynamic
-		}
-		best, eff := 0, false
-		for src, v := range seg.bySource {
-			if rk := postureRank(src); rk > best {
-				best, eff = rk, v
-			}
-		}
-		seg.dynamic = eff
-		return nil
+		r.posture[key] = dynamic
+		return true, nil
 	}
-	return fmt.Errorf("memory: no segment %q in tenant %q", scope, tenantID)
+	return false, fmt.Errorf("memory: no prefix %q in tenant %q", scope, tenantID)
 }
 
-// SegmentSnapshot implements [identity.Repository]: the tenant's segments in
-// registration order, with their effective posture.
+// SegmentSnapshot implements [identity.Repository]: the tenant's prefixes in
+// registration order, with their stored posture.
 func (r *Repository) SegmentSnapshot(_ context.Context, tenantID string) (identity.SegmentSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	snap := identity.SegmentSnapshot{TenantID: tenantID}
-	for _, seg := range r.segments[tenantID] {
-		snap.Segments = append(snap.Segments, identity.NetworkSegment{
-			ID: seg.scope, Type: seg.segType, Value: seg.value,
-			CloudNetworkRef: seg.networkRef,
-			Dynamic:         seg.dynamic && seg.segType != identity.SegmentTypeDomain,
-		})
+	for _, p := range r.prefixes[tenantID] {
+		key := tenantID + "|" + p.ID
+		// coalesce(dhcp_managed, source_kind <> 'declared'): a learned prefix
+		// nobody has stated a posture for reads as dynamic.
+		p.Dynamic = r.learned[key]
+		if v, said := r.posture[key]; said {
+			p.Dynamic = v
+		}
+		snap.Prefixes = append(snap.Prefixes, p)
 	}
 	return snap, nil
 }
@@ -1047,9 +1017,9 @@ func (r *Repository) SegmentSnapshot(_ context.Context, tenantID string) (identi
 // [identity.SegmentSnapshot.ScopeForAddress] — the one implementation of the
 // rule, shared with the SQL store and identity.Intake.
 //
-// It returns the most specific matching segment's scope, and
+// It returns the most specific matching prefix's scope, and
 // [identity.ScopeTenantDefault] when nothing matches — including for a tenant
-// with no segments at all, which is the case that matters: an empty scope there
+// with no prefixes at all, which is the case that matters: an empty scope there
 // is what made one host observed three times into three assets.
 func (r *Repository) ScopeForAddress(ctx context.Context, tenantID string, addr netip.Addr, cloudNetworkRef string) (string, bool, error) {
 	snap, err := r.SegmentSnapshot(ctx, tenantID)
@@ -1065,7 +1035,7 @@ func (r *Repository) ScopeForAddress(ctx context.Context, tenantID string, addr 
 // SetProvisionalScope records the answer [Repository.ProvisionalScope] will
 // give for a segment.
 //
-// The SQL store derives the same answer from `network_segments` — an active
+// The SQL store derives the same answer from `prefixes` — a live, non-container
 // cidr segment, nothing else active overlapping it, no cloud network ref — and
 // a fake that computed its own version of that query would be testing this
 // package's reading of the rule rather than the rule. A settable answer keeps
@@ -1146,7 +1116,9 @@ func (r *Repository) ReassignIdentifier(_ context.Context, id identity.Identifie
 		return fmt.Errorf("%w: %s does not carry %s=%q", identity.ErrIdentifierConflict, from.ID, id.Kind, id.Value)
 	}
 	src.dropIdentifier(id.Key())
+	src.unfile(held)
 	dst.putIdentifier(held)
+	dst.fileInterfaces([]identity.Identifier{held})
 	r.owners[key] = dst.ref
 	return nil
 }
@@ -1231,6 +1203,7 @@ func (r *Repository) RetireIdentifier(_ context.Context, ref identity.AssetRef, 
 		return fmt.Errorf("%w: %s does not carry %s=%q", identity.ErrIdentifierConflict, ref.ID, id.Kind, id.Value)
 	}
 	a.dropIdentifier(id.Key())
+	a.unfile(id)
 	delete(r.owners, key)
 	return nil
 }

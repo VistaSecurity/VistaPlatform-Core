@@ -16,7 +16,7 @@ Open the **profile chip** at the bottom of the left navigation rail →
 **Organization Settings**, then **Policies → Classes** or **Policies →
 Identification rules**.
 
-Both pages need the **View network assets** permission — the same permission
+Both pages need the **View infrastructure assets** permission — the same permission
 that lets you see the inventory itself. That is deliberate: these pages explain
 how the inventory is decided, so anyone who can read the inventory can read the
 rules behind it.
@@ -32,7 +32,7 @@ drawn from a fixed tree of **50 classes** under **7 top-level branches**:
 |---|---|
 | **Hardware** | Anything with a chassis — computers, servers, workstations, laptops, mobiles, network devices (switch, router, firewall, load balancer, wireless controller, access point, VPN gateway), storage, printers, OT devices (PLC, RTU, HMI, IED), IoT devices, smart devices (TVs, speakers, consoles and other consumer connected devices), and BMCs. |
 | **Virtual** | Virtual machines, containers, clusters, hypervisors. |
-| **Cloud resource** | Compute instances, managed databases, object storage, key stores, cloud load balancers, API gateways, CDN distributions, serverless functions, virtual networks, subnets. |
+| **Cloud resource** | Cloud accounts, compute instances, managed databases, object storage, key stores, cloud load balancers, API gateways, CDN distributions, serverless functions. (A cloud network and its address ranges are prefixes in Inventory → Networks, not assets.) |
 | **Application** | Web applications, database instances, service daemons, middleware. |
 | **Service** | A declared capability rather than a machine — business services and technical services. |
 | **External party** | Someone else's endpoint that your assets talk to. |
@@ -115,12 +115,12 @@ Every identifier is marked **Global** or **Scoped**:
 | **SSH host key** | Global | The host's own key. Changes only when the host is rebuilt — which is itself worth knowing. |
 | **MAC address** | Global | Unique per interface. Weaker than a serial: virtual machines and containers can be given one. |
 | **FQDN** | Global | Unique across the organization on its own, because the domain is part of it. |
-| **Hostname** | Scoped | A short name, unique only inside a network segment. Two segments can each have a "db01". |
-| **IP address** | Scoped | Weakest: addresses are reassigned. Matched inside a segment, never across the organization. |
+| **Hostname** | Scoped | A short name, unique only inside a prefix. Two prefixes can each have a "db01". |
+| **IP address** | Scoped | Weakest: addresses are reassigned. Matched inside a prefix, never across the organization. |
 | **Name** | Scoped | For declared services, which have no address or serial. Scoped by class. |
 
-A **scoped** identifier is matched inside its scope — the network segment, the
-class, or the CMDB sync profile. An organization with no segments defined uses
+A **scoped** identifier is matched inside its scope — the prefix, the
+class, or the CMDB sync profile. An organization with no prefixes defined uses
 one default scope. **Global** identifiers are unique on their own, and the
 platform rejects a scope on one: a scope nobody asked for would split the very
 thing that makes the identifier unique.
@@ -197,7 +197,7 @@ sure only when **all** of these hold:
   that manages it — not relayed second-hand;
 - an **address alone never counts** — a record known by a name is not merged with
   a device just because the device later used the same address;
-- both records are on the **same network segment** (or one has none, as a record
+- both records are on the **same prefix** (or one has none, as a record
   you typed in may not);
 - **nothing contradicts it** — different serial numbers, cloud resource IDs or
   agent IDs are always different devices;

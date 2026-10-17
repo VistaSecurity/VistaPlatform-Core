@@ -8,36 +8,6 @@ import (
 
 func strptr(s string) *string { return &s }
 
-func TestValidateSegmentValue(t *testing.T) {
-	cases := []struct {
-		name        string
-		segmentType string
-		value       string
-		wantErr     bool
-	}{
-		{"valid cidr", "cidr", "10.0.0.0/24", false},
-		{"bad cidr", "cidr", "10.0.0.0/99", true},
-		{"not a cidr", "cidr", "not-a-cidr", true},
-		{"valid ip range", "ip_range", "10.0.0.1-10.0.0.254", false},
-		{"bad ip range", "ip_range", "10.0.0.1", true},
-		{"valid domain", "domain", "*.example.com", false},
-		{"empty domain", "domain", "  ", true},
-		{"valid cloud vpc", "cloud_vpc", "vpc-123", false},
-		{"unknown type", "bogus", "x", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := validateSegmentValue(tc.segmentType, tc.value)
-			if tc.wantErr && err == nil {
-				t.Fatalf("expected error for %q/%q, got nil", tc.segmentType, tc.value)
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected error for %q/%q: %v", tc.segmentType, tc.value, err)
-			}
-		})
-	}
-}
-
 func TestBulkAssetKey(t *testing.T) {
 	cases := []struct {
 		name string

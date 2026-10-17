@@ -54,6 +54,12 @@ func (pm *PartitionManager) Start(ctx context.Context) {
 func (pm *PartitionManager) ensurePartitions(ctx context.Context) {
 	pm.logger.Println("Checking for partition maintenance")
 
+	// The DCIM change record (public.object_changes, DCIM BUILD_PLAN row 0.3)
+	// is partitioned the same way and kept ahead of the clock by this same
+	// job, so the two never disagree about the horizon. Its own step, before
+	// the activity-log one, so neither can starve the other.
+	pm.ensureObjectChangePartitions(ctx)
+
 	// Check if partitioning is enabled (table exists with partitions)
 	var isPartitioned bool
 	err := pm.db.QueryRowContext(ctx, `
@@ -78,6 +84,35 @@ func (pm *PartitionManager) ensurePartitions(ctx context.Context) {
 
 	// Create partitions for the next 3 months
 	pm.createFuturePartitions(ctx, 3)
+}
+
+// objectChangesMonthsAhead matches the activity-log horizon below.
+const objectChangesMonthsAhead = 3
+
+// ensureObjectChangePartitions materialises public.object_changes' monthly
+// partitions (current month + objectChangesMonthsAhead) and applies its
+// retention, which follows the audit retention setting: the SQL function
+// drops whole months older than the longest active general policy's
+// total_retention_days, and drops nothing when there is no such policy.
+func (pm *PartitionManager) ensureObjectChangePartitions(ctx context.Context) {
+	var made int
+	if err := pm.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM public.ensure_object_changes_partitions($1)`, objectChangesMonthsAhead).Scan(&made); err != nil {
+		pm.logger.Printf("ERROR: object_changes partitions: %v", err)
+		return
+	}
+	if made > 0 {
+		pm.logger.Printf("Created %d object_changes partition(s)", made)
+	}
+	var dropped int
+	if err := pm.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM public.drop_expired_object_changes_partitions()`).Scan(&dropped); err != nil {
+		pm.logger.Printf("ERROR: object_changes retention: %v", err)
+		return
+	}
+	if dropped > 0 {
+		pm.logger.Printf("Dropped %d expired object_changes partition(s)", dropped)
+	}
 }
 
 // createFuturePartitions creates partitions for future months

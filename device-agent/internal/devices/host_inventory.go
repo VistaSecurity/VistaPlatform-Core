@@ -205,7 +205,7 @@ func CollectLocalHostInventoryWithConnections(ctx context.Context, agentID strin
 		AgentID:            agentID,
 		CollectConnections: collectConnections,
 		// The one documented divergence from remote mode, and it only fires
-		// after `ip -j addr` has already failed — which it does on a minimal
+		// after `ip -d -j addr` has already failed — which it does on a minimal
 		// image that ships no iproute2.
 		LocalInterfaceFallback: true,
 	})

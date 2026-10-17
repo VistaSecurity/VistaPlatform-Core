@@ -51,9 +51,10 @@ own or are authorized to assess**, and read the OT/ICS caution in
 
 **Inventory.** Everything discovered lands in a CMDB-aligned model: assets,
 certificates, keys, crypto configurations, installed software with its
-lifecycle state, and the relationships between them. Eleven lenses reshape the
-same data — assets, network map, software, certificates, keys, configuration,
-TLS, SSH, data protection, third-party connections, and stale assets.
+lifecycle state, and the relationships between them. Twenty-one lenses reshape the
+same data — assets, network map, software, networks (the prefix tree), VLANs,
+clusters, circuits, sites, cloud, racks, cabling, certificates, keys, configuration, TLS, SSH, data protection, third-party
+connections, VPN tunnels, changes, and stale assets.
 
 **Assessment.** Every algorithm is scored against a maintained catalog:
 strength, deprecation status, post-quantum resistance, and NIST security level.
@@ -82,7 +83,7 @@ security in a security product is indefensible.
 | | Core | Enterprise | MSP |
 |---|---|---|---|
 | Discovery — sensor, agent, cloud; passive and active OT/ICS | ✅ | ✅ | ✅ |
-| Inventory, CMDB model, all eleven lenses; software + lifecycle (ITAM) | ✅ | ✅ | ✅ |
+| Inventory, CMDB model, all twenty-one lenses; software + lifecycle (ITAM) | ✅ | ✅ | ✅ |
 | Crypto assessment + PQC exposure | ✅ | ✅ | ✅ |
 | Compliance engine + 8 frameworks | ✅ | ✅ | ✅ |
 | CBOM generation + CycloneDX export | ✅ | ✅ | ✅ |

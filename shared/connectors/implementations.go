@@ -125,6 +125,12 @@ var implementations = map[string]Implementation{
 			"internal source routes. Writes nothing back to NetBox",
 		Enterprise: true,
 	},
+	ConnectorDevice42Import: {
+		Note: "DCIM import only (DCIM row 5.6): buildings, rooms, racks, hardware models, devices placed in racks, " +
+			"ports and their connections, VRF groups, subnets, IPs, VLANs, circuits and customers, written through " +
+			"inventory-service's internal import routes. Writes nothing back to Device42",
+		Enterprise: true,
+	},
 }
 
 // ImplementationFor returns where a connector's code lives. The second result

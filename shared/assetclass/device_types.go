@@ -57,37 +57,11 @@ var deviceTypeClass = map[string]Key{
 	"printer":             KeyPrinter,
 	"storage_device":      KeyStorageDevice,
 
-	// --- Cloud resources, each to its cloud_resource child. Three providers,
-	// one class per kind: an S3 bucket, an Azure storage account and a GCS
-	// bucket are the same KIND of thing under three names, and the class
-	// taxonomy is the place that says so.
-	"aws_alb":                   KeyCloudLoadBalancer,
-	"aws_nlb":                   KeyCloudLoadBalancer,
-	"aws_elb":                   KeyCloudLoadBalancer,
-	"aws_api_gateway":           KeyApiGateway,
-	"aws_cloudfront":            KeyCdnDistribution,
-	"aws_kms":                   KeyKeyStore,
-	"aws_s3_bucket":             KeyObjectStorage,
-	"aws_rds_instance":          KeyManagedDatabase,
-	"aws_ec2_instance":          KeyComputeInstance,
-	"aws_vpc":                   KeyVirtualNetwork,
-	"aws_subnet":                KeySubnet,
-	"azure_application_gateway": KeyCloudLoadBalancer,
-	"azure_load_balancer":       KeyCloudLoadBalancer,
-	"azure_keyvault_key":        KeyKeyStore,
-	"azure_storage_account":     KeyObjectStorage,
-	"azure_sql_database":        KeyManagedDatabase,
-	"azure_vm":                  KeyComputeInstance,
-	"azure_virtual_network":     KeyVirtualNetwork,
-	"azure_subnet":              KeySubnet,
-	"gcp_https_load_balancer":   KeyCloudLoadBalancer,
-	"gcp_ssl_proxy":             KeyCloudLoadBalancer,
-	"gcp_kms_crypto_key":        KeyKeyStore,
-	"gcp_storage_bucket":        KeyObjectStorage,
-	"gcp_cloudsql_instance":     KeyManagedDatabase,
-	"gcp_compute_instance":      KeyComputeInstance,
-	"gcp_network":               KeyVirtualNetwork,
-	"gcp_subnetwork":            KeySubnet,
+	// --- Cloud resources are NOT listed here: their `<provider>_*` device
+	// types are aliases in the class registry's provider-type mapping
+	// (standards/asset-classes.yaml `provider_types`, generated into
+	// cloud_types_gen.go) and are folded in by init below — one mapping for
+	// every cloud spelling (asset-inventory ADR-0009 D2).
 }
 
 // cloudResourceTypeClass maps the `resource_type` a cloud collector writes into
@@ -103,50 +77,52 @@ var deviceTypeClass = map[string]Key{
 // TestCloudResourceTypesTheCollectorsWriteAllMap scans the tree to keep it that
 // way — a new collector spelling is a compile-green, run-time-wrong class hint,
 // which is how buckets came to be applications.
-var cloudResourceTypeClass = map[string]Key{
-	// compute
-	"ec2": KeyComputeInstance, "instance": KeyComputeInstance,
-	"compute_instance": KeyComputeInstance, "virtual_machine": KeyComputeInstance,
-	"vm": KeyComputeInstance,
+//
+// It is DERIVED, at init, from the class registry's provider-type mapping
+// (cloud_types_gen.go): every provider type string (`AWS::EC2::Instance`, lower
+// cased), every collector alias that is not a `<provider>_*` device type, and
+// the provider-neutral `resource_type_aliases`. No network or subnet entries:
+// since DCIM row 1.5f a VPC / VNet / GCP network and its child ranges are IPAM
+// prefixes, not assets, so "vpc" answers the coarse `cloud_resource`.
+var cloudResourceTypeClass = map[string]Key{}
 
-	// managed databases
-	"rds": KeyManagedDatabase, "database": KeyManagedDatabase,
-	"managed_database": KeyManagedDatabase, "sql_database": KeyManagedDatabase,
-	"rds_instance": KeyManagedDatabase, "cloudsql_instance": KeyManagedDatabase,
-	"db_instance": KeyManagedDatabase,
+// providerTypeBySpelling resolves any spelling — a provider type string, a
+// device type, a resource type alias — to its provider type.
+var providerTypeBySpelling = map[string]CloudProviderType{}
 
-	// object storage
-	"s3": KeyObjectStorage, "bucket": KeyObjectStorage,
-	"object_storage": KeyObjectStorage, "storage_account": KeyObjectStorage,
-	"blob": KeyObjectStorage, "s3_bucket": KeyObjectStorage,
-	"gcs_bucket": KeyObjectStorage, "storage_bucket": KeyObjectStorage,
+func init() {
+	for _, pt := range cloudProviderTypes {
+		providerTypeBySpelling[strings.ToLower(pt.Type)] = pt
+		cloudResourceTypeClass[strings.ToLower(pt.Type)] = pt.Class
+		for _, a := range pt.Aliases {
+			a = strings.ToLower(a)
+			providerTypeBySpelling[a] = pt
+			if strings.HasPrefix(a, pt.Provider+"_") {
+				deviceTypeClass[a] = pt.Class
+			} else {
+				cloudResourceTypeClass[a] = pt.Class
+			}
+		}
+	}
+	for a, k := range cloudGenericAliases {
+		cloudResourceTypeClass[strings.ToLower(a)] = k
+	}
+}
 
-	// key stores
-	"kms": KeyKeyStore, "key_vault": KeyKeyStore, "keyvault": KeyKeyStore,
-	"key_store": KeyKeyStore, "keyring": KeyKeyStore, "crypto_key": KeyKeyStore,
+// ProviderTypeOf answers the provider type a spelling names — a device type
+// (`aws_ec2_instance`), a collector resource type (`ec2`) or the provider type
+// string itself — or false. Provider-neutral spellings ("bucket") name no one
+// provider's type and answer false.
+func ProviderTypeOf(spelling string) (CloudProviderType, bool) {
+	pt, ok := providerTypeBySpelling[strings.ToLower(strings.TrimSpace(spelling))]
+	return pt, ok
+}
 
-	// load balancers (the MANAGED kind — see the doc comment)
-	"elb": KeyCloudLoadBalancer, "alb": KeyCloudLoadBalancer, "nlb": KeyCloudLoadBalancer,
-	"load_balancer": KeyCloudLoadBalancer, "cloud_load_balancer": KeyCloudLoadBalancer,
-	"application_gateway": KeyCloudLoadBalancer, "ssl_proxy": KeyCloudLoadBalancer,
-
-	// edge
-	"api_gateway": KeyApiGateway, "apigateway": KeyApiGateway,
-	"cloudfront": KeyCdnDistribution, "cdn": KeyCdnDistribution,
-	"cdn_distribution": KeyCdnDistribution,
-
-	// serverless
-	"lambda": KeyServerlessFunction, "function": KeyServerlessFunction,
-	"serverless_function": KeyServerlessFunction,
-
-	// networks and subnets (the enumeration of BUILD_PLAN 2.4). "network" is
-	// the VPC-shaped thing on GCP and "virtual_network" on Azure; note it is
-	// NOT the same word as "virtual_machine" above, which is a compute
-	// instance — one letter of difference, opposite classes, which is why both
-	// are spelled out here rather than matched by prefix.
-	"vpc": KeyVirtualNetwork, "vnet": KeyVirtualNetwork,
-	"virtual_network": KeyVirtualNetwork, "network": KeyVirtualNetwork,
-	"subnet": KeySubnet, "subnetwork": KeySubnet,
+// CloudProviderTypes returns a copy of the provider-type mapping.
+func CloudProviderTypes() []CloudProviderType {
+	out := make([]CloudProviderType, len(cloudProviderTypes))
+	copy(out, cloudProviderTypes)
+	return out
 }
 
 // FromDeviceType maps a `device_type` onto a class key, or "" when the type

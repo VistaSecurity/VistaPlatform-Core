@@ -73,8 +73,7 @@ func newDriftFixture(t *testing.T) *driftFixture {
 	f := &driftFixture{owner: owner, app: app, tenant: tenant, now: time.Now().UTC()}
 
 	f.segment = uuid.New()
-	exec(t, owner, `INSERT INTO network_segments (id, tenant_id, name, segment_type, value, environment)
-	                VALUES ($1, $2, 'Server VLAN', 'cidr', '10.20.0.0/24', 'production')`, f.segment, tenant)
+	exec(t, owner, `INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Server VLAN','10.20.0.0/24'::cidr,'production','declared','active')`, f.segment, tenant)
 
 	settled := f.daysAgo(settledDays)
 	f.baselineAsset = f.addAsset(t, assetclass.KeyServer, settled, "settled-peer")
@@ -138,7 +137,7 @@ func (f *driftFixture) addAsset(t *testing.T, class string, firstSeen time.Time,
 		path = c.Path
 	}
 	exec(t, f.owner, `INSERT INTO assets (id, tenant_id, class_key, class_path, display_name, hostname,
-	                                      network_segment_id, asset_status, first_discovered_at, last_seen_at)
+	                                      prefix_id, asset_status, first_discovered_at, last_seen_at)
 	                  VALUES ($1, $2, $3, $4, $5, $5, $6, 'monitoring', $7, now())`,
 		id, f.tenant, class, path, name, f.segment, firstSeen)
 	return id
@@ -355,13 +354,13 @@ func TestIntegration_DriftProducer_NewClassInSegment(t *testing.T) {
 	if got.state != producer.StateActive {
 		t.Errorf("detection_state = %q, want ACTIVE", got.state)
 	}
-	if got.evidence["segment_id"] != f.segment.String() {
-		t.Errorf("evidence.segment_id = %v, want %s", got.evidence["segment_id"], f.segment)
+	if got.evidence["prefix_id"] != f.segment.String() {
+		t.Errorf("evidence.prefix_id = %v, want %s", got.evidence["prefix_id"], f.segment)
 	}
 	baseline, _ := got.evidence["baseline"].(map[string]any)
-	classes, _ := baseline["classes_in_segment"].([]any)
+	classes, _ := baseline["classes_in_prefix"].([]any)
 	if len(classes) != 1 || classes[0] != assetclass.KeyServer {
-		t.Errorf("evidence.baseline.classes_in_segment = %v, want [server] — what it was compared against", classes)
+		t.Errorf("evidence.baseline.classes_in_prefix = %v, want [server] — what it was compared against", classes)
 	}
 
 	// It ages into the baseline: 5 days old under a 30-day window is drift, and
@@ -884,7 +883,7 @@ func (f *driftFixture) addAssetWithoutSegment(t *testing.T, class string, firstS
 		path = c.Path
 	}
 	exec(t, f.owner, `INSERT INTO assets (id, tenant_id, class_key, class_path, display_name, hostname,
-	                                      network_segment_id, asset_status, first_discovered_at, last_seen_at)
+	                                      prefix_id, asset_status, first_discovered_at, last_seen_at)
 	                  VALUES ($1, $2, $3, $4, $5, $5, NULL, 'monitoring', $6, now())`,
 		id, f.tenant, class, path, name, firstSeen)
 	return id

@@ -40,6 +40,9 @@ let root: Root;
 let onChange: Mock<(s: AssetSelection) => void>;
 beforeEach(() => {
   mocks.post.mockReset(); mocks.get.mockReset(); mocks.toastSuccess.mockReset();
+  mocks.get.mockImplementation(async (path: string) => path === '/dcim/business-units'
+    ? { data: { business_units: [{ id: 'bu-1', name: 'Payments', slug: 'payments', parent_id: null, asset_count: 0 }], total: 1 } }
+    : { data: undefined, error: new Error('unmocked') });
   onChange = vi.fn<(s: AssetSelection) => void>();
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -136,20 +139,19 @@ describe('edit fields', () => {
     expect(button(/^Apply to 2 assets$/)?.disabled).toBe(true);
     const mode = host.querySelector('select[aria-label="Business unit: change"]') as HTMLSelectElement;
     await act(async () => { mode.value = 'set'; mode.dispatchEvent(new Event('change', { bubbles: true })); });
-    const input = host.querySelector('input[aria-label="Business unit"]') as HTMLInputElement;
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
-    await act(async () => { setter.call(input, 'Payments'); input.dispatchEvent(new Event('input', { bubbles: true })); });
+    const pick = host.querySelector('select[aria-label="Business unit"]') as HTMLSelectElement;
+    await act(async () => { pick.value = 'bu-1'; pick.dispatchEvent(new Event('change', { bubbles: true })); });
     await click(/^Apply to 2 assets$/);
     await vi.waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
     expect(mocks.post.mock.calls[0][0]).toBe('/infrastructure-assets/bulk-actions/update');
-    expect(mocks.post.mock.calls[0][1].body).toEqual({ asset_ids: ['a', 'b'], changes: { business_unit: 'Payments' } });
+    expect(mocks.post.mock.calls[0][1].body).toEqual({ asset_ids: ['a', 'b'], changes: { business_unit_id: 'bu-1' } });
   });
 
   it('clear sends an empty value; tags parse as name=value', () => {
     expect(buildChanges({ owner_email: 'clear' }, {}, '', '')).toEqual({ owner_email: '' });
     expect(buildChanges({ environment: 'set' }, { environment: 'production' }, 'zone=dmz, team = pay=ments, solo', 'legacy, ,temp'))
       .toEqual({ environment: 'production', add_tags: { zone: 'dmz', team: 'pay=ments', solo: '' }, remove_tags: ['legacy', 'temp'] });
-    expect(buildChanges({ business_unit: 'set' }, { business_unit: '  ' }, '', '')).toBeNull();
+    expect(buildChanges({ business_unit_id: 'set' }, { business_unit_id: '  ' }, '', '')).toBeNull();
     expect(buildChanges({}, {}, '', '')).toBeNull();
     expect(parseTagPairs(' , =x')).toEqual({});
   });

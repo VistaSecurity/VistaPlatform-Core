@@ -3,7 +3,7 @@
 // slice C: the asset page's "Networks routed" card and the host's
 // "via <gateway>" line, driven through the REAL AssetPage (Overview tab).
 //
-// `segment-gateway.test.ts` pins the decisions; this pins that the page renders
+// `prefix-gateway.test.ts` pins the decisions; this pins that the page renders
 // them — deleting the card, its null check or the via line turns this red.
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -12,7 +12,7 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Asset } from '@vistasecurity/api-contract';
 import { AssetPage } from './asset-page';
-import type { RoutedSegment, SegmentGateway } from './segment-gateway';
+import type { FHRPGroupRef, RoutedPrefix, PrefixGateway } from './prefix-gateway';
 
 // The page renders the Active Scan button, which reads the query client; none of
 // these tests reads a query through it.
@@ -37,26 +37,29 @@ vi.mock('@vistasecurity/primitives/rbac', async (importOriginal) => ({
 
 const ROUTER = '00000000-0000-4000-8000-0000000000a1';
 const HOST = '00000000-0000-4000-8000-0000000000b1';
-const SEG_V4 = '00000000-0000-4000-8000-0000000000c1';
-const SEG_V6 = '00000000-0000-4000-8000-0000000000c2';
-const SEG_RANGE = '00000000-0000-4000-8000-0000000000c3';
+const PFX_V4 = '00000000-0000-4000-8000-0000000000c1';
+const PFX_V6 = '00000000-0000-4000-8000-0000000000c2';
+const PFX_STATIC = '00000000-0000-4000-8000-0000000000c3';
 const LONG_NAME = 'Building 4 east wing laboratory instrumentation network (isolated)';
 
-const v4: RoutedSegment = {
-  segment_id: SEG_V4, name: 'Office LAN', value: '192.0.2.0/24', segment_type: 'cidr', address: '192.0.2.1',
-  observed_at: '2026-10-03T00:00:00Z', vlan_id: 10, dynamic: true, host_count: 1234,
-  coverage: { sensor_id: '00000000-0000-4000-8000-0000000000d1', sensor_name: 'office-sensor' },
+const vrrp: FHRPGroupRef = { id: '00000000-0000-4000-8000-0000000000e1', protocol: 'vrrp3', group_id: 10, name: 'office', virtual_address: '192.0.2.254/24' };
+
+const v4: RoutedPrefix = {
+  prefix_id: PFX_V4, prefix: '192.0.2.0/24', description: 'Office LAN', address: '192.0.2.1',
+  observed_at: '2026-10-03T00:00:00Z', vlan_id: 10, vlan_name: 'office', dynamic: true, host_count: 1234,
+  coverage: { sensor_id: '00000000-0000-4000-8000-0000000000d1', sensor_name: 'office-sensor' }, fhrp_group: vrrp,
 };
-const v6: RoutedSegment = {
-  segment_id: SEG_V6, name: LONG_NAME, value: '2001:db8:10::/64', segment_type: 'cidr', address: '2001:db8:10::1/128',
-  observed_at: '2026-10-03T00:00:00Z', vlan_id: null, dynamic: null, host_count: 3, coverage: null,
+const v6: RoutedPrefix = {
+  prefix_id: PFX_V6, prefix: '2001:db8:10::/64', description: LONG_NAME, address: '2001:db8:10::1/128',
+  observed_at: '2026-10-03T00:00:00Z', vlan_id: null, vlan_name: null, dynamic: null, host_count: 3, coverage: null, fhrp_group: null,
 };
-const range: RoutedSegment = {
-  segment_id: SEG_RANGE, name: 'Printers', value: '198.51.100.10-198.51.100.40', segment_type: 'ip_range', address: '198.51.100.1',
-  observed_at: '2026-10-03T00:00:00Z', vlan_id: 30, dynamic: false, host_count: 0, coverage: null,
+const statics: RoutedPrefix = {
+  prefix_id: PFX_STATIC, prefix: '198.51.100.0/26', description: 'Printers', address: '198.51.100.1',
+  observed_at: '2026-10-03T00:00:00Z', vlan_id: 30, vlan_name: null, dynamic: false, host_count: 0,
+  coverage: { sensor_id: '00000000-0000-4000-8000-0000000000d1', sensor_name: 'office-sensor' }, fhrp_group: null,
 };
 
-const gw: SegmentGateway = { asset_id: ROUTER, display_name: 'edge-router', address: '192.0.2.1', observed_at: '2026-10-03T00:00:00Z' };
+const gw: PrefixGateway = { asset_id: ROUTER, display_name: 'edge-router', address: '192.0.2.1', observed_at: '2026-10-03T00:00:00Z' };
 
 let container: HTMLDivElement;
 let root: Root;
@@ -88,7 +91,7 @@ const $$ = (sel: string) => [...container.querySelectorAll(sel)];
 
 describe('Networks routed card', () => {
   it('lists every network the asset routes, with each column the spec names', () => {
-    render({ id: ROUTER, routed_segments: [v4, v6, range] });
+    render({ id: ROUTER, routed_prefixes: [v4, v6, statics] });
     const card = $('[data-testid="routed-networks"]');
     expect(card).not.toBeNull();
     expect(card?.textContent).toContain('Networks routed (3)');
@@ -103,17 +106,19 @@ describe('Networks routed card', () => {
     expect(office).toContain('DHCP');
     expect(office).toContain('1,234');
     expect(office).toContain('Sensor: office-sensor');
+    // The FHRP group whose virtual address is in the prefix rides on the row.
+    expect(office).toContain('VRRP 10 (192.0.2.254)');
     expect($('[data-testid="routed-networks-error"]')).toBeNull();
   });
 
-  it('links each host count to the existing segment_id: Inventory query', () => {
-    render({ id: ROUTER, routed_segments: [v4] });
+  it('links each host count to the existing prefix_id: Inventory query', () => {
+    render({ id: ROUTER, routed_prefixes: [v4] });
     const link = $$('[data-testid="routed-network-row"] a').find((a) => a.textContent === '1,234');
-    expect(link?.getAttribute('href')).toBe(`/inventory?lens=assets&query=${encodeURIComponent(`segment_id:${SEG_V4}`)}`);
+    expect(link?.getAttribute('href')).toBe(`/inventory?lens=assets&query=${encodeURIComponent(`prefix_id:${PFX_V4}`)}`);
   });
 
-  it('handles an IPv6 network, a long name, no VLAN tag, unknown DHCP and no sensor', () => {
-    render({ id: ROUTER, routed_segments: [v6] });
+  it('handles an IPv6 prefix, a long description, no VLAN, unknown DHCP and no sensor', () => {
+    render({ id: ROUTER, routed_prefixes: [v6] });
     const row = $('[data-testid="routed-network-row"]')!;
     // The full name is one hover away even when the cell ellipsizes it.
     expect(row.querySelector(`[title="${LONG_NAME}"]`)).not.toBeNull();
@@ -127,16 +132,16 @@ describe('Networks routed card', () => {
     expect(note?.textContent).toBe('No sensor on this network');
   });
 
-  it('does not call a non-CIDR network uncovered', () => {
-    render({ id: ROUTER, routed_segments: [range] });
+  it('shows a static prefix a sensor reaches as covered', () => {
+    render({ id: ROUTER, routed_prefixes: [statics] });
     const note = $('[data-testid="routed-network-row"] [data-testid="coverage-note"]');
-    expect(note?.getAttribute('data-coverage')).toBe('not-applicable');
+    expect(note?.getAttribute('data-coverage')).toBe('sensor');
     expect($('[data-testid="routed-network-row"]')?.textContent).not.toContain('No sensor');
     expect($('[data-testid="routed-network-row"]')?.textContent).toContain('Static');
   });
 
   it('is not rendered at all for an asset that routes nothing', () => {
-    render({ id: HOST, class_key: 'workstation', routed_segments: [] });
+    render({ id: HOST, class_key: 'workstation', routed_prefixes: [] });
     expect($('[data-testid="routed-networks"]')).toBeNull();
     expect(container.textContent).not.toContain('Networks routed');
   });
@@ -152,25 +157,30 @@ describe('Networks routed card', () => {
 });
 
 describe('"via <gateway>" on a host', () => {
-  it('shows the gateway beside the host\'s network, linking to the gateway', () => {
-    render({ id: HOST, class_key: 'workstation', network_segment_name: 'Office LAN', segment_gateway: gw, routed_segments: [] });
-    const line = $('[data-testid="network-segment-via"]');
-    expect(line?.textContent).toContain('Office LAN');
+  it('shows the gateway beside the host\'s prefix, linking to the gateway', () => {
+    render({ id: HOST, class_key: 'workstation', prefix: '192.0.2.0/24', prefix_gateway: gw, routed_prefixes: [] });
+    const line = $('[data-testid="prefix-via"]');
+    expect(line?.textContent).toContain('192.0.2.0/24');
     expect(line?.textContent).toContain('via');
     expect(line?.textContent).toContain('edge-router');
     expect(line?.textContent).toContain('(192.0.2.1)');
     expect(line?.querySelector('a')?.getAttribute('href')).toBe(`/inventory/assets/${ROUTER}`);
   });
 
-  it('is absent when the host\'s network has no recorded gateway', () => {
-    render({ id: HOST, class_key: 'workstation', network_segment_name: 'Office LAN', routed_segments: [] });
-    expect($('[data-testid="network-segment-via"]')).toBeNull();
-    expect(container.textContent).toContain('Office LAN');
+  it('shows the FHRP virtual address the host routes through (VRRP)', () => {
+    render({ id: HOST, class_key: 'workstation', prefix: '192.0.2.0/24', prefix_gateway: gw, prefix_fhrp_group: vrrp, routed_prefixes: [] });
+    expect($('[data-testid="prefix-via-fhrp"]')?.textContent).toContain('VRRP 10 (192.0.2.254)');
+  });
+
+  it('is absent when the host\'s prefix has no recorded gateway', () => {
+    render({ id: HOST, class_key: 'workstation', prefix: '192.0.2.0/24', routed_prefixes: [] });
+    expect($('[data-testid="prefix-via"]')).toBeNull();
+    expect(container.textContent).toContain('192.0.2.0/24');
     expect(container.textContent).not.toContain('via edge-router');
   });
 
   it('is absent on the gateway itself, even if the server named it', () => {
-    render({ id: ROUTER, network_segment_name: 'Office LAN', segment_gateway: gw, routed_segments: [v4] });
-    expect($('[data-testid="network-segment-via"]')).toBeNull();
+    render({ id: ROUTER, prefix: '192.0.2.0/24', prefix_gateway: gw, routed_prefixes: [v4] });
+    expect($('[data-testid="prefix-via"]')).toBeNull();
   });
 });

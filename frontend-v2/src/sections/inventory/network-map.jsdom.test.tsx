@@ -10,6 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { PermissionProvider } from '@vistasecurity/primitives/rbac';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { NetworkMap } from './network-map-model';
 
@@ -26,7 +27,7 @@ class StubResizeObserver {
 }
 vi.stubGlobal('ResizeObserver', StubResizeObserver);
 
-const SEG = '00000000-0000-4000-8000-0000000000aa';
+const PFX = '00000000-0000-4000-8000-0000000000aa';
 const ROUTER = '00000000-0000-4000-8000-000000000001';
 const QUIET = '00000000-0000-4000-8000-000000000002';
 const ENDPOINT = '00000000-0000-4000-8000-0000000000e1';
@@ -36,11 +37,11 @@ const CERT = '00000000-0000-4000-8000-0000000000f1';
 const noPqc = { needs_migration: 1, pqc_ready: 0, symmetric_safe: 0, unclassified: 0 };
 
 const MAP: NetworkMap = {
-  segments: [{ segment_id: SEG, name: 'Office LAN', value: '10.0.0.0/24', segment_type: 'cidr', gateway: null }],
+  prefixes: [{ prefix_id: PFX, prefix: '10.0.0.0/24', description: 'Office LAN', vlan_vid: null, vlan_name: null, gateway: null, fhrp_group: null }],
   assets: [
     {
       asset_id: ROUTER, display_name: 'edge-router', class_key: 'router', address: '10.0.0.1',
-      asset_status: 'monitoring', site: 'Head office', segment_id: SEG,
+      asset_status: 'monitoring', site: 'Head office', prefix_id: PFX,
       risk_score: 72, risk_assessed: true, service_count: 2, crypto_service_count: 1,
       crypto: {
         components: [
@@ -53,7 +54,7 @@ const MAP: NetworkMap = {
     },
     {
       asset_id: QUIET, display_name: 'printer', class_key: 'printer', address: '10.0.0.9',
-      asset_status: 'pending_approval', site: 'Head office', segment_id: SEG,
+      asset_status: 'pending_approval', site: 'Head office', prefix_id: PFX,
       risk_score: 0, risk_assessed: false, service_count: 0, crypto_service_count: 0,
       crypto: { components: [], pqc: { needs_migration: 0, pqc_ready: 0, symmetric_safe: 0, unclassified: 0 }, certs_expiring_90d: 0 },
     },
@@ -141,9 +142,14 @@ async function render(url: string): Promise<void> {
   await act(async () => {
     root.render(
       <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={[url]}>
-          <MapShell />
-        </MemoryRouter>
+        {/* The lazily mounted lenses use the query editor, which reads
+            permissions. Without the provider a slow runner that mounts one
+            before the test ends throws; no permissions are granted here. */}
+        <PermissionProvider enabled={false}>
+          <MemoryRouter initialEntries={[url]}>
+            <MapShell />
+          </MemoryRouter>
+        </PermissionProvider>
       </QueryClientProvider>,
     );
   });
@@ -175,6 +181,19 @@ it('badges devices by the server\'s assessment, not by a guess', async () => {
   expect(tones['edge-router']).toBe('high');
   // No services and no assessment: nothing to badge, not a zero.
   expect(tones.printer).toBe('none');
+});
+
+// DCIM row 3.6: the funnel's device detail links to the device's faceplate —
+// the Ports tab of its asset page (row 3.4).
+it('links the exploded device to its faceplate', async () => {
+  await render('/inventory?lens=map');
+  await settle(() => $$('[data-testid="network-map-tile"]').length > 0);
+  const tile = $$('[data-testid="network-map-tile"]').find((t) => t.getAttribute('aria-label')?.startsWith('edge-router'))!;
+  await act(async () => { (tile as HTMLButtonElement).click(); });
+  await settle(() => $('[data-testid="exploded-faceplate"]') !== null);
+  const link = $('[data-testid="exploded-faceplate"]') as HTMLAnchorElement;
+  expect(link.textContent).toContain('Faceplate');
+  expect(link.getAttribute('href')).toMatch(/^\/inventory\/assets\/[^/]+\/ports$/);
 });
 
 it('explodes a clicked device into its services and catalogue-assessed crypto', async () => {

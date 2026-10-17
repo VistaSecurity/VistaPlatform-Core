@@ -81,16 +81,16 @@ func TestObservationConformanceFixtures(t *testing.T) {
 	// Unknown. The values are chosen to satisfy the fixtures that describe an
 	// ordinary internal discovery.
 	populated := mapSource{fields: map[string]any{
-		"source":             "agent",
-		"confidence":         0.95,
-		"class_key":          "server",
-		"class_path":         "hardware.computer.server",
-		"hostname":           "db-01.example.test",
-		"address":            "198.51.100.10",
-		"network_ownership":  "internal",
-		"network_type":       "private",
-		"network_segment_id": "0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
-		"first_seen_at":      time.Now().Add(-24 * time.Hour),
+		"source":            "agent",
+		"confidence":        0.95,
+		"class_key":         "server",
+		"class_path":        "hardware.computer.server",
+		"hostname":          "db-01.example.test",
+		"address":           "198.51.100.10",
+		"network_ownership": "internal",
+		"network_type":      "private",
+		"network_prefix_id": "0e8b2e1e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+		"first_seen_at":     time.Now().Add(-24 * time.Hour),
 	}}
 	// The same observation with NOTHING measured. No fixture may return True
 	// against it — a predicate over an absent value is Unknown, not False, and
@@ -130,9 +130,9 @@ func TestObservationConformanceFixtures(t *testing.T) {
 			// Unknown, not True (§5.2).
 			//
 			// Negated EXISTENCE is not an exception to that rule, it is the
-			// rule read correctly — `not exists(network.segment_id)` is asking
+			// rule read correctly — `not exists(network.prefix_id)` is asking
 			// about presence, and the honest answer for an observation with no
-			// segment is yes. That is precisely the rule a tenant writes to
+			// prefix is yes. That is precisely the rule a tenant writes to
 			// catch discoveries from unmapped networks.
 			if strings.Contains(c.Query, "not exists(") {
 				if got := check(t, c.Query, "observation", empty); got != eval.True {
@@ -193,15 +193,15 @@ func TestThreeValuedLogic(t *testing.T) {
 // value is there at all, which is always answerable.
 func TestExistsIsNotAComparison(t *testing.T) {
 	absent := mapSource{fields: map[string]any{}}
-	present := mapSource{fields: map[string]any{"network_segment_id": "550e8400-e29b-41d4-a716-446655440000"}}
+	present := mapSource{fields: map[string]any{"network_prefix_id": "550e8400-e29b-41d4-a716-446655440000"}}
 
-	if got := check(t, "exists(network.segment_id)", "observation", absent); got != eval.False {
+	if got := check(t, "exists(network.prefix_id)", "observation", absent); got != eval.False {
 		t.Errorf("exists over an absent value = %v, want false", got)
 	}
-	if got := check(t, "exists(network.segment_id)", "observation", present); got != eval.True {
+	if got := check(t, "exists(network.prefix_id)", "observation", present); got != eval.True {
 		t.Errorf("exists over a present value = %v, want true", got)
 	}
-	if got := check(t, "not exists(network.segment_id)", "observation", absent); got != eval.True {
+	if got := check(t, "not exists(network.prefix_id)", "observation", absent); got != eval.True {
 		t.Errorf("not exists over an absent value = %v, want true", got)
 	}
 }
@@ -219,9 +219,9 @@ func TestPerTypeOperators(t *testing.T) {
 			// class_path as its subtree column; a Source answers with the PATH
 			// for both, which is what lets one value serve `class:` and
 			// `class=` (§5.3).
-			"class_key":          "hardware.computer.server",
-			"network_segment_id": "550e8400-e29b-41d4-a716-446655440000",
-			"first_seen_at":      time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
+			"class_key":         "hardware.computer.server",
+			"network_prefix_id": "550e8400-e29b-41d4-a716-446655440000",
+			"first_seen_at":     time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
 		},
 		text: []string{"web-01.corp.example", "198.51.100.17"},
 	}
@@ -265,8 +265,8 @@ func TestPerTypeOperators(t *testing.T) {
 		{"class=hardware", eval.False},
 
 		// uuid and timestamp.
-		{"network.segment_id=550e8400-e29b-41d4-a716-446655440000", eval.True},
-		{"network.segment_id=550e8400-e29b-41d4-a716-446655440001", eval.False},
+		{"network.prefix_id=550e8400-e29b-41d4-a716-446655440000", eval.True},
+		{"network.prefix_id=550e8400-e29b-41d4-a716-446655440001", eval.False},
 		{"first_seen < now-5d", eval.True},
 		{"first_seen > now-5d", eval.False},
 

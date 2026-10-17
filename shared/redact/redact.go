@@ -189,6 +189,15 @@ var safeFieldNames = map[string]bool{
 	"public_key_algorithm":   true,
 	"host_key_type":          true,
 	"host_key_fingerprint":   true,
+	// A boolean saying THAT a tunnel has a pre-shared key configured (DCIM row
+	// 4.3, `ike_policies.preshared_key_present`): the `*_present` pattern that
+	// records the existence of a secret instead of the secret.
+	"preshared_key_present": true,
+	// A boolean saying a pre-shared key EXISTS on a wireless LAN (DCIM row
+	// 4.4), never the key. Whole names only: `psk`, `x_psk` and
+	// `wpa_psk_value` stay secret.
+	"psk_present":      true,
+	"auth_psk_present": true,
 }
 
 // normalizeFieldName lowercases and folds separators so one fragment matches

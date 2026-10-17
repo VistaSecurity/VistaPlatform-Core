@@ -216,6 +216,36 @@ describe('Add device', () => {
     expect(field('management_url')!.placeholder).toContain('ssh://');
   });
 
+  // DCIM row 1.5f: the address's interface — MAC and name — is sent with a
+  // by-hand add, and the platform declares it. MUTATION: drop mac_address /
+  // interface_name from the create body — red.
+  it('a by-hand add sends the MAC and interface the address is on', async () => {
+    mocks.post.mockResolvedValue({ data: { id: 'dev-1' }, response: { ok: true, status: 201 } });
+    await renderAdd();
+    await choose('other');
+    await type('hostname', 'appliance-02');
+    await type('ip_address', '198.51.100.21');
+    await type('mac_address', '00:09:0f:aa:00:21');
+    await type('interface_name', 'port1');
+    await click(primary());
+    await vi.waitFor(() => expect(mocks.close).toHaveBeenCalledOnce());
+    const [path, init] = mocks.post.mock.calls[0] as [string, { body: Record<string, unknown> }];
+    expect(path).toBe('/devices');
+    expect(init.body).toMatchObject({ ip_address: '198.51.100.21', mac_address: '00:09:0f:aa:00:21', interface_name: 'port1' });
+  });
+
+  it('leaves the interface out of the body when nothing was typed', async () => {
+    mocks.post.mockResolvedValue({ data: { id: 'dev-1' }, response: { ok: true, status: 201 } });
+    await renderAdd();
+    await choose('other');
+    await type('hostname', 'appliance-03');
+    await click(primary());
+    await vi.waitFor(() => expect(mocks.close).toHaveBeenCalledOnce());
+    const [, init] = mocks.post.mock.calls[0] as [string, { body: Record<string, unknown> }];
+    expect(init.body.mac_address).toBeUndefined();
+    expect(init.body.interface_name).toBeUndefined();
+  });
+
   it('the by-hand toggle reveals the fields without probing, and back', async () => {
     await renderAdd();
     const toggle = host.querySelector('[data-testid="device-form-mode-toggle"]') as HTMLButtonElement;
@@ -237,6 +267,9 @@ describe('Edit device (unchanged)', () => {
     } as never;
     await act(async () => { root.render(<QueryClientProvider client={cache}><DeviceFormModal open device={device} onClose={mocks.close} /></QueryClientProvider>); });
     for (const name of [...FOUR, ...REMAINING]) expect(field(name), name).not.toBeNull();
+    // The interface is stated when a device is added; editing does not move it.
+    expect(field('mac_address')).toBeNull();
+    expect(field('interface_name')).toBeNull();
     expect(field('hostname')!.value).toBe('fw-01');
     expect(primary().textContent).toBe('Save changes');
     expect(host.querySelector('[data-testid="device-form-mode-toggle"]')).toBeNull();

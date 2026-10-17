@@ -22,6 +22,7 @@ import {
 import { enterpriseSettings } from './enterprise-slots';
 import { NetBoxUpgradeSection } from './netbox-upgrade';
 import { CmdbUpgradeSection } from './cmdb-upgrade';
+import { Device42ImportUpgradeSection } from './device42-import-upgrade';
 import type { SettingsNavItem } from './nav';
 import type { notificationServiceComponents as NC, complianceEngineComponents } from '@vistasecurity/api-contract';
 import { unwrap } from '../../lib/api-result';
@@ -131,6 +132,8 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
   const NetBox = enterpriseSettings.NetBoxSection;
   const [cmdbCreate, setCmdbCreate] = useState(false);
   const Cmdb = enterpriseSettings.CmdbSection;
+  const [d42Create, setD42Create] = useState(false);
+  const Device42Import = enterpriseSettings.Device42ImportSection;
 
   // The connector CATALOGUE is Core and registry-driven: it answers from
   // standards/connectors.yaml, so what this page offers and what the platform
@@ -248,6 +251,14 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
         <NetBoxUpgradeSection />
       )}
 
+      {/* Device42 (import), DCIM row 5.6: Enterprise-only like NetBox; the
+          upgrade card stands in for it in Core. */}
+      {Device42Import ? (
+        <Device42Import createOpen={d42Create} onCreateClose={() => setD42Create(false)} />
+      ) : (
+        <Device42ImportUpgradeSection />
+      )}
+
       <SSection
         title="Available connectors"
         desc="Everything Vista can integrate with, from the connector registry. What is not available yet says so rather than pretending otherwise."
@@ -277,7 +288,9 @@ export function IntegrationsPage({ meta }: { meta: SettingsNavItem }) {
                     onAdd={
                       entry.key === 'netbox'
                         ? () => setNetboxCreate(true)
-                        : entry.kind === 'cmdb'
+                        : entry.key === 'device42_import'
+                          ? () => setD42Create(true)
+                          : entry.kind === 'cmdb'
                           ? () => setCmdbCreate(true)
                           : undefined
                     }

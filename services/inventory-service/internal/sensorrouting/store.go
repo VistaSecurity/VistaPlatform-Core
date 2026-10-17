@@ -13,6 +13,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // Store reads the router's inputs: the tenant's sensor fleet and which sensor
@@ -51,7 +52,7 @@ func (s *Store) TenantSensors(ctx context.Context, tenantID uuid.UUID) ([]Sensor
 			       -- hasn't landed on its first self-observation).
 			       COALESCE((
 			           SELECT array_agg(DISTINCT ai.value)
-			           FROM asset_identifiers ai
+			           FROM (`+identifiersql.Addresses+`) ai
 			           WHERE ai.tenant_id = s.tenant_id AND ai.asset_id = s.asset_id AND ai.kind = 'ip_address'
 			       ), '{}'::text[])
 			FROM sensors s

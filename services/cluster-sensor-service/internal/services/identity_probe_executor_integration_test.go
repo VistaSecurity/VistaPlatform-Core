@@ -57,7 +57,7 @@ func (f *dispatchFixture) collectorOn(t *testing.T, name, address string, prefix
 func (f *dispatchFixture) probeSegment(t *testing.T, cidr string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	if _, err := f.raw.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,$3,'cidr',$4,'production')`, id, f.tenant, "net "+cidr, cidr); err != nil {
+	if _, err := f.raw.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment) VALUES($1,$2,$3,$4,'production')`, id, f.tenant, "net "+cidr, cidr); err != nil {
 		t.Fatal(err)
 	}
 	return id

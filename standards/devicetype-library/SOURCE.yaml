@@ -1,0 +1,5 @@
+# The vendored device-type seed subset's origin. Written by tools/devicetype-import -library.
+repository: https://github.com/netbox-community/devicetype-library
+commit: 37f5f02c27eedf60767594174598daec5b9e2bee
+licence: CC0-1.0
+files: 154

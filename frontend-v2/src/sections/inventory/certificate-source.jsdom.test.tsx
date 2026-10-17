@@ -81,8 +81,8 @@ beforeEach(() => {
         return ok({ certificates: [cloudCert, observedCert], pagination: { total: 2, page: 1, page_size: 50 } });
       case '/identity/summary':
         return ok({ established: 0, operator_confirmed: 0, legacy: 0, unresolved: 0, conflicted: 0, provisional: 0, admission_mode: 'enforce' });
-      case '/saved-views':
-        return ok({ saved_views: [] });
+      case '/dcim/saved-filters':
+        return ok({ data: [], can_share: false });
       default:
         return ok({ assets: [], items: [], total: 0, pagination: { total: 0, page: 1, page_size: 50 } });
     }

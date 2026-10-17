@@ -19,6 +19,7 @@ const (
 	ProducerConfiguration = "configuration"
 	ProducerHygiene       = "hygiene"
 	ProducerDrift         = "drift"
+	ProducerTopology      = "topology"
 )
 
 // Kind keys. Unique across the whole registry, not just within a producer.
@@ -27,6 +28,7 @@ const (
 	KindWeakConfiguration         = "weak_configuration"
 	KindWeakCertificate           = "weak_certificate"
 	KindPQCVulnerable             = "pqc_vulnerable"
+	KindWeakWirelessAuth          = "weak_wireless_auth"
 	KindOSEndOfLife               = "os_end_of_life"
 	KindSoftwareEndOfLife         = "software_end_of_life"
 	KindHardwareEndOfSupport      = "hardware_end_of_support"
@@ -45,6 +47,7 @@ const (
 	KindPortProfileChanged        = "port_profile_changed"
 	KindHostKeyChanged            = "host_key_changed"
 	KindNewIssuer                 = "new_issuer"
+	KindCableDrift                = "cable_drift"
 )
 
 // Subject types. The shared vocabulary for what a finding (or a ticket, or an
@@ -149,7 +152,13 @@ var Producers = []Producer{
 		Key:         "drift",
 		Label:       "Drift",
 		Catalogue:   "none",
-		Description: "Compares the current population of a segment or an asset against its recent baseline window and reports what changed. Rule-based defaults first; the ADR-0008 drift seam may propose more later.",
+		Description: "Compares the current population of a prefix or an asset against its recent baseline window and reports what changed. Rule-based defaults first; the ADR-0008 drift seam may propose more later.",
+	},
+	{
+		Key:         "topology",
+		Label:       "Topology",
+		Catalogue:   "none",
+		Description: "Compares what the network says about its own cabling — LLDP and CDP neighbour tables read by interrogation (DCIM row 3.3, inventory-service cable_intake.go) — against the cables people declared.",
 	},
 }
 
@@ -210,6 +219,20 @@ var All = []Kind{
 		TitleTemplate:   "{subject} is vulnerable to quantum attack",
 		Guidance:        "Plan a migration to a post-quantum or hybrid algorithm for this subject. Nothing here is broken today: NIST IR 8547 deprecates these primitives in 2030 and disallows them in 2035, so the work is inventory-led — confirm what depends on this key or configuration, check whether the software and the peers support a PQC or hybrid option yet, and schedule the change. Long-lived data protected by this key is the part to prioritise.",
 		Description:     "The subject uses a classical asymmetric primitive broken by Shor's algorithm (signature, kem, key-agree, pke) per NIST IR 8547. Classification is the denylist in pqc_readiness.go — a subject not classified is unclassified, never assumed safe.",
+	},
+	{
+		Producer:        "crypto",
+		Key:             "weak_wireless_auth",
+		SeverityModel:   "fixed",
+		DefaultSeverity: "from-catalogue",
+		Score:           0,
+		ScoreSource:     "catalogue",
+		Rungs:           nil,
+		SubjectTypes:    []string{"asset"},
+		FeedsRisk:       true,
+		TitleTemplate:   "{subject} {detail}",
+		Guidance:        "Move the wireless LAN named in the finding to WPA2 or WPA3 with the AES (CCMP) cipher only. Open networks, WEP and TKIP give a listener in range little or no protection. If a legacy client forces TKIP or WEP, put that client on its own SSID and VLAN with no route to anything that matters, then replace it. Re-read the controller afterwards to confirm the LAN reports the new authentication.",
+		Description:     "An access point serves a wireless LAN whose authentication is open or whose cipher is TKIP or WEP. The subject is the access point asset (the LAN itself is not an asset); the evidence names each SSID. The cipher is scored by its algorithms-catalogue row (wireless_lans. algorithm_id), so editing the row changes the score. A LAN whose cipher is `auto` or unrecorded is not assessed and raises nothing.",
 	},
 	{
 		Producer:        "eol",
@@ -403,9 +426,9 @@ var All = []Kind{
 		Rungs:           nil,
 		SubjectTypes:    []string{"asset"},
 		FeedsRisk:       true,
-		TitleTemplate:   "{subject} is the first {detail} seen in its network segment",
-		Guidance:        "Confirm whether the asset belongs on this segment. If it does, nothing needs fixing and the finding can be resolved. If it does not, move it — an unexpected class on a segment is usually either a misconfigured port or something nobody meant to plug in.",
-		Description:     "An asset of a class never before seen in this network segment was observed. A printer on a server VLAN is worth a look; an OT device on a corporate VLAN is worth a call.",
+		TitleTemplate:   "{subject} is the first {detail} seen in its prefix",
+		Guidance:        "Confirm whether the asset belongs on this network. If it does, nothing needs fixing and the finding can be resolved. If it does not, move it — an unexpected class on a network is usually either a misconfigured port or something nobody meant to plug in.",
+		Description:     "An asset of a class never before seen in this prefix was observed. A printer on a server VLAN is worth a look; an OT device on a corporate VLAN is worth a call.",
 	},
 	{
 		Producer:        "drift",
@@ -462,6 +485,20 @@ var All = []Kind{
 		TitleTemplate:   "{subject} presented a certificate from a new issuer ({detail})",
 		Guidance:        "Confirm the new issuer is one you chose. A planned CA migration explains it and the finding can be resolved; an issuer nobody recognises on a connection that should be direct is what an interception looks like, and is worth treating as one until it is explained.",
 		Description:     "A certificate was observed from an issuer not seen for this subject in the baseline window. A changed issuer is either a planned CA migration or an interception.",
+	},
+	{
+		Producer:        "topology",
+		Key:             "cable_drift",
+		SeverityModel:   "fixed",
+		DefaultSeverity: "medium",
+		Score:           0,
+		ScoreSource:     "fixed",
+		Rungs:           nil,
+		SubjectTypes:    []string{"asset"},
+		FeedsRisk:       false,
+		TitleTemplate:   "{subject}'s cabling differs from what its neighbours report ({detail})",
+		Guidance:        "Open the asset's Interfaces tab and compare each port named in the finding with the neighbour the device reports on it. If the device was re-patched on purpose, update the cable so the record matches the network; if the cable record is right, find out what is plugged into that port instead. The finding resolves on the next interrogation in which the neighbours agree with the cables, or as soon as one of those cables is changed.",
+		Description:     "An LLDP or CDP neighbour observed on a port contradicts an active cable on that port (or on the far port the neighbour names): the cable's far end, followed through any patch panels, is a different device or port. Evidence lists each contradicted port with both ends. Inventory accuracy, not exposure, so it does not feed risk.",
 	},
 }
 

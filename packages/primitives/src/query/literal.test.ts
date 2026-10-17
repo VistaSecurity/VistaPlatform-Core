@@ -119,7 +119,7 @@ describe('uuid and inet', () => {
     expect(parseUUID('not-a-uuid')).toBe(false);
   });
 
-  it('recognises addresses and CIDR blocks', () => {
+  it('recognises addresses and prefixes (CIDR)', () => {
     expect(parseInet('198.51.100.7')).toEqual({ isCIDR: false });
     expect(parseInet('198.51.100.0/24')).toEqual({ isCIDR: true });
     expect(parseInet('2001:db8::1')).toEqual({ isCIDR: false });

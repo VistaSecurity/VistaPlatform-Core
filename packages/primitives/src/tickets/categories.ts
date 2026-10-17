@@ -33,6 +33,7 @@ export type TicketCategory =
   | 'inventory'
   | 'configuration'
   | 'drift'
+  | 'topology'
   | 'operational'
   | 'general';
 
@@ -51,7 +52,7 @@ export interface TicketCategoryDef {
    * The finding producer whose findings become tickets of this category, or
    * null when the category has a non-finding origin (an alert, or a person).
    */
-  producer: 'compliance' | 'crypto' | 'eol' | 'vulnerability' | 'configuration' | 'hygiene' | 'drift' | null;
+  producer: 'compliance' | 'crypto' | 'eol' | 'vulnerability' | 'configuration' | 'hygiene' | 'drift' | 'topology' | null;
 }
 
 /** The category list, in the order the picker and the filter bar show it. */
@@ -118,6 +119,13 @@ export const TICKET_CATEGORIES: readonly TicketCategoryDef[] = [
     icon: 'git-compare',
     description: 'Something changed against its recent baseline — a new issuer, an unexpected protocol, a changed port profile.',
     producer: 'drift',
+  },
+  {
+    key: 'topology',
+    label: 'Topology',
+    icon: 'cable',
+    description: 'What the network reports about its own cabling disagrees with a declared cable.',
+    producer: 'topology',
   },
   {
     key: 'operational',

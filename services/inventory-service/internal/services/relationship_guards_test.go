@@ -43,11 +43,12 @@ func relGuardsRead(t *testing.T, root, rel string) string {
 // copies, no database.
 //
 // replaced the old two-block shape (a `NOT EXISTS`-guarded ADD plus a
-// separate widening) with ONE coverage-gated DO block holding ONE `actions`
-// array, which removes the drift hazard this guard was originally written for —
-// there is no longer a second copy to fall out of step with the first. What
-// remains, and what this pins, is the OTHER half of the same trap: a value added
-// to the Go vocabulary and not to that array. Because the history writer LOGS a
+// separate widening) with ONE list, which removes the drift hazard this guard
+// was originally written for — there is no longer a second copy to fall out of
+// step with the first. Since the 5.0.0 re-baseline that list is the inline
+// asset_history_action_check on the CREATE TABLE. What remains, and what this
+// pins, is the OTHER half of the same trap: a value added to the Go vocabulary
+// and not to that list. Because the history writer LOGS a
 // rejected insert rather than returning it, such a row is simply never written
 // and nobody finds out until they read a timeline months later.
 //
@@ -61,7 +62,7 @@ func relGuardsRead(t *testing.T, root, rel string) string {
 // guard cannot drift from the thing it guards.
 //
 // Mutation check: add a HistoryAction without adding it to either schema copy's
-// `actions` array, or delete a value from one copy, and this fails.
+// asset_history_action_check list, or delete a value from one copy, and this fails.
 func TestSchemaAssetHistoryActionsCoverTheGoVocabulary(t *testing.T) {
 	root := relGuardsRepoRoot(t)
 	actions := goHistoryActions(t, root)
@@ -73,23 +74,21 @@ func TestSchemaAssetHistoryActionsCoverTheGoVocabulary(t *testing.T) {
 		t.Run(rel, func(t *testing.T) {
 			sql := relGuardsRead(t, root, rel)
 
-			// ONE block, one list. Two would be the drift hazard removed.
-			if n := strings.Count(sql, "actions text[] := ARRAY["); n != 1 {
+			// ONE list, on the CREATE TABLE. Two would be the drift hazard
+			// removed. (The 5.0.0 baseline, asset-inventory ADR-0010 D11, folded
+			// the DO block that widened a deployed constraint into the inline
+			// CHECK: every 5.0 install is created with it.)
+			const decl = "CONSTRAINT asset_history_action_check CHECK (action = ANY (ARRAY["
+			if n := strings.Count(sql, decl); n != 1 {
 				t.Fatalf("%s declares the action vocabulary %d times, want exactly 1 — "+
 					"a second copy drifts, and it drifts in the direction that fails silently", rel, n)
 			}
-			idx := strings.Index(sql, "actions text[] := ARRAY[")
-			block := sql[idx:min(len(sql), idx+900)]
-
-			// The convergence must be gated on COVERAGE, not on a value name: a
-			// gate naming the newest value is the second copy under another name.
-			if !strings.Contains(block, "asset_history_action_check") &&
-				!strings.Contains(sql[idx:min(len(sql), idx+2000)], "asset_history_action_check") {
-				t.Errorf("%s: the actions array is not the one feeding asset_history_action_check", rel)
+			idx := strings.Index(sql, decl)
+			end := strings.Index(sql[idx:], "]))")
+			if end < 0 {
+				t.Fatalf("%s: cannot find the end of asset_history_action_check", rel)
 			}
-			if strings.Contains(sql[idx:min(len(sql), idx+2000)], "NOT LIKE '%") {
-				t.Errorf("%s: the convergence is gated on a value NAME rather than on coverage", rel)
-			}
+			block := sql[idx : idx+end]
 
 			for _, action := range actions {
 				if !strings.Contains(block, "'"+action+"'") {

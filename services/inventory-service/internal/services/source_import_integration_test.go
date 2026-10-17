@@ -39,7 +39,6 @@ func newSourceFixture(t *testing.T) *sourceFixture {
 	testdb.ApplySchemaAndSeed(t, raw)
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
 	assets := NewAssetService(db)
-	assets.SetEnrichmentServices(NewNetworkSegmentService(db, NewLocationService(db)), nil)
 	return &sourceFixture{db: db, svc: NewSourceImportService(db, assets)}
 }
 
@@ -55,25 +54,24 @@ func (f *sourceFixture) tenant(t *testing.T) uuid.UUID {
 type segmentRow struct {
 	Name, Environment, SourceKind, SourceRef string
 	AutoApprove                              bool
-	Tags, Metadata                           map[string]any
+	ExternalIDs                              map[string]any
 }
 
 func (f *sourceFixture) segment(t *testing.T, tenant, id uuid.UUID) segmentRow {
 	t.Helper()
 	var r segmentRow
-	var tags, meta []byte
+	var ext []byte
 	err := database.WithTenantTx(context.Background(), f.db, tenant, func(tx *sqlx.Tx) error {
 		return tx.QueryRow(`
-			SELECT name, environment::text, COALESCE(source_kind,''), COALESCE(source_ref,''),
-			       COALESCE(auto_approve_discoveries,false), COALESCE(tags,'{}'::jsonb), COALESCE(metadata,'{}'::jsonb)
-			FROM network_segments WHERE tenant_id = $1 AND id = $2`, tenant, id).
-			Scan(&r.Name, &r.Environment, &r.SourceKind, &r.SourceRef, &r.AutoApprove, &tags, &meta)
+			SELECT COALESCE(description,''), COALESCE(environment,''), source_kind, COALESCE(source_ref,''),
+			       auto_approve_discoveries, external_ids
+			FROM prefixes WHERE tenant_id = $1 AND id = $2`, tenant, id).
+			Scan(&r.Name, &r.Environment, &r.SourceKind, &r.SourceRef, &r.AutoApprove, &ext)
 	})
 	if err != nil {
-		t.Fatalf("read segment: %v", err)
+		t.Fatalf("read prefix: %v", err)
 	}
-	_ = json.Unmarshal(tags, &r.Tags)
-	_ = json.Unmarshal(meta, &r.Metadata)
+	_ = json.Unmarshal(ext, &r.ExternalIDs)
 	return r
 }
 
@@ -86,10 +84,7 @@ func (f *sourceFixture) insertSegment(t *testing.T, tenant uuid.UUID, name, valu
 	}
 	err := database.WithTenantTx(context.Background(), f.db, tenant, func(tx *sqlx.Tx) error {
 		return tx.QueryRow(`
-			INSERT INTO network_segments (tenant_id, name, segment_type, value, network_type, environment,
-			                              auto_approve_discoveries, tags, metadata, cloud_network_ref)
-			VALUES ($1, $2, 'cidr', $3, 'private', 'staging'::environment_type, true,
-			        '{"owner":"netops"}'::jsonb, '{"note":"hand-drawn"}'::jsonb, $4)
+			INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,auto_approve_discoveries,cloud_network_ref,source_kind,status) VALUES($1,$2,network($3::inet),'private','staging',true,$4,'declared','active')
 			RETURNING id`, tenant, name, value, ref).Scan(&id)
 	})
 	if err != nil {
@@ -102,18 +97,18 @@ func (f *sourceFixture) segmentCount(t *testing.T, tenant uuid.UUID) int {
 	t.Helper()
 	var n int
 	if err := database.WithTenantTx(context.Background(), f.db, tenant, func(tx *sqlx.Tx) error {
-		return tx.QueryRow(`SELECT count(*) FROM network_segments WHERE tenant_id = $1`, tenant).Scan(&n)
+		return tx.QueryRow(`SELECT count(*) FROM prefixes WHERE tenant_id = $1`, tenant).Scan(&n)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	return n
 }
 
-func seg(cidr, ref string) SourceSegment {
-	return SourceSegment{
+func seg(cidr, ref string) SourcePrefix {
+	return SourcePrefix{
 		CIDR: cidr, Name: "Imported " + cidr, Environment: "production", SourceRef: ref,
-		Metadata:      map[string]any{"imported_from": "test", "role": "servers"},
-		MatchMetadata: map[string]any{"imported_from": "test"},
+		Metadata:      map[string]any{"imported_from": "test", "role": "servers", "netbox_prefix_id": 41},
+		MatchMetadata: map[string]any{"imported_from": "test", "netbox_prefix_id": 42},
 	}
 }
 
@@ -127,14 +122,14 @@ func TestIntegration_SourceImport_ExistingSegmentKeepsTheTenantsSettings(t *test
 	ctx := context.Background()
 	drawn := f.insertSegment(t, tenant, "Hand-drawn server LAN", "192.0.2.5/24", "")
 
-	res, err := f.svc.UpsertSegments(ctx, tenant, []SourceSegment{
+	res, err := f.svc.UpsertPrefixes(ctx, tenant, []SourcePrefix{
 		seg("192.0.2.0/24", "src:conn:prefix:1"),
 		seg("198.51.100.0/24", "src:conn:prefix:2"),
 	})
 	if err != nil {
-		t.Fatalf("UpsertSegments: %v", err)
+		t.Fatalf("UpsertPrefixes: %v", err)
 	}
-	if res[0].Outcome != SourceSegmentMatched || res[1].Outcome != SourceSegmentCreated {
+	if res[0].Outcome != SourcePrefixMatched || res[1].Outcome != SourcePrefixCreated {
 		t.Fatalf("outcomes = %+v, want matched then created", res)
 	}
 	got := f.segment(t, tenant, drawn)
@@ -144,36 +139,37 @@ func TestIntegration_SourceImport_ExistingSegmentKeepsTheTenantsSettings(t *test
 	if got.Name != "Hand-drawn server LAN" || got.Environment != "staging" || !got.AutoApprove {
 		t.Errorf("the tenant's settings were overwritten: %+v", got)
 	}
-	if got.Tags["owner"] != "netops" {
-		t.Errorf("tags were overwritten: %v", got.Tags)
-	}
-	if got.Metadata["note"] != "hand-drawn" || got.Metadata["imported_from"] != "test" {
-		t.Errorf("metadata was not MERGED: %v", got.Metadata)
-	}
-	if _, leaked := got.Metadata["role"]; leaked {
-		t.Errorf("create-only metadata reached a matched segment: %v", got.Metadata)
+	if got.ExternalIDs["netbox"] != float64(42) {
+		t.Errorf("the NetBox id was not recorded on the matched prefix: %v", got.ExternalIDs)
 	}
 	if n := f.segmentCount(t, tenant); n != 2 {
 		t.Errorf("%d segments, want 2 — the overlapping prefix was duplicated", n)
 	}
 }
 
-// A cloud segment with the same CIDR is a different address space and is not
-// matched. MUTATION: drop `cloud_network_ref IS NULL` from onPremSegments.
+// A cloud prefix with the same CIDR is a different address space and is not
+// matched: the import creates the on-premises prefix beside it (prefix identity
+// includes the cloud network, prefixes_identity_uniq) and leaves the cloud one
+// unstamped. MUTATION: drop `cloud_network_ref IS NULL` from onPremPrefixes
+// (the cloud prefix is matched and stamped), or from createSourcePrefix's
+// NOT EXISTS (nothing is created).
 func TestIntegration_SourceImport_CloudSegmentIsNotMatched(t *testing.T) {
 	f := newSourceFixture(t)
 	tenant := f.tenant(t)
 	cloud := f.insertSegment(t, tenant, "VPC prod", "192.0.2.0/24", "vpc-0abc123")
 
-	res, err := f.svc.UpsertSegments(context.Background(), tenant, []SourceSegment{seg("192.0.2.0/24", "src:c:prefix:1")})
+	res, err := f.svc.UpsertPrefixes(context.Background(), tenant, []SourcePrefix{seg("192.0.2.0/24", "src:c:prefix:1")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res[0].Outcome != SourceSegmentCreated {
-		t.Errorf("outcome = %q, want created — a VPC segment must not absorb an on-premises prefix", res[0].Outcome)
+	if res[0].Outcome != SourcePrefixCreated {
+		t.Errorf("outcome = %q (%s), want created — a VPC subnet must not absorb an on-premises prefix", res[0].Outcome, res[0].Error)
 	}
-	if got := f.segment(t, tenant, cloud); got.SourceKind != "" {
-		t.Errorf("the cloud segment was stamped %q", got.SourceKind)
+	if got := f.segment(t, tenant, cloud); got.SourceKind != "declared" || got.SourceRef != "" {
+		t.Errorf("the cloud prefix was stamped %q / %q", got.SourceKind, got.SourceRef)
+	}
+	if n := f.segmentCount(t, tenant); n != 2 {
+		t.Errorf("%d prefixes, want 2 — the VPC subnet and the on-premises network", n)
 	}
 }
 
@@ -182,11 +178,11 @@ func TestIntegration_SourceImport_CloudSegmentIsNotMatched(t *testing.T) {
 func TestIntegration_SourceImport_TooBroadPrefix(t *testing.T) {
 	f := newSourceFixture(t)
 	tenant := f.tenant(t)
-	res, err := f.svc.UpsertSegments(context.Background(), tenant, []SourceSegment{seg("0.0.0.0/0", "src:c:prefix:9")})
+	res, err := f.svc.UpsertPrefixes(context.Background(), tenant, []SourcePrefix{seg("0.0.0.0/0", "src:c:prefix:9")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res[0].Outcome != SourceSegmentTooBroad {
+	if res[0].Outcome != SourcePrefixTooBroad {
 		t.Errorf("0.0.0.0/0 outcome = %q, want too_broad", res[0].Outcome)
 	}
 	if n := f.segmentCount(t, tenant); n != 0 {
@@ -203,14 +199,14 @@ func TestIntegration_SourceImport_SegmentsAreTenantScoped(t *testing.T) {
 	a, b := f.tenant(t), f.tenant(t)
 	bSeg := f.insertSegment(t, b, "B's LAN", "192.0.2.0/24", "")
 
-	res, err := f.svc.UpsertSegments(context.Background(), a, []SourceSegment{seg("192.0.2.0/24", "src:a:prefix:1")})
+	res, err := f.svc.UpsertPrefixes(context.Background(), a, []SourcePrefix{seg("192.0.2.0/24", "src:a:prefix:1")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res[0].Outcome != SourceSegmentCreated {
+	if res[0].Outcome != SourcePrefixCreated {
 		t.Errorf("tenant A's outcome = %q, want created (B's segment is not A's)", res[0].Outcome)
 	}
-	if got := f.segment(t, b, bSeg); got.SourceKind != "" || got.SourceRef != "" {
+	if got := f.segment(t, b, bSeg); got.SourceKind != "declared" || got.SourceRef != "" {
 		t.Errorf("tenant A's import stamped tenant B's segment: %+v", got)
 	}
 	if f.segmentCount(t, a) != 1 || f.segmentCount(t, b) != 1 {
@@ -225,7 +221,7 @@ func TestIntegration_SourceImport_BadItemsFailAlone(t *testing.T) {
 	tenant := f.tenant(t)
 	bad := seg("10.9.0.0/16", "src:c:prefix:1")
 	bad.Environment = "prod-ish"
-	res, err := f.svc.UpsertSegments(context.Background(), tenant, []SourceSegment{
+	res, err := f.svc.UpsertPrefixes(context.Background(), tenant, []SourcePrefix{
 		{CIDR: "not-a-cidr", Name: "x", Environment: "production", SourceRef: "r"},
 		bad,
 		{CIDR: "10.8.0.0/16", Name: "no ref", Environment: "production"},
@@ -234,7 +230,7 @@ func TestIntegration_SourceImport_BadItemsFailAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{SourceSegmentError, SourceSegmentError, SourceSegmentError, SourceSegmentCreated}
+	want := []string{SourcePrefixError, SourcePrefixError, SourcePrefixError, SourcePrefixCreated}
 	for i, w := range want {
 		if res[i].Outcome != w {
 			t.Errorf("item %d outcome = %q (%s), want %q", i, res[i].Outcome, res[i].Error, w)

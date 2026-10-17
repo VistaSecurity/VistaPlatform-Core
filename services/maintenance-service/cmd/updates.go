@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 
 	"github.com/sirupsen/logrus"
@@ -24,8 +25,9 @@ const dockerConfigKey = ".dockerconfigjson"
 // MAINTENANCE_PULL_SECRET_NAME) and starts the scheduler when the check is on
 // and a chart source is configured. Only one replica runs a given check — the
 // advisory lock inside Checker.Run — so every replica can start the scheduler.
-func newUpdateService(ctx context.Context, db *sql.DB, namespace string, log logrus.FieldLogger) *updates.Service {
+func newUpdateService(ctx context.Context, db *sql.DB, namespace string, transport http.RoundTripper, log logrus.FieldLogger) *updates.Service {
 	settings := updates.SettingsFromEnv(os.Getenv)
+	settings.Transport = transport
 	for _, w := range settings.Warnings {
 		log.Warn("updates: " + w)
 	}

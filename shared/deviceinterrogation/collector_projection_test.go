@@ -187,8 +187,7 @@ func TestHTTPInterrogator_ProjectionIsWired(t *testing.T) {
 // that decides whether a field name is material.
 //
 // This is the layer the per-collector tests cannot reach. A collector that
-// builds its result entry field by field — fortinetInterfaces does, and so do
-// the UniFi projections — is already safe by construction, so widening its
+// builds its result entry field by field — the UniFi projections do — is already safe by construction, so widening its
 // allowlist with `psksecret` leaks nothing TODAY and no test notices. The leak
 // arrives later, when someone copies the projected map somewhere instead of
 // picking fields out of it, and by then the allowlist has carried a secret name
@@ -199,28 +198,28 @@ func TestHTTPInterrogator_ProjectionIsWired(t *testing.T) {
 // allowlist widening reviews the new field names against this)." This is that
 // review, run by the machine.
 //
-// To mutation-test: add "psksecret" to fortinetInterfaceFields, or "passphrase"
-// to f5HardwareFields, and this fails.
+// To mutation-test: add "psksecret" to fortinetSSLVPNFields, or "passphrase"
+// to f5HardwareFields, and this fails. (The FortiOS interface reads are typed
+// structs since DCIM row 1.5c; TestNetworkProjectionStructs_NameNoSecretFields
+// holds their json tags to the same rule.)
 func TestProjectionAllowlists_NameNoSecretFields(t *testing.T) {
 	allowlists := map[string][]string{
-		"fortinetInterfaceFields":        fortinetInterfaceFields,
-		"fortinetMonitorInterfaceFields": fortinetMonitorInterfaceFields,
-		"fortinetRouteFields":            fortinetRouteFields,
-		"fortinetSSLVPNFields":           fortinetSSLVPNFields,
-		"fortinetIPSecTunnelFields":      fortinetIPSecTunnelFields,
-		"fortinetCertificateFields":      fortinetCertificateFields,
-		"fortinetSystemStatusFields":     fortinetSystemStatusFields,
-		"f5SystemVersionFields":          f5SystemVersionFields,
-		"f5HardwareFields":               f5HardwareFields,
-		"unifiDeviceInventoryFields":     unifiDeviceInventoryFields,
-		"unifiDeviceStructuredFields":    unifiDeviceStructuredFields,
-		"unifiPortFields":                unifiPortFields,
-		"unifiEthernetFields":            unifiEthernetFields,
-		"unifiLLDPFields":                unifiLLDPFields,
-		"unifiUplinkFields":              unifiUplinkFields,
-		"unifiWANFields":                 unifiWANFields,
-		"unifiClientInventoryFields":     unifiClientInventoryFields,
-		"httpCertificateFields":          httpCertificateFields,
+		"fortinetRouteFields":         fortinetRouteFields,
+		"fortinetSSLVPNFields":        fortinetSSLVPNFields,
+		"fortinetIPSecTunnelFields":   fortinetIPSecTunnelFields,
+		"fortinetCertificateFields":   fortinetCertificateFields,
+		"fortinetSystemStatusFields":  fortinetSystemStatusFields,
+		"f5SystemVersionFields":       f5SystemVersionFields,
+		"f5HardwareFields":            f5HardwareFields,
+		"unifiDeviceInventoryFields":  unifiDeviceInventoryFields,
+		"unifiDeviceStructuredFields": unifiDeviceStructuredFields,
+		"unifiPortFields":             unifiPortFields,
+		"unifiEthernetFields":         unifiEthernetFields,
+		"unifiLLDPFields":             unifiLLDPFields,
+		"unifiUplinkFields":           unifiUplinkFields,
+		"unifiWANFields":              unifiWANFields,
+		"unifiClientInventoryFields":  unifiClientInventoryFields,
+		"httpCertificateFields":       httpCertificateFields,
 	}
 
 	// A walker that checks nothing passes vacuously.
@@ -340,16 +339,10 @@ func TestFortinetInterfaceProjections_OutputIsBoundedByItsAllowlist(t *testing.T
 	running := fortinetMonitorResultsFromJSON(t, fortinetMonitorInterfaceResponse)
 	routes := fortinetResultsFromJSON(t, fortinetRouteResponse)
 
-	for i, raw := range configured {
-		projected := projectFortinet(raw, fortinetInterfaceFields)
-		assertNoPoison(t, fmt.Sprintf("fortinet cmdb interface[%d]", i), projected)
-		assertKeysWithin(t, fmt.Sprintf("fortinet cmdb interface[%d]", i), projected, fortinetInterfaceFields)
-	}
-	for i, raw := range running {
-		projected := projectFortinet(raw, fortinetMonitorInterfaceFields)
-		assertNoPoison(t, fmt.Sprintf("fortinet monitor interface[%d]", i), projected)
-		assertKeysWithin(t, fmt.Sprintf("fortinet monitor interface[%d]", i), projected, fortinetMonitorInterfaceFields)
-	}
+	// Since DCIM row 1.5c the interface reads decode into typed structs: the
+	// whole network observation built from the poisoned fixtures carries none
+	// of the material.
+	assertNetworkCarriesNo(t, fortinetNetwork(configured, running, nil), poison)
 	// The route allowlist has ONE field, and what it projects is the customer's
 	// routing table. A widening here is the largest single leak in this package
 	// by volume.

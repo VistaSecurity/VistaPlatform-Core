@@ -14,7 +14,7 @@ import (
 //
 // This half is HAND-WRITTEN and cannot be otherwise. A column name is not a
 // field name — the language says `first_seen` where the column is
-// `first_discovered_at`, `segment_id` where it is `network_segment_id`, `risk`
+// `first_discovered_at`, `network.prefix_id` where it is `network_prefix_id`, `risk`
 // where it is `risk_score` plus the column that proves anybody scored it — and
 // nothing in the schema records which columns are queryable at all. What IS
 // generated is everything else: the namespaces (namespaces.go) come from
@@ -32,7 +32,7 @@ import (
 var targets = []catalog.Target{
 	{
 		Name: "asset", Table: "assets", Alias: "a", IDColumn: "id",
-		Subs:         []string{"endpoint", "software", "finding", "cert", "crypto", "identifier", "relationship"},
+		Subs:         []string{"endpoint", "software", "finding", "cert", "crypto", "identifier", "relationship", "interface"},
 		Traversable:  true,
 		FreeTextable: true,
 	},
@@ -63,6 +63,13 @@ var targets = []catalog.Target{
 	},
 	{
 		Name: "identifier", Table: "asset_identifiers", Alias: "ai", IDColumn: "id",
+		AssetIDColumn: "asset_id",
+		Subs:          []string{"asset"},
+	},
+	{
+		// DCIM BUILD_PLAN row 1.2 (QUERY_LANGUAGE §15): an asset's interfaces,
+		// `interface:(mac_address:"00:11:22:33:44:55")`.
+		Name: "interface", Table: "interfaces", Alias: "ifc", IDColumn: "id",
 		AssetIDColumn: "asset_id",
 		Subs:          []string{"asset"},
 	},
@@ -168,12 +175,86 @@ var assetFields = []catalog.FieldInfo{
 	col("description", ast.TypeText),
 	col("primary_address", ast.TypeInet),
 	enumAs("environment", "environment", environmentValues...),
-	col("business_unit", ast.TypeKeyword),
+	// business_unit is an OBJECT-valued field (DCIM 1.1): the asset points at a
+	// business_units row. A bare reference matches the unit's name or slug;
+	// `.id` is the row's uuid and `.parent` matches the named unit and every
+	// descendant, so `business_unit.parent = Corporate` finds Finance beneath it.
+	derived("business_unit", "asset.business_unit", ast.TypeKeyword),
+	colAs("business_unit.id", "business_unit_id", ast.TypeUUID),
+	derived("business_unit.parent", "asset.business_unit_parent", ast.TypeKeyword),
 	col("owner_email", ast.TypeKeyword),
 	col("support_group", ast.TypeKeyword),
-	col("site", ast.TypeKeyword),
-	col("region", ast.TypeKeyword),
+	// Placement (DCIM row 2.1, QUERY_LANGUAGE §15 D3): `site` matches the
+	// asset's site by name or slug; `.id` is its uuid; `.group` and `.region`
+	// match the site's group or region by name/slug AND every descendant; and
+	// `location` matches the asset's location or any location above it, by
+	// name, slug or name path ("HQ / Floor 2").
+	derived("site", "asset.site", ast.TypeKeyword),
+	colAs("site.id", "site_id", ast.TypeUUID),
+	derived("site.group", "asset.site_group", ast.TypeKeyword),
+	derived("site.region", "asset.site_region", ast.TypeKeyword),
+	derived("location", "asset.location", ast.TypeKeyword),
+	// `region` is the location region, or a cloud resource's provider region
+	// when it has no location region (DCIM row 4.6, ADR-0009 D7).
+	withDescription(derived("region", "asset.region", ast.TypeKeyword),
+		"the location region, or the provider region of a cloud resource that has none"),
 	col("zone", ast.TypeKeyword),
+	// The device catalogue (DCIM row 2.2): device_type, device_role and
+	// platform are OBJECT-valued like business_unit. A bare reference matches
+	// the device type's model, slug or part number (the role's and platform's
+	// name or slug); `.id` is the row's uuid; device_type.manufacturer matches
+	// the type's manufacturer by name or slug. serial and asset_tag are the
+	// promoted asset columns.
+	derived("device_type", "asset.device_type", ast.TypeKeyword),
+	colAs("device_type.id", "device_type_id", ast.TypeUUID),
+	derived("device_type.manufacturer", "asset.device_type_manufacturer", ast.TypeKeyword),
+	derived("device_role", "asset.device_role", ast.TypeKeyword),
+	colAs("device_role.id", "device_role_id", ast.TypeUUID),
+	derived("platform", "asset.platform", ast.TypeKeyword),
+	colAs("platform.id", "platform_id", ast.TypeUUID),
+	col("serial", ast.TypeKeyword),
+	col("asset_tag", ast.TypeKeyword),
+	// Virtualisation (DCIM row 4.2): the asset's cluster — a VM's
+	// (assets.cluster_id) or a hypervisor's (cluster_hosts). `cluster`
+	// matches the cluster's name, `cluster.type` its type's name or slug,
+	// `cluster.group` its group's name or slug; `cluster.id` is a VM's
+	// assets.cluster_id.
+	derived("cluster", "asset.cluster", ast.TypeKeyword),
+	colAs("cluster.id", "cluster_id", ast.TypeUUID),
+	derived("cluster.type", "asset.cluster_type", ast.TypeKeyword),
+	derived("cluster.group", "asset.cluster_group", ast.TypeKeyword),
+	// Circuits (DCIM row 4.1): circuits terminating at the asset's location.
+	// `circuit` matches a circuit's cid or its type's name or slug;
+	// circuit.cid the cid alone; circuit.provider the provider's name or slug.
+	derived("circuit", "asset.circuit", ast.TypeKeyword),
+	derived("circuit.cid", "asset.circuit_cid", ast.TypeKeyword),
+	derived("circuit.provider", "asset.circuit_provider", ast.TypeKeyword),
+	// Rack placement (DCIM row 2.3, QUERY_LANGUAGE §15 D7): `rack` matches the
+	// asset's rack by name or facility id; `.id` is assets.rack_id; `.site` and
+	// `.role` match the rack's site and rack role by name or slug. position is
+	// the lowest unit the asset occupies (half-U steps), face front or rear.
+	derived("rack", "asset.rack", ast.TypeKeyword),
+	colAs("rack.id", "rack_id", ast.TypeUUID),
+	derived("rack.site", "asset.rack_site", ast.TypeKeyword),
+	derived("rack.role", "asset.rack_role", ast.TypeKeyword),
+	// Hardware (DCIM row 2.4, QUERY_LANGUAGE §15 D8): `module_type` matches a
+	// module installed in the asset by its module type's model, part number or
+	// slug; `inventory_item.serial` matches the serial of any of its inventory
+	// items; `virtual_chassis` matches the chassis it is a member of by name or
+	// domain.
+	derived("module_type", "asset.module_type", ast.TypeKeyword),
+	derived("inventory_item.serial", "asset.inventory_item_serial", ast.TypeKeyword),
+	derived("virtual_chassis", "asset.virtual_chassis", ast.TypeKeyword),
+	col("position", ast.TypeNumber),
+	enumAs("face", "face", rackFaceValues...),
+	// Cloud (DCIM row 4.6, ADR-0009 D7; QUERY_LANGUAGE §15): the
+	// cloud_resource attributes every cloud collector writes. `provider` and
+	// `account` are the resource's provider and account / subscription /
+	// project id; `cloud.type` is the provider's own type string
+	// (AWS::EC2::Instance, Microsoft.Compute/virtualMachines, …).
+	withEnum(derived("provider", "asset.cloud_provider", ast.TypeKeyword), "aws", "azure", "gcp", "oci", "other"),
+	derived("account", "asset.cloud_account", ast.TypeKeyword),
+	derived("cloud.type", "asset.cloud_type", ast.TypeKeyword),
 	enumAs("status", "asset_status", assetStatusValues...),
 	enumAs("identity_status", "identity_status", identityStatusValues...),
 	enumAs("ownership", "asset_ownership", assetOwnershipValues...),
@@ -184,6 +265,40 @@ var assetFields = []catalog.FieldInfo{
 	withEnum(withDescription(derived("cert_trust", "asset.cert_trust", ast.TypeKeyword),
 		"worst trust status of the asset's certificates; unevaluated = none evaluated yet, none = no certificate"),
 		certTrustAssetValues...),
+	// IPAM (DCIM row 1.3; QUERY_LANGUAGE §15 D2): the asset's addresses, the
+	// longest-match prefix of each within its VRF, that prefix's VLAN and the
+	// address's VRF. Computed at query time (shared/query/sql/ipam.go).
+	withDescription(derived("ip.address", "asset.ip.address", ast.TypeInet),
+		"an IP address of the asset; ':' is CIDR containment (ip.address:10.0.0.0/24)"),
+	withDescription(derived("ip.dns_name", "asset.ip.dns_name", ast.TypeKeyword), "the DNS name recorded on one of the asset's addresses"),
+	withEnum(derived("ip.status", "asset.ip.status", ast.TypeKeyword), ipStatusValues...),
+	withEnum(derived("ip.role", "asset.ip.role", ast.TypeKeyword), ipRoleValues...),
+	withDescription(derived("prefix.prefix", "asset.prefix.prefix", ast.TypeInet),
+		"the longest-match prefix (within its VRF) of one of the asset's addresses"),
+	withEnum(derived("prefix.status", "asset.prefix.status", ast.TypeKeyword), prefixStatusValues...),
+	derived("prefix.network_type", "asset.prefix.network_type", ast.TypeKeyword),
+	withDescription(derived("vlan.vid", "asset.vlan.vid", ast.TypeNumber), "the VLAN of the prefix one of the asset's addresses is in"),
+	derived("vlan.name", "asset.vlan.name", ast.TypeKeyword),
+	withDescription(derived("vrf.name", "asset.vrf.name", ast.TypeKeyword), "the VRF one of the asset's addresses is in"),
+	// VPN (DCIM row 4.3): a tunnel one of the asset's interfaces terminates.
+	withDescription(derived("tunnel", "asset.tunnel", ast.TypeKeyword), "a tunnel one of the asset's interfaces terminates, by name"),
+	withEnum(derived("tunnel.encapsulation", "asset.tunnel.encapsulation", ast.TypeKeyword), tunnelEncapsulationValues...),
+	withDescription(derived("tunnel.ike_version", "asset.tunnel.ike_version", ast.TypeNumber), "the IKE version (1 or 2) of a tunnel the asset terminates"),
+	withDescription(derived("tunnel.pfs_group", "asset.tunnel.pfs_group", ast.TypeNumber), "the phase-2 PFS Diffie-Hellman group of a tunnel the asset terminates"),
+	// Wireless (DCIM row 4.4; QUERY_LANGUAGE §15): the wireless LANs the
+	// asset's interfaces serve (shared/query/sql/wireless.go).
+	withDescription(derived("wireless_lan.ssid", "asset.wireless_lan.ssid", ast.TypeKeyword), "the SSID of a wireless LAN one of the asset's interfaces serves"),
+	withDescription(withEnum(derived("wireless_lan.auth_type", "asset.wireless_lan.auth_type", ast.TypeKeyword), wirelessAuthTypeValues...),
+		"the authentication of a wireless LAN the asset serves"),
+	// Cabling (DCIM row 3.2; QUERY_LANGUAGE §15): the cables on the asset's
+	// components (shared/query/sql/cabling.go). cable.status is the cable's
+	// operational status; cabled_to the asset on a cable's far end.
+	withDescription(withEnum(derived("cable.type", "asset.cable.type", ast.TypeKeyword), cableTypeValues()...),
+		"the type of a cable on one of the asset's ports"),
+	withDescription(withEnum(derived("cable.status", "asset.cable.status", ast.TypeKeyword), cableStatusValues()...),
+		"the operational status (connected, planned, decommissioning) of a cable on one of the asset's ports"),
+	withDescription(derived("cabled_to", "asset.cabled_to", ast.TypeKeyword),
+		"an asset on the far end of one of the asset's cables, by hostname or display name"),
 	{
 		Name: "risk", Type: ast.TypeBand,
 		Accessor: ast.Accessor{
@@ -209,7 +324,9 @@ var assetFields = []catalog.FieldInfo{
 	}, "when the newest finished active or automatic scan reached this asset; absent if none has"),
 	col("created_at", ast.TypeTimestamp),
 	col("updated_at", ast.TypeTimestamp),
-	colAs("segment_id", "network_segment_id", ast.TypeUUID),
+	// The prefix the asset's identity is scoped within (DCIM row 1.6,
+	// QUERY_LANGUAGE §15 D6) — what the inventory rail's Prefix facet writes.
+	col("prefix_id", ast.TypeUUID),
 	col("location_id", ast.TypeUUID),
 	withDescription(col("id", ast.TypeUUID),
 		"the row's own primary key; the any-kind identifier form is id.any (§13 A1)"),
@@ -386,8 +503,37 @@ var observationFields = []catalog.FieldInfo{
 	col("address", ast.TypeInet),
 	enumAs("network.ownership", "network_ownership", observationNetworkOwnershipValues...),
 	enumAs("network.type", "network_type", observationNetworkTypeValues...),
-	colAs("network.segment_id", "network_segment_id", ast.TypeUUID),
+	// DCIM row 1.4 (QUERY_LANGUAGE §15): the IPAM prefix the observation's
+	// address falls in (longest match), its VRF, and the interface the
+	// observation names. A prefix-scoped rule is read before any other.
+	colAs("network.prefix_id", "network_prefix_id", ast.TypeUUID),
+	colAs("network.vrf_id", "network_vrf_id", ast.TypeUUID),
+	colAs("interface_id", "interface_id", ast.TypeUUID),
+	// The cloud account a provider's listing placed the resource in — the
+	// scope term of an account-level auto-approval rule (ADR-0009 D5,
+	// QUERY_LANGUAGE §15). Keyword, not text: an account id is matched whole.
+	colAs("cloud.account_id", "cloud_account_id", ast.TypeKeyword),
 	colAs("first_seen", "first_seen_at", ast.TypeTimestamp),
+}
+
+// interfaceFields are an interface's first-class fields (§15; DATA_MODEL
+// §2.4). `mac_address` is derived: the column is macaddr8, which renders an
+// EUI-48 as its EUI-64 form (00:11:22:ff:fe:33:44:55), so the field compares
+// against the form a person writes and the API returns.
+var interfaceFields = []catalog.FieldInfo{
+	col("name", ast.TypeKeyword),
+	col("type", ast.TypeKeyword),
+	withDescription(derived("mac_address", "interface.mac_address", ast.TypeKeyword),
+		"the primary MAC, colon form; an EUI-48 compares as 6 octets"),
+	col("enabled", ast.TypeBoolean),
+	col("mgmt_only", ast.TypeBoolean),
+	col("mtu", ast.TypeNumber),
+	col("speed_kbps", ast.TypeNumber),
+	enumAs("mode", "mode", interfaceModeValues...),
+	enumAs("status", "status", interfaceStatusValues...),
+	enumAs("operational_status", "operational_status", interfaceOperStatusValues...),
+	col("description", ast.TypeText),
+	col("id", ast.TypeUUID),
 }
 
 // measurementFields carries only §8's reserved scalar; everything else a
@@ -407,6 +553,7 @@ var firstClass = map[string][]catalog.FieldInfo{
 	"relationship":         relationshipFields,
 	"observation":          observationFields,
 	"measurement":          measurementFields,
+	"interface":            interfaceFields,
 }
 
 // FirstClassFields returns a target's first-class fields — the hand-written

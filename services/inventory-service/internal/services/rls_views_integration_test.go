@@ -112,7 +112,7 @@ func TestIntegration_Matviews_AppRoleDeniedDirectSelect(t *testing.T) {
 	testdb.ApplySchemaAndSeed(t, db)
 	testdb.EnsureRLSAppRole(t, db)
 
-	for _, mv := range []string{"mv_remediation_queue", "mv_location_finding_summary", "tenant_cost_summary"} {
+	for _, mv := range []string{"mv_remediation_queue", "mv_site_finding_summary", "tenant_cost_summary"} {
 		testdb.AsRoleNoTenant(t, db, func(tx *sql.Tx) {
 			var n int
 			err := tx.QueryRow(`SELECT count(*) FROM ` + mv).Scan(&n)
@@ -132,26 +132,26 @@ func TestIntegration_MatviewWrapper_TenantScopedAndFailClosed(t *testing.T) {
 	tenantB := testdb.NewTenant(t, db)
 	locA, locB := uuid.New(), uuid.New()
 	mustExec(t, db, `
-		INSERT INTO locations (id, tenant_id, name, location_type, full_path)
-		VALUES ($1,$2,'rls-wrapper-a','site','rls-wrapper-a'), ($3,$4,'rls-wrapper-b','site','rls-wrapper-b')`,
+		INSERT INTO sites (id, tenant_id, name, slug)
+		VALUES ($1,$2,'rls-wrapper-a','rls-wrapper-a'), ($3,$4,'rls-wrapper-b','rls-wrapper-b')`,
 		locA, tenantA, locB, tenantB)
-	// Populate the matview with both tenants' locations (owner refresh).
+	// Populate the matview with both tenants' sites (owner refresh).
 	mustExec(t, db, `SELECT refresh_operational_views()`)
 
 	testdb.AsTenant(t, db, tenantA, func(tx *sql.Tx) {
 		var n int
 		if err := tx.QueryRow(
-			`SELECT count(*) FROM mv_location_finding_summary_tenant WHERE location_id IN ($1,$2)`, locA, locB,
+			`SELECT count(*) FROM mv_site_finding_summary_tenant WHERE site_id IN ($1,$2)`, locA, locB,
 		).Scan(&n); err != nil {
 			t.Fatalf("wrapper as tenant A: %v", err)
 		}
 		if n != 1 {
-			t.Errorf("tenant A sees %d of the two locations through mv_location_finding_summary_tenant, want exactly its own 1", n)
+			t.Errorf("tenant A sees %d of the two sites through mv_site_finding_summary_tenant, want exactly its own 1", n)
 		}
 	})
 	testdb.AsRoleNoTenant(t, db, func(tx *sql.Tx) {
 		var n int
-		if err := tx.QueryRow(`SELECT count(*) FROM mv_location_finding_summary_tenant`).Scan(&n); err != nil {
+		if err := tx.QueryRow(`SELECT count(*) FROM mv_site_finding_summary_tenant`).Scan(&n); err != nil {
 			t.Fatalf("wrapper with no tenant context: %v", err)
 		}
 		if n != 0 {

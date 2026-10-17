@@ -21,7 +21,7 @@ When `ENABLE_INCIDENT_HOOKS=true`, monitoring-service will:
 1. Evaluate each stored log via `IncidentResponseHook`
 2. Auto-create a security incident when PII/security patterns trip
 3. Publish a platform-scoped `monitoring` / `security_incident` notification to the notification service, which routes it through the platform notification channels and rules (in-app, email, Slack, webhook, PagerDuty)
-4. Record an audit entry (`access_type=incident`) in `platform_log_access_audit` with `access_result=created`
+4. Write an audit-log record (`access_type=incident`) in `platform_log_access_audit` with `access_result=created`
 5. If the hook fails (NATS unavailable, publish error, etc.) an `access_type=incident` entry is still added with `access_result=error` and the error message for audit/replay
 
 Configure who is told in the admin console under **Settings → Notification Delivery**. Incident notices are platform notifications: they go to the platform channels and rules only, never to a tenant's own rules, even when the log line belonged to a tenant (that tenant's id is carried as `affected_tenants` metadata).

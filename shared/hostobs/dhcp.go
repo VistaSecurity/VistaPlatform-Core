@@ -17,6 +17,8 @@ const (
 	dhcpOffYIAddr  = 16
 	dhcpOffCHAddr  = 28
 	dhcpOptPad     = 0
+	dhcpOptSubnet  = 1
+	dhcpOptRouter  = 3
 	dhcpOptEnd     = 255
 	dhcpOptHostnm  = 12
 	dhcpOptReqIP   = 50
@@ -31,6 +33,34 @@ const (
 	// is in the code and not only in the package doc.
 	dhcpOptAuth = 90
 )
+
+// The attributes an ACK's lease options yield (DecodeDHCP).
+const (
+	// AttrDHCPSubnet is the leased address's network, CIDR ("192.0.2.0/24").
+	AttrDHCPSubnet = "dhcp_subnet"
+	// AttrDHCPPrefixLength is the leased address's configured length.
+	AttrDHCPPrefixLength = "dhcp_prefix_length"
+	// AttrDHCPRouter is the default gateway the server handed out.
+	AttrDHCPRouter = "dhcp_router"
+)
+
+// maskBits is the length of a contiguous IPv4 netmask; a non-contiguous one
+// is not a prefix and is refused.
+func maskBits(mask []byte) (int, bool) {
+	if len(mask) != 4 {
+		return 0, false
+	}
+	m := uint32(mask[0])<<24 | uint32(mask[1])<<16 | uint32(mask[2])<<8 | uint32(mask[3])
+	bits := 0
+	for m&0x80000000 != 0 {
+		bits++
+		m <<= 1
+	}
+	if m != 0 {
+		return 0, false
+	}
+	return bits, true
+}
 
 var dhcpMessageTypes = map[byte]string{
 	1: "discover", 2: "offer", 3: "request", 4: "decline",
@@ -74,6 +104,8 @@ func DecodeDHCP(f Frame) (*HostObservation, error) {
 
 	var requestedIP netip.Addr
 	var msgType byte
+	var subnetMask []byte
+	var router netip.Addr
 
 	// Options are TLV: code(1) len(1) value(len), with 0 = pad (no length
 	// byte) and 255 = end.
@@ -113,6 +145,19 @@ func DecodeDHCP(f Frame) (*HostObservation, error) {
 				name = string(val[3:])
 			}
 			obs.addName(strings.TrimRight(name, "\x00"))
+		case dhcpOptSubnet:
+			// Subnet mask (RFC 2132 §3.3): the length of the network the
+			// server leased the address on. Read only into the prefix below.
+			if len(val) == 4 {
+				subnetMask = val
+			}
+		case dhcpOptRouter:
+			// Router list (RFC 2132 §3.5): the first is the default gateway.
+			if len(val) >= 4 {
+				if a, ok := addrFromBytes(val[:4]); ok {
+					router = a
+				}
+			}
 		case dhcpOptReqIP:
 			if a, ok := addrFromBytes(val); ok {
 				requestedIP = a
@@ -170,6 +215,23 @@ func DecodeDHCP(f Frame) (*HostObservation, error) {
 
 	if name, ok := dhcpMessageTypes[msgType]; ok {
 		obs.setAttr("dhcp_message_type", name)
+	}
+
+	// The network the lease is on. Only a server's ACK states it: the address
+	// is then committed to the client, and the subnet-mask option is the
+	// server's statement of the prefix it hands addresses out of — a
+	// measurement of the NETWORK by the network's own DHCP service, which is
+	// what makes the platform record the prefix as DHCP-managed (DCIM row
+	// 1.5e). An OFFER the client may decline, and a client's own REQUEST
+	// carries no mask.
+	if msgType == 5 && yiaddr.IsValid() && !yiaddr.IsUnspecified() && yiaddr.Is4() {
+		if bits, ok := maskBits(subnetMask); ok && bits > 0 && bits < 32 {
+			obs.setAttr(AttrDHCPSubnet, netip.PrefixFrom(yiaddr, bits).Masked().String())
+			obs.setAttr(AttrDHCPPrefixLength, bits)
+			if router.IsValid() && !router.IsUnspecified() {
+				obs.setAttr(AttrDHCPRouter, router.String())
+			}
+		}
 	}
 
 	obs.Finalize()

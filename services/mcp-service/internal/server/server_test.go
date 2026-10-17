@@ -269,6 +269,9 @@ func newFixtureWith(t *testing.T, o fixtureOpts) *fixture {
 			}
 		case strings.HasSuffix(r.URL.Path, "/history"):
 			_, _ = w.Write([]byte(`{"history":[{"id":"h1","action":"updated","source":"discovery"}]}`))
+		// DCIM and IPAM reads (row 1.10): one generic page, so the contract test sees the request.
+		case strings.Contains(r.URL.Path, "/inventory-service/dcim/") || strings.Contains(r.URL.Path, "/inventory-service/ipam/"):
+			_, _ = w.Write([]byte(`{"data":[],"pagination":{"total":0}}`))
 		case strings.HasSuffix(r.URL.Path, "/asset-classes"):
 			_, _ = w.Write([]byte(`{"classes":[{"key":"server","parent":"hardware.computer","path":"hardware.computer.server","label":"Server","is_fixed":true}]}`))
 		case strings.HasSuffix(r.URL.Path, "/risk/summary") && o.hugeInventory:
@@ -384,8 +387,8 @@ func TestInitializeAndToolsList(t *testing.T) {
 	}
 	result, _ := out["result"].(map[string]any)
 	toolList, _ := result["tools"].([]any)
-	if len(toolList) != 23 {
-		t.Fatalf("tools/list returned %d tools, want 23", len(toolList))
+	if len(toolList) != 32 {
+		t.Fatalf("tools/list returned %d tools, want 32", len(toolList))
 	}
 	names := map[string]bool{}
 	descriptions := map[string]string{}
@@ -423,6 +426,12 @@ func TestInitializeAndToolsList(t *testing.T) {
 		// rather than 404: a tool that vanishes is indistinguishable from a
 		// broken server, and an agent cannot report what it cannot see.
 		"vistaplatform_ask",
+		// Interfaces, IPAM and Business Units (DCIM BUILD_PLAN row 1.10).
+		"vistaplatform_list_interfaces", "vistaplatform_get_asset_interfaces",
+		"vistaplatform_list_prefixes", "vistaplatform_get_prefix",
+		"vistaplatform_list_ip_addresses", "vistaplatform_find_ip",
+		"vistaplatform_list_vlans", "vistaplatform_list_business_units",
+		"vistaplatform_get_object_changes",
 	} {
 		if !names[want] {
 			t.Errorf("missing tool %q", want)

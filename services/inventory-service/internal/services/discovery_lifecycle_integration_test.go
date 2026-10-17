@@ -25,9 +25,7 @@ func TestIntegration_Ingest_PostResolutionEnrichmentFollowsMerge(t *testing.T) {
 				testdb.HoldSchemaShareLock(t, f.db.DB.DB)
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				defer cancel()
-				f.svc.networkSegmentService = NewNetworkSegmentService(f.db, nil)
-				if _, err := f.db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment)
- VALUES($1,$2,'Merge gap','cidr','198.51.100.0/24','production')`, uuid.New(), f.tenant); err != nil {
+				if _, err := f.db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Merge gap','198.51.100.0/24'::cidr,'production','declared','active')`, uuid.New(), f.tenant); err != nil {
 					t.Fatal(err)
 				}
 				finding := leafCertFinding("merge-gap.example.test", "198.51.100.81", 443, hexFingerprint("merge-gap"))

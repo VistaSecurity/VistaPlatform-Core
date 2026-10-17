@@ -23,7 +23,7 @@ import (
 // person asked and can read the result. For an UNATTENDED one it is a probe
 // that cannot succeed whenever the platform is not on the target's network:
 // the private address of a cloud instance is reachable only from inside its
-// VPC, and a private segment with no sensor is not the cluster's network
+// VPC, and a private prefix with no sensor is not the cluster's network
 // either. Every port comes back `filtered`, liveness is `assumed_up`, and the
 // stamp then keeps the host out of the queue for a full rescan interval.
 //
@@ -40,8 +40,8 @@ type autoScanReach interface {
 
 // autoScanReachability is a tenant's networks and collectors at one instant.
 type autoScanReachability struct {
-	// Segments are the active registered segments, typed.
-	Segments []autoscan.Segment
+	// Segments are the active prefixes, typed.
+	Prefixes []autoscan.Prefix
 	// Collectors are the live tenant sensors with a reported interface prefix.
 	Collectors []identityenrichment.Collector
 	// HasLiveSensors is true when the tenant has any live, dispatchable tenant
@@ -61,7 +61,7 @@ type platformTargetsDecision struct {
 	// Platform keep today's executor.
 	Platform []string
 	// ViaCollector are reached by a live tenant sensor the router did not
-	// match (its interface is inside the target's registered segment).
+	// match (its interface is inside the target's prefix).
 	ViaCollector []reachedBy
 	// Unreachable are not scanned this pass: no executor can reach them.
 	Unreachable []string
@@ -70,9 +70,9 @@ type platformTargetsDecision struct {
 // decidePlatformTargets applies the reachability rule to addresses that would
 // otherwise run from the platform.
 //
-//   - A live tenant sensor with an interface in the target's segment runs it.
-//   - Otherwise a `cloud` segment is skipped: the platform is never inside it.
-//   - Otherwise (private, VPN or no registered segment) the platform keeps it
+//   - A live tenant sensor with an interface in the target's prefix runs it.
+//   - Otherwise a `cloud` prefix is skipped: the platform is never inside it.
+//   - Otherwise (private, VPN or no prefix) the platform keeps it
 //     only when the tenant has no live sensor at all. A tenant that deployed
 //     sensors has told us where its networks are, and the platform is not
 //     among them.
@@ -90,7 +90,7 @@ func decidePlatformTargets(targets []string, r autoScanReachability, strict bool
 			continue
 		}
 		addr = addr.Unmap()
-		seg, segPrefix, hasSeg := segmentFor(addr, r.Segments)
+		seg, segPrefix, hasSeg := segmentFor(addr, r.Prefixes)
 
 		var chosen *identityenrichment.Collector
 		if hasSeg {
@@ -124,9 +124,9 @@ func decidePlatformTargets(targets []string, r autoScanReachability, strict bool
 	return out
 }
 
-// segmentFor is the most specific registered segment containing addr.
-func segmentFor(addr netip.Addr, segments []autoscan.Segment) (autoscan.Segment, netip.Prefix, bool) {
-	var best autoscan.Segment
+// segmentFor is the most specific prefix containing addr.
+func segmentFor(addr netip.Addr, segments []autoscan.Prefix) (autoscan.Prefix, netip.Prefix, bool) {
+	var best autoscan.Prefix
 	var bestPrefix netip.Prefix
 	found := false
 	for _, seg := range segments {
@@ -170,11 +170,11 @@ func NewAutoScanReach(db *database.DB, segments *autoscan.Store, fleet *sensorro
 
 func (r *reachStore) Reachability(ctx context.Context, tenantID uuid.UUID, now time.Time) (autoScanReachability, error) {
 	var out autoScanReachability
-	segs, err := r.segments.Segments(ctx, tenantID)
+	segs, err := r.segments.Prefixes(ctx, tenantID)
 	if err != nil {
 		return out, err
 	}
-	out.Segments = segs
+	out.Prefixes = segs
 	sensors, err := r.fleet.TenantSensors(ctx, tenantID)
 	if err != nil {
 		return out, err

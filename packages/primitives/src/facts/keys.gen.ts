@@ -46,6 +46,10 @@ export type FactKey =
   | 'cloud.vpc_id'
   | 'cloud.subnet_id'
   | 'cloud.security_groups'
+  | 'cloud.listing'
+  | 'cloud.last_enumerated_at'
+  | 'cloud.provider_state'
+  | 'cloud.enumeration_coverage'
   | 'sw.package_count'
   | 'sw.cpe'
   | 'svc.listening_sockets'
@@ -76,6 +80,11 @@ export interface FactKeyDef {
   /** Whether the value must be masked in exports, logs and AI prompts. */
   redact: boolean;
   description: string;
+  /**
+   * Set when the key is retired: what replaced it. The key stays registered
+   * (older collectors still send it, stored rows keep their meaning).
+   */
+  retired?: string;
 }
 
 /** Fact keys by Go-style constant name, for call sites that prefer a symbol. */
@@ -102,6 +111,10 @@ export const FACT_KEYS = {
   CloudVPCID: 'cloud.vpc_id',
   CloudSubnetID: 'cloud.subnet_id',
   CloudSecurityGroups: 'cloud.security_groups',
+  CloudListing: 'cloud.listing',
+  CloudLastEnumeratedAt: 'cloud.last_enumerated_at',
+  CloudProviderState: 'cloud.provider_state',
+  CloudEnumerationCoverage: 'cloud.enumeration_coverage',
   SWPackageCount: 'sw.package_count',
   SWCPE: 'sw.cpe',
   SvcListeningSockets: 'svc.listening_sockets',
@@ -193,10 +206,11 @@ export const FACT_KEY_DEFS: Record<FactKey, FactKeyDef> = {
   'net.interfaces': {
     key: 'net.interfaces',
     type: 'array',
-    itemSchema: {"type":"object","properties":{"name":{"type":"string","description":"interface name as the device calls it (eth0, GigabitEthernet1/0/1)"},"mac":{"type":"string","description":"MAC address, lower-case colon-separated"},"addresses":{"type":"array","items":{"type":"string"},"description":"assigned IP addresses in CIDR form"},"static_addresses":{"type":"array","items":{"type":"string"},"description":"The subset of `addresses` the host's own configuration reports as statically configured (Linux: no lease lifetime; Windows: PrefixOrigin/SuffixOrigin Manual; macOS: ConfigMethod Manual), spelled exactly as in `addresses`. A pinned address matches its asset even inside a segment flagged DHCP. An address in neither this list nor `dynamic_addresses` is unknown."},"dynamic_addresses":{"type":"array","items":{"type":"string"},"description":"The subset of `addresses` the host reports as leased — DHCP, or a router advertisement (SLAAC) — spelled exactly as in `addresses`."},"vlan":{"type":"integer","description":"access or native VLAN id, where the device reports one"},"state":{"type":"string","enum":["up","down","unknown"],"description":"operational state"},"admin_state":{"type":"string","enum":["up","down","testing","unknown"],"description":"Administrative state, where the device reports one separately from the operational state (SNMP ifAdminStatus, a shut interface). An interface that is down because someone shut it is a different fact from one that is down because the link failed, and collapsing them into `state` loses the only half an operator can act on."},"speed":{"type":"integer","description":"negotiated speed in Mbit/s, 0 when unknown"}},"required":["name"]},
+    itemSchema: {"type":"object","properties":{"name":{"type":"string","description":"interface name as the device calls it (eth0, GigabitEthernet1/0/1)"},"mac":{"type":"string","description":"MAC address, lower-case colon-separated"},"addresses":{"type":"array","items":{"type":"string"},"description":"assigned IP addresses in CIDR form"},"static_addresses":{"type":"array","items":{"type":"string"},"description":"The subset of `addresses` the host's own configuration reports as statically configured (Linux: no lease lifetime; Windows: PrefixOrigin/SuffixOrigin Manual; macOS: ConfigMethod Manual), spelled exactly as in `addresses`. A pinned address matches its asset even inside a segment flagged DHCP. An address in neither this list nor `dynamic_addresses` is unknown."},"dynamic_addresses":{"type":"array","items":{"type":"string"},"description":"The subset of `addresses` the host reports as leased — DHCP, or a router advertisement (SLAAC) — spelled exactly as in `addresses`."},"vlan":{"type":"integer","description":"access or native VLAN id, where the device reports one"},"state":{"type":"string","enum":["up","down","unknown"],"description":"operational state"},"admin_state":{"type":"string","enum":["up","down","testing","unknown"],"description":"Administrative state, where the device reports one separately from the operational state (SNMP ifAdminStatus, a shut interface). An interface that is down because someone shut it is a different fact from one that is down because the link failed, and collapsing them into `state` loses the only half an operator can act on."},"speed":{"type":"integer","description":"negotiated speed in Mbit/s, 0 when unknown"},"mtu":{"type":"integer","description":"MTU in bytes, where the device reports one"},"kind":{"type":"string","description":"the OS's kind for a software interface: vlan, bond, team, bridge"},"parent":{"type":"string","description":"a VLAN sub-interface's lower device"},"lag":{"type":"string","description":"the bond or team the interface is a member of"},"type":{"type":"string","description":"interface-type registry key (1000base-t, 10gbase-x-sfpp, lag, bridge, ieee802.11ac, …), where the device states one"},"mode":{"type":"string","enum":["access","tagged","tagged-all"],"description":"802.1Q mode, where the device reports one"},"tagged_vlans":{"type":"array","items":{"type":"integer"},"description":"VLAN ids the interface trunks, beside its untagged `vlan`"}},"required":[]},
     producers: ['device-agent', 'device-interrogation', 'cloud-collector'],
     redact: false,
-    description: 'Every network interface the device has, with its addresses and state. The authoritative addresses for an asset are its endpoints; this fact is the interface-level view an operator expects on a device page, including the down and unaddressed ones an endpoint row would never show.',
+    description: 'Every network interface the device has, with its addresses and state. The authoritative addresses for an asset are its endpoints; this fact is the interface-level view an operator expects on a device page, including the down and unaddressed ones an endpoint row would never show. Item fields beyond the original shape, sent by the device agent since DCIM row 1.5a: `mtu`, `kind` (vlan / bond / team / bridge), `parent` (a VLAN sub-interface\'s lower device) and `lag` (the bond it is a member of). Sent by the UniFi collector since row 1.5b: `type`, `mode` and `tagged_vlans`, and an item with NO name — a client a controller lists, whose own name for its interface the controller does not know (its MAC and address become identifiers on a synthetic interface).',
+    retired: 'Interfaces and their addresses are modelled (DCIM row 1.2/1.3, ADR-0010 D3): `interfaces`, `ip_addresses`, `mac_addresses`, written by the identity engine from a sighting\'s identity.ObservedInterfaces. Since row 1.5a the platform no longer stores this fact for HOSTS — the device agent still sends the list in this shape on the wire, and device-interrogation-service turns it into observed interfaces. The generic SNMP stopped in row 1.5d (its interfaces, addresses and VLANs travel as InterrogateResult.Network), and so did the Cisco, Palo Alto, Fortinet and F5 collectors in row 1.5c. Since row 1.5b it is not stored for anything a UniFi controller reports either — a managed device\'s interfaces or a client\'s address (every SUBJECT-bound net.interfaces): the list rides on that subject\'s sighting. Cloud enumeration stopped in row 1.5f (an ENI is an observed `virtual` interface). No platform collector writes it any more; the key stays registered for older collectors and for rows already stored.',
   },
   'net.neighbors': {
     key: 'net.neighbors',
@@ -217,10 +231,10 @@ export const FACT_KEY_DEFS: Record<FactKey, FactKeyDef> = {
   'net.vlans': {
     key: 'net.vlans',
     type: 'array',
-    itemSchema: {"type":"object","properties":{"id":{"type":"integer","description":"802.1Q VLAN id. Absent on an untagged network — a controller's default LAN has a name, a prefix and a gateway but no tag, and inventing 0 or 1 for it would assert a tag nobody configured."},"name":{"type":"string","description":"VLAN name as configured"},"subnet":{"type":"string","description":"associated prefix in CIDR form, where the device declares one"},"gateway":{"type":"string","description":"The device's own address on this network, where it declares one. Read at ingest: with a subnet, the address becomes a claimed identifier of the device, and the device becomes the gateway of every network segment where it holds it (network_segments.gateway_*, via inventory-service's internal gateway-links route, which takes the run's complete list so a network no longer reported is unlinked). An entry without a subnet is skipped."},"dhcp_enabled":{"type":"boolean","description":"whether the device serves DHCP on this network"},"dhcp_range_configured":{"type":"boolean","description":"Whether a DHCP pool is configured on this network. The RANGE itself, and every DHCP option beside it, are deliberately not collected: they are the operator's addressing plan and the network's name servers, boot servers and domain — an attacker's map of the network — and nothing in the inventory reads them. Whether the network hands out addresses at all is what tells a reader an unmanaged device could appear on it."}},"required":[]},
+    itemSchema: {"type":"object","properties":{"id":{"type":"integer","description":"802.1Q VLAN id. Absent on an untagged network — a controller's default LAN has a name, a prefix and a gateway but no tag, and inventing 0 or 1 for it would assert a tag nobody configured."},"name":{"type":"string","description":"VLAN name as configured"},"subnet":{"type":"string","description":"associated prefix in CIDR form, where the device declares one"},"gateway":{"type":"string","description":"The device's own address on this network, where it declares one. Read at ingest: with a subnet, the address becomes a claimed identifier of the device, and the device becomes the gateway of every prefix where it holds it (prefixes.gateway_*, via inventory-service's internal gateway-links route, which takes the run's complete list so a network no longer reported is unlinked). An entry without a subnet is skipped."},"dhcp_enabled":{"type":"boolean","description":"whether the device serves DHCP on this network"},"dhcp_range_configured":{"type":"boolean","description":"Whether a DHCP pool is configured on this network. The RANGE itself, and every DHCP option beside it, are deliberately not collected: they are the operator's addressing plan and the network's name servers, boot servers and domain — an attacker's map of the network — and nothing in the inventory reads them. Whether the network hands out addresses at all is what tells a reader an unmanaged device could appear on it."},"purpose":{"type":"string","description":"What the network is for, as the controller states it (UniFi: corporate, guest, vlan-only) — the prefix's network type."}},"required":[]},
     producers: ['device-interrogation', 'connector'],
     redact: false,
-    description: 'VLANs the device knows about — configured on a switch or controller, tagged on a host trunk. The seed for network segments: a VLAN here can become a pending segment, approved like any other proposal.',
+    description: 'VLANs the device knows about — configured on a switch or controller, tagged on a host trunk. The seed for VLANs and prefixes: a VLAN here with a prefix becomes a pending prefix, approved like any other proposal. Since DCIM row 1.5b a UniFi controller\'s networks are recorded as the tenant\'s PREFIXES and VLANs directly (the list rides on the site gateway\'s sighting, bound to it as the fact\'s subject, with each network\'s `purpose`), and no UniFi net.vlans is stored as a fact. Since row 1.5c the Cisco, Palo Alto, Fortinet and F5 collectors no longer emit it: their VLANs and connected prefixes are `vlans` and `prefixes` objects, written by the identity engine.',
   },
   'net.route_next_hop_count': {
     key: 'net.route_next_hop_count',
@@ -263,14 +277,16 @@ export const FACT_KEY_DEFS: Record<FactKey, FactKeyDef> = {
     type: 'string',
     producers: ['cloud-collector', 'connector'],
     redact: false,
-    description: 'Identifier of the VPC, VNet or network the resource sits in. The cloud analogue of a network segment, and what makes "which of these instances share a network" answerable without an agent.',
+    description: 'Identifier of the VPC, VNet or network the resource sits in. The cloud analogue of a VRF, and what makes "which of these instances share a network" answerable without an agent.',
+    retired: 'A cloud network is an IPAM object now (asset-inventory ADR-0009 amendment, DCIM row 1.5f): the VPC / VNet / GCP network is a container prefix and its child prefixes are prefixes, each carrying the network\'s provider id in `prefixes.cloud_network_ref`, and an instance\'s private addresses are `ip_addresses` on its ENI interfaces. Which network a resource sits in is answered by prefix containment of its addresses, not by a copied id. Cloud enumeration no longer writes it; the key stays registered for rows already stored.',
   },
   'cloud.subnet_id': {
     key: 'cloud.subnet_id',
     type: 'string',
     producers: ['cloud-collector', 'connector'],
     redact: false,
-    description: 'Identifier of the subnet within the VPC or VNet. Finer than cloud.vpc_id and usually what a security group or a route is scoped to.',
+    description: 'Identifier of the child prefix within the VPC or VNet. Finer than cloud.vpc_id and usually what a security group or a route is scoped to.',
+    retired: 'A cloud child network is a prefix now (asset-inventory ADR-0009 amendment, DCIM row 1.5f), and an instance\'s addresses sit on its ENI interfaces, so the prefix a resource is in is the prefix that contains its address. Cloud enumeration no longer writes it; the key stays registered for rows already stored.',
   },
   'cloud.security_groups': {
     key: 'cloud.security_groups',
@@ -279,6 +295,35 @@ export const FACT_KEY_DEFS: Record<FactKey, FactKeyDef> = {
     producers: ['cloud-collector', 'connector'],
     redact: false,
     description: 'Security groups, NSGs or firewall rule sets attached to the resource. Membership only — this is the group the resource is IN, never the rules inside it. Rules are configuration to be judged (a finding), not a fact about the asset, and pulling whole rule sets would mean storing an attacker\'s map of the network.',
+  },
+  'cloud.listing': {
+    key: 'cloud.listing',
+    type: 'string',
+    producers: ['cloud-collector'],
+    redact: false,
+    description: 'Which provider listing last returned this resource, as `<resource_type>@<region>` (`global` for an account-wide call such as S3 ListBuckets or every Azure / GCP listing). It is the key the account\'s `cloud.enumeration_coverage` is read with: a resource is only ever judged absent by the listing that is supposed to return it.',
+  },
+  'cloud.last_enumerated_at': {
+    key: 'cloud.last_enumerated_at',
+    type: 'date',
+    producers: ['cloud-collector'],
+    redact: false,
+    description: 'When a provider listing last returned this resource. Disappearance is measured against it: a later COMPLETE run of the same listing (the account\'s `cloud.enumeration_coverage`) that did not return the resource is what moves it to stale on its class\'s window — a failed or partial listing proves nothing about absence and moves nothing.',
+  },
+  'cloud.provider_state': {
+    key: 'cloud.provider_state',
+    type: 'string',
+    producers: ['cloud-collector'],
+    redact: false,
+    description: 'The lifecycle state the provider reports for the resource, normalised to lower case (`running`, `stopped`, `terminated`, `shutting-down`, `deleting`, `pending_deletion`, …). A terminal state is recorded as the reason the resource went stale. GCP\'s `TERMINATED` means stopped and is recorded as `stopped`.',
+  },
+  'cloud.enumeration_coverage': {
+    key: 'cloud.enumeration_coverage',
+    type: 'object',
+    itemSchema: {"type":"object","additionalProperties":{"type":"string","format":"date-time"}},
+    producers: ['cloud-collector'],
+    redact: false,
+    description: 'On a cloud ACCOUNT asset: for each listing (`<resource_type>@<region>`), when that listing last completed with every scope answering. The lifecycle sweep compares a resource\'s `cloud.last_enumerated_at` with the coverage of its `cloud.listing`; a listing that never completed is never evidence of absence.',
   },
   'sw.package_count': {
     key: 'sw.package_count',
@@ -408,6 +453,10 @@ export const FACT_KEY_ORDER: readonly FactKey[] = [
   'cloud.vpc_id',
   'cloud.subnet_id',
   'cloud.security_groups',
+  'cloud.listing',
+  'cloud.last_enumerated_at',
+  'cloud.provider_state',
+  'cloud.enumeration_coverage',
   'sw.package_count',
   'sw.cpe',
   'svc.listening_sockets',

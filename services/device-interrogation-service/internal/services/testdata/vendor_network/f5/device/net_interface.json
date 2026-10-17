@@ -1,0 +1,33 @@
+{
+  "kind": "tm:net:interface:interfacecollectionstate",
+  "items": [
+    {
+      "name": "1.1",
+      "macAddress": "00:23:e9:aa:00:11",
+      "enabled": true,
+      "mediaActive": "1000T-FD",
+      "mtu": 1500,
+      "description": "PlantedF5Secret-6102"
+    },
+    {
+      "name": "1.2",
+      "macAddress": "00:23:e9:aa:00:12",
+      "enabled": true,
+      "mediaActive": "10000SR-FD",
+      "mtu": 9198
+    },
+    {
+      "name": "1.3",
+      "macAddress": "00:23:e9:aa:00:13",
+      "enabled": true,
+      "mediaActive": "10000SR-FD",
+      "mtu": 9198
+    },
+    {
+      "name": "mgmt",
+      "macAddress": "00:23:e9:aa:00:ff",
+      "enabled": true,
+      "mediaActive": "100TX-FD"
+    }
+  ]
+}

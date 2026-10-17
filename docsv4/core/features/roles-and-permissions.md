@@ -12,9 +12,9 @@ You need the **Manage users** permission to open this page. It is the same
 permission that governs every action on it, so if you can see the page you can
 use it.
 
-## The eleven permission families
+## The permission families
 
-Every permission is named `family.action`, and there are **eleven families**. The
+Every permission is named `family.action`, and there are **eleven core families** plus the eight infrastructure families below. The
 permission drawer groups the catalogue by family, in this order:
 
 | Family | What it covers | Actions |
@@ -23,7 +23,7 @@ permission drawer groups the catalogue by family, in this order:
 | `sensors` | Sensors and discovery agents — registration, configuration, commands | create · read · update · delete · manage |
 | `reports` | Bills of Materials — viewing artifacts, and generating them | read · manage |
 | `users` | The member roster, invitations, roles, and data-subject export and erasure | create · read · update · delete · manage |
-| `settings` | Organization settings — org details, branding, integrations, notifications, locations, segments, lifecycle | read · update · manage |
+| `settings` | Organization settings — org details, branding, integrations, notifications, lifecycle | read · update · manage |
 | `billing` | Subscription, invoices and payment | read · update |
 | `compliance` | Frameworks, controls, measurements, findings and scopes | read · update · manage |
 | `alerts` | The alert inbox — acknowledging, snoozing, resolving, and raising tickets from alerts | read · manage |
@@ -42,6 +42,27 @@ somewhere else:
   Administrator does not hold it and so cannot grant it — but *can* assign the
   built-in **Billing Admin** role, which does. Being able to delegate a power and
   holding it yourself are deliberately different things.
+
+### Infrastructure permissions
+
+Eight more families cover the infrastructure objects in Inventory and
+**Settings → Infrastructure**. A page appears in the settings rail, and its
+**Create**, **Edit** and **Delete** controls appear on it, according to these.
+
+| Family | What it covers | Actions |
+|---|---|---|
+| `dcim` | Sites, racks, device types and the rest of the catalogue, assets' placement, interfaces, ports and cables, contacts, config contexts, export templates, custom fields (the page), bulk import | read · manage |
+| `ipam` | Prefixes, IP addresses, VLANs, VRFs and the rest of **Settings → Infrastructure → IPAM** | read · manage |
+| `circuits` | Circuits, providers and terminations | read · manage |
+| `virtualization` | Clusters, virtual machines and virtual disks | read · manage |
+| `vpn` | Tunnels and their IKE and IPsec policies (never pre-shared keys) | read · manage |
+| `wireless` | Wireless LANs and links (never pre-shared keys) | read · manage |
+| `business_units` | Business Units | manage |
+| `custom_fields` | Custom field definitions | manage |
+
+Tenant Administrators hold all of them. Security Administrators hold the first six
+in full. Viewers hold **read** on the first six. Only Tenant Administrators hold
+`business_units.manage` and `custom_fields.manage`.
 
 ### What the built-in roles hold
 

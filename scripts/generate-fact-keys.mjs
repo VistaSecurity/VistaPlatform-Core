@@ -16,6 +16,7 @@ const root = path.resolve(__dirname, '..');
 
 const TYPES = ['string', 'integer', 'boolean', 'date', 'array', 'object'];
 const SCALARS = ['string', 'integer', 'boolean', 'date'];
+const STATUSES = ['active', 'retired'];
 
 const fail = (msg) => sharedFail('fact-keys', msg);
 
@@ -47,6 +48,18 @@ function validate(registry) {
     // Explicit, never defaulted: a new key must not inherit "not sensitive"
     // by omission.
     if (typeof k.redact !== 'boolean') fail(`${k.key}: redact must be an explicit bool`);
+
+    // Lifecycle. A retired key stays registered (older collectors still send
+    // it; stored rows keep their meaning) and must say what replaced it.
+    if (k.status !== undefined && !STATUSES.includes(k.status)) {
+      fail(`${k.key}: status must be one of ${STATUSES.join(', ')} (got ${JSON.stringify(k.status)})`);
+    }
+    if (k.status === 'retired' && !(typeof k.retired_reason === 'string' && k.retired_reason.trim())) {
+      fail(`${k.key}: a retired key needs a retired_reason saying what replaced it`);
+    }
+    if (k.status !== 'retired' && k.retired_reason !== undefined) {
+      fail(`${k.key}: retired_reason is only valid with status: retired`);
+    }
 
     if (!Array.isArray(k.producers) || !k.producers.length) {
       fail(`${k.key}: at least one producer required`);
@@ -117,7 +130,8 @@ function renderGo(registry) {
 		ItemSchema:  ${schema},
 		Producers:   []string{${producers}},
 		Redact:      ${k.redact},
-		Description: ${goStr(k.description.trim())},
+		Description: ${goStr(k.description.trim())},${k.status === 'retired' ? `
+		Retired:     ${goStr(k.retired_reason.trim())},` : ''}
 	},`;
     })
     .join('\n');
@@ -157,6 +171,12 @@ type Key struct {
 	Producers   []string \`json:"producers"\`
 	Redact      bool     \`json:"redact"\`
 	Description string   \`json:"description"\`
+	// Retired, when set, says the key is retired and what replaced it
+	// (standards/fact-keys.yaml \`status: retired\`). The key stays
+	// registered — older collectors still send it and stored rows keep their
+	// meaning — but the platform no longer stores it from the producers the
+	// reason names.
+	Retired string \`json:"retired,omitempty"\`
 }
 
 // All is the generated fact-key list, in YAML order.
@@ -205,6 +225,7 @@ function renderTs(registry) {
       lines.push(`    producers: [${k.producers.map((p) => tsStr(p)).join(', ')}],`);
       lines.push(`    redact: ${k.redact},`);
       lines.push(`    description: ${tsStr(k.description.trim())},`);
+      if (k.status === 'retired') lines.push(`    retired: ${tsStr(k.retired_reason.trim())},`);
       lines.push('  },');
       return lines.join('\n');
     })
@@ -245,6 +266,11 @@ export interface FactKeyDef {
   /** Whether the value must be masked in exports, logs and AI prompts. */
   redact: boolean;
   description: string;
+  /**
+   * Set when the key is retired: what replaced it. The key stays registered
+   * (older collectors still send it, stored rows keep their meaning).
+   */
+  retired?: string;
 }
 
 /** Fact keys by Go-style constant name, for call sites that prefer a symbol. */

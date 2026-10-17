@@ -71,11 +71,10 @@ func main() {
 
 	// Initialize services
 	assetService := services.NewAssetService(db)
-	networkSpaceService := services.NewNetworkSpaceService(db)
-	locationService := services.NewLocationService(db)
-	networkSegmentService := services.NewNetworkSegmentService(db, locationService)
+	siteService := services.NewSiteService(db)
+	assetService.SetSiteService(siteService)
 	serviceIdentificationService := services.NewServiceIdentificationService(db)
-	assetService.SetEnrichmentServices(networkSegmentService, serviceIdentificationService)
+	assetService.SetEnrichmentServices(serviceIdentificationService)
 	lifecycleService := services.NewAssetLifecycleService(db)
 	discoveryService, err := services.NewDiscoveryService(cfg)
 	if err != nil {
@@ -112,6 +111,8 @@ func main() {
 	// map's "where is everything" view, as a site -> segment -> class tree of
 	// counts rather than the force graph D4 rejects.
 	topologyHandler := handlers.NewTopologyHandler(assetService)
+	// A cloud resource's placement (ADR-0009 D7, DCIM row 4.6).
+	cloudPlacementHandler := handlers.NewCloudPlacementHandler(assetService)
 	// Inventory → Map → Network: every live asset placed by site and
 	// segment, with a catalogue-assessed crypto summary.
 	networkMapHandler := handlers.NewNetworkMapHandler(assetService)
@@ -132,12 +133,15 @@ func main() {
 	cloudKeyHandler := handlers.NewCloudKeyHandler(assetService)
 	cryptoApplicationsHandler := handlers.NewCryptoApplicationsHandler(assetService)
 	integrationsHandler := handlers.NewIntegrationsHandler(assetService)
-	networkSpaceHandler := handlers.NewNetworkSpaceHandler(networkSpaceService)
-	networkSpaceHandler.SetNetworkSegmentService(networkSegmentService)
 	// Confirming a scan of assets outside the registered networks needs
 	// discovery.create as well as the route's assets.update ( W5.13b).
 	assetLifecycleHandler := newAssetLifecycleHandler(lifecycleService, revalidationService, assetService, db.DB.DB)
 	assetBulkHandler := handlers.NewAssetBulkHandler(assetService, lifecycleService)
+	// Business Units (DCIM 1.1): one service shared by the API and the asset
+	// write paths, so both record changes through the same recorder.
+	businessUnitService := services.NewBusinessUnitService(db)
+	assetService.SetBusinessUnitService(businessUnitService)
+	businessUnitHandler := handlers.NewBusinessUnitHandler(businessUnitService)
 	certificateHandler := handlers.NewCertificateHandler(certificateService)
 	// Tenant certificate trust: one evaluator shared by the ingest hook
 	// and the decision store, so both decide against the same public roots.
@@ -159,8 +163,7 @@ func main() {
 	externalConnectionsService.SetServiceIdentificationService(serviceIdentificationService)
 	assetService.SetExternalConnectionsService(externalConnectionsService)
 	externalConnectionsHandler := handlers.NewExternalConnectionsHandler(externalConnectionsService)
-	locationHandler := handlers.NewLocationHandler(locationService)
-	networkSegmentHandler := handlers.NewNetworkSegmentHandler(networkSegmentService)
+	siteHandler := handlers.NewSiteHandler(siteService)
 	operationalService := services.NewOperationalService(db)
 	remediationTemplateService := services.NewRemediationTemplateService()
 	operationalHandler := handlers.NewOperationalHandler(operationalService, remediationTemplateService)
@@ -244,6 +247,11 @@ func main() {
 	// database.DB wraps *sqlx.DB which embeds *sql.DB; sharedrbac.RequireTenantPermission
 	// needs the raw *sql.DB.
 	rawDB := db.DB.DB
+	// Cables (DCIM row 3.2) and the LLDP / CDP neighbour intake that proposes
+	// them (row 3.3): posted sightings' neighbours are filed through it.
+	cableService := services.NewCableService(rawDB)
+	cableIntake := services.NewCableIntake(rawDB, cableService)
+	assetService.SetCableIntake(cableIntake)
 
 	// ── Query seam (ADR-0008 D1, build-plan 4.4b) ──────────────────────────
 	//
@@ -283,6 +291,8 @@ func main() {
 		handlers.NewSourceImportHandler(services.NewSourceImportService(db, assetService).WithArchiver(lifecycleService)),
 		handlers.NewCIExportHandler(services.NewCIExportService(db, assetService)),
 		handlers.NewInternalTrustHandler(trustStore),
+		handlers.NewDCIMSyncHandler(services.NewDCIMSyncService(rawDB, db)),
+		handlers.NewDCIMImportHandler(services.NewDCIMImportService(rawDB, db)),
 		os.Getenv("INTERNAL_AUTH_SECRET"))
 
 	// The internal sightings intake (platform ADR-0003 D3 step 2): what
@@ -524,10 +534,6 @@ func main() {
 		api.POST("/inventory-service/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), integrationsHandler.Create)
 		api.PUT("/inventory-service/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), integrationsHandler.Update)
 		api.DELETE("/inventory-service/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsDelete), integrationsHandler.Delete)
-		// Network spaces — subnet → location mapping is tenant config.
-		api.GET("/inventory-service/network-spaces", networkSpaceHandler.GetNetworkSpaces)
-		api.POST("/inventory-service/network-spaces", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSpaceHandler.SaveNetworkSpaces)
-		api.POST("/inventory-service/network-spaces/classify-assets", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), networkSpaceHandler.ReclassifyAssets)
 
 		// Discovery endpoints
 		// Settings -> Discovery -> Active Scanning. The read is settings.read
@@ -600,10 +606,6 @@ func main() {
 		api.POST("/integrations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsCreate), integrationsHandler.Create)
 		api.PUT("/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), integrationsHandler.Update)
 		api.DELETE("/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsDelete), integrationsHandler.Delete)
-		// Direct network spaces
-		api.GET("/network-spaces", networkSpaceHandler.GetNetworkSpaces)
-		api.POST("/network-spaces", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSpaceHandler.SaveNetworkSpaces)
-		api.POST("/network-spaces/classify-assets", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), networkSpaceHandler.ReclassifyAssets)
 
 		// Discovery direct routes
 		// Register OPTIONS handlers for CORS preflight
@@ -676,6 +678,9 @@ func main() {
 		apiv2.GET("/inventory-service/infrastructure-assets/recent-count", assetHandler.GetRecentAssetsCount)
 		apiv2.GET("/inventory-service/infrastructure-assets/:id/endpoints", assetPhase1Handler.GetAssetEndpoints)
 		apiv2.GET("/inventory-service/infrastructure-assets/:id/identifiers", assetPhase1Handler.GetAssetIdentifiers)
+		// Cloud placement (ADR-0009 D7): gated on assets.read, the cloud read
+		// permission.
+		apiv2.GET("/inventory-service/infrastructure-assets/:id/cloud-placement", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsRead), cloudPlacementHandler.GetCloudPlacement)
 		// Relationships (ADR-0003). This is the spelling the spec documents and
 		// the UI calls; the v1 `/assets/...` twins above exist for parity with
 		// the rest of the legacy surface.
@@ -838,39 +843,20 @@ func main() {
 		apiv2.PUT("/inventory-service/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsUpdate), integrationsHandler.Update)
 		apiv2.DELETE("/inventory-service/integrations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsDelete), integrationsHandler.Delete)
 
-		// Network spaces — tenant config.
-		apiv2.GET("/inventory-service/network-spaces", networkSpaceHandler.GetNetworkSpaces)
-		apiv2.POST("/inventory-service/network-spaces", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSpaceHandler.SaveNetworkSpaces)
-		apiv2.POST("/inventory-service/network-spaces/classify-assets", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), networkSpaceHandler.ReclassifyAssets)
-
 		// Locations (operational context) — tenant config; treated as settings.
-		apiv2.GET("/inventory-service/locations", locationHandler.GetLocations)
-		apiv2.GET("/inventory-service/locations/tree", locationHandler.GetLocationTree)
-		apiv2.POST("/inventory-service/locations", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), locationHandler.CreateLocation)
-		apiv2.GET("/inventory-service/locations/:id", locationHandler.GetLocation)
-		apiv2.PUT("/inventory-service/locations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), locationHandler.UpdateLocation)
-		apiv2.DELETE("/inventory-service/locations/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), locationHandler.DeleteLocation)
-		apiv2.GET("/inventory-service/locations/:id/assets", locationHandler.GetLocationAssets)
-		apiv2.GET("/inventory-service/locations/:id/summary", locationHandler.GetLocationSummary)
+		// Regions, site groups, sites and locations (DCIM 2.1): dcim.read to
+		// read, dcim.manage to write. See site_routes.go.
+		registerSiteRoutes(apiv2, rawDB, siteHandler)
 
-		// Network segments (operational context) — tenant config.
-		apiv2.GET("/inventory-service/network-segments", networkSegmentHandler.GetNetworkSegments)
-		apiv2.POST("/inventory-service/network-segments", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.CreateNetworkSegment)
-		apiv2.POST("/inventory-service/network-segments/bulk", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.CreateNetworkSegmentsBulk)
-		apiv2.POST("/inventory-service/network-segments/reclassify-all", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionAssetsManage), networkSegmentHandler.ReclassifyAllAssets)
-		apiv2.POST("/inventory-service/network-segments/migrate-from-spaces", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.MigrateFromNetworkSpaces)
-		apiv2.GET("/inventory-service/network-segments/:id", networkSegmentHandler.GetNetworkSegment)
-		apiv2.PUT("/inventory-service/network-segments/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.UpdateNetworkSegment)
-		apiv2.DELETE("/inventory-service/network-segments/:id", sharedrbac.RequireTenantPermission(rawDB, rbac.PermissionSettingsUpdate), networkSegmentHandler.DeleteNetworkSegment)
-		apiv2.POST("/inventory-service/network-segments/:id/claim", segmentClaimChain(rawDB, networkSegmentHandler.ClaimNetworkSegment)...)
-		apiv2.DELETE("/inventory-service/network-segments/:id/claim", segmentClaimChain(rawDB, networkSegmentHandler.RevokeNetworkSegmentClaim)...)
+		// Business Units (DCIM 1.1): dcim.read to read, business_units.manage to write.
+		registerBusinessUnitRoutes(apiv2, rawDB, businessUnitHandler)
 
 		// Operational overview and remediation queue (materialized views).
 		// Ticket CRUD lives in compliance-engine under
 		// /api/v1/compliance-engine/tickets, not here.
-		apiv2.GET("/inventory-service/operational/locations-summary", operationalHandler.GetLocationsSummary)
-		apiv2.GET("/inventory-service/operational/locations/:id/environments", operationalHandler.GetLocationEnvironments)
-		apiv2.GET("/inventory-service/operational/locations/:id/environments/:env/assets", operationalHandler.GetEnvironmentAssets)
+		apiv2.GET("/inventory-service/operational/sites-summary", operationalHandler.GetSitesSummary)
+		apiv2.GET("/inventory-service/operational/sites/:id/environments", operationalHandler.GetSiteEnvironments)
+		apiv2.GET("/inventory-service/operational/sites/:id/environments/:env/assets", operationalHandler.GetEnvironmentAssets)
 		apiv2.GET("/inventory-service/operational/remediation-queue/stats", operationalHandler.GetRemediationStats)
 		apiv2.GET("/inventory-service/operational/remediation-queue", operationalHandler.GetRemediationQueue)
 		apiv2.GET("/inventory-service/operational/remediation-templates", operationalHandler.GetRemediationTemplates)
@@ -916,6 +902,86 @@ func main() {
 		// internal source routes mounted above. The catalogue entry is what
 		// tells a Core tenant it is an upgrade.
 	}
+
+	// DCIM object substrate (DCIM BUILD_PLAN row 0.3): change log, journals and
+	// tags of any object, behind dcim.read / dcim.manage. See
+	// dcim_substrate_routes.go.
+	mountDcimSubstrateRoutes(apiv2, rawDB, handlers.NewDcimSubstrateHandler(services.NewDcimSubstrateService(rawDB)))
+	mountDcimSavedFilterRoutes(apiv2, rawDB, handlers.NewDcimSavedFilterHandler(services.NewSavedFilterService(rawDB), savedFilterCanShare(rawDB)))
+
+	// IPAM (DCIM BUILD_PLAN row 1.3): prefixes, IP addresses, VLANs, VRFs and
+	// their catalogues, behind ipam.read / ipam.manage. See ipam_routes.go.
+	mountIPAMRoutes(apiv2, rawDB, handlers.NewIPAMHandler(services.NewIPAMService(rawDB)))
+	// Interfaces (DCIM BUILD_PLAN row 1.2), behind dcim.read / dcim.manage.
+	// See dcim_interface_routes.go.
+	mountDcimInterfaceRoutes(apiv2, rawDB, handlers.NewInterfaceHandler(services.NewInterfaceService(rawDB)))
+
+	// The device catalogue (DCIM BUILD_PLAN row 2.2): manufacturers, device
+	// types, module types, device roles, platforms, component templates and an
+	// asset's hardware columns, behind dcim.read / dcim.manage. See
+	// dcim_catalogue_routes.go.
+	mountDcimCatalogueRoutes(apiv2, rawDB, handlers.NewCatalogueHandler(services.NewCatalogueService(rawDB)))
+	// The asset components beyond interfaces (DCIM BUILD_PLAN row 3.1): console
+	// ports, front/rear ports, device bays, power ports and outlets. See
+	// dcim_component_routes.go.
+	mountDcimComponentRoutes(apiv2, rawDB, handlers.NewComponentHandler(services.NewComponentService(rawDB)))
+	// Modules, module bays, inventory items and virtual chassis (DCIM
+	// BUILD_PLAN row 2.4). See dcim_hardware_routes.go.
+	hardware := services.NewHardwareService(rawDB)
+	mountDcimHardwareRoutes(apiv2, rawDB, handlers.NewComponentHandler(hardware), handlers.NewVirtualChassisHandler(hardware))
+
+	// Virtualisation (DCIM BUILD_PLAN row 4.2): cluster types, cluster groups,
+	// clusters, virtual disks, cluster hosts and a VM's cluster and resources,
+	// behind virtualization.read / virtualization.manage. See
+	// virtualization_routes.go.
+	mountVirtualizationRoutes(apiv2, rawDB, handlers.NewVirtualizationHandler(services.NewVirtualizationService(rawDB)))
+	// VPN (DCIM BUILD_PLAN row 4.3): tunnels, IKE / IPsec proposals, policies
+	// and profiles, L2VPNs, behind vpn.read / vpn.manage. See vpn_routes.go.
+	mountVPNRoutes(apiv2, rawDB, handlers.NewVPNHandler(services.NewVPNService(rawDB)))
+	// Wireless (DCIM BUILD_PLAN row 4.4): wireless LAN groups, LANs and links,
+	// behind wireless.read / wireless.manage. See wireless_routes.go.
+	mountWirelessRoutes(apiv2, rawDB, handlers.NewIPAMHandler(services.NewWirelessService(rawDB)))
+	// Contacts, contact roles and assignments, and image attachments (DCIM
+	// BUILD_PLAN row 2.8), behind dcim.read / dcim.manage. Image bytes go to
+	// the shared/storage dcim_images artifact type when an admin has enabled
+	// it, else to local disk. See dcim_contact_routes.go, dcim_image_storage.go.
+	mountDcimContactRoutes(apiv2, rawDB,
+		handlers.NewContactHandler(services.NewContactService(rawDB)),
+		handlers.NewImageHandler(services.NewImageService(rawDB,
+			services.NewBlobStore(initDcimImageStorage(rawDB, bypassDB), ""))))
+	// Config contexts (DCIM BUILD_PLAN row 5.3) and the per-asset rendered
+	// config, behind dcim.read / dcim.manage. See dcim_config_context_routes.go.
+	mountDcimConfigContextRoutes(apiv2, rawDB, handlers.NewConfigContextHandler(services.NewConfigContextService(rawDB)))
+	// Bulk CSV import and export per object kind (DCIM BUILD_PLAN row 2.7):
+	// Settings → Import and the Export buttons. See dcim_bulk_routes.go.
+	exportTemplateService := services.NewExportTemplateService(rawDB)
+	mountDcimBulkRoutes(apiv2, rawDB, services.NewBulkImportService(rawDB, services.BulkDeps{
+		BusinessUnits: businessUnitService,
+		Sites:         siteService,
+		Assets:        assetService,
+		Catalogue:     services.NewCatalogueService(rawDB),
+		Interfaces:    services.NewInterfaceService(rawDB),
+	}), exportTemplateService)
+	// Export templates (DCIM BUILD_PLAN row 5.5): Settings → Export Templates,
+	// behind dcim.read / dcim.manage. See dcim_export_template_routes.go.
+	mountDcimExportTemplateRoutes(apiv2, rawDB, handlers.NewExportTemplateHandler(exportTemplateService))
+	// Circuits (DCIM BUILD_PLAN row 4.1): providers, provider accounts and
+	// networks, circuit types, circuits, terminations and groups, behind
+	// circuits.read / circuits.manage. See circuit_routes.go.
+	mountCircuitRoutes(apiv2, rawDB, handlers.NewCircuitHandler(services.NewCircuitService(rawDB)))
+	// Custom fields (DCIM BUILD_PLAN row 5.1): definitions and choice sets,
+	// behind dcim.read / custom_fields.manage. Values are validated on every
+	// DCIM write. See custom_field_routes.go.
+	mountCustomFieldRoutes(apiv2, rawDB, handlers.NewCustomFieldHandler(services.NewCustomFieldService(rawDB)))
+
+	// Racks, rack roles, rack types, reservations, the rack elevation and asset
+	// placement (DCIM BUILD_PLAN row 2.3), behind dcim.read / dcim.manage. See
+	// dcim_rack_routes.go.
+	mountDcimRackRoutes(apiv2, rawDB, handlers.NewRackHandler(services.NewRackService(rawDB), services.NewPlacementService(rawDB)))
+
+	// Cables, cable terminations and traces (DCIM BUILD_PLAN row 3.2), behind
+	// dcim.read / dcim.manage. See dcim_cable_routes.go.
+	mountDcimCableRoutes(apiv2, rawDB, handlers.NewCableHandler(cableService))
 
 	// Health check server (HTTP, port 8080). Answers a static body and never
 	// calls a seam, so it keeps its own short timeout — see
@@ -1066,6 +1132,11 @@ func main() {
 	// place — then every six hours; promotes only, never raises a proposal.
 	// Recorded per tenant in class_floor_sweep_state.
 	go jobs.StartClassFloorSweepWorker(ctx, bypassDB, services.ClassFloorSweepTenants, assetService)
+
+	// LLDP / CDP neighbours parked until their far interface arrives become
+	// proposed cables (DCIM row 3.3, services/cable_resolver.go): after every
+	// sightings batch that files interfaces, and hourly here.
+	go jobs.StartCableResolverWorker(ctx, bypassDB, services.CableResolverTenants, cableIntake)
 
 	// Keeps the persisted crypto risk judgement (crypto_risk_judgments) warm and
 	// back-fills the rows a schema upgrade creates stale. Readers

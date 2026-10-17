@@ -11,7 +11,7 @@ import {
   MERGE_PROPOSALS_PAGE_SIZE, mergeProposalRangeLabel, useAutoAcceptedMerges,
   useMergeAsIs, useMergeProposals, useResolveMergeProposal,
 } from '../inventory/asset-queries';
-import { assetIdentity, classLabel, primaryAddressPort } from '../inventory/asset-shape';
+import { assetIdentity, businessUnitName, classLabel, primaryAddressPort } from '../inventory/asset-shape';
 import { IdentityStatus } from '../inventory/identity-status';
 import { AssetMergeModal, recommendedMerge } from './asset-merge-modal';
 import type { MergeProposal } from '../inventory/asset-queries';
@@ -26,9 +26,12 @@ import {
 import {
   APPROVAL_SOURCES, SOURCE_HELP, SOURCE_ICON, SOURCE_LABEL,
   countBySource, matchesSourceFilter, sourceOfAsset, sourceOfClassProposal,
-  sourceOfProposal, sourceOfRelationshipProposal, type ApprovalSource,
+  sourceOfProposal, sourceOfRelationshipProposal, SOURCE_OF_CABLE_PROPOSAL, type ApprovalSource,
 } from './approval-sources';
 import { unwrap } from '../../lib/api-result';
+import { enterpriseDiscovery } from './enterprise-slots';
+import { ProposedCablesSection } from './proposed-cables-section';
+import { useProposedCables } from '../inventory/dcim/cable-queries';
 
 // Discovery → Approvals — the single proposal queue (ADR-0006 D6).
 //
@@ -42,7 +45,7 @@ const COLS = [
   { label: 'Discovered asset', w: '1.4fr' },
   { label: 'Address', w: '1fr' },
   { label: 'Class', w: '1fr' },
-  { label: 'Segment', w: '1fr' },
+  { label: 'Network', w: '1fr' },
   { label: 'Source', w: '150px' },
   { label: 'Confidence', w: '110px' },
   { label: 'Found', w: '100px' },
@@ -107,12 +110,15 @@ export function ApprovalsPage() {
   // rendering it as an empty section tells them there is nothing to do.
   const classProposalsQ = useClassProposals();
   const decideClass = useDecideClassProposal();
+  // Proposed cables (DCIM row 3.3): LLDP / CDP links between two known ports.
+  const cablesQ = useProposedCables();
   // What the platform merged WITHOUT asking — the matcher's auto-accepts and the
   // same-device rule's merges. Not a queue — a record, so the one unattended act
   // in this pipeline is visible to the person who enabled it. The rule is on by
   // default, so an empty list is an answer and the section says so.
   const autoMergedQ = useAutoAcceptedMerges();
   const qc = useQueryClient();
+  const SyncConflicts = enterpriseDiscovery.SyncConflictsSection;
 
   const allAssets = useMemo(() => q.data?.assets ?? [], [q.data]);
   // The tenant's whole pending-asset count, which is NOT the page length.
@@ -126,6 +132,8 @@ export function ApprovalsPage() {
   const allProposals = useMemo(() => proposalsQ.data?.proposals ?? [], [proposalsQ.data]);
   const allRelProposals = useMemo(() => relProposalsQ.data?.proposals ?? [], [relProposalsQ.data]);
   const allClassProposals = useMemo(() => classProposalsQ.data?.proposals ?? [], [classProposalsQ.data]);
+  const allCables = useMemo(() => cablesQ.data?.rows ?? [], [cablesQ.data]);
+  const cableTotal = cablesQ.data?.total ?? 0;
   // The tenant's whole proposal count, which is NOT the page length.
   const proposalTotal = proposalsQ.data?.total ?? 0;
   const relProposalTotal = relProposalsQ.data?.total ?? 0;
@@ -134,8 +142,8 @@ export function ApprovalsPage() {
   const [selected, setSelected] = useState<ApprovalSource[]>([]);
 
   const counts = useMemo(
-    () => countBySource(allAssets, allProposals, allRelProposals, allClassProposals),
-    [allAssets, allProposals, allRelProposals, allClassProposals],
+    () => countBySource(allAssets, allProposals, allRelProposals, allClassProposals, allCables),
+    [allAssets, allProposals, allRelProposals, allClassProposals, allCables],
   );
   const assets = useMemo(
     () => allAssets.filter((a) => matchesSourceFilter(sourceOfAsset(a), selected)),
@@ -155,8 +163,9 @@ export function ApprovalsPage() {
   );
   // What is on this page, and what the tenant actually has waiting. The header
   // must say the second: the merge list stops at the page size.
-  const shown = assets.length + proposals.length + relProposals.length + classProposals.length;
-  const queueTotal = assetTotal + proposalTotal + relProposalTotal + classProposalTotal;
+  const cablesShown = matchesSourceFilter(SOURCE_OF_CABLE_PROPOSAL, selected);
+  const shown = assets.length + proposals.length + relProposals.length + classProposals.length + (cablesShown ? allCables.length : 0);
+  const queueTotal = assetTotal + proposalTotal + relProposalTotal + classProposalTotal + cableTotal;
   const morePages = proposalTotal > allProposals.length;
 
   const toggleSource = (s: ApprovalSource) =>
@@ -171,8 +180,8 @@ export function ApprovalsPage() {
     onSuccess: (r) => toast.success(`${r.count ?? ''} asset${(r.count ?? 2) === 1 ? '' : 's'} ${r.approve ? 'approved' : 'denied'}`),
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Request failed'),
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: ['discovery', 'pending-assets'] });
-      qc.invalidateQueries({ queryKey: ['inventory'] });
+      void qc.invalidateQueries({ queryKey: ['discovery', 'pending-assets'] });
+      void qc.invalidateQueries({ queryKey: ['inventory'] });
     },
   });
 
@@ -185,10 +194,10 @@ export function ApprovalsPage() {
   // the merge read was failing behind it, and adding a third kind without
   // adding it here would reintroduce exactly that.
   const filtered = selected.length > 0;
-  const note = queryNote([q, proposalsQ, relProposalsQ, classProposalsQ], shown === 0 && !filtered, {
+  const note = queryNote([q, proposalsQ, relProposalsQ, classProposalsQ, cablesQ], shown === 0 && !filtered, {
     thing: 'pending items',
     emptyTitle: 'Nothing awaiting review',
-    emptyMessage: 'Newly discovered assets, imports, CMDB pulls, merge proposals, proposed relationships and proposed classes all land here for review. To skip review for trusted networks, enable "Auto-approve discoveries" on a network segment in Settings → Infrastructure.',
+    emptyMessage: 'Newly discovered assets, imports, CMDB pulls, merge proposals, proposed relationships, proposed classes and proposed cables all land here for review. To skip review for trusted networks, enable "Auto-approve discoveries" on a prefix in Inventory → Networks.',
   });
 
   return (
@@ -201,6 +210,7 @@ export function ApprovalsPage() {
         q.isLoading || proposalsQ.isLoading || proposalsQ.isError
           || relProposalsQ.isLoading || relProposalsQ.isError
           || classProposalsQ.isLoading || classProposalsQ.isError
+          || cablesQ.isLoading || cablesQ.isError
           ? '' : queueTotal
       }
     >
@@ -431,6 +441,14 @@ export function ApprovalsPage() {
         </div>
       )}
 
+      {/* Proposed cables (DCIM row 3.3). The section states its own loading
+          and failure; an empty read renders nothing. */}
+      {cablesShown && <ProposedCablesSection query={cablesQ} />}
+
+      {/* Sync conflicts from the NetBox connector (Enterprise; empty slot in
+          Core). The section fetches and states its own loading and failure. */}
+      {SyncConflicts && <SyncConflicts />}
+
       {shown === 0 && filtered ? (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '40px 20px', textAlign: 'center' }}>
           <Icon name="filter-x" size={24} style={{ color: 'var(--app-t3)' }} />
@@ -499,7 +517,7 @@ export function ApprovalsPage() {
                         with no endpoint has none to show. */}
                     <CellMono v={primaryAddressPort(a)} c="var(--app-t3)" />
                     <CellTxt v={classLabel(a.class_key)} />
-                    <CellTxt v={a.network_segment_name || a.business_unit} />
+                    <CellTxt v={a.prefix || businessUnitName(a.business_unit)} />
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: 'var(--app-t3)' }} title={SOURCE_HELP[source]}>
                       <Icon name={SOURCE_ICON[source]} size={11} />{SOURCE_LABEL[source]}
                     </span>

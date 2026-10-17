@@ -18,7 +18,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { SETTINGS_NAV, visibleSettingsNav, settingsPageMeta } from './nav';
+import { visibleSettingsNav, settingsPageMeta } from './nav';
 import { defaultFeatures } from '@vistasecurity/primitives/features';
 
 const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
@@ -26,16 +26,16 @@ const settingsPage = read('./settings-page.tsx');
 const autoScanPage = read('./pages-auto-scan.tsx');
 
 describe('Active Scanning is reachable', () => {
-  const item = SETTINGS_NAV
+  const item = visibleSettingsNav(defaultFeatures)
     .flatMap((s) => s.items.map((i) => ({ ...i, section: s.section })))
     .find((i) => i.key === 'sensor-config');
 
-  it('has a nav entry under Infrastructure, marked built', () => {
+  it('has a nav entry under Discovery & Reconciliation, marked built', () => {
     // The negative polarity of the same fact: left `built: false`, the entry
     // renders the "arrives in a later release" placeholder over a live endpoint
     // AND a worker that is already scanning the tenant's network.
     expect(item).toBeDefined();
-    expect(item?.section).toBe('Infrastructure');
+    expect(item?.section).toBe('Discovery & Reconciliation');
     expect(item?.built).toBe(true);
   });
 
@@ -108,12 +108,12 @@ describe('the page reaches the endpoints and reports what the platform did', () 
     expect(autoScanPage).toMatch(/describeNotScanned\(summary\.not_scanned\)/);
   });
 
-  it('the not-scanned rows offer the register-the-segment action as a LINK to the segments page', () => {
+  it('the not-scanned rows offer the add-the-prefix action as a LINK to Inventory → Networks', () => {
     // A call to action that names a page and does not link to it is a
     // scavenger hunt. The href comes from the logic module so the test next
     // door pins which reasons get it.
-    expect(autoScanPage).toMatch(/<Link to=\{row\.registerSegmentsHref\}/);
-    expect(autoScanPage).toMatch(/Register the segment to include these hosts/);
+    expect(autoScanPage).toMatch(/<Link to=\{row\.registerPrefixesHref\}/);
+    expect(autoScanPage).toMatch(/Add the prefix to include these hosts/);
   });
 
   it('distinguishes "every eligible host was scanned" from "no pass has run yet"', () => {

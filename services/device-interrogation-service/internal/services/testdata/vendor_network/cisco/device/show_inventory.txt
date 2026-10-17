@@ -1,0 +1,8 @@
+NAME: "Switch 1 Chassis", DESCR: "Cisco Catalyst 9300 Series Switch"
+PID: C9300-48P         , VID: V02  , SN: FCW2140L0GH
+
+NAME: "Switch 1 Power Supply Module 0", DESCR: "Cisco Catalyst 9300 Series 715W AC Power Supply"
+PID: PWR-C1-715WAC     , VID: V02  , SN: DTN2138W0FG
+
+NAME: "Switch 1 FRU Uplink Module 1", DESCR: "8x10G Uplink Module"
+PID: C9300-NM-8X        , VID: V02  , SN: FOC2137P0QR

@@ -254,9 +254,6 @@ func legacyFilterTerms(f models.AssetFilters) (terms []string, statusDefaulted b
 	if len(f.LocationID) > 0 {
 		add("location_id in (%s)", valueList(f.LocationID))
 	}
-	if len(f.NetworkSegmentID) > 0 {
-		add("segment_id in (%s)", valueList(f.NetworkSegmentID))
-	}
 	if len(f.RiskLevel) > 0 {
 		add("%s", legacyRiskLevels(f.RiskLevel))
 	}

@@ -61,7 +61,7 @@ func newInvMatrix(t *testing.T, raw *sql.DB) *invMatrix {
 	f := intakematrix.Setup(t, raw, tenant)
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
 	svc := NewAssetService(db)
-	svc.SetEnrichmentServices(NewNetworkSegmentService(db, NewLocationService(db)), NewServiceIdentificationService(db))
+	svc.SetEnrichmentServices(NewServiceIdentificationService(db))
 	svc.SetExternalConnectionsService(NewExternalConnectionsService(db, NewAlgorithmService(db)))
 	m := &invMatrix{Fixture: f, svc: svc, sensor: uuid.New()}
 	if _, err := raw.Exec(`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat)
@@ -694,7 +694,7 @@ func TestIntegration_IdentityIntakeMatrix_HeadlineRows(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				m := newInvMatrix(t, raw)
 				if !tc.serviceID {
-					m.svc.SetEnrichmentServices(NewNetworkSegmentService(m.svc.db, NewLocationService(m.svc.db)), nil)
+					m.svc.SetEnrichmentServices(nil)
 				}
 				before := m.Take(t)
 				findings := m.scanFindings(intakematrix.InNoSegment, intakematrix.Shape{}, nil)
@@ -738,7 +738,7 @@ func TestIntegration_IdentityIntakeMatrix_HeadlineRows(t *testing.T) {
 	// identity's supportingEndpointsAttach return false → ports "-".
 	t.Run("no_segment_direct_scan_attaches_endpoints_in_the_engine", func(t *testing.T) {
 		m := newInvMatrix(t, raw)
-		m.svc.SetEnrichmentServices(NewNetworkSegmentService(m.svc.db, NewLocationService(m.svc.db)), nil)
+		m.svc.SetEnrichmentServices(nil)
 		before := m.Take(t)
 		report, err := m.svc.IngestFindingsReport(m.Tenant, m.scanFindings(intakematrix.InNoSegment, intakematrix.Shape{}, nil), identity.StatusPendingApproval)
 		if err != nil {

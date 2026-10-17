@@ -109,6 +109,16 @@ const fortinetSystemStatusResponse = `{
   ]
 }`
 
+const fortinetARPResponse = `{
+  "http_method": "GET",
+  "status": "success",
+  "results": [
+    {"ip": "192.0.2.40", "age": 12, "mac": "00:00:5e:00:53:40", "interface": "internal"},
+    {"ip": "192.0.2.1", "age": 0, "mac": "00:09:0f:aa:bb:02", "interface": "internal"},
+    {"ip": "198.51.100.77", "age": 3, "mac": "00:00:00:00:00:00", "interface": "vlan-voice"}
+  ]
+}`
+
 const fortinetEmptyResponse = `{"http_method":"GET","status":"success","results":[]}`
 
 // newFortinetOpsTestServer answers every call the interrogation makes, so the
@@ -127,6 +137,8 @@ func newFortinetOpsTestServer(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(fortinetMonitorInterfaceResponse))
 		case strings.HasSuffix(path, "/monitor/router/ipv4"):
 			_, _ = w.Write([]byte(fortinetRouteResponse))
+		case strings.HasSuffix(path, "/monitor/network/arp"):
+			_, _ = w.Write([]byte(fortinetARPResponse))
 		default:
 			_, _ = w.Write([]byte(fortinetEmptyResponse))
 		}
@@ -185,70 +197,57 @@ func TestFortinetInterrogator_OpsCollectionIsWired(t *testing.T) {
 	}
 }
 
-func TestFortinetInterfaces_MergesConfiguredAndRunningViews(t *testing.T) {
+func TestFortinetNetwork_MergesConfiguredAndRunningViews(t *testing.T) {
 	configured := fortinetResultsFromJSON(t, fortinetInterfaceResponse)
 	running := fortinetMonitorResultsFromJSON(t, fortinetMonitorInterfaceResponse)
 
-	interfaces := fortinetInterfaces(configured, running)
-	assertNoPoison(t, "fortinet interfaces", interfaces)
+	n := fortinetNetwork(configured, running, nil)
+	assertNetworkCarriesNo(t, n, "MUST-NOT-BE-COLLECTED")
 
-	byName := map[string]map[string]interface{}{}
-	for _, iface := range interfaces {
-		byName[iface["name"].(string)] = iface
+	byName := map[string]netIface{}
+	for _, ifc := range n.Interfaces {
+		byName[ifc.Name] = ifc
 	}
 	// Four configured plus "mgmt", which only the running view reports.
 	if len(byName) != 5 {
-		t.Fatalf("interfaces = %v, want four configured plus mgmt", interfaceNames(interfaces))
+		t.Fatalf("interfaces = %+v, want four configured plus mgmt", n.Interfaces)
 	}
 
 	wan := byName["port1"]
-	if wan["mac"] != "00:09:0f:aa:bb:01" || wan["admin_state"] != "up" || wan["state"] != "up" || wan["speed"] != 1000 {
+	if wan.MAC != "00:09:0f:aa:bb:01" || wan.Enabled == nil || !*wan.Enabled || wan.OperStatus != "up" || wan.SpeedKbps != 1_000_000 {
 		t.Errorf("port1 projection wrong: %+v", wan)
 	}
-	if addrs, ok := wan["addresses"].([]interface{}); !ok || addrs[0] != "203.0.113.2/29" {
-		t.Errorf("the \"address netmask\" pair was not combined into a prefix: %+v", wan)
+	if len(wan.Addresses) != 1 || wan.Addresses[0].Address != "203.0.113.2/29" || wan.Addresses[0].VRF != "" {
+		t.Errorf("the \"address netmask\" pair was not combined into a prefix (root VDOM = global): %+v", wan)
 	}
 
 	vlan := byName["vlan-voice"]
-	if vlan["vlan"] != 40 {
-		t.Errorf("VLAN tag lost: %+v", vlan)
+	if vlan.UntaggedVLAN != 40 || vlan.Mode != "access" || vlan.Parent != "internal" || vlan.Type != "virtual" {
+		t.Errorf("VLAN sub-interface lost its tag, parent or type: %+v", vlan)
 	}
 
-	// Administrative and operational state are different facts: this interface
-	// is administratively down AND unlinked, and both have to survive.
+	// Administrative and operational state are different statements.
 	unused := byName["unused"]
-	if unused["admin_state"] != "down" || unused["state"] != "down" {
+	if unused.Enabled == nil || *unused.Enabled || unused.OperStatus != "down" || len(unused.Addresses) != 0 || unused.SpeedKbps != 0 {
 		t.Errorf("unused interface: %+v", unused)
 	}
-	if _, addressed := unused["addresses"]; addressed {
-		t.Errorf("\"0.0.0.0 0.0.0.0\" was recorded as an address: %+v", unused)
-	}
-	if _, hasSpeed := unused["speed"]; hasSpeed {
-		t.Errorf("a link-down interface was given a speed of 0: %+v", unused)
-	}
 
-	// The running view states mgmt's address as a separate address and mask.
 	mgmt := byName["mgmt"]
-	if addrs, ok := mgmt["addresses"].([]interface{}); !ok || addrs[0] != "10.0.0.1/24" {
+	if len(mgmt.Addresses) != 1 || mgmt.Addresses[0].Address != "10.0.0.1/24" {
 		t.Errorf("the monitor view's address/mask pair was lost: %+v", mgmt)
 	}
-}
 
-func TestFortinetVLANs_OnlyTaggedSubinterfaces(t *testing.T) {
-	vlans := fortinetVLANs(fortinetResultsFromJSON(t, fortinetInterfaceResponse))
-	assertNoPoison(t, "fortinet vlans", vlans)
-
-	if len(vlans) != 1 {
-		t.Fatalf("expected the one tagged subinterface, got %+v", vlans)
+	if len(n.VLANs) != 1 || n.VLANs[0].VID != 40 || n.VLANs[0].Name != "vlan-voice" {
+		t.Errorf("VLANs = %+v, want the tagged sub-interface's 40", n.VLANs)
 	}
-	vlan := vlans[0]
-	if vlan["id"] != 40 || vlan["name"] != "vlan-voice" {
-		t.Errorf("VLAN projection wrong: %+v", vlan)
+	var voice *netPrefix
+	for i := range n.Prefixes {
+		if n.Prefixes[i].Prefix == "198.51.100.0/24" {
+			voice = &n.Prefixes[i]
+		}
 	}
-	// The subinterface's address is the firewall's own address on that segment
-	// — the same reading UniFi's ip_subnet gets.
-	if vlan["subnet"] != "198.51.100.0/24" || vlan["gateway"] != "198.51.100.1" {
-		t.Errorf("segment/gateway split wrong: %+v", vlan)
+	if voice == nil || voice.VLAN != 40 {
+		t.Errorf("prefixes = %+v, want 198.51.100.0/24 on VLAN 40", n.Prefixes)
 	}
 }
 

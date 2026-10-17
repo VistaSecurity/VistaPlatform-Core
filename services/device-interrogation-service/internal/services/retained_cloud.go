@@ -17,7 +17,6 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
-	"github.com/vistasecurity/vistaplatform/shared/relationships"
 )
 
 // CloudIdentitySummary counts committed identity outcomes independently of
@@ -153,32 +152,10 @@ func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, 
 		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 			return err
 		}
-		var parent uuid.UUID
-		if payload.Enumeration != nil && payload.Enumeration.ParentID != "" {
-			owners, err := repo.FindByIdentifier(ctx, tenant.String(), identity.KindCloudResourceID, payload.Enumeration.ParentID, "")
-			if err != nil {
-				return err
-			}
-			if len(owners) == 1 {
-				parent, err = uuid.Parse(owners[0].ID)
-				if err != nil {
-					return err
-				}
-			}
-		}
-		if payload.Enumeration != nil && payload.Enumeration.ParentID != "" && parent == uuid.Nil {
-			if err := repo.RunInTx(ctx, tenant.String(), func(r *pgidentity.Repository) error {
-				_, err := r.Tx().ExecContext(ctx, `UPDATE identity_observation_cloud_contexts SET next_attempt_at=now()+interval '5 minutes',last_error='cloud parent identity unresolved' WHERE tenant_id=$1 AND observation_id=$2 AND receipt_key=$3`, tenant, observation, receipt)
-				return err
-			}); err != nil {
-				return err
-			}
-			continue
-		}
+		// No containment edge is replayed: an enumerated instance's network is
+		// prefix containment of its addresses since DCIM row 1.5f, not a
+		// `contains` edge from a subnet asset.
 		locks := []shareddatabase.SessionAdvisoryLock{{Key: pgidentity.AssetLifecycleLockKey(tenant, asset), Shared: true}}
-		if parent != uuid.Nil {
-			locks = append(locks, shareddatabase.SessionAdvisoryLock{Key: pgidentity.AssetLifecycleLockKey(tenant, parent), Shared: true})
-		}
 		// Rows the replay queued, read only once its transaction committed.
 		replayQueued := 0
 		err = shareddatabase.WithSessionAdvisoryLocks(ctx, s.db, locks, func() error {
@@ -222,24 +199,6 @@ func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, 
 						// or fresher attributes installed while identity was unresolved.
 						if _, err := r.Tx().ExecContext(ctx, `UPDATE assets SET attributes=$3::jsonb||COALESCE(attributes,'{}'::jsonb),updated_at=now() WHERE tenant_id=$1 AND id=$2`, tenant, asset, string(attrs)); err != nil {
 							return err
-						}
-					}
-					if parent != uuid.Nil && parent != asset {
-						var available bool
-						if err := r.Tx().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE tenant_id=$1 AND id=$2 AND deleted_at IS NULL AND asset_status NOT IN ('archived','denied'))`, tenant, parent).Scan(&available); err != nil {
-							return err
-						}
-						if !available {
-							return fmt.Errorf("cloud parent identity changed during replay")
-						}
-						if available {
-							edgeStatus, err := r.EdgeStatusFor(ctx, tenant.String(), source.Kind, parent.String(), asset.String())
-							if err != nil {
-								return err
-							}
-							if err := r.UpsertRelationship(ctx, tenant.String(), pgidentity.Edge{FromAssetID: parent.String(), ToAssetID: asset.String(), Type: string(relationships.Contains), SourceKind: source.Kind, SourceRef: source.Ref, Status: edgeStatus, ObservedAt: observedAt}); err != nil {
-								return err
-							}
 						}
 					}
 				}

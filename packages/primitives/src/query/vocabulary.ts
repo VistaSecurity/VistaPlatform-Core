@@ -19,6 +19,8 @@ export const COLLECTIONS: readonly string[] = [
   'identifier',
   'relationship',
   'asset',
+  // DCIM amendment (QUERY_LANGUAGE §15, BUILD_PLAN row 1.2).
+  'interface',
 ];
 
 /** Reports whether s names a sub-predicate collection, case-insensitively. */

@@ -1,0 +1,110 @@
+{
+  "region": "us-east-1",
+  "describe_vpcs": {
+    "Vpcs": [
+      {
+        "VpcId": "vpc-0a1f00000000000a1",
+        "OwnerId": "111122223333",
+        "CidrBlock": "10.20.0.0/16",
+        "State": "available",
+        "IsDefault": false,
+        "Tags": [{"Key": "Name", "Value": "prod"}]
+      }
+    ]
+  },
+  "describe_subnets": {
+    "Subnets": [
+      {
+        "SubnetId": "subnet-0b1f0000000000b1",
+        "SubnetArn": "arn:aws:ec2:us-east-1:111122223333:subnet/subnet-0b1f0000000000b1",
+        "OwnerId": "111122223333",
+        "VpcId": "vpc-0a1f00000000000a1",
+        "CidrBlock": "10.20.1.0/24",
+        "AvailabilityZone": "us-east-1a",
+        "MapPublicIpOnLaunch": true,
+        "State": "available",
+        "Tags": [{"Key": "Name", "Value": "prod-app-a"}]
+      },
+      {
+        "SubnetId": "subnet-0b2f0000000000b2",
+        "SubnetArn": "arn:aws:ec2:us-east-1:111122223333:subnet/subnet-0b2f0000000000b2",
+        "OwnerId": "111122223333",
+        "VpcId": "vpc-0a1f00000000000a1",
+        "CidrBlock": "10.20.2.0/24",
+        "AvailabilityZone": "us-east-1b",
+        "MapPublicIpOnLaunch": false,
+        "State": "available",
+        "Tags": [{"Key": "Name", "Value": "prod-data-b"}]
+      }
+    ]
+  },
+  "describe_security_groups": {
+    "SecurityGroups": [
+      {
+        "GroupId": "sg-0e1f0000000000e1",
+        "GroupName": "web",
+        "OwnerId": "111122223333",
+        "VpcId": "vpc-0a1f00000000000a1",
+        "IpPermissions": [{"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}]
+      }
+    ]
+  },
+  "describe_instances": {
+    "Reservations": [
+      {
+        "OwnerId": "111122223333",
+        "Instances": [
+          {
+            "InstanceId": "i-0c1f0000000000c1",
+            "InstanceType": "m6i.large",
+            "ImageId": "ami-0f1f0000000000f1",
+            "State": {"Code": 16, "Name": "running"},
+            "PrivateDnsName": "ip-10-20-1-10.ec2.internal",
+            "PrivateIpAddress": "10.20.1.10",
+            "VpcId": "vpc-0a1f00000000000a1",
+            "SubnetId": "subnet-0b1f0000000000b1",
+            "Placement": {"AvailabilityZone": "us-east-1a"},
+            "PlatformDetails": "Linux/UNIX",
+            "Architecture": "x86_64",
+            "KeyName": "bastion",
+            "LaunchTime": "2026-10-01T08:00:00Z",
+            "SecurityGroups": [{"GroupId": "sg-0e1f0000000000e1", "GroupName": "web"}],
+            "NetworkInterfaces": [
+              {
+                "NetworkInterfaceId": "eni-0d1f0000000000d1",
+                "MacAddress": "0A:11:22:33:44:01",
+                "Status": "in-use",
+                "SubnetId": "subnet-0b1f0000000000b1",
+                "VpcId": "vpc-0a1f00000000000a1",
+                "Description": "Primary network interface db_password=PlantedEniSecret7731",
+                "PrivateIpAddress": "10.20.1.10",
+                "PrivateIpAddresses": [
+                  {"Primary": true, "PrivateIpAddress": "10.20.1.10"},
+                  {"Primary": false, "PrivateIpAddress": "10.20.1.11"}
+                ],
+                "Association": {"PublicIp": "203.0.113.10", "PublicDnsName": "ec2-203-0-113-10.compute-1.amazonaws.com"}
+              },
+              {
+                "NetworkInterfaceId": "eni-0d2f0000000000d2",
+                "MacAddress": "0a:11:22:33:44:02",
+                "Status": "in-use",
+                "SubnetId": "subnet-0b2f0000000000b2",
+                "VpcId": "vpc-0a1f00000000000a1",
+                "Description": "data plane",
+                "PrivateIpAddress": "10.20.2.10",
+                "PrivateIpAddresses": [{"Primary": true, "PrivateIpAddress": "10.20.2.10"}]
+              }
+            ],
+            "Tags": [
+              {"Key": "Name", "Value": "web-01"},
+              {"Key": "aws_secret_access_key", "Value": "AKIAPLANTEDSECRET0001wJalrXUtnFEMI"}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "list_buckets": {
+    "Buckets": [{"Name": "prod-logs-111122223333", "CreationDate": "2026-01-01T00:00:00Z"}]
+  }
+}

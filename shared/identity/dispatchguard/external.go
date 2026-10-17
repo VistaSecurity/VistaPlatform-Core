@@ -82,7 +82,7 @@ const (
 	CodeTargetsRefused              = "targets_refused"
 	CodeExternalTargetsUnconfirmed  = "external_targets_unconfirmed"
 	CodeExternalTargetsDisabled     = "external_targets_disabled"
-	reasonOutsideRegisteredNetworks = "outside the network segments this tenant has registered"
+	reasonOutsideRegisteredNetworks = "outside the prefixes this tenant has declared"
 )
 
 // ExternalPolicy is the installation's stance on explicit external targets.
@@ -462,7 +462,7 @@ func (s TargetScope) classify(lo, hi netip.Addr) (targetClass, string) {
 			if why, ok := reservedReason(p.Masked()); ok {
 				return classExcluded, why
 			}
-			return classExcluded, "the range is excluded from scanning (a range your organization excluded, a network segment marked sensitive, or the platform's own addresses)"
+			return classExcluded, "the range is excluded from scanning (a range your organization excluded, a prefix marked sensitive, or the platform's own addresses)"
 		}
 	}
 	// 6to4 / Teredo: the IPv4 address inside is judged by the same exclusions.
@@ -539,7 +539,7 @@ func intervalSize(lo, hi netip.Addr, max uint64) uint64 {
 //     ranges, a hostname resolving to one, an external block over the size
 //     bound), all of them listed — RefusedTargetsError;
 //  2. external targets on a request that is not a person's — RefusedTargetsError
-//     with today's "outside the network segments" reason;
+//     with today's "outside the prefixes" reason;
 //  3. external targets when the operator switched the capability off —
 //     ExternalTargetsError{CodeExternalTargetsDisabled};
 //  4. external targets without the confirmation flag —
@@ -600,7 +600,7 @@ func (s TargetScope) AuthorizeManual(targets []ResolvedTarget, opts ManualOption
 		case classExternal:
 			if opts.PersonInitiated && opts.Policy.Enabled && intervalSize(lo, hi, opts.Policy.MaxAddresses) > opts.Policy.MaxAddresses {
 				refused = append(refused, RefusedTarget{Target: name, Reason: fmt.Sprintf(
-					"a target outside your registered networks may name at most %d addresses; split the block or register it as a network segment", opts.Policy.MaxAddresses)})
+					"a target outside your registered networks may name at most %d addresses; split the block or declare it as a prefix (Inventory → Networks)", opts.Policy.MaxAddresses)})
 				continue
 			}
 			external = append(external, ExternalTarget{Target: name, Addresses: []string{t.Input}, Count: intervalSize(lo, hi, jobBound)})

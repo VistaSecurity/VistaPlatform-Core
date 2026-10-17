@@ -13,6 +13,7 @@
 // table would have been the wrong answer — twelve classes would have meant
 // twelve lists to forget to update.
 import { ATTRIBUTE_SCHEMAS, ASSET_CLASSES, type AssetClassKey } from '@vistasecurity/primitives/assets';
+import { businessUnitName, siteName } from './asset-shape';
 import {
   assetRisk, attr, classLabel, endpointCount, primaryAddressPort, relativeSeen,
   type AssetLike,
@@ -53,9 +54,9 @@ export const BASE_COLUMNS: AssetColumn[] = [
  */
 export const OPTIONAL_BASE_COLUMNS: AssetColumn[] = [
   { key: 'support_group', label: 'Support group', width: 'minmax(0,1fr)', value: (a) => a.support_group ?? '' },
-  { key: 'site', label: 'Site', width: 'minmax(0,0.9fr)', value: (a) => a.site ?? '' },
-  { key: 'business_unit', label: 'Business unit', width: 'minmax(0,1fr)', value: (a) => a.business_unit ?? '' },
-  { key: 'segment', label: 'Segment', width: 'minmax(0,1fr)', value: (a) => a.network_segment_name ?? '' },
+  { key: 'site', label: 'Site', width: 'minmax(0,0.9fr)', value: (a) => siteName(a.site) },
+  { key: 'business_unit', label: 'Business unit', width: 'minmax(0,1fr)', value: (a) => businessUnitName(a.business_unit) },
+  { key: 'prefix', label: 'Network', width: 'minmax(0,1fr)', value: (a) => a.prefix ?? '' },
   { key: 'endpoints', label: 'Endpoints', width: '84px', numeric: true, value: (a) => { const n = endpointCount(a); return n === null ? '' : String(n); } },
   { key: 'risk_score', label: 'Risk', width: '70px', numeric: true, value: (a) => assetRisk(a).label },
 ];
@@ -74,7 +75,7 @@ const ATTRIBUTE_RANK: readonly string[] = [
   'operating_system', 'os_version', 'serial_number', 'model', 'vendor',
   'cloud_provider', 'account_id', 'resource_type', 'engine', 'engine_version',
   'version', 'runtime', 'image', 'firmware_version', 'software_version',
-  'ip_protocol', 'server_role', 'architecture', 'asset_tag', 'cpu_count', 'memory_mb',
+  'ip_protocol', 'server_role', 'architecture', 'cpu_count', 'memory_mb',
 ];
 
 /** How many attribute columns a class contributes. Three keeps the row legible
@@ -109,17 +110,17 @@ export function classColumns(classKey: string | null | undefined, limit = MAX_CL
  *
  * When the facet is at a PARENT class (or at no class at all) the sensible
  * default applies: a parent's own attribute set is the intersection its
- * children share, so `hardware` contributes vendor/model/asset_tag and nothing
+ * children share, so `hardware` contributes vendor/model and nothing
  * class-specific — which is exactly right, because a list mixing servers and
  * switches has no common OS column to show. With no class selected there is no
- * attribute set at all and the table falls back to base columns plus Segment,
+ * attribute set at all and the table falls back to base columns plus Network,
  * which is the most useful thing to say about a heterogeneous list.
  */
 export function columnsForClass(classKey: string | null | undefined): AssetColumn[] {
   const attributeCols = classColumns(classKey);
   if (attributeCols.length === 0) {
-    const segment = OPTIONAL_BASE_COLUMNS.find((c) => c.key === 'segment');
-    return segment ? [...BASE_COLUMNS, segment] : [...BASE_COLUMNS];
+    const network = OPTIONAL_BASE_COLUMNS.find((c) => c.key === 'prefix');
+    return network ? [...BASE_COLUMNS, network] : [...BASE_COLUMNS];
   }
   // Address stays; environment and owner give up their tracks to the class
   // columns, which are the more specific answer once a class is chosen.

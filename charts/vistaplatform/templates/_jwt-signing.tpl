@@ -66,7 +66,7 @@ vistaplatform.io/legacy-hmac-sessions
 
 {{/* Cluster facts, as JSON. BEGIN-FACTS (the test stubs out this define). */}}
 {{- define "vistaplatform.jwtLegacyHmacFacts" -}}
-{{- $live := lookup "v1" "Namespace" "" "kube-system" -}}
+{{- $live := include "vistaplatform.clusterIsLive" . -}}
 {{- $sec := lookup "v1" "Secret" .Release.Namespace (include "vistaplatform.jwtSigningSecretName" .) -}}
 {{- $meta := dict -}}
 {{- if $sec -}}
@@ -74,7 +74,7 @@ vistaplatform.io/legacy-hmac-sessions
 {{- end -}}
 {{- $annotations := $meta.annotations | default dict -}}
 {{- toJson (dict
-      "live" (not (empty $live))
+      "live" (eq $live "true")
       "found" (not (empty $sec))
       "created" ($meta.creationTimestamp | default "" | toString)
       "marker" (index $annotations (include "vistaplatform.jwtLegacyHmacMarkerKey" .) | default "")) -}}

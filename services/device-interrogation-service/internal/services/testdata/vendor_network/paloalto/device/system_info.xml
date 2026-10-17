@@ -1,0 +1,18 @@
+<response status="success">
+  <result>
+    <system>
+      <hostname>fw-dc-01</hostname>
+      <ip-address>10.30.0.5</ip-address>
+      <netmask>255.255.255.0</netmask>
+      <default-gateway>10.30.0.1</default-gateway>
+      <mac-address>00:1b:17:0a:30:0c</mac-address>
+      <uptime>8 days, 4:23:11</uptime>
+      <devicename>fw-dc-01</devicename>
+      <family>3200</family>
+      <model>PA-3220</model>
+      <serial>013201005521</serial>
+      <sw-version>11.1.4-h7</sw-version>
+      <snmp-community>PlantedPanSecret-5521</snmp-community>
+    </system>
+  </result>
+</response>

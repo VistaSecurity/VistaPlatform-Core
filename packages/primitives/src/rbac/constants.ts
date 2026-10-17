@@ -85,6 +85,36 @@ export const TENANT_PERMISSIONS = {
     read: 'audit.read',
     manage: 'audit.manage',
   },
+  dcim: {
+    read: 'dcim.read',
+    manage: 'dcim.manage',
+  },
+  ipam: {
+    read: 'ipam.read',
+    manage: 'ipam.manage',
+  },
+  circuits: {
+    read: 'circuits.read',
+    manage: 'circuits.manage',
+  },
+  virtualization: {
+    read: 'virtualization.read',
+    manage: 'virtualization.manage',
+  },
+  vpn: {
+    read: 'vpn.read',
+    manage: 'vpn.manage',
+  },
+  wireless: {
+    read: 'wireless.read',
+    manage: 'wireless.manage',
+  },
+  business_units: {
+    manage: 'business_units.manage',
+  },
+  custom_fields: {
+    manage: 'custom_fields.manage',
+  },
 } as const;
 
 type ValueOf<T> = T[keyof T];

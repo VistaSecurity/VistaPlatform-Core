@@ -13,6 +13,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 )
 
@@ -91,7 +92,7 @@ func observationOwners(ctx context.Context, tx *sql.Tx, tenant uuid.UUID, eviden
 	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT ai.asset_id, COALESCE(NULLIF(a.display_name,''), NULLIF(a.hostname,''), ''),
 		 (a.id IS NOT NULL AND a.deleted_at IS NULL AND a.asset_status NOT IN ('archived','denied'))
 		FROM unnest($2::text[], $3::text[], $4::text[]) AS x(kind, value, scope)
-		JOIN asset_identifiers ai ON ai.tenant_id=$1 AND ai.kind=x.kind AND ai.value=x.value AND coalesce(ai.scope,'')=coalesce(x.scope,'')
+		JOIN (`+identifiersql.All+`) ai ON ai.tenant_id=$1 AND ai.kind=x.kind AND ai.value=x.value AND coalesce(ai.scope,'')=coalesce(x.scope,'')
 		LEFT JOIN assets a ON a.tenant_id=ai.tenant_id AND a.id=ai.asset_id
 		ORDER BY ai.asset_id`, tenant, pq.Array(kinds), pq.Array(values), pq.Array(scopes))
 	if err != nil {

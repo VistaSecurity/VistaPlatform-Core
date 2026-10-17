@@ -31,15 +31,15 @@ vi.mock('../../components/ui', async (importOriginal) => {
 vi.mock('./network-map-exploded', () => ({ ExplodedDevice: () => null }));
 
 const COUNT = 80;
-const SEG = '00000000-0000-4000-8000-0000000000aa';
+const PFX = '00000000-0000-4000-8000-0000000000aa';
 const id = (i: number): string => `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
 const noPqc = { needs_migration: 0, pqc_ready: 0, symmetric_safe: 0, unclassified: 0 };
 
 const MAP: NetworkMap = {
-  segments: [{ segment_id: SEG, name: 'Office LAN', value: '10.0.0.0/24', segment_type: 'cidr', gateway: null }],
+  prefixes: [{ prefix_id: PFX, prefix: '10.0.0.0/24', description: 'Office LAN', vlan_vid: null, vlan_name: null, gateway: null, fhrp_group: null }],
   assets: Array.from({ length: COUNT }, (_, i) => ({
     asset_id: id(i + 1), display_name: `host-${i}`, class_key: 'server', address: `10.0.0.${i + 1}`,
-    asset_status: 'monitoring', site: 'Head office', segment_id: SEG,
+    asset_status: 'monitoring', site: 'Head office', prefix_id: PFX,
     risk_score: 0, risk_assessed: false, service_count: 0, crypto_service_count: 0,
     crypto: { components: [], pqc: noPqc, certs_expiring_90d: 0 },
   })),

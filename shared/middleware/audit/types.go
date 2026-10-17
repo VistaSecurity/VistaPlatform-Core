@@ -126,21 +126,6 @@ const (
 	EventTypeSensorDeactivated   = "sensor.deactivated"
 	EventTypeSensorHealthCheck   = "sensor.health_check"
 
-	// Network space events (legacy)
-	EventTypeNetworkSpaceCreated     = "network_space.created"
-	EventTypeNetworkSpaceAssetTagged = "network_space.asset_tagged"
-
-	// Network segment events
-	EventTypeNetworkSegmentCreated     = "network_segment.created"
-	EventTypeNetworkSegmentUpdated     = "network_segment.updated"
-	EventTypeNetworkSegmentDeleted     = "network_segment.deleted"
-	EventTypeNetworkSegmentAssetTagged = "network_segment.asset_tagged"
-	// A person stated that a range learned from a device is the tenant's, and
-	// so made it scannable on request ( D8) — or withdrew that statement.
-	// The claim is the paper trail for "who said this range was ours".
-	EventTypeNetworkSegmentClaimed      = "network_segment.claimed"
-	EventTypeNetworkSegmentClaimRevoked = "network_segment.claim_revoked"
-
 	// System events
 	EventTypeSystemConfigChanged = "system.config.changed"
 	EventTypeSecurityAlert       = "security.alert"

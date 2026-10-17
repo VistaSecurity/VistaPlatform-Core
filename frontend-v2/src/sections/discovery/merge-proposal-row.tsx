@@ -24,7 +24,7 @@ import type { MergeCandidate, MergeProposal, MergeScoreFactor } from '../invento
 
 /** One entry of a candidate's `matched_identifiers`, which the contract leaves
  *  as an open object. Narrowed here to the fields the row reads. */
-export interface MatchedIdentifier { kind?: string; value?: string; scope?: string }
+export interface MatchedIdentifier { kind?: string; value?: string; scope?: string; iface?: string }
 
 export function readIdentifier(raw: unknown): MatchedIdentifier {
   if (!raw || typeof raw !== 'object') return {};
@@ -33,7 +33,16 @@ export function readIdentifier(raw: unknown): MatchedIdentifier {
     kind: typeof r.kind === 'string' ? r.kind : undefined,
     value: typeof r.value === 'string' ? r.value : undefined,
     scope: typeof r.scope === 'string' ? r.scope : undefined,
+    // DCIM row 1.4: the candidate's interface holding a matched MAC or
+    // address. Absent on older proposals and on every other kind.
+    iface: typeof r.interface === 'string' && r.interface !== '' ? r.interface : undefined,
   };
+}
+
+/** The interface a matched MAC or address sits on, as the card shows it. */
+export function interfaceNote(i: MatchedIdentifier): string | null {
+  if (!i.iface) return null;
+  return i.kind === 'mac_address' || i.kind === 'ip_address' ? `on ${i.iface}` : null;
 }
 
 /** The matcher's score as a percentage. ZERO means UNSCORED, not "certainly
@@ -192,6 +201,11 @@ function CandidateCard({ candidate, selected, onSelect, selectable }: {
             <Icon name="link" size={10} style={{ color: 'var(--accent)', flex: 'none' }} />
             <span style={{ fontSize: 10.5, color: 'var(--app-t3)', flex: 'none', minWidth: 92 }}>{identifierKindLabel(i.kind ?? '')}</span>
             <span className="mono" title={i.value} style={{ fontSize: 11, color: 'var(--app-t1)', fontWeight: 600, minWidth: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{i.value ?? '—'}</span>
+            {interfaceNote(i) && (
+              // Which of the candidate's interfaces holds the value: evidence
+              // a reviewer can check against the asset's Interfaces tab.
+              <span data-testid="matched-interface" className="mono" title={i.iface} style={{ fontSize: 10.5, color: 'var(--app-t3)', flex: 'none', whiteSpace: 'nowrap' }}>{interfaceNote(i)}</span>
+            )}
           </div>
         ))}
       </div>

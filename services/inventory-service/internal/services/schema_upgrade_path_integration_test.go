@@ -59,49 +59,45 @@ import (
 // newest first. Raise it with SCHEMA_UPGRADE_FROM_COUNT when auditing a risky
 // schema change; each extra tag costs a full schema+seed apply cycle.
 //
-// It was ZERO until core-v1.0.0 shipped, per ADR-0007 D2.5. That test asks
-// "does the current schema apply over the shape release X left behind?", and
-// from phase 1 onwards the honest answer for every PRE-1.0 core-v* tag is "no,
-// and deliberately": `assets`, `devices` and the `asset_type` enum are
-// REPLACED, not migrated, because the owner established that there
-// are no installs of those releases to carry forward.
+// It is ZERO for the 5.0 cycle, by decision (asset-inventory ADR-0010 D11).
+// scripts/database/schema.sql was re-baselined for 5.0.0: every ADD COLUMN was
+// folded into its CREATE TABLE, every backfill and 4.x-only DROP deleted, and
+// the POST-MIGRATIONS block removed. 5.0.0 is a fresh install — there is no
+// upgrade path from 4.x — so "does the current schema apply over the shape
+// release X left behind?" has no X to ask about: every 4.x tag is a shape the
+// re-baseline deliberately does not converge, and every 5.0 release candidate
+// is installed onto an empty database.
 //
-// core-v1.0.0 was tagged on. It is the first release of the new
-// shape and therefore the first one anything can upgrade FROM, so the count is
-// re-armed to 2 exactly as D2.5 directs. The test is the only thing that
-// catches a statement which is fine against today's tables and fails against a
-// prior release's (a `SET NOT NULL` on a column old rows hold NULL in, a
-// `CHECK` old-format data violates); a populated double-apply is structurally
-// blind to that class.
-//
-// Two, not one: the second-newest release is the one an install that skipped a
-// patch upgrades from, and it costs one more schema+seed cycle to cover.
-// Only FINAL releases count — see releaseTag below.
-const upgradeFromTagCount = 2
+// The day core-v5.0.0 ships it becomes the first release anything can upgrade
+// FROM, and this goes back to 2 — the newest release and the one an install
+// that skipped a patch upgrades from. The tripwire in
+// schema_upgrade_tripwire_test.go fails the unit suite until it does.
+// Only FINAL releases at or above firstSupportedUpgradeFrom count.
+const upgradeFromTagCount = 0
 
 func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
-	// Unreachable while upgradeFromTagCount is 2 — kept so that setting the
-	// constant back to 0 disarms the test loudly rather than fataling on an
-	// empty tag list. The tripwire in schema_upgrade_tripwire_test.go fails the
-	// unit suite if anyone does set it back.
+	// Disarmed for the 5.0 cycle (ADR-0010 D11): the skip is the constant at
+	// work, not an absent dependency. The tripwire in
+	// schema_upgrade_tripwire_test.go fails the unit suite once core-v5.0.0
+	// exists and the constant is still 0.
 	if n := upgradeFromTagCountFromEnv(); n == 0 {
-		t.Skip("upgrade-path verification is disarmed: upgradeFromTagCount is 0. " +
-			"It was re-armed to 2 when core-v1.0.0 shipped (ADR-0007 D2.5); if you are " +
-			"reading this, something set it back. Set SCHEMA_UPGRADE_FROM_COUNT to run " +
-			"against that many prior release tags anyway.")
+		t.Skip("upgrade-path verification is disarmed: upgradeFromTagCount is 0 until " +
+			"core-v5.0.0 ships (asset-inventory ADR-0010 D11: 5.0.0 is a fresh install, " +
+			"so no prior release is an upgrade path). Set SCHEMA_UPGRADE_FROM_COUNT to " +
+			"run against that many final releases at or above firstSupportedUpgradeFrom.")
 	}
 	admin := testdb.Connect(t)
 	root := testdb.RepoRoot(t)
 
 	tags := priorReleaseTags(t, root, upgradeFromTagCountFromEnv())
 	if len(tags) == 0 {
-		t.Fatal("no core-v1.0.0-or-later release tags found — cannot verify the upgrade " +
-			"path. This usually means a shallow checkout: the test needs full history " +
-			"(actions/checkout with fetch-depth: 0), not just the tip commit. " +
-			"Release CANDIDATES and pre-1.0 releases do not count; see " +
-			"firstSupportedUpgradeFrom.")
+		t.Fatalf("no %v-or-later release tags found — cannot verify the upgrade "+
+			"path. This usually means a shallow checkout: the test needs full history "+
+			"(actions/checkout with fetch-depth: 0), not just the tip commit. "+
+			"Release CANDIDATES and releases below the floor do not count; see "+
+			"firstSupportedUpgradeFrom.", firstSupportedUpgradeFrom)
 	}
-	// Fewer tags than asked for is normal right after 1.0.0 — there is only one
+	// Fewer tags than asked for is normal right after 5.0.0 — there is only one
 	// release at or above the floor — and says so rather than looking like the
 	// loop silently did less work than the constant advertises.
 	if want := upgradeFromTagCountFromEnv(); len(tags) < want {
@@ -128,13 +124,6 @@ func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
 			//    (algorithms, roles, frameworks); these add the tenant-scoped
 			//    shape that constraint changes are most likely to break.
 			tenant := populateForUpgrade(t, scratch)
-			// ...and a platform admin's edits to shipped content, made before
-			// the release that started protecting them (decision 4, RC-12).
-			editSeededContentBeforeUpgrade(t, scratch)
-			// ...and the rows a purged tenant left behind in tables that had
-			// no FK to tenants, which this release's cascade FKs must clean
-			// up before adding (schema_upgrade_orphan_tenant_rows_integration_test.go).
-			orphans := seedOrphanTenantRows(t, scratch, tenant)
 
 			// 3. The assertion. This is the exact operation the chart's
 			//    schema-migration Job performs on `helm upgrade`.
@@ -152,9 +141,6 @@ func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
 			// 5. An upgrade that silently discards tenant data is not a
 			//    successful upgrade, even though psql exited 0.
 			assertTenantDataSurvived(t, scratch, tenant, tag)
-			assertSeededContentEditsSurvived(t, scratch, tag)
-			assertOTActiveProbingOnAfterUpgrade(t, scratch, tag)
-			assertOrphanTenantRowsRemoved(t, scratch, tenant, orphans, tag)
 		})
 	}
 }
@@ -190,23 +176,17 @@ var releaseTag = regexp.MustCompile(`^core-v([0-9]+)\.([0-9]+)\.([0-9]+)$`)
 // firstSupportedUpgradeFrom is the oldest shape this test will start from, and
 // it is a DECISION, not a convenience.
 //
-// ADR-0007 D2 is the no-migration path: phase 1 REPLACES `network_assets`,
-// `devices` and the `asset_type` enum rather than migrating them, drops the old
-// tables in POST-MIGRATIONS, and attempts no translation — because the owner
-// established that there are no installs of any pre-1.0 release to
-// carry forward. D2.5 therefore re-arms this test "against that release and
-// every one after it", core-v1.0.0 being the first release of the new shape.
+// asset-inventory ADR-0010 D11 re-baselined schema.sql for 5.0.0 as a fresh
+// install: the 4.x migration block is gone, so no 4.x shape converges and none
+// is an upgrade path. core-v5.0.0 is the first release of the re-baselined
+// shape and therefore the first one anything can upgrade FROM. (The previous
+// floor, core-v1.0.0, was ADR-0007 D2.5's for the same reason.)
 //
-// Without the floor, "newest two" reaches back to core-v0.12.5, which fails on
-// the replacement itself and would fail the suite on a decision — which teaches
-// the next person to weaken the test rather than to read the ADR, the exact
-// outcome the constant's comment above was written to prevent.
-//
-// The floor is NOT a place to hide a failure. It excludes only shapes the ADR
-// says nothing can be upgraded from; every release from 1.0.0 onward is tested,
-// and a real ordering bug against one of those still fails here. Raise it only
-// if a future ADR declares another replacement release.
-var firstSupportedUpgradeFrom = version{1, 0, 0}
+// The floor is NOT a place to hide a failure. It excludes only shapes an ADR
+// says nothing can be upgraded from; every release from 5.0.0 onward is
+// tested, and a real ordering bug against one of those still fails here. Raise
+// it only if a future ADR declares another fresh-install release.
+var firstSupportedUpgradeFrom = version{5, 0, 0}
 
 type version struct{ major, minor, patch int }
 
@@ -274,9 +254,9 @@ func firstNReleaseTags(lines []string, n int) []string {
 // floor) are separable: cases below fail if EITHER is removed.
 //
 // The shape being guarded is the real `git tag --sort=-v:refname` output of
-// this repository at core-v1.0.0: nineteen candidates sorted ABOVE the release
-// they are candidates for, because git's version sort has no semver prerelease
-// rule. An unfiltered "newest two" returns rc.19 and rc.18 and never a shipped
+// this repository at core-v1.0.0 (renumbered to the 5.0 floor below): nineteen
+// candidates sorted ABOVE the release they are candidates for, because git's
+// version sort has no semver prerelease rule. An unfiltered "newest two" returns rc.19 and rc.18 and never a shipped
 // release at all.
 func TestPriorReleaseTagsSelectsFinalReleasesOnly(t *testing.T) {
 	for _, c := range []struct {
@@ -290,13 +270,13 @@ func TestPriorReleaseTagsSelectsFinalReleasesOnly(t *testing.T) {
 			// floor, so this case fails if the rc filter goes and passes if
 			// only the floor does the work.
 			"candidates sorted above their release are skipped",
-			[]string{"core-v1.0.1-rc.2", "core-v1.0.1-rc.1", "core-v1.0.1", "core-v1.0.0"},
+			[]string{"core-v5.0.1-rc.2", "core-v5.0.1-rc.1", "core-v5.0.1", "core-v5.0.0"},
 			2,
-			[]string{"core-v1.0.1", "core-v1.0.0"},
+			[]string{"core-v5.0.1", "core-v5.0.0"},
 		},
 		{
 			"candidates only yields nothing rather than a candidate",
-			[]string{"core-v1.0.0-rc.2", "core-v1.0.0-rc.1"},
+			[]string{"core-v5.0.0-rc.2", "core-v5.0.0-rc.1"},
 			2,
 			nil,
 		},
@@ -308,9 +288,9 @@ func TestPriorReleaseTagsSelectsFinalReleasesOnly(t *testing.T) {
 		},
 		{
 			"n caps the result",
-			[]string{"core-v1.0.1", "core-v1.0.0", "core-v0.12.5"},
+			[]string{"core-v5.0.1", "core-v5.0.0", "core-v4.6.5"},
 			1,
-			[]string{"core-v1.0.1"},
+			[]string{"core-v5.0.1"},
 		},
 		{
 			"blank lines from an empty tag list do not match",
@@ -318,26 +298,26 @@ func TestPriorReleaseTagsSelectsFinalReleasesOnly(t *testing.T) {
 			2,
 			nil,
 		},
-		// The floor. ADR-0007 D2 replaces the asset tables rather than
-		// migrating them, so a pre-1.0 shape is not an upgrade path; asking
-		// for two when only one qualifying release exists returns the one.
+		// The floor. ADR-0010 D11 makes 5.0.0 a fresh install, so a 4.x shape
+		// is not an upgrade path; asking for two when only one qualifying
+		// release exists returns the one.
 		{
-			"pre-1.0 releases are below the floor",
-			[]string{"core-v1.0.0", "core-v0.12.5", "core-v0.12.4"},
+			"pre-5.0 releases are below the floor",
+			[]string{"core-v5.0.0", "core-v4.6.5", "core-v4.6.4"},
 			2,
-			[]string{"core-v1.0.0"},
+			[]string{"core-v5.0.0"},
 		},
 		{
 			"the floor is not a blanket exclusion of older patches",
-			[]string{"core-v1.2.0", "core-v1.1.9", "core-v1.0.0"},
+			[]string{"core-v5.2.0", "core-v5.1.9", "core-v5.0.0"},
 			3,
-			[]string{"core-v1.2.0", "core-v1.1.9", "core-v1.0.0"},
+			[]string{"core-v5.2.0", "core-v5.1.9", "core-v5.0.0"},
 		},
 		{
 			"a major above the floor qualifies",
-			[]string{"core-v2.0.0"},
+			[]string{"core-v6.0.0"},
 			1,
-			[]string{"core-v2.0.0"},
+			[]string{"core-v6.0.0"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -488,8 +468,7 @@ func populateForUpgrade(t *testing.T, db *sql.DB) uuid.UUID {
 	// subject: sign-up ignored deleted accounts until, so any prior
 	// release can hold this pair, and it is exactly the data a bare
 	// CREATE UNIQUE INDEX on uq_user_auth_methods_platform_subject fails on.
-	// schema_platform_subject_index_integration_test.go covers the cases in
-	// detail; this puts the reported one on a real prior release's shape.
+	// This puts that pair on a real prior release's shape.
 	goneUser, liveUser := uuid.New(), uuid.New()
 	subject := "upgrade-subject-" + tenant.String()[:8]
 	tryExec(t, db, "users", `
@@ -536,41 +515,4 @@ func assertTenantDataSurvived(t *testing.T, db *sql.DB, tenant uuid.UUID, tag st
 		return
 	}
 	t.Logf("upgrade from %s preserved %d assets row(s) for the test tenant", tag, assets)
-}
-
-// assertOTActiveProbingOnAfterUpgrade: releases before OT active probing moved
-// to Core seeded `ot_active_probing` {"enabled": false} on every tier, and the
-// tier_entitlements INSERT is ON CONFLICT DO NOTHING — so only seed.sql's
-// one-shot correction turns those rows on. Without it an upgraded install
-// would keep OT probing off on every plan while a fresh one has it on.
-func assertOTActiveProbingOnAfterUpgrade(t *testing.T, db *sql.DB, tag string) {
-	t.Helper()
-	rows, err := db.Query(`
-		SELECT st.name, te.included_value->>'enabled'
-		FROM tier_entitlements te
-		JOIN subscription_tiers st ON st.id = te.tier_id
-		JOIN billable_items bi ON bi.id = te.item_id
-		WHERE bi.key = 'ot_active_probing'
-		  AND st.name IN ('community', 'free', 'starter', 'pro', 'enterprise')`)
-	if err != nil {
-		t.Fatalf("read ot_active_probing tier rows after upgrading from %s: %v", tag, err)
-	}
-	defer func() { _ = rows.Close() }()
-	seen := 0
-	for rows.Next() {
-		var tier, enabled string
-		if err := rows.Scan(&tier, &enabled); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		seen++
-		if enabled != "true" {
-			t.Errorf("after upgrading from %s: %s tier ot_active_probing enabled=%s, want true (Core, on by default)", tag, tier, enabled)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate: %v", err)
-	}
-	if seen != 5 {
-		t.Errorf("after upgrading from %s: found %d seeded-tier ot_active_probing rows, want 5", tag, seen)
-	}
 }

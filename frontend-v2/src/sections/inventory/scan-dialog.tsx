@@ -4,7 +4,7 @@
 // Active Scan used to (that page is retired):
 //
 // • "Run from": Auto (the observing sensor, else one on its
-//     segment, else the platform) · Platform sensor · one named tenant sensor.
+//     prefix, else the platform) · Platform sensor · one named tenant sensor.
 // • The outside-your-registered-networks question ( W5.13b): the API
 //     answers 422 naming those assets BEFORE anything is stamped or
 //     dispatched for them. "Scan anyway" resends exactly what the answer says
@@ -214,8 +214,8 @@ export function ScanDialog({ open, selection, onClose, onStarted }: {
       )}
       {choice === 'auto' && !runFrom.loading && !runFrom.noTenantSensors && (
         <p style={{ margin: '10px 0 0', fontSize: 12, color: 'var(--app-t3)' }}>
-          Each asset is scanned from the tenant sensor that saw it, else one on its network segment, else the platform sensor.
-          If the sensor that saw it is offline, another online sensor on the same segment takes it; with none, it is not scanned
+          Each asset is scanned from the tenant sensor that saw it, else one on its network, else the platform sensor.
+          If the sensor that saw it is offline, another online sensor on the same network takes it; with none, it is not scanned
           (never from the platform instead) and is listed with the reason.
         </p>
       )}

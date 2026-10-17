@@ -45,7 +45,7 @@ describe('the dashboard registry', () => {
   });
 
   it('lists the dashboards, Overview first', () => {
-    expect(DASHBOARDS.map((d) => d.key)).toEqual(['overview', 'assets', 'compliance', 'pqc', 'overview-next']);
+    expect(DASHBOARDS.map((d) => d.key)).toEqual(['overview', 'assets', 'compliance', 'pqc']);
   });
 
   it('gives every non-Overview dashboard a /dashboard/<key> path', () => {
@@ -108,9 +108,9 @@ describe('registry ↔ router', () => {
     expect(missing).toEqual([]);
   });
 
-  it('serves no /dashboard route that is not in the registry', () => {
+  it('serves no dashboard route outside the registry except the retired Overview 2 redirect', () => {
     const extra = routed.filter((p) => !DASHBOARDS.some((d) => d.path === p));
-    expect(extra).toEqual([]);
+    expect(extra).toEqual(['/dashboard/overview-next']);
   });
 });
 

@@ -176,11 +176,11 @@ func SameDeviceVerdict(obs Observation, candidates []MergeCandidate, summaries m
 	}
 	switch {
 	case segA != "" && segA == segB:
-		evidence = append(evidence, "same segment")
+		evidence = append(evidence, "same prefix")
 	case segA == "" && segB == "":
-		evidence = append(evidence, "no segment on either record")
+		evidence = append(evidence, "no prefix on either record")
 	default:
-		evidence = append(evidence, "one of the records has no segment")
+		evidence = append(evidence, "one of the records has no prefix")
 	}
 	if onlyAddressesA || onlyAddressesB {
 		evidence = append(evidence, "the record reached by address holds nothing but addresses")

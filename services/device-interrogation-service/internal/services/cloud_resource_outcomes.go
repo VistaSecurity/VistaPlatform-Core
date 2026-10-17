@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -100,6 +101,29 @@ type CloudResourceTypeOutcome struct {
 	ScopesSucceeded int                     `json:"scopes_succeeded"`
 	ScopesAttempted int                     `json:"scopes_attempted"`
 	Failures        []CloudCollectorFailure `json:"failures,omitempty"`
+	// Regions is the per-region half of the outcome (asset-inventory ADR-0009
+	// D3): one row per region this type was asked about, in the order they
+	// were attempted. An account-wide listing (S3, CloudFront, every Azure and
+	// GCP listing) is one `global` row for the CALL, plus one row per region
+	// the listing's resources turned out to be in, marked
+	// `from_account_listing` — those regions were not asked separately, the
+	// one call answered for all of them.
+	Regions []CloudRegionOutcome `json:"regions,omitempty"`
+}
+
+// CloudRegionOutcome is one resource type in one region (or `global`).
+type CloudRegionOutcome struct {
+	Region string `json:"region"`
+	Status string `json:"status"`
+	// Found is meaningful for succeeded and partial rows only.
+	Found int `json:"found"`
+	// Failure is the provider's error for a failed (or partial) row.
+	Failure *CloudCollectorFailure `json:"failure,omitempty"`
+	// FromAccountListing marks a region row attributed from an account-wide
+	// call rather than asked for on its own.
+	FromAccountListing bool `json:"from_account_listing,omitempty"`
+
+	attempts, succeeded int
 }
 
 // CloudOutcomeRecorder accumulates per-type outcomes for one run.
@@ -169,11 +193,15 @@ func (r *CloudOutcomeRecorder) Attempt(resourceType, scope string, found int, er
 	o := r.ensure(resourceType)
 	o.ScopesAttempted++
 	o.Found += found
+	var failure *CloudCollectorFailure
 	if err != nil {
-		o.Failures = append(o.Failures, SanitizeCloudFailure(scope, err))
+		f := SanitizeCloudFailure(scope, err)
+		failure = &f
+		o.Failures = append(o.Failures, f)
 	} else {
 		o.ScopesSucceeded++
 	}
+	o.regionRow(scope).attempt(found, failure)
 
 	switch {
 	case len(o.Failures) == 0:
@@ -185,6 +213,138 @@ func (r *CloudOutcomeRecorder) Attempt(resourceType, scope string, found int, er
 	}
 }
 
+// AttemptPartial records ONE call that answered with `found` resources but is
+// known to be incomplete because of `err` — Azure's VM listing answered while
+// the NIC listing that places the VMs did not. One scope, status partial;
+// never rounded up to succeeded. Nil-receiver safe.
+func (r *CloudOutcomeRecorder) AttemptPartial(resourceType, scope string, found int, err error) {
+	if r == nil {
+		return
+	}
+	if err == nil {
+		r.Attempt(resourceType, scope, found, nil)
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	o := r.ensure(resourceType)
+	o.ScopesAttempted++
+	o.ScopesSucceeded++
+	o.Found += found
+	f := SanitizeCloudFailure(scope, err)
+	o.Failures = append(o.Failures, f)
+	o.Status = CloudTypePartial
+	row := o.regionRow(scope)
+	row.attempts++
+	row.Found += found
+	if row.Failure == nil {
+		row.Failure = &f
+	}
+	row.Status = CloudTypePartial
+}
+
+// regionRow returns the type's row for a region, appending it on first use.
+// Caller holds the lock.
+func (o *CloudResourceTypeOutcome) regionRow(region string) *CloudRegionOutcome {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		region = cloudScopeGlobal
+	}
+	for i := range o.Regions {
+		if o.Regions[i].Region == region {
+			return &o.Regions[i]
+		}
+	}
+	o.Regions = append(o.Regions, CloudRegionOutcome{Region: region, Status: CloudTypeNotAttempted})
+	return &o.Regions[len(o.Regions)-1]
+}
+
+// attempt folds one call into a region row. One region can take several calls
+// for one type (AWS `networks` is DescribeVpcs AND DescribeSubnets), and a
+// region where one answered and one did not is partial, not either extreme.
+func (row *CloudRegionOutcome) attempt(found int, failure *CloudCollectorFailure) {
+	row.attempts++
+	row.Found += found
+	if failure != nil {
+		if row.Failure == nil {
+			row.Failure = failure
+		}
+	} else {
+		row.succeeded++
+	}
+	switch {
+	case row.succeeded == row.attempts:
+		row.Status = CloudTypeSucceeded
+	case row.succeeded > 0:
+		row.Status = CloudTypePartial
+	default:
+		row.Status = CloudTypeFailed
+	}
+}
+
+// AttributeRegions spreads an ACCOUNT-WIDE listing's resources over the
+// regions they turned out to be in, as `from_account_listing` rows beside the
+// call's own `global` row. Only for a listing that answered: a failed call
+// found nothing to attribute. Nil-receiver safe.
+func (r *CloudOutcomeRecorder) AttributeRegions(resourceType string, perRegion map[string]int) {
+	if r == nil || len(perRegion) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	o := r.ensure(resourceType)
+	regions := make([]string, 0, len(perRegion))
+	for region := range perRegion {
+		if strings.TrimSpace(region) != "" && region != cloudScopeGlobal {
+			regions = append(regions, region)
+		}
+	}
+	sort.Strings(regions)
+	for _, region := range regions {
+		row := o.regionRow(region)
+		if row.attempts > 0 {
+			// Asked on its own as well; the direct answer stands.
+			continue
+		}
+		row.Status = CloudTypeSucceeded
+		row.Found = perRegion[region]
+		row.FromAccountListing = true
+	}
+}
+
+// Covered returns the listings this run READ COMPLETELY, as
+// `<resource_type>@<region>` (`global` for an account-wide call): the
+// statements "every resource of this type in this region was listed at this
+// run's time", which is what lets the lifecycle treat a resource the listing
+// did not return as gone rather than unlooked-for (ADR-0009 D6). A partial or
+// failed region covers nothing; neither does a not_attempted type.
+func (r *CloudOutcomeRecorder) Covered() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, t := range r.order {
+		for _, row := range r.byType[t].Regions {
+			if row.FromAccountListing || row.Status != CloudTypeSucceeded {
+				continue
+			}
+			out = append(out, CloudListingKey(t, row.Region))
+		}
+	}
+	return out
+}
+
+// CloudListingKey names one listing: a resource type in a region.
+func CloudListingKey(resourceType, region string) string {
+	region = strings.TrimSpace(region)
+	if region == "" {
+		region = cloudScopeGlobal
+	}
+	return strings.TrimSpace(resourceType) + "@" + region
+}
+
 // Outcomes returns the per-type outcomes in the order the types were requested.
 func (r *CloudOutcomeRecorder) Outcomes() []CloudResourceTypeOutcome {
 	if r == nil {
@@ -194,7 +354,9 @@ func (r *CloudOutcomeRecorder) Outcomes() []CloudResourceTypeOutcome {
 	defer r.mu.Unlock()
 	out := make([]CloudResourceTypeOutcome, 0, len(r.order))
 	for _, t := range r.order {
-		out = append(out, *r.byType[t])
+		o := *r.byType[t]
+		o.Regions = append([]CloudRegionOutcome(nil), o.Regions...)
+		out = append(out, o)
 	}
 	return out
 }
@@ -307,14 +469,44 @@ func runCloudCollectors(ctx context.Context, resourceTypes, regions []string, co
 			scopes = regions
 		}
 		for _, scope := range scopes {
-			found, err := c.collect(ctx, scope)
+			// The listing rides the context down to the per-resource write, so
+			// every resource it records carries `cloud.listing` and
+			// `cloud.last_enumerated_at` (ADR-0009 D6).
+			found, err := c.collect(withCloudListing(ctx, CloudListingKey(resourceType, scope)), scope)
 			devices = append(devices, found...)
 			outcomes.Attempt(resourceType, scope, len(found), err)
 			logCloudCollectorFailure(resourceType, scope, err)
+			if !c.regional && err == nil {
+				outcomes.AttributeRegions(resourceType, devicesPerRegion(found))
+			}
 		}
 	}
 
 	return devices
+}
+
+// devicesPerRegion counts an account-wide listing's resources by the region
+// each one states.
+func devicesPerRegion(devices []models.Device) map[string]int {
+	out := map[string]int{}
+	for _, d := range devices {
+		if region := strings.TrimSpace(cloudRegionForDevice(d)); region != "" {
+			out[region]++
+		}
+	}
+	return out
+}
+
+// cloudListingCtxKey carries the listing a collector call is answering.
+type cloudListingCtxKey struct{}
+
+func withCloudListing(ctx context.Context, listing string) context.Context {
+	return context.WithValue(ctx, cloudListingCtxKey{}, listing)
+}
+
+func cloudListingFrom(ctx context.Context) string {
+	v, _ := ctx.Value(cloudListingCtxKey{}).(string)
+	return v
 }
 
 // logCloudCollectorFailure keeps the operator-facing log line the swallowed

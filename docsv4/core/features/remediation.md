@@ -143,7 +143,7 @@ version — or when the subject leaves your inventory.
 
 **Changed since baseline.** When something about an asset stops matching its
 own recent history, you get **one alert for that asset** naming what changed: a
-class of device never before seen on its network segment, a protocol it has not
+class of device never before seen on its prefix, a protocol it has not
 spoken before, a different set of listening ports, or a certificate from an
 issuer it has not presented. Its severity is the severity of the change itself
 — a changed port profile is Low, a new issuer or an unexpected protocol is
@@ -242,7 +242,7 @@ What happens:
 - The deletion is **recorded in the audit trail** under the name of whoever did
   it, together with the ticket's details: title, category, status, priority,
   assignee, due date, tags and everything it was linked to. Because the ticket
-  itself is gone, that audit entry is the only remaining record of it — which
+  itself is gone, that audit-log record is the only remaining record of it — which
   is exactly why it holds the whole ticket rather than just an ID.
 
 Deleting requires remediation-management permission, even though **creating**

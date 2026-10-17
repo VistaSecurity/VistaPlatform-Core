@@ -106,7 +106,7 @@ func newProbeFixture(t *testing.T) *probeFixture {
 		sql  string
 		args []any
 	}{
-		{`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,is_active,environment) VALUES($1,$2,'VLAN 99','cidr','198.51.100.0/24',true,'production')`, []any{f.segment, tenant}},
+		{`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'VLAN 99','198.51.100.0/24'::cidr,'production','declared','active')`, []any{f.segment, tenant}},
 		{`INSERT INTO sensors(id,tenant_id,name,platform,version,profile,status,last_heartbeat,network_interfaces,reported_capabilities,reported_dns_interfaces) VALUES($1,$2,'branch-sensor','windows','4.3.1','datacenter_host','active',$3,ARRAY['eth0'],ARRAY['identity_dns_v1'],ARRAY['eth0'])`, []any{f.executor, tenant, now}},
 		{`INSERT INTO agent_addresses(sensor_id,interface_name,address,prefix_length,last_seen_at) VALUES($1,'eth0','198.51.100.205',24,$2)`, []any{f.executor, now}},
 	} {

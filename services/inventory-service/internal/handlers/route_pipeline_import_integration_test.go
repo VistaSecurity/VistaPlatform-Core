@@ -20,6 +20,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -31,9 +32,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
+	"github.com/vistasecurity/vistaplatform/shared/dcim/changes"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
-	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	sharedmw "github.com/vistasecurity/vistaplatform/shared/middleware"
@@ -43,13 +44,11 @@ import (
 const routeImportPath = "/api/v1/inventory-service/discovery/jobs/%s/import"
 
 // routePipelineFixture is the import handler over a real database, with the
-// asset service wired as cmd/main.go wires it: segment classification and the
-// external-connections writer both present. Without the segment service every
-// finding classifies "unknown" and no third-party assertion below could fail.
+// asset service wired as cmd/main.go wires it: prefix classification and the
+// external-connections writer both present.
 type routePipelineFixture struct {
 	engine *gin.Engine
 	raw    *sql.DB
-	segSvc *services.NetworkSegmentService
 	tenant uuid.UUID
 }
 
@@ -60,9 +59,7 @@ func newRoutePipelineFixture(t *testing.T) *routePipelineFixture {
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
 	tenant := testdb.NewTenant(t, raw)
 
-	segSvc := services.NewNetworkSegmentService(db, services.NewLocationService(db))
 	assets := services.NewAssetService(db)
-	assets.SetEnrichmentServices(segSvc, nil)
 	assets.SetExternalConnectionsService(services.NewExternalConnectionsService(db, services.NewAlgorithmService(db)))
 
 	gin.SetMode(gin.TestMode)
@@ -75,7 +72,7 @@ func newRoutePipelineFixture(t *testing.T) *routePipelineFixture {
 		c.Next()
 	})
 	grp.POST("/inventory-service/discovery/jobs/:id/import", NewDiscoveryHandler(assets, nil).IngestPipelineFindings)
-	return &routePipelineFixture{engine: r, raw: raw, segSvc: segSvc, tenant: tenant}
+	return &routePipelineFixture{engine: r, raw: raw, tenant: tenant}
 }
 
 // routeImportResponse is the import handler's response shape.
@@ -255,32 +252,32 @@ func TestIntegration_RoutePipelineImport_ThirdPartyWithoutSourceIsDropped(t *tes
 	}
 }
 
-// routeSegmentWithAutoApproval registers a CIDR segment that auto-approves
-// sensor discoveries and regenerates the tenant's rules — what Settings →
-// Infrastructure → Network Segments does on save.
-func (f *routePipelineFixture) routeSegmentWithAutoApproval(t *testing.T, cidr string) *models.NetworkSegment {
+// routePrefixWithAutoApproval declares a prefix that auto-approves sensor
+// discoveries — what Inventory → Networks does — through the IPAM service, whose
+// write generates the rule (prefix_approval_rules.go).
+func (f *routePipelineFixture) routePrefixWithAutoApproval(t *testing.T, cidr string) uuid.UUID {
 	t.Helper()
-	on := true
-	seg, err := f.segSvc.Create(f.tenant, models.NetworkSegmentInput{
-		Name: "Route test " + cidr, SegmentType: "cidr", Value: cidr, NetworkType: "private",
-		Environment: "production", AutoApproveDiscoveries: &on,
-		AutoApproveSources: []string{models.AutoApproveSourceSensor},
-	})
+	body, _ := json.Marshal(map[string]any{"prefix": cidr, "description": "Route test " + cidr,
+		"network_type": "private", "environment": "production", "auto_approve_discoveries": true})
+	out, err := services.NewIPAMService(f.raw).Create(handlerIPAMCtx(), f.tenant, "prefixes", body)
 	if err != nil {
-		t.Fatalf("create segment %s: %v", cidr, err)
+		t.Fatalf("declare prefix %s: %v", cidr, err)
 	}
-	if err := f.segSvc.ManageAutoApprovalRules(f.tenant, uuid.Nil); err != nil {
-		t.Fatalf("regenerate auto-approval rules: %v", err)
+	var row struct {
+		ID uuid.UUID `json:"id"`
 	}
-	return seg
+	if err := json.Unmarshal(out, &row); err != nil {
+		t.Fatal(err)
+	}
+	return row.ID
 }
 
 // The rules run here now. Both polarities in one import: a finding inside the
-// auto-approving segment lands monitoring and names its rule; one outside it
+// auto-approving prefix lands monitoring and names its rule; one outside it
 // lands pending and names none.
 func TestIntegration_RoutePipelineImport_EvaluatesAutoApprovalRules(t *testing.T) {
 	f := newRoutePipelineFixture(t)
-	f.routeSegmentWithAutoApproval(t, "10.20.0.0/16")
+	f.routePrefixWithAutoApproval(t, "10.20.0.0/16")
 
 	resp := f.importFindings(t,
 		routeFinding("10.20.1.5", "inside.corp.example", nil),
@@ -388,4 +385,11 @@ func TestIntegration_RoutePipelineImport_FailedRouteIsRetryableError(t *testing.
 	if n := len(f.externalRows(t)); n != 1 {
 		t.Errorf("external_connections rows = %d, want only the healthy one", n)
 	}
+}
+
+// handlerIPAMCtx is the actor context an IPAM write needs: the change ledger
+// refuses a UI/API change nobody made.
+func handlerIPAMCtx() context.Context {
+	return changes.WithSource(changes.WithActor(context.Background(),
+		changes.Actor{UserID: uuid.New(), UserName: "op@example.test"}), changes.SourceUI)
 }

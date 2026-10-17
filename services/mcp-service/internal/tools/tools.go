@@ -203,4 +203,5 @@ func Register(s *mcp.Server, d *Deps) {
 	registerInventoryTools(s, d)
 	registerComplianceTools(s, d)
 	registerCBOMTools(s, d)
+	registerDcimIPAMTools(s, d)
 }

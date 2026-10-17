@@ -48,7 +48,7 @@ describe('palette ↔ lens registry parity (gate1 C8)', () => {
   it('labels each lens entry with the registry’s own label', () => {
     for (const item of LENS_NAV_ITEMS) {
       const lens = INVENTORY_LENSES.find((l) => l.key === lensOf(item.to))!;
-      expect(item.label).toBe(`Inventory · ${lens.label}`);
+      expect(item.label).toBe(`Infrastructure · ${lens.label}`);
     }
   });
 
@@ -69,9 +69,9 @@ describe('palette ↔ lens registry parity (gate1 C8)', () => {
 describe('palette ↔ settings registry parity (gate1 C8)', () => {
   const settingsKeys = SETTINGS_NAV.flatMap((s) => s.items.map((i) => i.key));
 
-  it('offers the two pages that explain how the inventory is decided', () => {
+  it('offers operational taxonomy in Infrastructure and matching policy in Settings', () => {
     const targets = NAV_ITEMS.map((i) => i.to);
-    expect(targets).toContain('/settings/classes');
+    expect(targets).toContain('/inventory/manage/classes');
     expect(targets).toContain('/settings/identification-rules');
   });
 

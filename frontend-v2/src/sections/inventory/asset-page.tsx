@@ -26,8 +26,8 @@ import {
   type AssetClassChange, type AssetEndpoint, type AssetHistoryEntry, type AssetIdentifier,
 } from './asset-queries';
 import {
-  addressPinLabel, assetRisk, attr, classIcon, classLabel, confidenceLabel, handshakeRefusal, identifierKindLabel, identifierProvenanceLabel,
-  operatingSystem, primaryAddressPort, relativeSeen, sourceKindLabel, stripMask,
+  addressPinLabel, assetRisk, businessUnitName, attr, classIcon, classLabel, confidenceLabel, handshakeRefusal, identifierKindLabel, identifierProvenanceLabel,
+  operatingSystem, primaryAddressPort, relativeSeen, sitePlacementLabel, sourceKindLabel, stripMask,
   type AssetLike,
 } from './asset-shape';
 import { ATTRIBUTE_SCHEMAS, type AssetClassKey } from '@vistasecurity/primitives/assets';
@@ -50,8 +50,28 @@ import { AssessmentLimitNotice } from '../findings/assessment-limit';
 import { CryptoRiskChip } from './crypto-risk-presentation';
 import { RelationshipsTab } from './relationships-tab';
 import { historySentence } from './history-sentence';
-import { dhcpText, reportedText, routedHostsHref, routedNetworks, viaGateway, vlanText, type SegmentGateway } from './segment-gateway';
-import { CoverageText, GatewayLink } from './segment-gateway-view';
+import {
+  dhcpText, fhrpText, reportedText, routedHostsHref, routedNetworks, viaFHRPGroup, viaGateway, vlanText,
+  type FHRPGroupRef, type PrefixGateway,
+} from './prefix-gateway';
+import { CoverageText, GatewayLink } from './prefix-gateway-view';
+// The DCIM object substrate's readers (DCIM BUILD_PLAN row 0.3): any object's
+// change record, journal and tags, mounted here on the asset first.
+import { ObjectChanges } from './dcim/object-changes';
+import { InterfacesTab } from './dcim/interfaces-tab';
+import { PortsTab } from './dcim/ports-tab';
+import { HardwareTab } from './dcim/hardware-tab';
+import { PlacementCard } from './racks/placement-card';
+import { ObjectJournal } from './dcim/object-journal';
+import { ConfigContextTab } from './dcim/config-context-tab';
+import { ObjectContacts } from './dcim/object-contacts';
+import { CloudPlacementSection } from './cloud/cloud-placement';
+import { ObjectImages } from './dcim/object-images';
+import { ObjectTags } from './dcim/object-tags';
+import { VirtualizationCard } from './virtualization/virtualization-card';
+import { CustomFieldsPanel } from './dcim/custom-fields-panel';
+import { useSaveAssetCustomFields } from './dcim/custom-field-queries';
+import { HardwareCard } from './dcim/hardware-card';
 
 // ------------------------------------------------------------------ states --
 
@@ -130,7 +150,7 @@ function IdentifierRow({ ident }: { ident: AssetIdentifier }) {
         {pin && (
           <span
             data-testid="identifier-address-pin"
-            title="Pinned address: declared by an operator or reported static by the host's agent. It still matches this asset inside a network segment flagged DHCP."
+            title="Pinned address: declared by an operator or reported static by the host's agent. It still matches this asset inside a prefix flagged DHCP."
             style={{ flex: 'none', fontSize: 10.5, fontWeight: 600, color: 'var(--app-t2)', border: '1px solid var(--app-border)', borderRadius: 40, padding: '0 6px', lineHeight: '16px' }}
           >
             {pin}
@@ -237,6 +257,7 @@ export function selectedFindingID(hash: string): string {
 }
 
 function OverviewTab({ asset }: { asset: Asset }) {
+  const saveCustomFields = useSaveAssetCustomFields(asset.id);
   const identifiers = (asset.identifiers ?? []) as AssetIdentifier[];
   const risk = assetRisk(asset);
   // The "why" behind the gauge. Loading or failing quietly leaves the gauge
@@ -251,6 +272,7 @@ function OverviewTab({ asset }: { asset: Asset }) {
     .filter((r) => r.value !== '');
   const tags = asset.tags && typeof asset.tags === 'object' ? Object.entries(asset.tags as Record<string, unknown>) : [];
   const via = viaGateway(asset);
+  const fhrp = viaFHRPGroup(asset);
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.35fr) minmax(0,1fr)', gap: 26, alignItems: 'start' }}>
@@ -356,18 +378,32 @@ function OverviewTab({ asset }: { asset: Asset }) {
         </div>
         <AssessmentLimitNotice findings={findingsQ.data ?? []} assetContext />
 
+        {/* Placement (ADR-0009 D7): every cloud resource, the account asset
+            excepted — an account is the root, not something placed. */}
+        {(asset.class_path ?? '').startsWith('cloud_resource.') && asset.class_key !== 'cloud_account' && (
+          <>
+            <SectionLabel icon="map-pin">Placement</SectionLabel>
+            <CloudPlacementSection assetId={asset.id} />
+          </>
+        )}
+
         <SectionLabel icon="building-2">Context</SectionLabel>
         <MetaRow k="Environment" v={asset.environment} />
-        <MetaRow k="Business unit" v={asset.business_unit} />
+        <MetaRow k="Business unit" v={businessUnitName(asset.business_unit)} />
         <MetaRow k="Support group" v={asset.support_group} />
         <MetaRow k="Owner" v={asset.owner_email} />
-        <MetaRow k="Location" v={[asset.site, asset.region, asset.zone].filter(Boolean).join(' / ')} />
-        {/* "via <gateway>" (#1973): the host's network AND the device it is
+        <MetaRow k="Site" v={sitePlacementLabel(asset)} />
+        <MetaRow k="Region / zone" v={[asset.region, asset.zone].filter(Boolean).join(' / ')} />
+        {/* "via <gateway>" (#1973): the host's prefix AND the device it is
             reached through, derived when read. Absent for the gateway itself
-            and for a network with no recorded gateway — the row is then the
-            bare name it always was. */}
-        <MetaRow k="Network segment" v={via ? <NetworkSegmentVia name={asset.network_segment_name} via={via} /> : asset.network_segment_name} />
+            and for a prefix with no recorded gateway — the row is then the
+            bare CIDR. An FHRP group's virtual address in the prefix (VRRP,
+            HSRP, …) is the address the host actually routes through. */}
+        <MetaRow k="Network" v={via || fhrp ? <PrefixVia prefix={asset.prefix} via={via} fhrp={fhrp} /> : asset.prefix} mono />
         <MetaRow k="Description" v={asset.description} />
+
+        {/* Rack placement (DCIM row 2.3): Site › Location › Rack › U · Face. */}
+        {asset.id && <PlacementCard assetId={asset.id} />}
 
         <SectionLabel icon="activity">Status</SectionLabel>
         <MetaRow k="Lifecycle" v={asset.asset_status} />
@@ -389,21 +425,55 @@ function OverviewTab({ asset }: { asset: Asset }) {
             </div>
           </>
         )}
+
+        {/* The tenant's custom fields (DCIM row 5.1). dcim.read reads the
+            definitions; editing the values is an asset edit (assets.update). */}
+        <PermissionGate permission={TENANT_PERMISSIONS.dcim.read}>
+          <SectionLabel icon="list-checks">Custom fields</SectionLabel>
+          <CustomFieldsPanel kind="asset" id={asset.id} values={asset.custom_fields}
+            permission={TENANT_PERMISSIONS.assets.update} onChange={saveCustomFields} />
+        </PermissionGate>
+
+        {/* Contacts and pictures of this asset (DCIM row 2.8). dcim.read gates
+            both; their own controls add dcim.manage. */}
+        <PermissionGate permission={TENANT_PERMISSIONS.dcim.read}>
+          <SectionLabel icon="users">Contacts</SectionLabel>
+          <ObjectContacts kind="asset" id={asset.id} />
+          <SectionLabel icon="image-plus">Images</SectionLabel>
+          <ObjectImages kind="asset" id={asset.id} />
+        </PermissionGate>
       </div>
 
+      {/* The asset's hardware (DCIM row 2.2): the catalogue read is dcim.read,
+          like the other DCIM panels, so a reader without it fetches nothing. */}
+      <PermissionGate permission={TENANT_PERMISSIONS.dcim.read}>
+        <HardwareCard assetId={asset.id} />
+      </PermissionGate>
       <RoutedNetworksCard asset={asset} />
+      {asset.id && <VirtualizationCard assetId={asset.id} />}
     </div>
   );
 }
 
 /** The Overview's network line for a host reached through a recorded gateway:
- *  "<network> · via <gateway> (address)", the gateway linking to its page. */
-function NetworkSegmentVia({ name, via }: { name?: string | null; via: SegmentGateway }) {
+ *  "<prefix> · via <gateway> (address)", the gateway linking to its page, and
+ *  the FHRP group whose virtual address the host routes through when there is
+ *  one. */
+function PrefixVia({ prefix, via, fhrp }: { prefix?: string | null; via: PrefixGateway | null; fhrp: FHRPGroupRef | null }) {
   return (
-    <span data-testid="network-segment-via" style={{ display: 'inline-flex', alignItems: 'baseline', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 5, maxWidth: '100%' }}>
-      {name ? <span>{name}</span> : null}
-      <span style={{ color: 'var(--app-t3)', fontWeight: 400 }}>{name ? '· via' : 'via'}</span>
-      <GatewayLink gateway={via} size={12.5} />
+    <span data-testid="prefix-via" style={{ display: 'inline-flex', alignItems: 'baseline', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 5, maxWidth: '100%' }}>
+      {prefix ? <span className="mono">{prefix}</span> : null}
+      {via && (
+        <>
+          <span style={{ color: 'var(--app-t3)', fontWeight: 400 }}>{prefix ? '· via' : 'via'}</span>
+          <GatewayLink gateway={via} size={12.5} />
+        </>
+      )}
+      {fhrp && (
+        <span data-testid="prefix-via-fhrp" className="mono" title={fhrp.name || undefined} style={{ fontSize: 12, color: 'var(--app-t2)' }}>
+          {via || prefix ? '· ' : ''}{fhrpText(fhrp)}
+        </span>
+      )}
     </span>
   );
 }
@@ -446,23 +516,25 @@ function RoutedNetworksCard({ asset }: { asset: Asset }) {
             <span className="eyebrow-app">Sensor coverage</span>
           </div>
           {routed.rows.map((r) => (
-            <div key={r.segment_id} data-testid="routed-network-row" style={{ display: 'grid', gridTemplateColumns: ROUTED_GRID, gap: 12, alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--app-border)' }}>
+            <div key={r.prefix_id} data-testid="routed-network-row" style={{ display: 'grid', gridTemplateColumns: ROUTED_GRID, gap: 12, alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--app-border)' }}>
               <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                <span title={r.name} style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.name || '—'}</span>
-                <span className="mono" title={r.value} style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.value}</span>
+                <span className="mono" title={r.prefix} style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.prefix}</span>
+                <span title={r.description} style={{ fontSize: 11, color: 'var(--app-t3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {[r.description, r.fhrp_group ? fhrpText(r.fhrp_group) : ''].filter(Boolean).join(' · ') || '\u00a0'}
+                </span>
               </span>
               <span className="mono" title={[stripMask(r.address), reportedText(r.observed_at)].filter(Boolean).join('\n')} style={{ fontSize: 12, color: 'var(--app-t1)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{stripMask(r.address) || '—'}</span>
-              <span className="mono" title={r.vlan_id == null ? 'The device reported no VLAN tag for this network' : `802.1Q tag ${r.vlan_id}`} style={{ fontSize: 12, color: r.vlan_id == null ? 'var(--app-t3)' : 'var(--app-t2)' }}>{vlanText(r.vlan_id)}</span>
+              <span className="mono" title={r.vlan_id == null ? 'This prefix has no VLAN' : `802.1Q tag ${r.vlan_id}${r.vlan_name ? ` (${r.vlan_name})` : ''}`} style={{ fontSize: 12, color: r.vlan_id == null ? 'var(--app-t3)' : 'var(--app-t2)' }}>{vlanText(r.vlan_id)}</span>
               <span title={r.dynamic == null ? 'Nobody has said whether this network hands out addresses' : undefined} style={{ fontSize: 12, color: r.dynamic == null ? 'var(--app-t3)' : 'var(--app-t2)' }}>{dhcpText(r.dynamic)}</span>
               <Link
                 to={routedHostsHref(r)}
                 className="mono"
-                title={`Every asset in ${r.name}, this gateway included`}
+                title={`Every asset in ${r.prefix}, this gateway included`}
                 style={{ fontSize: 12, color: 'var(--accent)', textDecoration: 'none', textAlign: 'right' }}
               >
                 {r.host_count.toLocaleString()}
               </Link>
-              <span style={{ minWidth: 0 }}><CoverageText segmentType={r.segment_type} coverage={r.coverage} /></span>
+              <span style={{ minWidth: 0 }}><CoverageText coverage={r.coverage} /></span>
             </div>
           ))}
         </div>
@@ -914,6 +986,23 @@ export const SUBJECT_NOUN: Record<string, string> = {
 
 // ----------------------------------------------------------------- history --
 
+// The Changes tab: the substrate's change record and the journal. dcim.read
+// gates both; without it the tab says what it would show and why it does not,
+// rather than rendering an empty list that reads as "nothing has changed".
+function ChangesTab({ asset }: { asset: Asset }) {
+  return (
+    <PermissionGate
+      permission={TENANT_PERMISSIONS.dcim.read}
+      fallback={<Empty icon="lock" title="You can't view changes" message="The change log and journal need the DCIM read permission. Ask an organisation admin to grant it to your role." />}
+    >
+      <SectionLabel icon="git-compare">Change log</SectionLabel>
+      <ObjectChanges kind="asset" id={asset.id} includeRelated />
+      <SectionLabel icon="file-text">Journal</SectionLabel>
+      <ObjectJournal kind="asset" id={asset.id} />
+    </PermissionGate>
+  );
+}
+
 function HistoryTab({ asset }: { asset: Asset }) {
   const q = useAssetHistory(asset.id);
   const rows = q.data ?? [];
@@ -1214,6 +1303,20 @@ function StateCellTd({ cell, href, testId }: {
 
 // -------------------------------------------------------------------- page --
 
+/** "Site › Location" under the asset's name (DCIM row 2.1), linking to the
+ *  site page. Nothing when the asset is not placed. */
+export function AssetPlacement({ asset }: { asset: Pick<Asset, 'site' | 'location'> }) {
+  const label = sitePlacementLabel(asset);
+  const site = asset.site;
+  if (!label || !site || typeof site !== 'object' || !site.id) return null;
+  return (
+    <Link to={`/inventory/sites/${site.id}`} data-testid="asset-site-link"
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginTop: 4, fontSize: 12, color: 'var(--app-t2)', textDecoration: 'none' }}>
+      <Icon name="map-pin" size={12} style={{ color: 'var(--app-t3)' }} />{label}
+    </Link>
+  );
+}
+
 export function AssetPage() {
   const { id, tab: tabParam } = useParams();
   const navigate = useNavigate();
@@ -1296,6 +1399,10 @@ export function AssetPage() {
           <div className="mono" style={{ fontSize: 11.5, color: 'var(--app-t3)' }}>
             {ident?.sub || (operatingSystem(asset) || 'no network endpoint')}
           </div>
+          <AssetPlacement asset={asset} />
+          <PermissionGate permission={TENANT_PERMISSIONS.dcim.read}>
+            <ObjectTags kind="asset" id={asset.id} />
+          </PermissionGate>
         </div>
         {/* The same button the drawer carries, under the same conditions: a
             person looking at one asset can probe it from where they are. It
@@ -1340,11 +1447,16 @@ export function AssetPage() {
         {tab.placeholder ? <PhasePlaceholder tab={tab} />
           : tab.key === 'overview' ? <OverviewTab asset={asset} />
           : tab.key === 'endpoints' ? <EndpointsTab asset={asset} />
+          : tab.key === 'interfaces' ? <InterfacesTab asset={asset} />
+          : tab.key === 'ports' ? <PortsTab asset={asset} />
+          : tab.key === 'hardware' ? <HardwareTab asset={asset} />
           : tab.key === 'relationships' ? <RelationshipsTab asset={asset} />
           : tab.key === 'cryptography' ? <CryptographyTab asset={asset} onOpenConfig={openConfig} />
           : tab.key === 'findings' ? <FindingsTab asset={asset} />
           : tab.key === 'software' ? <SoftwareTab asset={asset} />
           : tab.key === 'history' ? <HistoryTab asset={asset} />
+          : tab.key === 'changes' ? <ChangesTab asset={asset} />
+          : tab.key === 'config-context' ? <ConfigContextTab asset={asset} />
           : <OverviewTab asset={asset} />}
       </div>
 

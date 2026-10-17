@@ -324,7 +324,7 @@ func sampleAsset() models.Asset {
 			FirstSeenAt: now, LastSeenAt: now,
 		},
 		Environment:       strPtr("production"),
-		BusinessUnit:      strPtr("platform"),
+		BusinessUnit:      &models.BusinessUnitRef{ID: uuid.MustParse("00000000-0000-0000-0000-0000000000b1"), Name: "Platform", Slug: "platform"},
 		OwnerEmail:        strPtr("ops@example.com"),
 		Description:       strPtr("edge web server"),
 		Tags:              map[string]interface{}{"team": "infra"},

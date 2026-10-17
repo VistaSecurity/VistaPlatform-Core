@@ -80,7 +80,7 @@ export const RULE_MERGE_READ_ERROR =
 export const RULE_MERGE_CONDITIONS = [
   'the same MAC address or serial number was seen directly on the device — not relayed second-hand from somewhere else,',
   'an address alone never counts: a record known by a name is not merged with a device just because it later used the same address,',
-  'both records are on the same network segment,',
+  'both records are in the same prefix,',
   'nothing contradicts it — two different serial numbers, cloud ids or agent ids are always two devices,',
   'and neither record has ever been marked “keep separate”. A decision you made is never overridden.',
 ] as const;

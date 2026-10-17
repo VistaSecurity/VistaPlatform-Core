@@ -15,8 +15,8 @@ import (
 type Reason string
 
 const (
-	ReasonPrivate     Reason = "private"            // RFC 1918 / ULA
-	ReasonSegment     Reason = "registered_segment" // inside a network segment the tenant declared
+	ReasonPrivate     Reason = "private"           // RFC 1918 / ULA
+	ReasonPrefix      Reason = "registered_prefix" // inside a prefix the tenant declared
 	ReasonUnparseable Reason = "unparseable"
 	ReasonLoopback    Reason = "loopback"
 	ReasonLinkLocal   Reason = "link_local"
@@ -30,7 +30,7 @@ const (
 	// hit it are a recognisable population — Tailscale, ZeroTier and mobile
 	// carriers hand out that range — and "public" would send them looking at
 	// the wrong thing. The fix is the same as for any range that is theirs:
-	// register it as a network segment.
+	// register it as a prefix.
 	ReasonCarrierGradeNAT Reason = "carrier_grade_nat"
 )
 
@@ -59,12 +59,12 @@ func ParseTarget(address string) (netip.Addr, Reason, bool) {
 
 // Classify decides whether an automatic scan may probe an address.
 //
-// `segments` are the CIDRs of the network segments the tenant has registered —
+// `declared` are the CIDRs of the prefixes the tenant has declared —
 // their own declared estate. `excluded` are addresses and ranges the platform
 // must never probe on its own initiative (its own cluster, chiefly).
 //
 // The order is not arbitrary. Exclusions are checked FIRST so that nothing —
-// not a tenant's own segment declaration, not RFC 1918 — can put the platform's
+// not a tenant's own prefix declaration, not RFC 1918 — can put the platform's
 // own address back in scope. Everything unroutable (loopback, link-local,
 // multicast, unspecified) is refused next, because those are not hosts on the
 // tenant's network. Only then is the address accepted, either because it is
@@ -73,7 +73,7 @@ func ParseTarget(address string) (netip.Addr, Reason, bool) {
 // The default answer for anything else is NO. A public address reached by an
 // unattended daily scan is a third party being port-scanned by us on a
 // schedule, which is the one outcome this feature must never produce.
-func Classify(addr netip.Addr, segments, excluded []netip.Prefix) (bool, Reason) {
+func Classify(addr netip.Addr, declared, excluded []netip.Prefix) (bool, Reason) {
 	if !addr.IsValid() {
 		return false, ReasonUnparseable
 	}
@@ -107,15 +107,15 @@ func Classify(addr netip.Addr, segments, excluded []netip.Prefix) (bool, Reason)
 	// RFC 6598 shared address space (100.64.0.0/10), which is correct for us:
 	// that is carrier space, and a tenant behind it reaches other operators'
 	// customers through it. A tenant who genuinely runs their estate on it
-	// declares it as a network segment, which is the explicit statement of
+	// declares it as a prefix, which is the explicit statement of
 	// ownership this code requires ( D1).
 	if addrscope.MayAutoProbe(addr) {
 		return true, ReasonPrivate
 	}
 
-	for _, p := range segments {
+	for _, p := range declared {
 		if p.Contains(addr) {
-			return true, ReasonSegment
+			return true, ReasonPrefix
 		}
 	}
 
@@ -125,10 +125,9 @@ func Classify(addr netip.Addr, segments, excluded []netip.Prefix) (bool, Reason)
 	return false, ReasonPublic
 }
 
-// ParsePrefixes turns segment/exclusion values into prefixes, ignoring anything
-// that is not one. Network segments can be a CIDR, a range, a domain or a VPC
-// id — only the CIDR form describes addresses, and the others are simply not
-// this function's business.
+// ParsePrefixes turns prefix/exclusion values into prefixes, ignoring anything
+// that is not one. Only the CIDR form describes addresses; anything else is
+// simply not this function's business.
 //
 // A bare address is accepted as a host prefix (/32, /128) so an exclusion list
 // can name one machine without the caller doing the arithmetic.

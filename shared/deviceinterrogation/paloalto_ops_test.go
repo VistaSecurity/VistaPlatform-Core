@@ -100,60 +100,73 @@ func TestPanParseUptime(t *testing.T) {
 	}
 }
 
-func TestPanInterfaces_MergesLayer3AndHardwareViews(t *testing.T) {
+func TestPanNetwork_MergesLayer3AndHardwareViews(t *testing.T) {
 	info, err := panParseSystemInfo(panFixture(t, "paloalto_system_info.xml"))
 	if err != nil {
 		t.Fatalf("panParseSystemInfo: %v", err)
 	}
-	interfaces, err := panInterfaces(panFixture(t, "paloalto_interfaces.xml"), info)
+	n, err := panNetwork(panFixture(t, "paloalto_interfaces.xml"), info, panFixture(t, "paloalto_arp.xml"))
 	if err != nil {
-		t.Fatalf("panInterfaces: %v", err)
+		t.Fatalf("panNetwork: %v", err)
 	}
-
-	byName := map[string]map[string]interface{}{}
-	for _, iface := range interfaces {
-		byName[iface["name"].(string)] = iface
+	byName := map[string]netIface{}
+	for _, ifc := range n.Interfaces {
+		byName[ifc.Name] = ifc
 	}
 	if len(byName) != 4 {
-		t.Fatalf("expected three data interfaces plus management, got %+v", interfaces)
+		t.Fatalf("expected three data interfaces plus management, got %+v", n.Interfaces)
 	}
 
 	eth1 := byName["ethernet1/1"]
-	if eth1["mac"] != "00:1b:17:0a:0b:0d" || eth1["state"] != "up" || eth1["speed"] != 1000 {
+	if eth1.MAC != "00:1b:17:0a:0b:0d" || eth1.OperStatus != "up" || eth1.SpeedKbps != 1_000_000 {
 		t.Errorf("hardware view lost for ethernet1/1: %+v", eth1)
 	}
-	if addrs, ok := eth1["addresses"].([]interface{}); !ok || len(addrs) != 1 || addrs[0] != "198.51.100.2/24" {
-		t.Errorf("address lost for ethernet1/1: %+v", eth1)
+	if len(eth1.Addresses) != 1 || eth1.Addresses[0].Address != "198.51.100.2/24" || eth1.Addresses[0].VRF != "" {
+		t.Errorf("address lost for ethernet1/1 (vr:default is the global table): %+v", eth1)
 	}
-	if _, tagged := eth1["vlan"]; tagged {
+	if eth1.UntaggedVLAN != 0 || eth1.Mode != "" {
 		t.Errorf("tag 0 was recorded as a VLAN: %+v", eth1)
 	}
 
+	// A tagged sub-interface is its parent plus its untagged VLAN.
 	sub := byName["ethernet1/2.100"]
-	if sub["vlan"] != 100 {
-		t.Errorf("subinterface tag lost: %+v", sub)
+	if sub.UntaggedVLAN != 100 || sub.Mode != "access" || sub.Parent != "ethernet1/2" {
+		t.Errorf("subinterface tag/parent lost: %+v", sub)
 	}
-	if _, hasState := sub["state"]; hasState {
+	if sub.OperStatus != "" {
 		t.Errorf("a subinterface with no hardware row was given a link state: %+v", sub)
 	}
 
 	down := byName["ethernet1/3"]
-	if down["state"] != "down" {
-		t.Errorf("link state lost: %+v", down)
-	}
-	if _, addressed := down["addresses"]; addressed {
-		t.Errorf("N/A was recorded as an address: %+v", down)
-	}
-	if _, hasSpeed := down["speed"]; hasSpeed {
-		t.Errorf("speed \"unknown\" was recorded as a number: %+v", down)
+	if down.OperStatus != "down" || len(down.Addresses) != 0 || down.SpeedKbps != 0 {
+		t.Errorf("down port: %+v (N/A is not an address, \"unknown\" is not a speed)", down)
 	}
 
 	mgmt := byName["management"]
-	if mgmt["mac"] != "00:1b:17:0a:0b:0c" {
-		t.Errorf("management MAC lost: %+v", mgmt)
+	if mgmt.MAC != "00:1b:17:0a:0b:0c" || len(mgmt.Addresses) != 1 || mgmt.Addresses[0].Address != "192.0.2.5/24" {
+		t.Errorf("management interface: %+v", mgmt)
 	}
-	if addrs, ok := mgmt["addresses"].([]interface{}); !ok || addrs[0] != "192.0.2.5/24" {
-		t.Errorf("the dotted netmask was not combined into a prefix: %+v", mgmt)
+
+	if len(n.VLANs) != 1 || n.VLANs[0].VID != 100 {
+		t.Errorf("VLANs = %+v, want the sub-interface's 100", n.VLANs)
+	}
+	// Connected prefixes: one per addressed interface, the sub-interface's on
+	// its VLAN.
+	got := map[string]int{}
+	for _, p := range n.Prefixes {
+		got[p.Prefix] = p.VLAN
+	}
+	if v, ok := got["203.0.113.0/24"]; !ok || v != 100 {
+		t.Errorf("prefixes = %+v, want 203.0.113.0/24 on VLAN 100", n.Prefixes)
+	}
+	// ARP: the complete entries, never the incomplete one.
+	for _, e := range n.ARP {
+		if e.Address == "198.51.100.9" {
+			t.Errorf("an incomplete ARP entry became evidence: %+v", e)
+		}
+	}
+	if len(n.ARP) != 2 {
+		t.Errorf("ARP = %+v, want the two complete entries", n.ARP)
 	}
 }
 
@@ -263,12 +276,19 @@ func TestPaloAltoInterrogator_OpsCollectionIsWired(t *testing.T) {
 
 	for _, key := range []string{
 		factHWVendor, factHWModel, factHWSerial, factOSName, factOSVersion,
-		factNetUptimeSeconds, factNetInterfaces, factNetNeighbors,
+		factNetUptimeSeconds, factNetNeighbors,
 		factMgmtProtocol, factMgmtPlaintext,
 	} {
 		if !hasFact(result, key) {
 			t.Errorf("no %s fact reached the result; facts: %v", key, factKeys(result))
 		}
+	}
+	// DCIM row 1.5c: interfaces are objects, not the net.interfaces fact.
+	if hasFact(result, factNetInterfaces) {
+		t.Error("the retired net.interfaces fact is still emitted")
+	}
+	if result.Network == nil || len(result.Network.Interfaces) == 0 {
+		t.Errorf("no network observation reached the result: %+v", result.Network)
 	}
 	if edges := relationshipsOfType(result, relTypeConnectsTo); len(edges) != 1 {
 		t.Errorf("expected the LLDP edge to reach the result, got %+v", edges)
@@ -286,10 +306,15 @@ func TestPaloAltoInterrogator_OpsCollectionIsWired(t *testing.T) {
 	if result.DeviceInfo["hostname"] != "fw-edge-01" {
 		t.Errorf("system info did not reach DeviceInfo: %#v", result.DeviceInfo)
 	}
-	// The ARP and LLDP neighbours land in one fact, not two.
+	// The ARP neighbours stay the fact; the LLDP neighbour is a cable end on
+	// the network observation (DCIM row 3.3).
 	neighbors := factValue(t, result, factNetNeighbors).([]map[string]interface{})
-	if len(neighbors) != 3 {
-		t.Errorf("expected two ARP neighbours and one LLDP neighbour in one fact, got %+v", neighbors)
+	if len(neighbors) != 2 {
+		t.Errorf("expected the two ARP neighbours in the fact, got %+v", neighbors)
+	}
+	if result.Network == nil || len(result.Network.Neighbors) != 1 || result.Network.Neighbors[0].Protocol != "lldp" ||
+		result.Network.Neighbors[0].LocalInterface == "" {
+		t.Errorf("expected the LLDP neighbour on the network observation, got %+v", result.Network)
 	}
 	// And the crypto assets the interrogator already produced are untouched.
 	if len(result.Assets) == 0 {

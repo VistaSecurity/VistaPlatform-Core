@@ -332,6 +332,20 @@ func (s *AssetService) updateAssetIdentifiers(
 			}
 		}
 		for _, e := range remove {
+			if e.Kind == string(identity.KindIPAddress) {
+				// An address is an ip_addresses row on one of the asset's
+				// interfaces (DCIM row 1.4): retiring it releases the row.
+				scope := ""
+				if e.Scope != nil {
+					scope = *e.Scope
+				}
+				if derr := r.RetireIdentifier(ctx, asset, identity.Identifier{
+					Kind: identity.KindIPAddress, Value: e.Value, Scope: scope,
+				}); derr != nil {
+					return fmt.Errorf("retire identifier %s: %w", e.Kind, derr)
+				}
+				continue
+			}
 			if _, derr := r.Tx().ExecContext(ctx,
 				`DELETE FROM public.asset_identifiers WHERE tenant_id = $1 AND asset_id = $2 AND id = $3`,
 				tenantID, assetID, e.ID); derr != nil {

@@ -39,59 +39,9 @@
       },
       {
         "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "addresses": [
-              "203.0.113.2/29"
-            ],
-            "admin_state": "up",
-            "mac": "00:09:0f:aa:bb:01",
-            "name": "wan1",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "addresses": [
-              "192.0.2.1/24"
-            ],
-            "admin_state": "up",
-            "mac": "00:09:0f:aa:bb:02",
-            "name": "internal",
-            "speed": 10000,
-            "state": "up"
-          },
-          {
-            "addresses": [
-              "198.51.100.1/24"
-            ],
-            "admin_state": "up",
-            "name": "vlan-voice",
-            "speed": 10000,
-            "state": "up",
-            "vlan": 40
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "net.route_next_hop_count",
         "source_kind": "measured",
         "value": 1
-      },
-      {
-        "asset": "device",
-        "key": "net.vlans",
-        "source_kind": "measured",
-        "value": [
-          {
-            "gateway": "198.51.100.1",
-            "id": 40,
-            "name": "vlan-voice",
-            "subnet": "198.51.100.0/24"
-          }
-        ]
       },
       {
         "asset": "device",
@@ -147,16 +97,8 @@
         "state": "linked"
       },
       {
-        "admission_reasons": "{dynamic_address_without_device_binding}",
+        "admission_reasons": "{direct_scoped_interface}",
         "identifiers": [
-          {
-            "claimed": true,
-            "confidence": 1,
-            "kind": "ip_address",
-            "pinned": true,
-            "scope": "segment:198.51.100.0/24",
-            "value": "198.51.100.1"
-          },
           {
             "confidence": 1,
             "kind": "ip_address",
@@ -166,6 +108,27 @@
               "ref": "asset:{{DEVICE_ASSET_ID}}"
             },
             "value": "{{APPLIANCE_IP}}"
+          },
+          {
+            "confidence": 1,
+            "interface": "wan1",
+            "kind": "ip_address",
+            "scope": "prefix:203.0.113.0/29",
+            "value": "203.0.113.2"
+          },
+          {
+            "confidence": 1,
+            "interface": "internal",
+            "kind": "ip_address",
+            "scope": "prefix:192.0.2.0/24",
+            "value": "192.0.2.1"
+          },
+          {
+            "confidence": 1,
+            "interface": "vlan-voice",
+            "kind": "ip_address",
+            "scope": "prefix:198.51.100.0/24",
+            "value": "198.51.100.1"
           },
           {
             "confidence": 1,
@@ -175,68 +138,27 @@
               "ref": "asset:{{DEVICE_ASSET_ID}}"
             },
             "value": "fw-branch-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
+          },
           {
             "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
+            "kind": "serial_number",
             "source": {
               "kind": "inferred",
               "ref": "asset:{{DEVICE_ASSET_ID}}"
             },
-            "value": "{{APPLIANCE_IP}}"
+            "value": "FGT60F0000000001"
           },
           {
             "confidence": 1,
+            "interface": "wan1",
             "kind": "mac_address",
             "value": "00:09:0f:aa:bb:01"
           },
           {
             "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "fw-branch-01.corp.example.test"
-          }
-        ],
-        "source_kind": "measured",
-        "state": "linked"
-      },
-      {
-        "admission_reasons": "{network_scope_unresolved}",
-        "identifiers": [
-          {
-            "confidence": 1,
-            "kind": "ip_address",
-            "scope": "tenant",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "{{APPLIANCE_IP}}"
-          },
-          {
-            "confidence": 1,
+            "interface": "internal",
             "kind": "mac_address",
             "value": "00:09:0f:aa:bb:02"
-          },
-          {
-            "confidence": 1,
-            "kind": "fqdn",
-            "source": {
-              "kind": "inferred",
-              "ref": "asset:{{DEVICE_ASSET_ID}}"
-            },
-            "value": "fw-branch-01.corp.example.test"
           }
         ],
         "source_kind": "measured",
@@ -286,59 +208,9 @@
       },
       {
         "asset": "device",
-        "key": "net.interfaces",
-        "source_kind": "measured",
-        "value": [
-          {
-            "addresses": [
-              "203.0.113.2/29"
-            ],
-            "admin_state": "up",
-            "mac": "00:09:0f:aa:bb:01",
-            "name": "wan1",
-            "speed": 1000,
-            "state": "up"
-          },
-          {
-            "addresses": [
-              "192.0.2.1/24"
-            ],
-            "admin_state": "up",
-            "mac": "00:09:0f:aa:bb:02",
-            "name": "internal",
-            "speed": 10000,
-            "state": "up"
-          },
-          {
-            "addresses": [
-              "198.51.100.1/24"
-            ],
-            "admin_state": "up",
-            "name": "vlan-voice",
-            "speed": 10000,
-            "state": "up",
-            "vlan": 40
-          }
-        ]
-      },
-      {
-        "asset": "device",
         "key": "net.route_next_hop_count",
         "source_kind": "measured",
         "value": 1
-      },
-      {
-        "asset": "device",
-        "key": "net.vlans",
-        "source_kind": "measured",
-        "value": [
-          {
-            "gateway": "198.51.100.1",
-            "id": 40,
-            "name": "vlan-voice",
-            "subnet": "198.51.100.0/24"
-          }
-        ]
       },
       {
         "asset": "device",

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"github.com/vistasecurity/vistaplatform/shared/deviceinterrogation/snmpfake"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -343,6 +344,17 @@ func ciscoConformanceOutputs(t *testing.T) map[string]string {
 	}
 }
 
+// ciscoConformanceStackOutputs: a two-member Catalyst 9300 stack (DCIM row
+// 2.4): `show inventory` lists both members, their power supplies, uplink
+// modules and SFPs, so the stack-only `show switch` is asked.
+func ciscoConformanceStackOutputs(t *testing.T) map[string]string {
+	t.Helper()
+	out := ciscoConformanceOutputs(t)
+	out["show inventory"] = ciscoFixture(t, "cisco_c9300_stack_show_inventory.txt")
+	out["show switch"] = ciscoFixture(t, "cisco_c9300_stack_show_switch.txt")
+	return out
+}
+
 // ciscoConformanceXROutputs: an IOS-XR router, from real XR captures.
 func ciscoConformanceXROutputs(t *testing.T) map[string]string {
 	t.Helper()
@@ -515,6 +527,7 @@ func ciscoConformanceRuns(t *testing.T) []conformanceRun {
 	return []conformanceRun{
 		ciscoConformanceRun(t, "ios", full),
 		expectWarnings(ciscoConformanceRun(t, "ios, arp refused", refused), "show ip arp"),
+		ciscoConformanceRun(t, "ios-xe, c9300 stack", ciscoConformanceStackOutputs(t)),
 		ciscoConformanceRun(t, "ios-xr", ciscoConformanceXROutputs(t)),
 		ciscoConformanceRun(t, "nx-os", ciscoConformanceNXOSOutputs(t)),
 		ciscoConformanceEnableRun(t, "ios, level 1 + enable", readRealFixture(t, "cisco_ios", "show_version.txt"), ciscoConformanceOutputs(t)),
@@ -955,8 +968,16 @@ func snmpConformanceRuns(t *testing.T) []conformanceRun {
 	for i := 100; i <= 100+snmpMaxWalkRows; i++ {
 		truncated = append(truncated, snmpTestOctet(snmpOIDIfDescr+"."+strconv.Itoa(i), "Gi2/0/"+strconv.Itoa(i)))
 	}
+	// A layer-3 switch answering every table the network phase walks (row
+	// 1.5d): interface type and MTU, IP-MIB addresses, LACP, ifStack, Q-BRIDGE.
+	var switchMIB []snmpTestValue
+	for _, v := range snmpfake.L3Switch48().MIB {
+		oid, tag, raw := v.Wire()
+		switchMIB = append(switchMIB, snmpTestValue{oid: oid, tag: tag, raw: raw})
+	}
 	return []conformanceRun{
 		snmpConformanceRun(t, "mib-ii agent", snmpTestMIB()),
+		snmpConformanceRun(t, "layer-3 switch", switchMIB),
 		expectWarnings(snmpConformanceRun(t, "mib-ii agent, interface table past the cap", truncated),
 			snmpColumnEndpoint(snmpOIDIfDescr)),
 	}

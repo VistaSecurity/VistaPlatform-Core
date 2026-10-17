@@ -1,5 +1,7 @@
 package registrycatalog
 
+import "github.com/vistasecurity/vistaplatform/shared/dcim"
+
 // The closed value sets the validator enforces on first-class fields.
 //
 // Every list here is a COPY of something the database declares — a Postgres
@@ -39,7 +41,7 @@ var environmentValues = []string{"production", "staging", "development", "test"}
 // list acquires, and exactly what TestEnumsMatchSchema now prevents.
 var protocolValues = []string{
 	"TLS", "SSH", "IPSec", "VPN", "Database", "API", "SMB", "Kerberos",
-	"QUIC", "PPTP",
+	"QUIC", "PPTP", "IKE",
 	"Modbus", "DNP3", "MMS", "ICCP", "IEC62351", "OPC_UA",
 	"EtherNet_IP", "BACnet", "BACnet_SC", "HART_IP", "S7",
 }
@@ -82,6 +84,19 @@ var assetOwnershipValues = []string{"internal", "third_party", "unknown"}
 
 // staleStatusValues is `assets_stale_status_check`.
 var staleStatusValues = []string{"active", "stale", "archived"}
+
+// interfaceModeValues is `interfaces_mode_check`.
+var interfaceModeValues = []string{"access", "tagged", "tagged-all", "q-in-q"}
+
+// rackFaceValues is `assets_face_check` (DCIM row 2.3): the face of a rack a
+// placed asset is mounted on.
+var rackFaceValues = []string{"front", "rear"}
+
+// interfaceStatusValues is `interfaces_status_check` (the asset lifecycle).
+var interfaceStatusValues = []string{"pending", "active", "rejected", "stale", "archived"}
+
+// interfaceOperStatusValues is `interfaces_operational_status_check`.
+var interfaceOperStatusValues = []string{"up", "down", "testing", "unknown"}
 
 // endpointTransportValues is `asset_endpoints_transport_check`.
 var endpointTransportValues = []string{"tcp", "udp", "none"}
@@ -164,14 +179,13 @@ var observationKindValues = []string{"crypto", "host_observation"}
 // Ownership is internal/third_party/unknown and has no table to pin against:
 // the classifier computes it, and those three values are its whole range.
 //
-// Type is NOT computed. The classifier copies the matching segment's
-// `network_type` straight through (inventory-service's ClassifyAsset returns
-// `seg.NetworkType`), so its range is the segment column's CHECK — four values,
-// not two. It was written here as {private, public} on the strength of the
-// field's NAME, and the consequence only became visible when auto-approval
-// rules started being VALIDATED: a rule for a `cloud` or `vpn` segment was
-// refused outright, so every cloud segment silently stopped generating one.
-// Pinned to the CHECK by TestEnumsMatchSchema for that reason.
+// Type is the matching prefix's `network_type` when it is one of the four
+// values the auto-approval generator and the scan-consent rules read (DCIM row
+// 1.6; inventory-service prefix_context.go), else the address class
+// (private/public). Four values, not two: it was once written here as
+// {private, public} on the strength of the field's NAME, and a rule for a
+// `cloud` or `vpn` network was refused outright, so every cloud network
+// silently stopped generating one.
 //
 // §13 A8 is the same mistake in the other direction: §8 used to map
 // `conditions.network_type` to `network.type:corporate`, and nothing in the
@@ -182,3 +196,34 @@ var (
 	observationNetworkOwnershipValues = []string{"internal", "third_party", "unknown"}
 	observationNetworkTypeValues      = []string{"private", "public", "vpn", "cloud"}
 )
+
+// The IPAM closed sets (DCIM DATA_MODEL §5), equal to the schema's CHECKs on
+// ip_addresses.operational_status / role and prefixes.operational_status.
+var (
+	ipStatusValues     = []string{"active", "reserved", "deprecated", "dhcp", "slaac"}
+	ipRoleValues       = []string{"loopback", "secondary", "anycast", "vip", "vrrp", "hsrp", "glbp", "carp"}
+	prefixStatusValues = []string{"container", "active", "reserved", "deprecated"}
+	// wireless_lans.auth_type (row 4.4), shared/dcim/wireless.AuthTypes.
+	wirelessAuthTypeValues = []string{"open", "wep", "wpa-personal", "wpa-enterprise"}
+)
+
+// tunnelEncapsulationValues is `tunnels_encapsulation_check` (DCIM row 4.3).
+var tunnelEncapsulationValues = []string{"ipsec-transport", "ipsec-tunnel", "ip-ip", "gre", "wireguard", "l2tp", "pptp", "openvpn"}
+
+// cableTypeValues and cableStatusValues come from the generated DCIM type
+// registry (standards/cable-types.yaml → shared/dcim), not a copy.
+func cableTypeValues() []string {
+	var out []string
+	for _, t := range dcim.AllCableTypes() {
+		out = append(out, string(t))
+	}
+	return out
+}
+
+func cableStatusValues() []string {
+	var out []string
+	for _, t := range dcim.AllCableStatuses() {
+		out = append(out, string(t))
+	}
+	return out
+}

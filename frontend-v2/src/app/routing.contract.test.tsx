@@ -123,6 +123,8 @@ describe('tenant console route table (react-router v8)', () => {
     ['/inventory', '~layout > ~layout > /inventory'],
     ['/inventory/assets/a1b2c3', '~layout > ~layout > /inventory/assets/:id'],
     ['/inventory/assets/a1b2c3/history', '~layout > ~layout > /inventory/assets/:id/:tab'],
+    // The cluster page (DCIM row 4.2), reached from Inventory → Clusters.
+    ['/inventory/clusters/c1d2e3', '~layout > ~layout > /inventory/clusters/:id'],
     ['/discovery', '~layout > ~layout > /discovery'],
     ['/discovery/sensors', '~layout > ~layout > /discovery/sensors'],
     ['/discovery/active-scan', '~layout > ~layout > /discovery/active-scan'],
@@ -213,6 +215,17 @@ describe('tenant console route table (react-router v8)', () => {
     const matches = matchRoutes(routes, '/remediation/triage')!;
     const el = matches[matches.length - 1].route.element as ReactElement<{ to: string; replace?: boolean }>;
     expect(el.props.to).toBe('/remediation/alerts');
+    expect(el.props.replace).toBe(true);
+  });
+
+  it('the retired /settings/segments deep link redirects to Inventory → Networks', () => {
+    // Settings → Network Segments was retired with its table (DCIM row 1.6):
+    // the tenant's networks are prefixes. The static route must win over
+    // /settings/:page, or the old bookmark renders an unknown settings page.
+    expect(resolve('/settings/segments')).toBe('~layout > ~layout > /settings/segments');
+    const matches = matchRoutes(routes, '/settings/segments')!;
+    const el = matches[matches.length - 1].route.element as ReactElement<{ to: string; replace?: boolean }>;
+    expect(el.props.to).toBe('/inventory?lens=networks');
     expect(el.props.replace).toBe(true);
   });
 

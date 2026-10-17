@@ -80,7 +80,7 @@ func prepareEnrichmentDispatch(t *testing.T, f *dispatchFixture, sensor uuid.UUI
 	if _, err := f.raw.Exec(`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"},"identity_enrichment":{"enabled":true}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`, f.tenant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.raw.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'probe network','cidr','192.168.80.0/24','production')`, segment, f.tenant); err != nil {
+	if _, err := f.raw.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment) VALUES($1,$2,'probe network','192.168.80.0/24','production')`, segment, f.tenant); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.raw.Exec(`INSERT INTO identity_observations(id,tenant_id,fingerprint,source_kind,source_ref,evidence,first_seen_at,last_seen_at) VALUES($1::uuid,$2,$1::text,'measured',$3,$4,now(),now())`, observation, f.tenant, "sensor:"+sensor.String(), string(evidence)); err != nil {

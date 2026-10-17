@@ -51,8 +51,8 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/hostinventory"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identitytest/intakematrix"
-	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/relationships"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
@@ -325,9 +325,9 @@ func diPaths() []diPath {
 			// overlay is what decides.
 			name: "peer_controller_run_reports_dhcp_operator_static", shapes: diMACShapes, places: diStaticOnly,
 			drive: func(t *testing.T, m *diMatrix, p intakematrix.Place, s intakematrix.Shape) intakematrix.Effect {
-				if res, err := pgidentity.RecordSegmentPosture(context.Background(), m.DB, m.Tenant.String(), m.StaticSegment.String(),
-					pgidentity.PostureOperator, false, pgidentity.PostureEvidence{ObservedAt: m.Now}); err != nil || !res.Written {
-					t.Fatalf("operator posture: written=%v err=%v", res.Written, err)
+				// The operator's answer, as the IPAM API writes it.
+				if _, err := m.DB.ExecContext(context.Background(), `UPDATE prefixes SET dhcp_managed = false WHERE tenant_id = $1 AND id = $2`, m.Tenant, m.StaticSegment); err != nil {
+					t.Fatalf("operator posture: %v", err)
 				}
 				return m.persistPeer(t, p, s, peerRun{evidence: peerFromController,
 					vlans: []map[string]any{{"name": "matrix static LAN", "subnet": intakematrix.StaticCIDR, "dhcp_enabled": true}}})
@@ -366,7 +366,7 @@ func diPaths() []diPath {
 				if s.MAC {
 					for addr, want := range map[string]string{intakematrix.TenantAddr: "dynamic", intakematrix.DynamicAddr: "static"} {
 						var got string
-						if err := m.DB.QueryRow(`SELECT coalesce(address_assignment,'') FROM asset_identifiers
+						if err := m.DB.QueryRow(`SELECT coalesce(address_assignment,'') FROM (`+identifiersql.All+`) ident_rows
 						   WHERE tenant_id=$1 AND asset_id=$2 AND kind='ip_address' AND value=$3`, m.Tenant, m.Asset, addr).Scan(&got); err != nil {
 							t.Fatalf("%s on the gateway: %v", addr, err)
 						}
@@ -418,7 +418,7 @@ func diPaths() []diPath {
 				// Owner decision 1 / ADR-0003 D1: an address the operator typed
 				// on the device is pinned, whatever its segment's DHCP flag.
 				var assignment string
-				if qerr := m.DB.QueryRow(`SELECT coalesce(address_assignment,'') FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind='ip_address' AND value=$3`,
+				if qerr := m.DB.QueryRow(`SELECT coalesce(address_assignment,'') FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND asset_id=$2 AND kind='ip_address' AND value=$3`,
 					m.Tenant, m.Asset, addr).Scan(&assignment); qerr != nil || assignment != string(identity.AssignmentStatic) {
 					t.Errorf("typed address %s on the device: assignment %q (%v), want static", addr, assignment, qerr)
 				}
@@ -536,7 +536,7 @@ var diMatrixWant = map[string]string{
 	"peer_controller_two_addresses/no_segment/ip": "outcome=edges=1 obs=[1x{src=measured/interrogation/active scope=dyn dyn=[dyn] ip=[dyn,tenant] kinds=- adm=[auth] reasons=[dynamic_address_without_device_binding] state=linked asset=fixture}] ids=- resourced=- ports=- new_assets=0 other_ids=0 other_ports=0 proposals=0",
 	// item 5 fixed (sightings): each address scoped on its own; the sighting segment is the first REAL one (dyn)
 	"peer_controller_two_addresses/no_segment/ip+mac": "outcome=edges=1 obs=[1x{src=measured/interrogation/active scope=dyn dyn=[dyn] ip=[dyn,tenant] kinds=[mac] adm=[auth] reasons=[insufficient_identity_evidence] state=linked asset=fixture}] ids=- resourced=- ports=- new_assets=0 other_ids=0 other_ports=0 proposals=0",
-	// issue item 7: the run's net.vlans DHCP overlay marks the static segment dynamic for this peer (ensureVLANSegments also records the measured posture on it).
+	// issue item 7: the run's net.vlans DHCP overlay marks the static segment dynamic for this peer (ensureVLANPrefixes also records the measured posture on it).
 	// Owner decision 1: the gateway holds this address DECLARED, so it is pinned and admission no longer reads it as a lease;
 	// the peer is still Authoritative-only, not Direct, so it is not established — and is linked as supporting evidence
 	"peer_controller_run_reports_dhcp/static_segment/ip": "outcome=edges=1 obs=[1x{src=measured/interrogation/active scope=static dyn=[static] ip=[static] kinds=- adm=[auth] reasons=[insufficient_identity_evidence] state=linked asset=fixture}] ids=- resourced=- ports=- new_assets=0 other_ids=0 other_ports=0 proposals=0",

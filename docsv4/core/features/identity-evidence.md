@@ -20,8 +20,8 @@ dynamically, today's address is tomorrow's other device, so an address alone
 never creates or matches an asset (a **pinned** address is the exception,
 below). A host found by address on such a network — a scan sees no MAC address
 or host key — is kept as an observation instead. Confirming says you recognise
-it. If the network's addresses do not in fact move, set the segment's DHCP to
-off in **Settings → Network Segments**; future scans then create assets there
+it. If the network's addresses do not in fact move, set the prefix's DHCP to
+off in **Inventory → Networks**; future scans then create assets there
 directly.
 
 **A scan you run on an asset is that asset's.** Pressing **Scan** on an asset
@@ -102,7 +102,7 @@ collector and network joins it.
 **Supporting evidence keeps its endpoints until you attach them.** Some
 sightings are linked to an asset you already have without being able to
 identify it on their own — for example a scan of an address that is in none of
-your network segments, or one on a DHCP network that carried a host key but
+your prefixes, or one on a DHCP network that carried a host key but
 no MAC address. This **supporting evidence** is listed as **Linked**, moves the
 asset's last-seen time, and adds nothing else: no endpoint, no identified
 service, no crypto configuration. Its row offers **Attach endpoints…**, which
@@ -170,7 +170,7 @@ overlapping network scopes wait for source evidence rather than initiating a
 probe whose result could be attributed to the wrong network.
 
 Enrichment reuses configured credentials and profiles; it does not try default
-credentials or expand a weak hostname into a subnet scan. Repeated delivery and
+credentials or expand a weak hostname into a scan of its network. Repeated delivery and
 worker restarts reuse persisted work. New useful evidence and the configured
 rescan interval permit another bounded enrichment cycle. Pausing admission also
 pauses automatic enrichment while retaining incoming evidence.
@@ -229,7 +229,7 @@ item. No second asset is ever created for the same device.
 
 An advertisement that names a device but carries no address on a configured
 network, or one whose network is unresolved or overlaps another configured
-segment, does not become a provisional item. It stays in Discovery →
+prefix, does not become a provisional item. It stays in Discovery →
 Observations until a sensor on its own network resolves the ambiguity.
 
 ### Deciding a provisional-linked observation
@@ -253,7 +253,7 @@ If trustworthy discovery was already active before this release, existing
 retained observations do not need to be re-registered. Most become provisional
 items within minutes of the upgrade, on the next enrichment sweep. An
 observation that was refused for an unresolved or overlapping network is
-re-checked on a six-hour cadence instead, so fixing the segment is reflected
+re-checked on a six-hour cadence instead, so fixing the prefix is reflected
 within six hours, with no action required from you either way.
 
 ## Review and merge
@@ -340,7 +340,7 @@ timestamps. Existing duplicate assets still require explicit reconciliation;
 a shared hostname alone is not permission to combine them.
 
 An online sensor is not necessarily eligible to enrich every device it observes.
-Reflected mDNS advertisements can describe a device on another subnet. Automatic
+Reflected mDNS advertisements can describe a device on another network. Automatic
 network checks require a recently reported, enabled interface with an address and
 prefix in the target network. Discovery explains this separately from a collector
 whose heartbeat is stale or whose profile disables active network checks.

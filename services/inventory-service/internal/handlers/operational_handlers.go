@@ -16,9 +16,9 @@ import (
 // satisfies it) lets the contract test drive the real handlers with an
 // in-memory stub — no database — per the spec-first contract recipe (ADR-0001).
 type operationalStore interface {
-	GetLocationSummaries(tenantID uuid.UUID) ([]models.LocationFindingSummaryRow, error)
-	GetLocationEnvironments(tenantID, locationID uuid.UUID) ([]models.EnvironmentSummary, error)
-	GetEnvironmentAssets(tenantID, locationID uuid.UUID, environment string, page, pageSize int) ([]models.Asset, int, error)
+	GetSiteSummaries(tenantID uuid.UUID) ([]models.SiteFindingSummaryRow, error)
+	GetSiteEnvironments(tenantID, siteID uuid.UUID) ([]models.EnvironmentSummary, error)
+	GetEnvironmentAssets(tenantID, siteID uuid.UUID, environment string, page, pageSize int) ([]models.Asset, int, error)
 	GetRemediationQueue(tenantID uuid.UUID, filters models.RemediationQueueFilters) ([]models.RemediationQueueRow, int, error)
 	GetRemediationQueueStats(tenantID uuid.UUID) (bySeverity map[string]int, byFindingType map[string]int, total int, err error)
 }
@@ -34,22 +34,22 @@ func NewOperationalHandler(operational *services.OperationalService, templates *
 	return &OperationalHandler{operational: operational, templates: templates}
 }
 
-// GetLocationsSummary handles GET /inventory-service/operational/locations-summary
-func (h *OperationalHandler) GetLocationsSummary(c *gin.Context) {
+// GetSitesSummary handles GET /inventory-service/operational/sites-summary
+func (h *OperationalHandler) GetSitesSummary(c *gin.Context) {
 	tenantID, ok := getTenantID(c)
 	if !ok {
 		return
 	}
-	rows, err := h.operational.GetLocationSummaries(tenantID)
+	rows, err := h.operational.GetSiteSummaries(tenantID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get location summaries"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get site summaries"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"locations_summary": rows})
+	c.JSON(http.StatusOK, gin.H{"sites_summary": rows})
 }
 
-// GetLocationEnvironments handles GET /inventory-service/operational/locations/:id/environments
-func (h *OperationalHandler) GetLocationEnvironments(c *gin.Context) {
+// GetSiteEnvironments handles GET /inventory-service/operational/sites/:id/environments
+func (h *OperationalHandler) GetSiteEnvironments(c *gin.Context) {
 	tenantID, ok := getTenantID(c)
 	if !ok {
 		return
@@ -57,10 +57,10 @@ func (h *OperationalHandler) GetLocationEnvironments(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid location id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
 		return
 	}
-	envs, err := h.operational.GetLocationEnvironments(tenantID, id)
+	envs, err := h.operational.GetSiteEnvironments(tenantID, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get environments"})
 		return
@@ -68,16 +68,16 @@ func (h *OperationalHandler) GetLocationEnvironments(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"environments": envs})
 }
 
-// GetEnvironmentAssets handles GET /inventory-service/operational/locations/:id/environments/:env/assets
+// GetEnvironmentAssets handles GET /inventory-service/operational/sites/:id/environments/:env/assets
 func (h *OperationalHandler) GetEnvironmentAssets(c *gin.Context) {
 	tenantID, ok := getTenantID(c)
 	if !ok {
 		return
 	}
 	idStr := c.Param("id")
-	locationID, err := uuid.Parse(idStr)
+	siteID, err := uuid.Parse(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid location id"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid site id"})
 		return
 	}
 	env := c.Param("env")
@@ -90,7 +90,7 @@ func (h *OperationalHandler) GetEnvironmentAssets(c *gin.Context) {
 		return
 	}
 	page, pageSize := pg.Page, pg.PageSize
-	assets, total, err := h.operational.GetEnvironmentAssets(tenantID, locationID, env, page, pageSize)
+	assets, total, err := h.operational.GetEnvironmentAssets(tenantID, siteID, env, page, pageSize)
 	if err != nil {
 		log.Printf("[operational] GetEnvironmentAssets: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get assets"})

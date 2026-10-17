@@ -1,0 +1,61 @@
+[
+  {
+    "ifindex": 1, "ifname": "lo", "flags": ["LOOPBACK", "UP", "LOWER_UP"], "mtu": 65536,
+    "qdisc": "noqueue", "operstate": "UNKNOWN", "group": "default", "txqlen": 1000,
+    "link_type": "loopback", "address": "00:00:00:00:00:00", "broadcast": "00:00:00:00:00:00",
+    "promiscuity": 0, "min_mtu": 0, "max_mtu": 0,
+    "addr_info": [
+      { "family": "inet", "local": "127.0.0.1", "prefixlen": 8, "scope": "host", "label": "lo", "valid_life_time": 4294967295, "preferred_life_time": 4294967295 },
+      { "family": "inet6", "local": "::1", "prefixlen": 128, "scope": "host", "valid_life_time": 4294967295, "preferred_life_time": 4294967295 }
+    ]
+  },
+  {
+    "ifindex": 2, "ifname": "eth0", "flags": ["BROADCAST", "MULTICAST", "SLAVE", "UP", "LOWER_UP"], "mtu": 9000,
+    "qdisc": "mq", "master": "bond0", "operstate": "UP", "group": "default", "txqlen": 1000,
+    "link_type": "ether", "address": "b4:96:91:1a:2b:3c", "broadcast": "ff:ff:ff:ff:ff:ff",
+    "promiscuity": 0, "min_mtu": 68, "max_mtu": 9216,
+    "linkinfo": { "info_slave_kind": "bond", "info_slave_data": { "state": "ACTIVE", "mii_status": "UP", "link_failure_count": 0, "perm_hwaddr": "b4:96:91:1a:2b:3c", "queue_id": 0 } },
+    "addr_info": []
+  },
+  {
+    "ifindex": 3, "ifname": "eth1", "flags": ["BROADCAST", "MULTICAST", "SLAVE", "UP", "LOWER_UP"], "mtu": 9000,
+    "qdisc": "mq", "master": "bond0", "operstate": "UP", "group": "default", "txqlen": 1000,
+    "link_type": "ether", "address": "b4:96:91:1a:2b:3c", "broadcast": "ff:ff:ff:ff:ff:ff",
+    "promiscuity": 0, "min_mtu": 68, "max_mtu": 9216,
+    "linkinfo": { "info_slave_kind": "bond", "info_slave_data": { "state": "BACKUP", "mii_status": "UP", "link_failure_count": 0, "perm_hwaddr": "b4:96:91:1a:2b:3d", "queue_id": 0 } },
+    "addr_info": []
+  },
+  {
+    "ifindex": 4, "ifname": "bond0", "flags": ["BROADCAST", "MULTICAST", "MASTER", "UP", "LOWER_UP"], "mtu": 9000,
+    "qdisc": "noqueue", "operstate": "UP", "group": "default", "txqlen": 1000,
+    "link_type": "ether", "address": "b4:96:91:1a:2b:3c", "broadcast": "ff:ff:ff:ff:ff:ff",
+    "promiscuity": 0, "min_mtu": 68, "max_mtu": 65535,
+    "ifalias": "uplink to core-sw-1 (radius key PlantedLinuxSecret8842)",
+    "linkinfo": { "info_kind": "bond", "info_data": { "mode": "active-backup", "miimon": 100, "primary": "eth0", "ad_actor_system": "00:00:00:00:00:00" } },
+    "addr_info": [
+      { "family": "inet", "local": "198.51.100.24", "prefixlen": 24, "broadcast": "198.51.100.255", "scope": "global", "label": "bond0", "valid_life_time": 4294967295, "preferred_life_time": 4294967295 },
+      { "family": "inet6", "local": "2001:db8:aa::24", "prefixlen": 64, "scope": "global", "valid_life_time": 4294967295, "preferred_life_time": 4294967295 },
+      { "family": "inet6", "local": "fe80::b696:91ff:fe1a:2b3c", "prefixlen": 64, "scope": "link", "valid_life_time": 4294967295, "preferred_life_time": 4294967295 }
+    ]
+  },
+  {
+    "ifindex": 5, "ifname": "bond0.100", "link": "bond0", "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"], "mtu": 9000,
+    "qdisc": "noqueue", "operstate": "UP", "group": "default", "txqlen": 1000,
+    "link_type": "ether", "address": "b4:96:91:1a:2b:3c", "broadcast": "ff:ff:ff:ff:ff:ff",
+    "promiscuity": 0, "min_mtu": 0, "max_mtu": 65535,
+    "linkinfo": { "info_kind": "vlan", "info_data": { "protocol": "802.1Q", "id": 100, "flags": ["REORDER_HDR"] } },
+    "addr_info": [
+      { "family": "inet", "local": "10.100.0.24", "prefixlen": 24, "broadcast": "10.100.0.255", "scope": "global", "dynamic": true, "label": "bond0.100", "valid_life_time": 85614, "preferred_life_time": 85614 }
+    ]
+  },
+  {
+    "ifindex": 6, "ifname": "docker0", "flags": ["NO-CARRIER", "BROADCAST", "MULTICAST", "UP"], "mtu": 1500,
+    "qdisc": "noqueue", "operstate": "DOWN", "group": "default",
+    "link_type": "ether", "address": "02:42:7b:0c:11:9a", "broadcast": "ff:ff:ff:ff:ff:ff",
+    "promiscuity": 0, "min_mtu": 68, "max_mtu": 65535,
+    "linkinfo": { "info_kind": "bridge", "info_data": { "forward_delay": 1500, "stp_state": 0 } },
+    "addr_info": [
+      { "family": "inet", "local": "172.17.0.1", "prefixlen": 16, "broadcast": "172.17.255.255", "scope": "global", "label": "docker0", "valid_life_time": 4294967295, "preferred_life_time": 4294967295 }
+    ]
+  }
+]

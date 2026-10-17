@@ -1362,8 +1362,11 @@ export interface components {
              */
             cloud_provider?: "aws" | "azure" | "gcp";
             /**
-             * @description Provider-specific resource types to discover.
-             *     AWS (8): alb, elb, nlb, api_gateway, cloudfront, kms, s3, rds.
+             * @description Provider-specific resource types to discover — one selection for
+             *     the account inventory listings and the crypto / at-rest
+             *     collectors alike (asset-inventory ADR-0009 D3).
+             *     Every provider: compute_instances, networks, security_groups.
+             *     AWS: alb, elb, nlb, api_gateway, cloudfront, kms, s3, rds.
              *     Azure: application_gateway, load_balancer, key_vault, storage_account, sql_database.
              *     GCP: load_balancer, ssl_proxy, kms, storage, cloudsql.
              *     Unknown values are ignored rather than rejected, so a run naming
@@ -1374,10 +1377,14 @@ export interface components {
              * @description AWS regions to scan (e.g. us-east-1), commercial partition only —
              *     GovCloud (aws-us-gov) and China (aws-cn) are not supported. Applies
              *     only to the REGIONAL AWS resource types (alb, elb, nlb,
-             *     api_gateway, kms, rds); each is scanned once per region,
-             *     sequentially. s3 and cloudfront are enumerated account-wide and
-             *     IGNORE this field entirely. When omitted, the integration's default
-             *     region is used. Ignored for Azure and GCP.
+             *     api_gateway, kms, rds, compute_instances, networks,
+             *     security_groups); each is scanned once per region, sequentially.
+             *     s3 and cloudfront are enumerated account-wide and IGNORE this
+             *     field entirely. When omitted — what the Discover modal sends —
+             *     the account's enabled regions are listed (ec2:DescribeRegions,
+             *     asset-inventory ADR-0009 D3); if that listing fails the
+             *     integration's default region is read and a `region_discovery`
+             *     failure is recorded. Ignored for Azure and GCP.
              */
             regions?: string[];
             /** @description Azure resource groups to filter by. Ignored for AWS and GCP. */
@@ -1489,6 +1496,10 @@ export interface components {
             /** @description DNS hostname or IP literal; display names with spaces are not hostnames. */
             hostname?: string;
             ip_address?: string;
+            /** @description The MAC of the interface the IP address is on, as typed (DCIM row 1.5f). With `interface_name` the two become a declared interface carrying the address; without it the platform names the interface. */
+            mac_address?: string;
+            /** @description The name of the interface the IP address is on (`eth0`, `port1`). Optional. */
+            interface_name?: string;
             management_url?: string;
             serial_number?: string;
             firmware_version?: string;
@@ -1573,10 +1584,10 @@ export interface components {
              *     client_secret, service_account_json, api_key, password.
              *     assume_role_arn and role_session_name are NOT secret and are
              *     returned as stored.
-             *     `enumerate_compute` (boolean, default TRUE when absent) decides
-             *     whether a cloud discovery run for this integration also enumerates
-             *     compute instances, virtual networks and subnets. It is not secret
-             *     and is returned as stored.
+             *     Compute, network and security-group enumeration is not an
+             *     integration setting: it is selected per run through the
+             *     discovery's `resource_types` (`compute_instances`, `networks`,
+             *     `security_groups`), like every other type.
              */
             config: {
                 [key: string]: unknown;
@@ -1587,6 +1598,22 @@ export interface components {
             description?: string;
             tags?: string[];
             is_enabled: boolean;
+            /**
+             * @description Account-level auto-approval (asset-inventory ADR-0009 D5): resources
+             *     this integration discovers in its account are approved
+             *     automatically. Default true. Evaluated by the same auto-approval
+             *     rules as everything else — the platform derives one rule per account
+             *     (`source:cloud and cloud.account_id="<account>"`) from this setting.
+             */
+            auto_approve_resources: boolean;
+            /**
+             * Format: uuid
+             * @description The `cloud_account` asset this integration's account is (ADR-0009
+             *     D1). Absent until the account is known — AWS learns it on the first
+             *     successful connection test. Deleting the integration does not delete
+             *     the asset; it goes stale by policy.
+             */
+            account_asset_id?: string;
             is_shared?: boolean;
             /** @description pending / configured / connected / error. */
             status: string;
@@ -1620,6 +1647,8 @@ export interface components {
             description?: string;
             tags?: string[];
             is_enabled?: boolean;
+            /** @description Account-level auto-approval (ADR-0009 D5). Default true when omitted. */
+            auto_approve_resources?: boolean;
         };
         /** @description Request body for PUT /integrations/{id}. All fields optional. */
         UpdateIntegrationRequest: {
@@ -1638,6 +1667,8 @@ export interface components {
             description?: string;
             tags?: string[];
             is_enabled?: boolean;
+            /** @description Account-level auto-approval (ADR-0009 D5). */
+            auto_approve_resources?: boolean;
         };
         /** @description CURRENT envelope for GET /integrations — `{ "integrations": [...], "count": N }`. `integrations` is always a non-nil array. */
         IntegrationListResponse: {
@@ -2127,11 +2158,12 @@ export interface components {
         };
         /**
          * @description What a cloud discovery run's enumeration half found: compute instances,
-         *     virtual networks, subnets and the distinct security groups it saw
+         *     virtual networks, child networks and the distinct security groups it saw
          *     membership of (handlers.CloudEnumerationCounts).
          *
-         *     ABSENT on a job means enumeration did not run — the integration has
-         *     `enumerate_compute` off, or the job is not a cloud discovery. Four
+         *     ABSENT on a job means enumeration did not run — the run selected none
+         *     of `compute_instances` / `networks` / `security_groups`, or the job is
+         *     not a cloud discovery. Four
          *     zeros mean it ran and the account was empty. The two are different
          *     answers and are not flattened.
          *
@@ -2541,6 +2573,26 @@ export interface components {
             /** @description Regions (or `global`) attempted. Zero for not_attempted. */
             scopes_attempted: number;
             failures?: components["schemas"]["JobResultCollectorFailure"][];
+            /**
+             * @description The type's per-region outcome, one row per region asked (or
+             *     `global` for an account-wide call), in the order attempted —
+             *     the job detail's outcome grid (asset-inventory ADR-0009 D3).
+             */
+            regions?: components["schemas"]["JobResultRegionOutcome"][];
+        };
+        /**
+         * @description One resource type in one region. An account-wide listing (S3,
+         *     CloudFront, every Azure and GCP listing) has one `global` row for the
+         *     call plus `from_account_listing` rows for the regions its resources
+         *     are in — those regions were not asked separately.
+         */
+        JobResultRegionOutcome: {
+            region: string;
+            /** @enum {string} */
+            status: "succeeded" | "partial" | "failed" | "not_attempted";
+            found: number;
+            failure?: components["schemas"]["JobResultCollectorFailure"];
+            from_account_listing?: boolean;
         };
         /**
          * @description One scope's collection failure, projected onto actionable fields. The

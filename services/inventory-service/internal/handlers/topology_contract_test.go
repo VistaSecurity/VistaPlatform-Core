@@ -62,9 +62,9 @@ func sampleTopology() *services.Topology {
 		Sites: []services.TopologySite{
 			{
 				Site: "DC-East", AssetCount: 12,
-				Segments: []services.TopologySegment{
+				Prefixes: []services.TopologyPrefix{
 					{
-						SegmentID: &seg, SegmentName: "Core VLAN", AssetCount: 8,
+						PrefixID: &seg, PrefixName: "Core VLAN", AssetCount: 8,
 						Classes: []services.TopologyClass{
 							{ClassKey: "server", ClassPath: "hardware.computer.server", AssetCount: 5},
 							{ClassKey: "managed_database", ClassPath: "service.data.managed_database", AssetCount: 3},
@@ -73,7 +73,7 @@ func sampleTopology() *services.Topology {
 					// The bucket, with a NULL id. It is in the fixture because
 					// it is the row a client most easily mishandles.
 					{
-						SegmentID: nil, SegmentName: services.TopologyUnsegmented, AssetCount: 4,
+						PrefixID: nil, PrefixName: services.TopologyNoPrefix, AssetCount: 4,
 						Classes: []services.TopologyClass{
 							{ClassKey: "server", ClassPath: "hardware.computer.server", AssetCount: 4},
 						},
@@ -82,9 +82,9 @@ func sampleTopology() *services.Topology {
 			},
 			{
 				Site: services.TopologyUnassignedSite, AssetCount: 3,
-				Segments: []services.TopologySegment{
+				Prefixes: []services.TopologyPrefix{
 					{
-						SegmentID: nil, SegmentName: services.TopologyUnsegmented, AssetCount: 3,
+						PrefixID: nil, PrefixName: services.TopologyNoPrefix, AssetCount: 3,
 						Classes: []services.TopologyClass{
 							{ClassKey: "network_device", ClassPath: "hardware.network_device", AssetCount: 3},
 						},
@@ -94,12 +94,28 @@ func sampleTopology() *services.Topology {
 		},
 		Edges: []services.TopologyEdge{
 			{
-				FromSegmentID: &seg, FromSegmentName: "Core VLAN",
-				ToSegmentID: nil, ToSegmentName: services.TopologyUnsegmented,
+				FromPrefixID: &seg, FromPrefixName: "Core VLAN",
+				ToPrefixID: nil, ToPrefixName: services.TopologyNoPrefix,
 				Count: 9, ByType: map[string]int{"connects_to": 7, "depends_on": 2},
 			},
 		},
-		TotalAssets: 15, UnassignedAssets: 3,
+		// The cloud hierarchy (ADR-0009 D7): account → region → prefix → class.
+		Clouds: []services.TopologyCloudAccount{{
+			Provider: "aws", AccountID: "123456789012", AccountName: "prod", AssetCount: 3,
+			Regions: []services.TopologyCloudRegion{{
+				Region: "us-east-1", AssetCount: 3,
+				Prefixes: []services.TopologyPrefix{{
+					PrefixID: &seg, PrefixName: "10.0.1.0/24", AssetCount: 3,
+					Classes: []services.TopologyClass{{ClassKey: "compute_instance", ClassPath: "cloud_resource.compute_instance", AssetCount: 3}},
+				}},
+			}},
+		}},
+		// Physical cable runs between prefixes (DCIM row 3.6).
+		CablePaths: []services.TopologyCablePaths{
+			{FromPrefixID: &seg, FromPrefixName: "Core VLAN", ToPrefixID: nil, ToPrefixName: services.TopologyNoPrefix, Count: 4, PendingCount: 1},
+		},
+		TotalCablePaths: 1,
+		TotalAssets:     15, UnassignedAssets: 3,
 		TotalNodes: 4, TotalEdges: 1,
 		NodeCap: services.TopologyNodeCap, EdgeCap: services.TopologyEdgeCap,
 	}
@@ -124,8 +140,9 @@ func TestContract_GetTopology_200(t *testing.T) {
 	// A client inventing them would name them differently from an export and
 	// from an agent reading the same API.
 	for _, want := range []string{
-		`"site":"Unassigned"`, `"segment_name":"Unsegmented"`, `"segment_id":null`,
+		`"site":"Unassigned"`, `"prefix_name":"No prefix"`, `"prefix_id":null`,
 		`"total_assets":15`, `"unassigned_assets":3`,
+		`"account_id":"123456789012"`, `"region":"us-east-1"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the response does not carry %s: %s", want, body)

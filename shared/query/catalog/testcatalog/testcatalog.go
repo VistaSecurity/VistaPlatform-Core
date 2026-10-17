@@ -41,7 +41,7 @@ var Ladder = CVSSLadder{}
 var targets = []catalog.Target{
 	{
 		Name: "asset", Table: "assets", Alias: "a", IDColumn: "id",
-		Subs:         []string{"endpoint", "software", "finding", "cert", "crypto", "identifier", "relationship"},
+		Subs:         []string{"endpoint", "software", "finding", "cert", "crypto", "identifier", "relationship", "interface"},
 		Traversable:  true,
 		FreeTextable: true,
 	},
@@ -69,6 +69,13 @@ var targets = []catalog.Target{
 	},
 	{
 		Name: "identifier", Table: "asset_identifiers", Alias: "ai", IDColumn: "id",
+		AssetIDColumn: "asset_id",
+		Subs:          []string{"asset"},
+	},
+	{
+		// DCIM BUILD_PLAN row 1.2 (QUERY_LANGUAGE §15): an asset's interfaces,
+		// `interface:(mac_address:"00:11:22:33:44:55")`.
+		Name: "interface", Table: "interfaces", Alias: "ifc", IDColumn: "id",
 		AssetIDColumn: "asset_id",
 		Subs:          []string{"asset"},
 	},
@@ -167,12 +174,85 @@ var assetFields = []catalog.FieldInfo{
 	// input value for enum" at query time — an error where the honest answer
 	// is "no rows".
 	enumAs("environment", "environment", "production", "staging", "development", "test"),
-	col("business_unit", ast.TypeKeyword),
+	// business_unit is an OBJECT-valued field (DCIM 1.1): the asset points at a
+	// business_units row. A bare reference matches the unit's name or slug;
+	// `.id` is the row's uuid and `.parent` matches the named unit and every
+	// descendant, so `business_unit.parent = Corporate` finds Finance beneath it.
+	derived("business_unit", "asset.business_unit", ast.TypeKeyword),
+	colAs("business_unit.id", "business_unit_id", ast.TypeUUID),
+	derived("business_unit.parent", "asset.business_unit_parent", ast.TypeKeyword),
 	col("owner_email", ast.TypeKeyword),
 	col("support_group", ast.TypeKeyword),
-	col("site", ast.TypeKeyword),
-	col("region", ast.TypeKeyword),
+	// Placement (DCIM row 2.1, QUERY_LANGUAGE §15 D3): `site` matches the
+	// asset's site by name or slug; `.id` is its uuid; `.group` and `.region`
+	// match the site's group or region by name/slug AND every descendant; and
+	// `location` matches the asset's location or any location above it, by
+	// name, slug or name path ("HQ / Floor 2").
+	derived("site", "asset.site", ast.TypeKeyword),
+	colAs("site.id", "site_id", ast.TypeUUID),
+	derived("site.group", "asset.site_group", ast.TypeKeyword),
+	derived("site.region", "asset.site_region", ast.TypeKeyword),
+	derived("location", "asset.location", ast.TypeKeyword),
+	// `region` is the location region, or a cloud resource's provider region
+	// when it has no location region (DCIM row 4.6, ADR-0009 D7).
+	derived("region", "asset.region", ast.TypeKeyword),
 	col("zone", ast.TypeKeyword),
+	// The device catalogue (DCIM row 2.2): device_type, device_role and
+	// platform are OBJECT-valued like business_unit. A bare reference matches
+	// the device type's model, slug or part number (the role's and platform's
+	// name or slug); `.id` is the row's uuid; device_type.manufacturer matches
+	// the type's manufacturer by name or slug. serial and asset_tag are the
+	// promoted asset columns.
+	derived("device_type", "asset.device_type", ast.TypeKeyword),
+	colAs("device_type.id", "device_type_id", ast.TypeUUID),
+	derived("device_type.manufacturer", "asset.device_type_manufacturer", ast.TypeKeyword),
+	derived("device_role", "asset.device_role", ast.TypeKeyword),
+	colAs("device_role.id", "device_role_id", ast.TypeUUID),
+	derived("platform", "asset.platform", ast.TypeKeyword),
+	colAs("platform.id", "platform_id", ast.TypeUUID),
+	col("serial", ast.TypeKeyword),
+	col("asset_tag", ast.TypeKeyword),
+	// Virtualisation (DCIM row 4.2): the asset's cluster — a VM's
+	// (assets.cluster_id) or a hypervisor's (cluster_hosts). `cluster`
+	// matches the cluster's name, `cluster.type` its type's name or slug,
+	// `cluster.group` its group's name or slug; `cluster.id` is a VM's
+	// assets.cluster_id.
+	derived("cluster", "asset.cluster", ast.TypeKeyword),
+	colAs("cluster.id", "cluster_id", ast.TypeUUID),
+	derived("cluster.type", "asset.cluster_type", ast.TypeKeyword),
+	derived("cluster.group", "asset.cluster_group", ast.TypeKeyword),
+	// Circuits (DCIM row 4.1): circuits terminating at the asset's location.
+	// `circuit` matches a circuit's cid or its type's name or slug;
+	// circuit.cid the cid alone; circuit.provider the provider's name or slug.
+	derived("circuit", "asset.circuit", ast.TypeKeyword),
+	derived("circuit.cid", "asset.circuit_cid", ast.TypeKeyword),
+	derived("circuit.provider", "asset.circuit_provider", ast.TypeKeyword),
+	// Rack placement (DCIM row 2.3, QUERY_LANGUAGE §15 D7): `rack` matches the
+	// asset's rack by name or facility id; `.id` is assets.rack_id; `.site` and
+	// `.role` match the rack's site and rack role by name or slug. position is
+	// the lowest unit the asset occupies (half-U steps), face front or rear.
+	derived("rack", "asset.rack", ast.TypeKeyword),
+	colAs("rack.id", "rack_id", ast.TypeUUID),
+	derived("rack.site", "asset.rack_site", ast.TypeKeyword),
+	derived("rack.role", "asset.rack_role", ast.TypeKeyword),
+	// Hardware (DCIM row 2.4, QUERY_LANGUAGE §15 D8): `module_type` matches a
+	// module installed in the asset by its module type's model, part number or
+	// slug; `inventory_item.serial` matches the serial of any of its inventory
+	// items; `virtual_chassis` matches the chassis it is a member of by name or
+	// domain.
+	derived("module_type", "asset.module_type", ast.TypeKeyword),
+	derived("inventory_item.serial", "asset.inventory_item_serial", ast.TypeKeyword),
+	derived("virtual_chassis", "asset.virtual_chassis", ast.TypeKeyword),
+	col("position", ast.TypeNumber),
+	enumAs("face", "face", "front", "rear"),
+	// Cloud (DCIM row 4.6, ADR-0009 D7; QUERY_LANGUAGE §15): the
+	// cloud_resource attributes every cloud collector writes. `provider` and
+	// `account` are the resource's provider and account / subscription /
+	// project id; `cloud.type` is the provider's own type string
+	// (AWS::EC2::Instance, Microsoft.Compute/virtualMachines, …).
+	enumDerived("provider", "asset.cloud_provider", "aws", "azure", "gcp", "oci", "other"),
+	derived("account", "asset.cloud_account", ast.TypeKeyword),
+	derived("cloud.type", "asset.cloud_type", ast.TypeKeyword),
 	enumAs("status", "asset_status", "pending_approval", "monitoring", "denied", "archived"),
 	enumAs("ownership", "asset_ownership", "internal", "third_party", "unknown"),
 	enumAs("stale_status", "stale_status", "active", "stale", "archived"),
@@ -189,6 +269,28 @@ var assetFields = []catalog.FieldInfo{
 	derived("proposed_by", "asset.proposed_by", ast.TypeKeyword),
 	enumDerived("cert_trust", "asset.cert_trust",
 		"public", "private_trusted", "incomplete", "self_signed", "untrusted", "distrusted", "unevaluated", "none"),
+	// IPAM (QUERY_LANGUAGE §15 D2): computed from the asset's addresses.
+	derived("ip.address", "asset.ip.address", ast.TypeInet),
+	derived("ip.dns_name", "asset.ip.dns_name", ast.TypeKeyword),
+	enumDerived("ip.status", "asset.ip.status", "active", "reserved", "deprecated", "dhcp", "slaac"),
+	enumDerived("ip.role", "asset.ip.role", "loopback", "secondary", "anycast", "vip", "vrrp", "hsrp", "glbp", "carp"),
+	derived("prefix.prefix", "asset.prefix.prefix", ast.TypeInet),
+	enumDerived("prefix.status", "asset.prefix.status", "container", "active", "reserved", "deprecated"),
+	derived("prefix.network_type", "asset.prefix.network_type", ast.TypeKeyword),
+	derived("vlan.vid", "asset.vlan.vid", ast.TypeNumber),
+	derived("vlan.name", "asset.vlan.name", ast.TypeKeyword),
+	derived("vrf.name", "asset.vrf.name", ast.TypeKeyword),
+	// VPN (DCIM row 4.3): a tunnel one of the asset's interfaces terminates.
+	derived("tunnel", "asset.tunnel", ast.TypeKeyword),
+	enumDerived("tunnel.encapsulation", "asset.tunnel.encapsulation", "ipsec-transport", "ipsec-tunnel", "ip-ip", "gre", "wireguard", "l2tp", "pptp", "openvpn"),
+	derived("tunnel.ike_version", "asset.tunnel.ike_version", ast.TypeNumber),
+	derived("tunnel.pfs_group", "asset.tunnel.pfs_group", ast.TypeNumber),
+	derived("wireless_lan.ssid", "asset.wireless_lan.ssid", ast.TypeKeyword),
+	enumDerived("wireless_lan.auth_type", "asset.wireless_lan.auth_type", "open", "wep", "wpa-personal", "wpa-enterprise"),
+	// Cabling (DCIM row 3.2): the cables on the asset's components.
+	enumDerived("cable.type", "asset.cable.type", "cat3", "cat5", "cat5e", "cat6", "cat6a", "cat7", "cat7a", "cat8", "dac-active", "dac-passive", "mrj21-trunk", "coaxial", "mmf", "mmf-om1", "mmf-om2", "mmf-om3", "mmf-om4", "mmf-om5", "smf", "smf-os1", "smf-os2", "aoc", "usb", "power"),
+	enumDerived("cable.status", "asset.cable.status", "connected", "planned", "decommissioning"),
+	derived("cabled_to", "asset.cabled_to", ast.TypeKeyword),
 	{
 		Name: "risk", Type: ast.TypeBand,
 		Accessor: ast.Accessor{
@@ -211,7 +313,7 @@ var assetFields = []catalog.FieldInfo{
 	},
 	col("created_at", ast.TypeTimestamp),
 	col("updated_at", ast.TypeTimestamp),
-	colAs("segment_id", "network_segment_id", ast.TypeUUID),
+	col("prefix_id", ast.TypeUUID),
 	col("location_id", ast.TypeUUID),
 	col("id", ast.TypeUUID),
 }
@@ -227,7 +329,7 @@ var endpointFields = []catalog.FieldInfo{
 	// missing, so `protocol:S7` read as an invalid field value in the spec
 	// fixture while the column accepted it.
 	enumAs("protocol", "protocol",
-		"TLS", "SSH", "IPSec", "VPN", "Database", "API", "SMB", "Kerberos", "QUIC", "PPTP",
+		"TLS", "SSH", "IPSec", "VPN", "Database", "API", "SMB", "Kerberos", "QUIC", "PPTP", "IKE",
 		"Modbus", "DNP3", "MMS", "ICCP", "IEC62351", "OPC_UA",
 		"EtherNet_IP", "BACnet", "BACnet_SC", "HART_IP", "S7"),
 	col("service_name", ast.TypeKeyword),
@@ -284,7 +386,7 @@ var cryptoFields = []catalog.FieldInfo{
 	// missing, so `protocol:S7` read as an invalid field value in the spec
 	// fixture while the column accepted it.
 	enumAs("protocol", "protocol",
-		"TLS", "SSH", "IPSec", "VPN", "Database", "API", "SMB", "Kerberos", "QUIC", "PPTP",
+		"TLS", "SSH", "IPSec", "VPN", "Database", "API", "SMB", "Kerberos", "QUIC", "PPTP", "IKE",
 		"Modbus", "DNP3", "MMS", "ICCP", "IEC62351", "OPC_UA",
 		"EtherNet_IP", "BACnet", "BACnet_SC", "HART_IP", "S7"),
 	col("protocol_version", ast.TypeKeyword),
@@ -311,14 +413,14 @@ var cryptoFields = []catalog.FieldInfo{
 
 var findingFields = []catalog.FieldInfo{
 	enumAs("producer", "producer",
-		"compliance", "crypto", "eol", "vulnerability", "configuration", "hygiene", "drift"),
+		"compliance", "crypto", "eol", "vulnerability", "configuration", "hygiene", "drift", "topology"),
 	enumAs("kind", "kind",
-		"control_noncompliant", "weak_configuration", "weak_certificate", "pqc_vulnerable",
+		"control_noncompliant", "weak_configuration", "weak_certificate", "pqc_vulnerable", "weak_wireless_auth",
 		"os_end_of_life", "software_end_of_life", "hardware_end_of_support", "known_vulnerability",
 		"plaintext_management", "default_credentials_exposed", "insecure_service_exposed",
 		"no_owner", "no_class", "no_location", "duplicate_suspected", "stale", "orphan_relationship",
 		"new_class_in_segment", "unexpected_protocol", "port_profile_changed", "new_issuer",
-		"host_key_changed"),
+		"host_key_changed", "cable_drift"),
 	enumAs("subject_type", "subject_type",
 		"asset", "endpoint", "certificate", "key", "crypto_configuration", "software_install",
 		"relationship", "control", "framework"),
@@ -399,16 +501,35 @@ var observationFields = []catalog.FieldInfo{
 	// `network.type:corporate`, and nothing in the platform has ever emitted
 	// "corporate" — §13 A8.
 	//
-	// `network.type` is FOUR values, not two — §14 B1. The classifier copies
-	// the matching segment's `network_type` column through and
-	// `network_segments_network_type_check` allows private / public / vpn /
-	// cloud; published as two, an auto-approval rule for a cloud or VPN segment
-	// was refused outright and that segment silently stopped generating one.
-	// The registry-derived catalogue was corrected then; this copy was not.
+	// `network.type` is FOUR values, not two — §14 B1: private / public / vpn
+	// / cloud, the prefix network types an auto-approval rule is generated
+	// for (DCIM row 1.6). Published as two, a rule for a cloud or VPN network
+	// was refused outright and silently stopped being generated.
 	enumAs("network.ownership", "network_ownership", "internal", "third_party", "unknown"),
 	enumAs("network.type", "network_type", "private", "public", "vpn", "cloud"),
-	colAs("network.segment_id", "network_segment_id", ast.TypeUUID),
+	// DCIM row 1.4 (§15): prefix, VRF and interface of the observation.
+	colAs("network.prefix_id", "network_prefix_id", ast.TypeUUID),
+	colAs("network.vrf_id", "network_vrf_id", ast.TypeUUID),
+	colAs("interface_id", "interface_id", ast.TypeUUID),
+	// The account scope term of a cloud auto-approval rule (ADR-0009 D5, §15).
+	colAs("cloud.account_id", "cloud_account_id", ast.TypeKeyword),
 	colAs("first_seen", "first_seen_at", ast.TypeTimestamp),
+}
+
+// interfaceFields mirror the registry catalogue's (§15).
+var interfaceFields = []catalog.FieldInfo{
+	col("name", ast.TypeKeyword),
+	col("type", ast.TypeKeyword),
+	derived("mac_address", "interface.mac_address", ast.TypeKeyword),
+	col("enabled", ast.TypeBoolean),
+	col("mgmt_only", ast.TypeBoolean),
+	col("mtu", ast.TypeNumber),
+	col("speed_kbps", ast.TypeNumber),
+	enumAs("mode", "mode", "access", "tagged", "tagged-all", "q-in-q"),
+	enumAs("status", "status", "pending", "active", "rejected", "stale", "archived"),
+	enumAs("operational_status", "operational_status", "up", "down", "testing", "unknown"),
+	col("description", ast.TypeText),
+	col("id", ast.TypeUUID),
 }
 
 // measurement carries only the reserved scalar; everything else it reads is a
@@ -432,15 +553,17 @@ var fieldsByTarget = map[string][]catalog.FieldInfo{
 	"relationship":         relationshipFields,
 	"observation":          observationFields,
 	"measurement":          measurementFields,
+	"interface":            interfaceFields,
 }
 
 // namespacesByTarget says which of the four namespaces resolve on a target
 // (§4.2). Only an asset-shaped row carries class attributes, facts,
 // identifiers and tags; a measurement predicate reads facts and nothing else.
 var namespacesByTarget = map[string][]ast.Namespace{
-	"asset":       {ast.NamespaceAttr, ast.NamespaceFact, ast.NamespaceID, ast.NamespaceTag},
+	"asset":       {ast.NamespaceAttr, ast.NamespaceFact, ast.NamespaceID, ast.NamespaceTag, ast.NamespaceCF},
 	"observation": {ast.NamespaceAttr, ast.NamespaceFact, ast.NamespaceID, ast.NamespaceTag},
 	"measurement": {ast.NamespaceFact},
+	"interface":   {ast.NamespaceCF},
 }
 
 func namespaceAllowed(target string, ns ast.Namespace) bool {

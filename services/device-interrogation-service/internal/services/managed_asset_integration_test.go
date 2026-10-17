@@ -25,6 +25,7 @@ import (
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/facts"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/relationships"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
@@ -150,7 +151,7 @@ func TestIntegration_CreateDevice_IsAnAssetWithManagement(t *testing.T) {
 	// and the same host seen by the sensor resolve to ONE asset.
 	var fqdnCount int
 	if err := db.QueryRow(`
-		SELECT count(*) FROM asset_identifiers
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'fqdn' AND value = $3`,
 		tenant, dev.ID, hostname).Scan(&fqdnCount); err != nil {
 		t.Fatalf("read identifiers: %v", err)
@@ -208,7 +209,7 @@ func TestIntegration_CreateDevice_IsOneUnitOfWork(t *testing.T) {
 	}
 
 	assertCount(t, db, 0, `SELECT count(*) FROM assets WHERE tenant_id = $1`, tenant)
-	assertCount(t, db, 0, `SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1`, tenant)
+	assertCount(t, db, 0, `SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1`, tenant)
 	assertCount(t, db, 0, `SELECT count(*) FROM asset_history WHERE tenant_id = $1`, tenant)
 	assertCount(t, db, 0, `SELECT count(*) FROM asset_management WHERE tenant_id = $1`, tenant)
 }
@@ -303,12 +304,12 @@ func TestIntegration_CreateDevice_AnAddressTypedAsAHostnameStaysAnAddress(t *tes
 		t.Errorf("assets.primary_address = %q, want 198.51.100.77", primary.String)
 	}
 	assertCount(t, db, 1, `
-		SELECT count(*) FROM asset_identifiers
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'ip_address' AND value = '198.51.100.77'`,
 		tenant, dev.ID)
 	// And no hostname identifier was minted from it.
 	assertCount(t, db, 0, `
-		SELECT count(*) FROM asset_identifiers
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND asset_id = $2 AND kind IN ('hostname', 'fqdn')`, tenant, dev.ID)
 }
 
@@ -571,7 +572,7 @@ func TestIntegration_ObservationSink_PersistsFactsAndIdentity(t *testing.T) {
 	// `devices.serial_number` being a plain column is a large part of why an
 	// interrogated device and the same host seen elsewhere were two rows.
 	assertCount(t, db, 1, `
-		SELECT count(*) FROM asset_identifiers
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'serial_number' AND value = $3`,
 		tenant, dev.ID, obs.DeviceIdentity.SerialNumber)
 
@@ -883,8 +884,7 @@ func TestIntegration_WeakIdentifiersAreScopedToTheSegment(t *testing.T) {
 
 	var segmentID uuid.UUID
 	if err := db.QueryRow(`
-		INSERT INTO network_segments (tenant_id, name, segment_type, value, environment)
-		VALUES ($1, 'lab', 'cidr', '198.51.100.0/24', 'production')
+		INSERT INTO prefixes(tenant_id,description,prefix,environment,source_kind,status) VALUES($1,'lab','198.51.100.0/24'::cidr,'production','declared','active')
 		RETURNING id`, tenant).Scan(&segmentID); err != nil {
 		t.Fatalf("seed segment: %v", err)
 	}
@@ -905,7 +905,7 @@ func TestIntegration_WeakIdentifiersAreScopedToTheSegment(t *testing.T) {
 	for _, kind := range []string{"hostname", "ip_address"} {
 		var scope sql.NullString
 		if err := db.QueryRow(`
-			SELECT scope FROM asset_identifiers
+			SELECT scope FROM (`+identifiersql.All+`) ident_rows
 			WHERE tenant_id = $1 AND asset_id = $2 AND kind = $3`, tenant, dev.ID, kind).Scan(&scope); err != nil {
 			t.Fatalf("read %s identifier: %v", kind, err)
 		}
@@ -929,7 +929,7 @@ func TestIntegration_WeakIdentifiersAreScopedToTheSegment(t *testing.T) {
 
 	var peerScope sql.NullString
 	if err := db.QueryRow(`
-		SELECT scope FROM asset_identifiers
+		SELECT scope FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND kind = 'ip_address' AND value = '198.51.100.30'`, tenant).Scan(&peerScope); err != nil {
 		t.Fatalf("read peer identifier: %v", err)
 	}
@@ -950,7 +950,7 @@ func TestIntegration_WeakIdentifiersAreScopedToTheSegment(t *testing.T) {
 	}
 	var outsideScope sql.NullString
 	if err := db.QueryRow(`
-		SELECT scope FROM asset_identifiers
+		SELECT scope FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND kind = 'ip_address' AND value = '203.0.113.5'`, tenant).Scan(&outsideScope); err != nil {
 		t.Fatalf("read outside identifier: %v", err)
 	}
@@ -984,8 +984,7 @@ func TestIntegration_CreateDevice_ScopeIsTheFirstAddressInASegment(t *testing.T)
 
 	var segmentID uuid.UUID
 	if err := db.QueryRow(`
-		INSERT INTO network_segments (tenant_id, name, segment_type, value, environment)
-		VALUES ($1, 'mgmt', 'cidr', '198.51.100.0/24', 'production')
+		INSERT INTO prefixes(tenant_id,description,prefix,environment,source_kind,status) VALUES($1,'mgmt','198.51.100.0/24'::cidr,'production','declared','active')
 		RETURNING id`, tenant).Scan(&segmentID); err != nil {
 		t.Fatalf("seed segment: %v", err)
 	}
@@ -995,7 +994,7 @@ func TestIntegration_CreateDevice_ScopeIsTheFirstAddressInASegment(t *testing.T)
 		t.Helper()
 		var scope sql.NullString
 		if err := db.QueryRow(`
-			SELECT scope FROM asset_identifiers
+			SELECT scope FROM (`+identifiersql.All+`) ident_rows
 			WHERE tenant_id = $1 AND asset_id = $2 AND kind = $3 AND value = $4`,
 			tenant, assetID, kind, value).Scan(&scope); err != nil {
 			t.Fatalf("read %s %s: %v", kind, value, err)
@@ -1099,11 +1098,11 @@ func TestIntegration_ObservationSink_PeerSyntheticNamesAreAttributes(t *testing.
 	if err := json.Unmarshal([]byte(synthetic.String), &got); err != nil || len(got) != 2 {
 		t.Errorf("synthetic_names = %q, want the UUID and the IP-encoded name (err %v)", synthetic.String, err)
 	}
-	assertCount(t, db, 1, `SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2 AND kind IN ('hostname','fqdn')`, tenant, peerAsset)
-	assertCount(t, db, 1, `SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'hostname' AND value = 'speaker-7'`, tenant, peerAsset)
+	assertCount(t, db, 1, `SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1 AND asset_id = $2 AND kind IN ('hostname','fqdn')`, tenant, peerAsset)
+	assertCount(t, db, 1, `SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'hostname' AND value = 'speaker-7'`, tenant, peerAsset)
 	// Nothing anywhere holds a synthetic name as an identifier, and the
 	// synthetic-only peer created no asset.
-	assertCount(t, db, 0, `SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1 AND kind IN ('hostname','fqdn') AND (value LIKE '%-%-%-%-%.local' OR value LIKE '192-0-2-5%')`, tenant)
+	assertCount(t, db, 0, `SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1 AND kind IN ('hostname','fqdn') AND (value LIKE '%-%-%-%-%.local' OR value LIKE '192-0-2-5%')`, tenant)
 	assertCount(t, db, 2, `SELECT count(*) FROM assets WHERE tenant_id = $1 AND deleted_at IS NULL`, tenant)
 }
 
@@ -1178,7 +1177,7 @@ func TestIntegration_SubmitJobResult_PersistsObservationsWithoutCryptoAssets(t *
 	// The peer became an asset of its own, which is what makes it a node on the
 	// map rather than a string in a payload.
 	assertCount(t, db, 1, `
-		SELECT count(*) FROM asset_identifiers
+		SELECT count(*) FROM (`+identifiersql.All+`) ident_rows
 		WHERE tenant_id = $1 AND kind = 'mac_address' AND value = 'a8:bb:cc:dd:ee:07'`, tenant)
 }
 
@@ -1260,7 +1259,7 @@ func TestIntegration_ObservationSink_RepeatRunBumpsTheObservationItMade(t *testi
 	if len(got) != 1 {
 		var all, assets string
 		_ = db.QueryRow(`SELECT COALESCE(string_agg(state||' '||source_ref||' '||left(evidence::text,400), E'\n'),'') FROM identity_observations WHERE tenant_id=$1`, tenant).Scan(&all)
-		_ = db.QueryRow(`SELECT COALESCE(string_agg(i.kind||'='||i.value||' -> '||a.asset_status||' '||COALESCE(a.hostname,''), E'\n'),'') FROM asset_identifiers i JOIN assets a ON a.id=i.asset_id WHERE i.tenant_id=$1`, tenant).Scan(&assets)
+		_ = db.QueryRow(`SELECT COALESCE(string_agg(i.kind||'='||i.value||' -> '||a.asset_status||' '||COALESCE(a.hostname,''), E'\n'),'') FROM (`+identifiersql.All+`) i JOIN assets a ON a.id=i.asset_id WHERE i.tenant_id=$1`, tenant).Scan(&assets)
 		t.Fatalf("observations of %s after two runs of one device = %d, want 1: %+v\nALL OBS:\n%s\nASSET IDS:\n%s", clientMAC, len(got), got, all, assets)
 	}
 	if got[0].state != "unresolved" {

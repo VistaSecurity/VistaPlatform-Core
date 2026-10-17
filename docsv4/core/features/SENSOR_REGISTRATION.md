@@ -18,7 +18,7 @@ Everything on this page happens under **Discovery → Sensors & Agents**.
 
 Both are registered from the same button and appear on the same page, in two
 tables — because a sensor row and an agent row answer different questions. A
-sensor has a segment and an "assets found" count; an agent has a profile, an
+sensor has a network and an "assets found" count; an agent has a profile, an
 address inventory and a job history.
 
 ### Platform sensors
@@ -234,7 +234,7 @@ Configuration and commands, for users with the **Update sensors** permission
 (`sensors.update`).
 
 **Network interfaces.** Tick the interfaces the sensor should monitor and click
-**Save NICs** to send the change — nothing is queued until you do. **Detect**
+**Save interfaces** to send the change — nothing is queued until you do. **Detect**
 asks the sensor to report what the host actually has; an interface you typed in
 by hand that the host has not reported is flagged *not detected on host* rather
 than silently accepted.

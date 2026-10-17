@@ -15,11 +15,21 @@ import { AssetsLens } from './assets-lens';
 import { useMergeProposalCount } from './asset-queries';
 import { useRelationshipProposalCount } from './relationship-queries';
 import { useClassProposalCount } from '../discovery/class-proposal-queries';
-import { assetIdentity, assetRisk, classLabel, primaryAddressPort } from './asset-shape';
+import { assetIdentity, assetRisk, businessUnitName, classLabel, primaryAddressPort } from './asset-shape';
 import { ASSET_CSV_HEADER, assetCsvRow } from './asset-csv';
 import { AssetDrawer, CertDrawer, ConfigDrawer, KeyDrawer, type Certificate, type CryptoConfig, type Key, type OpenAsset, type OpenCert, type OpenConfig, type OpenKey } from './drawers';
 import { AssetFormModal } from './asset-form-modal';
 import { SoftwareLens } from './software-lens';
+import { NetworksLens } from './ipam/networks-lens';
+import { CircuitsLens } from './circuits/circuits-lens';
+import { CablingLens } from './cabling/cabling-lens';
+import { CloudLens } from './cloud/cloud-lens';
+import { ChangesLens } from './changes/changes-lens';
+import { VlansLens } from './ipam/vlans-lens';
+import { ClustersLens } from './virtualization/clusters-lens';
+import { SitesLens } from './sites/sites-lens';
+import { RacksLens } from './racks/racks-lens';
+import { TunnelsLens } from './vpn/tunnels-lens';
 import { MapShell } from './map-shell';
 import { CertificateUploadModal } from './certificate-upload-modal';
 import { ImportSpreadsheetModal } from '../discovery/import-modal';
@@ -414,7 +424,7 @@ export function InventoryPage() {
   // was added, and `map` had to be NAMED when it stopped being a placeholder,
   // because that clause silently stopped covering it.
   const usesAssetDataset = def.anchor === 'asset' && !isConn && !def.placeholder
-    && lens !== 'assets' && lens !== 'map' && lens !== 'software';
+    && lens !== 'assets' && lens !== 'map' && lens !== 'software' && lens !== 'networks' && lens !== 'vlans' && lens !== 'clusters' && lens !== 'sites' && lens !== 'circuits' && lens !== 'tunnels' && lens !== 'changes' && lens !== 'cloud' && lens !== 'racks' && lens !== 'cabling';
   // The raw `search` drives the input and the client-side key filter; the
   // DEBOUNCED value reaches the server-backed query keys, so a burst of
   // keystrokes is one request.
@@ -669,7 +679,7 @@ export function InventoryPage() {
           <SelectAllBanner selection={staleSelection} pageIds={stalePageIds} total={total} query={staleQuery} queryable={staleQueryable} onChange={setStaleSelection} />
           <div style={{ display: 'grid', gridTemplateColumns: STALE_GRID, gap: 12, padding: '0 16px', height: 34, alignItems: 'center', borderBottom: '1px solid var(--app-border2)', position: 'sticky', top: 0, background: 'var(--app-panel)', zIndex: 1 }}>
             <SelectBox state={pageState(staleSelection, stalePageIds)} onChange={() => setStaleSelection((s) => togglePage(s, stalePageIds))} label="Select every stale asset on this page" />
-            {['', 'Asset', 'Class', 'Segment', 'Status', 'Last seen'].map((h, i) => <span key={i} className="eyebrow-app">{h}</span>)}
+            {['', 'Asset', 'Class', 'Network', 'Status', 'Last seen'].map((h, i) => <span key={i} className="eyebrow-app">{h}</span>)}
           </div>
           {staleAssets.map((a) => {
             const risk = assetRisk(a);
@@ -687,7 +697,7 @@ export function InventoryPage() {
                   <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>{primaryAddressPort(a)}</div>
                 </div>
                 <Txt v={classLabel(a.class_key)} />
-                <Txt v={a.network_segment_name || a.business_unit} />
+                <Txt v={a.prefix || businessUnitName(a.business_unit)} />
                 <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--warn)', background: 'color-mix(in srgb, var(--warn) 11%, transparent)', borderRadius: 40, padding: '2px 9px', justifySelf: 'start', textTransform: 'capitalize' }}>{a.asset_status || 'unknown'}</span>
                 <span className="mono" style={{ fontSize: 12, color: 'var(--warn-strong)' }}>{d != null ? `${d}d` : '—'}</span>
               </div>
@@ -781,6 +791,54 @@ export function InventoryPage() {
   // crypto lenses this page's remaining branches are.
   if (lens === 'software') {
     return <SoftwareLens />;
+  }
+
+  // IPAM (row 1.3): prefix- and VLAN-anchored, so they return early like the
+  // two above — neither is an asset table reshaped.
+  if (lens === 'networks') {
+    return <NetworksLens />;
+  }
+  if (lens === 'vlans') {
+    return <VlansLens />;
+  }
+  // Virtualisation (row 4.2): cluster-anchored, its own table.
+  if (lens === 'clusters') {
+    return <ClustersLens />;
+  }
+  if (lens === 'sites') {
+    return <SitesLens />;
+  }
+  // Racks (row 2.5): rack-anchored, so it returns early like Sites.
+  if (lens === 'racks') {
+    return <RacksLens />;
+  }
+  // VPN (row 4.3): tunnel-anchored, returns early like IPAM.
+  if (lens === 'tunnels') {
+    return <TunnelsLens />;
+  }
+  // Circuits (row 4.1): circuit-anchored, so it returns early like IPAM's.
+  if (lens === 'circuits') {
+    return <CircuitsLens />;
+  }
+  // Cabling (row 3.4): cable-anchored, returns early like Circuits.
+  if (lens === 'cabling') {
+    return <CablingLens />;
+  }
+
+  // Cloud (ADR-0009 D7): the asset list under a `class:cloud_resource` scope,
+  // with its own facets and the Account grouping. Same query/page state and
+  // the same asset drawer as All assets.
+  if (lens === 'cloud') {
+    return (
+      <>
+        <CloudLens query={query} onQueryChange={setQuery} page={page} onPageChange={setPage} onOpenAsset={openAsset} />
+        {drawerStack}
+      </>
+    );
+  }
+  // The change log (row 5.2): change-anchored, so it returns early too.
+  if (lens === 'changes') {
+    return <ChangesLens />;
   }
 
   // The map is the neighbourhood GRAPH (ADR-0006 D4), not a table reshaped, so

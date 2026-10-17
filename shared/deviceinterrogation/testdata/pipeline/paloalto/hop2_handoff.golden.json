@@ -1,6 +1,6 @@
 {
   "vendor": "paloalto",
-  "input_sha256": "4b57a22269f0fb06b6b19c4851504ca7414a8bdc80005f2159367aa332ca3d0b",
+  "input_sha256": "cfe300e60b2e7d2f4490847c66d4672f010983cc1123874d48b92ae64b3511d5",
   "imports": [
     {
       "findings": [
@@ -93,7 +93,18 @@
     }
   ],
   "process_error": "",
-  "learned_segments": [],
+  "learned_prefixes": [
+    {
+      "value": "192.0.2.0/24",
+      "network_type": "",
+      "dhcp_managed": null
+    },
+    {
+      "value": "203.0.113.0/24",
+      "network_type": "",
+      "dhcp_managed": null
+    }
+  ],
   "assets": [
     {
       "label": "device",
@@ -112,6 +123,24 @@
           "value": "{{APPLIANCE_IP}}",
           "scope": "tenant",
           "source_kind": "declared"
+        },
+        {
+          "kind": "ip_address",
+          "value": "192.0.2.5",
+          "scope": "prefix:192.0.2.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "198.51.100.2",
+          "scope": "prefix:198.51.100.0/24",
+          "source_kind": "measured"
+        },
+        {
+          "kind": "ip_address",
+          "value": "203.0.113.1",
+          "scope": "prefix:203.0.113.0/24",
+          "source_kind": "measured"
         },
         {
           "kind": "mac_address",
@@ -154,7 +183,7 @@
         {
           "kind": "ip_address",
           "value": "198.51.100.1",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         },
         {

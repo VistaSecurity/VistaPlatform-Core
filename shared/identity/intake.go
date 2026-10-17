@@ -28,11 +28,10 @@ import (
 //
 //   - every address and every name is scoped SEPARATELY, against ONE segment
 //     snapshot loaded once per call ([Repository.SegmentSnapshot]):
-//     an address by [SegmentSnapshot.ScopeForAddress]; a name by the segment
-//     of the address it was seen at, else the domain rule
-//     ([SegmentSnapshot.ScopeForName]), else the tenant default;
-//   - DynamicScopes comes from the segments' STORED effective posture only
-//     (operator > measured > inferred, decided once at write time by
+//     an address by [SegmentSnapshot.ScopeForAddress]; a name by the prefix
+//     of the address it was seen at, else the tenant default;
+//   - DynamicScopes comes from the prefixes' STORED DHCP posture only
+//     (`prefixes.dhcp_managed`, decided at write time by
 //     shared/identity/postgres/segment_posture.go). A Sighting has no field a
 //     collector could use to overlay its own run's DHCP opinion;
 //   - Direct / Relayed / Authoritative come from the sighting's [Channel]
@@ -301,6 +300,72 @@ type Sighting struct {
 	// [SegmentSnapshot.ScopeForAddress], and the copy names a key that
 	// already exists or is not added at all.
 	BridgePriorScope bool `json:"bridge_prior_scope,omitempty"`
+
+	// Interfaces, Prefixes and VLANs are what the collector saw of the
+	// device's interfaces and of the networks around it (DCIM row 1.5,
+	// observed_network.go). Intake folds each interface's MAC and global-VRF
+	// addresses into Identifiers, named by the interface, and carries the rest
+	// to [Observation.Interfaces] for the engine to record once the sighting
+	// resolved to an asset. No collector writes interfaces or addresses any
+	// other way.
+	Interfaces []ObservedInterface `json:"interfaces,omitempty"`
+	Prefixes   []ObservedPrefix    `json:"prefixes,omitempty"`
+	VLANs      []ObservedVLAN      `json:"vlans,omitempty"`
+	// WirelessLANs and WirelessLinks are an access point's SSIDs and its
+	// point-to-point wireless links (DCIM row 4.4), recorded with the
+	// interfaces once the sighting resolved to an asset.
+	WirelessLANs  []ObservedWirelessLAN  `json:"wireless_lans,omitempty"`
+	WirelessLinks []ObservedWirelessLink `json:"wireless_links,omitempty"`
+
+	// Cluster is the cluster the sighted asset belongs to, as a host or a
+	// virtual machine (DCIM row 4.2, observed_cluster.go). The engine records
+	// the membership once the sighting resolved to an asset; a cluster is
+	// never an asset of its own.
+	Cluster *ObservedCluster `json:"cluster,omitempty"`
+	// Tunnels are the VPN tunnels the collector read off the device, with
+	// their IKE / IPsec proposals (DCIM row 4.3, observed_tunnel.go). They are
+	// not identity: the engine never reads them, and inventory-service writes
+	// them on the engine's transaction once the sighting resolved to an asset.
+	Tunnels []ObservedTunnel `json:"tunnels,omitempty"`
+	// Neighbors are the device's LLDP / CDP neighbour table (DCIM row 3.3,
+	// observed_neighbor.go). Not identity: inventory-service turns them into
+	// proposed cables, parked terminations and drift findings once the
+	// sighting resolved to an asset.
+	Neighbors []ObservedNeighbor `json:"neighbors,omitempty"`
+
+	// InventoryItems, Modules and VirtualChassis are the device's hardware
+	// parts, the modules in its bays and the stack it manages (DCIM row 2.4,
+	// observed_hardware.go). Not identity: the engine never reads them, and
+	// inventory-service writes them on the engine's transaction once the
+	// sighting resolved to an asset.
+	InventoryItems []ObservedInventoryItem `json:"inventory_items,omitempty"`
+	Modules        []ObservedModule        `json:"modules,omitempty"`
+	VirtualChassis *ObservedVirtualChassis `json:"virtual_chassis,omitempty"`
+
+	// ManagementAddress is the address the collector reached the device at,
+	// or the address the device's agent reported as its own — the address an
+	// operator manages it by. When it is one of the sighting's addresses it is
+	// the asset's primary address of its family, ahead of the rule's other
+	// candidates ([PickPrimaryIP]); otherwise it is ignored.
+	ManagementAddress string `json:"management_address,omitempty"`
+}
+
+// managementAddress is the sighting's management address when the sighting
+// lists it as one of the device's own addresses, else "".
+func managementAddress(s Sighting) string {
+	want, err := Normalize(KindIPAddress, strings.TrimSpace(s.ManagementAddress))
+	if err != nil || want == "" {
+		return ""
+	}
+	for _, id := range s.Identifiers {
+		if id.Kind != KindIPAddress || id.Provenance.VirtualInterface {
+			continue
+		}
+		if v, err := Normalize(KindIPAddress, id.Value); err == nil && v == want {
+			return want
+		}
+	}
+	return ""
 }
 
 // SightedIdentifier is one raw identifier as a collector saw it: no scope, no
@@ -341,6 +406,13 @@ type SightedIdentifier struct {
 	// drift classifier reads: only a same-algorithm change is a rotation).
 	// Ignored on every other kind.
 	KeyAlgorithm string `json:"key_algorithm,omitempty"`
+
+	// Interface is the name of the interface a `mac_address` or `ip_address`
+	// was read from, as the collector spelled it (DCIM row 1.4), carried to
+	// [Identifier.Interface]. Empty when the collector did not say — a
+	// passive sighting never knows — and the value is then filed under a
+	// synthetic `observed-<n>` interface. Ignored on every other kind.
+	Interface string `json:"interface,omitempty"`
 
 	// Assignment is how the host said it holds this address, when it said:
 	// [AssignmentStatic] for an interface it reports as statically
@@ -466,6 +538,10 @@ type IntakeResult struct {
 	// KeyLinkLocal), in sighting order — what the adapter writes with
 	// attrlist.Record once the observation has resolved to an asset.
 	AttributeEvidence map[string][]string
+	// DroppedNetwork are the interfaces, prefixes and VLANs of the sighting
+	// that no table could hold (no usable name, not a CIDR, a VID out of
+	// range), each with the reason. The rest of the sighting is unaffected.
+	DroppedNetwork []string
 	// Snapshot is the segment snapshot the sighting was scoped against, so a
 	// caller that needs a further answer from it (the asset's segment
 	// enrichment) asks the same topology rather than reading it again.
@@ -549,6 +625,12 @@ func validateSighting(s Sighting) (AdmissionEvidence, error) {
 	if !ok {
 		return AdmissionEvidence{}, fmt.Errorf("%w: channel %q is not one of the intake channels", ErrInvalidSighting, s.Channel)
 	}
+	// A cluster is the clusters object, not an asset (DCIM row 4.2): a
+	// sighting classed as one is refused, so nothing can mint an asset under
+	// the retired class.
+	if strings.EqualFold(strings.TrimSpace(s.ClassHint), RetiredClusterClass) {
+		return AdmissionEvidence{}, ErrClusterNotAnAsset
+	}
 	for _, raw := range s.Identifiers {
 		if raw.Kind == KindDeclarationID {
 			return AdmissionEvidence{}, fmt.Errorf("%w: declaration identifiers are issued only by an operator's confirmation", ErrInvalidSighting)
@@ -589,6 +671,43 @@ func validateSighting(s Sighting) (AdmissionEvidence, error) {
 
 // assess applies the intake rules to a validated sighting over snap.
 func (in *Intake) assess(ctx context.Context, s Sighting, admission AdmissionEvidence, snap SegmentSnapshot) (IntakeResult, error) {
+	// The interfaces first (DCIM row 1.5): normalised, and their MACs and
+	// global-VRF addresses folded into the identifiers carrying the
+	// interface's name, so every rule below reads them like any other value.
+	var dropped []string
+	s.Interfaces, s.Prefixes, s.VLANs, dropped = NormalizeObservedNetwork(s.Interfaces, s.Prefixes, s.VLANs)
+	s.Identifiers = interfaceIdentifiers(s.Identifiers, s.Interfaces)
+	var cluster *ObservedCluster
+	if s.Cluster != nil {
+		if c, err := s.Cluster.Normalize(); err != nil {
+			dropped = append(dropped, "cluster: "+err.Error())
+		} else {
+			cluster = &c
+		}
+	}
+	var droppedWireless []string
+	s.WirelessLANs, s.WirelessLinks, droppedWireless = NormalizeObservedWireless(s.WirelessLANs, s.WirelessLinks)
+	dropped = append(dropped, droppedWireless...)
+	// The sighting's own prefixes scope its own addresses (DCIM row 1.6): a
+	// prefix this sighting is the first to report is recorded before any
+	// address is scoped, and the snapshot re-read, so the device that taught
+	// the platform a network is scoped by it — and, under enforced admission,
+	// admitted by it (ObservedPrefixEnsurer has the cycle this breaks).
+	if missing := missingPrefixes(snap, s.Prefixes); len(missing) > 0 {
+		if ensurer, ok := in.repo.(ObservedPrefixEnsurer); ok {
+			created, err := ensurer.EnsureObservedPrefixes(ctx, s.TenantID, missing, s.Source)
+			if err != nil {
+				return IntakeResult{}, fmt.Errorf("identity: intake: recording the sighting's prefixes: %w", err)
+			}
+			if created > 0 {
+				fresh, err := in.Snapshot(ctx, s.TenantID)
+				if err != nil {
+					return IntakeResult{}, err
+				}
+				snap = fresh
+			}
+		}
+	}
 	admission.ReceiptID = s.ReceiptID
 	admission.CollectorVersion = s.CollectorVersion
 	b := &intakeBuild{
@@ -605,9 +724,17 @@ func (in *Intake) assess(ctx context.Context, s Sighting, admission AdmissionEvi
 			Network:             Network{Ownership: s.Ownership, Type: s.NetworkType},
 			Attributes:          maps.Clone(s.Attributes),
 			TLSCertFingerprints: append([]string(nil), s.TLSCertFingerprints...),
+			Interfaces:          s.Interfaces,
+			Prefixes:            s.Prefixes,
+			VLANs:               s.VLANs,
+			Cluster:             cluster,
+			WirelessLANs:        s.WirelessLANs,
+			WirelessLinks:       s.WirelessLinks,
+			ManagementAddress:   managementAddress(s),
 		},
 		seen: map[string]int{},
 	}
+	b.res.DroppedNetwork = dropped
 	b.run(ctx)
 	if b.err != nil {
 		return IntakeResult{}, b.err
@@ -775,23 +902,6 @@ func (b *intakeBuild) run(ctx context.Context) {
 		}
 	}
 	if b.obs.Network.SegmentID == "" {
-		// An fqdn identifies without a scope, but a `domain` segment still
-		// PLACES the sighting it names. Domain patterns are dotted
-		// (`corp.example.com`), so the names they match are almost always
-		// fqdns: without this, a sighting carrying only `db.corp.example.com`
-		// landed in the tenant default and the domain segment placed nothing,
-		// where both services' observationScope placed it by name.
-		for _, id := range b.obs.Identifiers {
-			if id.Kind != KindFQDN {
-				continue
-			}
-			if scope, ok := b.snap.ScopeForName(id.Value); ok {
-				b.obs.Network.SegmentID = scope
-				break
-			}
-		}
-	}
-	if b.obs.Network.SegmentID == "" {
 		b.obs.Network.SegmentID = ScopeTenantDefault
 	}
 
@@ -873,17 +983,13 @@ func (b *intakeBuild) addName(ctx context.Context, raw SightedIdentifier, synthe
 
 // nameScope is THE name-scope rule:
 //
-//  1. the segment of the address the name was seen at, when that is a real
-//     segment;
-//  2. with no address of its own, the sighting's first real address segment;
-//  3. otherwise the domain rule ([SegmentSnapshot.ScopeForName]);
-//  4. otherwise the tenant default.
+//  1. the prefix of the address the name was seen at, when that is a real
+//     prefix;
+//  2. with no address of its own, the sighting's first real address prefix;
+//  3. otherwise the tenant default.
 //
-// An address in a declared subnet is a stronger statement than a name matching
-// a domain pattern, which is why 1 and 2 come first — the order
-// shared/network.MatchSegment has always used. Rule 3 now applies whenever no
-// address placed the name; before Intake a host whose address was in no CIDR
-// segment never reached its domain segment in either service ( item 8).
+// The domain rule (a name placed by a `domain` segment pattern) retired with
+// the segments in DCIM row 1.6: a prefix places addresses, not names.
 func (b *intakeBuild) nameScope(raw SightedIdentifier) string {
 	if ctxAddr := strings.TrimSpace(raw.Address); ctxAddr != "" {
 		if addr, err := netip.ParseAddr(ctxAddr); err == nil {
@@ -893,9 +999,6 @@ func (b *intakeBuild) nameScope(raw SightedIdentifier) string {
 		}
 	} else if b.primary != "" {
 		return b.primary
-	}
-	if scope, ok := b.snap.ScopeForName(raw.Value); ok {
-		return scope
 	}
 	return ScopeTenantDefault
 }
@@ -963,6 +1066,9 @@ func (b *intakeBuild) add(raw SightedIdentifier, id Identifier) (Identifier, boo
 	if id.Confidence <= 0 {
 		id.Confidence = 1
 	}
+	if id.Interface == "" && (raw.Kind == KindMACAddress || raw.Kind == KindIPAddress) && raw.Kind == id.Kind {
+		id.Interface = raw.Interface
+	}
 	if id.Generic && id.Confidence > GenericConfidence {
 		id.Confidence = GenericConfidence
 	}
@@ -992,6 +1098,9 @@ func (b *intakeBuild) add(raw SightedIdentifier, id Identifier) (Identifier, boo
 		have := &b.obs.Identifiers[i]
 		have.Pinned = have.Pinned || n.Pinned
 		have.Claimed = have.Claimed || n.Claimed
+		if have.Interface == "" {
+			have.Interface = n.Interface
+		}
 		if have.Assignment == "" {
 			have.Assignment = n.Assignment
 		}

@@ -280,3 +280,35 @@ func TestCredentialsFromDockerConfig(t *testing.T) {
 		t.Fatal("invalid JSON was accepted")
 	}
 }
+
+// The wiring the extra-CA feature depends on: RegistryTags hands its
+// Transport to the lister. A registry behind a private CA (an httptest TLS
+// server, whose CA no system store knows) lists only through a transport
+// that trusts it; with the default transport the same listing fails with an
+// x509 error. Delete the Transport pass-through in RegistryTags.ListTags and
+// the first half goes red.
+func TestRegistryTags_UsesTheConfiguredTransportForAPrivateCA(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/vp/vistaplatform/tags/list" {
+			http.NotFound(w, r)
+			return
+		}
+		writeTags(w, "4.6.0", "4.6.1")
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	src := Source{Registry: u.Host, Repository: "vp/vistaplatform"}
+
+	trusting := srv.Client().Transport // trusts the server's private CA
+	tags, err := RegistryTags{Source: src, Transport: trusting}.ListTags(context.Background())
+	if err != nil {
+		t.Fatalf("with a transport that trusts the private CA the listing must succeed: %v", err)
+	}
+	if len(tags) != 2 || tags[1] != "4.6.1" {
+		t.Fatalf("tags = %v", tags)
+	}
+
+	if _, err := (RegistryTags{Source: src}).ListTags(context.Background()); err == nil || !strings.Contains(err.Error(), "x509") {
+		t.Fatalf("with the default transport the private CA must be refused with an x509 error, got %v", err)
+	}
+}

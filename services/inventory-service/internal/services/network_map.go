@@ -3,7 +3,7 @@ package services
 // The tenant-wide network map (feature spec `network-crypto-map`).
 //
 // The data behind Inventory → Map → Network: one row per asset, placed by site
-// and network segment, carrying a SUMMARY of the crypto its services serve —
+// and prefix (DCIM row 1.6), carrying a SUMMARY of the crypto its services serve —
 // enough to colour a device and to group devices by a shared crypto trait, and
 // no more. The per-service detail the exploded view shows is read on demand from
 // the asset's own endpoints / crypto configurations / certificates reads, so
@@ -55,15 +55,22 @@ const NetworkMapAssetCap = 5000
 // pending-approval assets are drawn (dashed), archived and denied are not.
 var networkMapStatuses = []string{"monitoring", "pending_approval"}
 
-// NetworkMapSegment is one active network segment.
-type NetworkMapSegment struct {
-	SegmentID   uuid.UUID `json:"segment_id" db:"segment_id"`
-	Name        string    `json:"name" db:"name"`
-	Value       string    `json:"value" db:"value"`
-	SegmentType string    `json:"segment_type" db:"segment_type"`
+// NetworkMapPrefix is one live global-VRF prefix that is not a container: a
+// network the map can draw devices in.
+type NetworkMapPrefix struct {
+	PrefixID    uuid.UUID `json:"prefix_id" db:"prefix_id"`
+	Prefix      string    `json:"prefix" db:"prefix"`
+	Description string    `json:"description" db:"description"`
+	// VLANVID and VLANName are the prefix's VLAN, null when it has none: the
+	// map labels a network by its VLAN where IPAM records one.
+	VLANVID  *int    `json:"vlan_vid" db:"vlan_vid"`
+	VLANName *string `json:"vlan_name" db:"vlan_name"`
 	// Gateway is the device that reported routing this network, null
 	// when none has. Always present on the wire.
-	Gateway *models.SegmentGateway `json:"gateway" db:"-"`
+	Gateway *models.PrefixGateway `json:"gateway" db:"-"`
+	// FHRPGroup is the redundancy group whose VIP is on the network, null
+	// when none is recorded.
+	FHRPGroup *models.FHRPGroupRef `json:"fhrp_group" db:"-"`
 }
 
 // NetworkMapComponent is one DISTINCT catalogue component linked to any of an
@@ -107,8 +114,8 @@ type NetworkMapAsset struct {
 	ClassKey    string    `json:"class_key"`
 	// Address is the primary address without a prefix length; omitted when none.
 	Address string `json:"address,omitempty"`
-	// SegmentID is null for an unsegmented asset. Always present on the wire.
-	SegmentID   *uuid.UUID `json:"segment_id"`
+	// PrefixID is null for an asset in no prefix. Always present on the wire.
+	PrefixID    *uuid.UUID `json:"prefix_id"`
 	Site        string     `json:"site"`
 	AssetStatus string     `json:"asset_status"`
 	RiskScore   int        `json:"risk_score"`
@@ -124,8 +131,8 @@ type NetworkMapAsset struct {
 
 // NetworkMap is the whole answer.
 type NetworkMap struct {
-	Segments []NetworkMapSegment `json:"segments"`
-	Assets   []NetworkMapAsset   `json:"assets"`
+	Prefixes []NetworkMapPrefix `json:"prefixes"`
+	Assets   []NetworkMapAsset  `json:"assets"`
 	// TotalAssets is counted INDEPENDENTLY of the capped list, so a truncated
 	// map says how much it is not showing.
 	TotalAssets int  `json:"total_assets"`
@@ -139,7 +146,7 @@ type networkMapAssetRow struct {
 	DisplayName  string     `db:"display_name"`
 	ClassKey     string     `db:"class_key"`
 	Address      *string    `db:"address"`
-	SegmentID    *uuid.UUID `db:"segment_id"`
+	PrefixID     *uuid.UUID `db:"prefix_id"`
 	Site         string     `db:"site"`
 	AssetStatus  string     `db:"asset_status"`
 	RiskScore    int        `db:"risk_score"`
@@ -202,8 +209,8 @@ const networkMapConfigurationsSQL = `
       FROM crypto_implementations ci
      WHERE ci.tenant_id = $1 AND ci.asset_id = ANY($2) AND ci.deleted_at IS NULL`
 
-// GetNetworkMap returns every live asset placed by site and segment, with a
-// crypto summary, plus every active segment — for one tenant.
+// GetNetworkMap returns every live asset placed by site and prefix, with a
+// crypto summary, plus every drawable prefix — for one tenant.
 func (s *AssetService) GetNetworkMap(ctx context.Context, tenantID uuid.UUID) (*NetworkMap, error) {
 	return s.getNetworkMap(ctx, tenantID, NetworkMapAssetCap)
 }
@@ -212,35 +219,48 @@ func (s *AssetService) GetNetworkMap(ctx context.Context, tenantID uuid.UUID) (*
 // integration test can prove truncation without writing 5000 assets.
 func (s *AssetService) getNetworkMap(ctx context.Context, tenantID uuid.UUID, assetCap int) (*NetworkMap, error) {
 	out := &NetworkMap{
-		Segments: []NetworkMapSegment{},
+		Prefixes: []NetworkMapPrefix{},
 		Assets:   []NetworkMapAsset{},
 		AssetCap: assetCap,
 	}
 	statuses := pq.Array(networkMapStatuses)
 
 	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
-		// Every ACTIVE segment, including ones no returned asset sits in, so an
-		// empty network is drawn as empty rather than missing.
-		if err := tx.SelectContext(ctx, &out.Segments, `
-			SELECT ns.id AS segment_id, ns.name, ns.value, ns.segment_type
-			  FROM network_segments ns
-			 WHERE ns.tenant_id = $1 AND ns.is_active = true
-			 ORDER BY ns.name ASC, ns.id ASC`, tenantID); err != nil {
-			return fmt.Errorf("network map segments: %w", err)
+		// Every live, non-container global-VRF prefix, including ones no
+		// returned asset sits in, so an empty network is drawn as empty rather
+		// than missing.
+		if err := tx.SelectContext(ctx, &out.Prefixes, `
+			SELECT p.id AS prefix_id, p.prefix::text AS prefix, COALESCE(p.description, '') AS description,
+			       v.vid AS vlan_vid, v.name AS vlan_name
+			  FROM prefixes p
+			  LEFT JOIN vlans v ON v.tenant_id = p.tenant_id AND v.id = p.vlan_id
+			 WHERE p.tenant_id = $1 AND p.vrf_id IS NULL AND p.status NOT IN ('rejected', 'archived')
+			   AND p.operational_status <> 'container'
+			 ORDER BY family(p.prefix), p.prefix, p.id`, tenantID); err != nil {
+			return fmt.Errorf("network map prefixes: %w", err)
 		}
-		if out.Segments == nil {
-			out.Segments = []NetworkMapSegment{}
+		if out.Prefixes == nil {
+			out.Prefixes = []NetworkMapPrefix{}
 		}
-		segmentIDs := make([]uuid.UUID, len(out.Segments))
-		for i := range out.Segments {
-			segmentIDs[i] = out.Segments[i].SegmentID
+		prefixIDs := make([]uuid.UUID, len(out.Prefixes))
+		for i := range out.Prefixes {
+			prefixIDs[i] = out.Prefixes[i].PrefixID
 		}
-		gateways, err := readSegmentGateways(ctx, tx, tenantID, segmentIDs)
+		gateways, err := readPrefixGateways(ctx, tx, tenantID, prefixIDs)
 		if err != nil {
 			return fmt.Errorf("network map: %w", err)
 		}
-		for i := range out.Segments {
-			out.Segments[i].Gateway = gateways[out.Segments[i].SegmentID]
+		groups, err := readPrefixFHRPGroups(ctx, tx, tenantID, prefixIDs)
+		if err != nil {
+			return fmt.Errorf("network map: %w", err)
+		}
+		for i := range out.Prefixes {
+			id := out.Prefixes[i].PrefixID
+			out.Prefixes[i].Gateway = gateways[id]
+			if gs := groups[id]; len(gs) > 0 {
+				g := gs[0]
+				out.Prefixes[i].FHRPGroup = &g
+			}
 		}
 
 		if err := tx.QueryRowContext(ctx,
@@ -259,7 +279,7 @@ func (s *AssetService) getNetworkMap(ctx context.Context, tenantID uuid.UUID, as
 			                host(a.primary_address), '')               AS display_name,
 			       a.class_key,
 			       host(a.primary_address)                             AS address,
-			       a.network_segment_id                                AS segment_id,
+			       a.prefix_id                                         AS prefix_id,
 			       `+topologySiteSQL+`                                 AS site,
 			       a.asset_status,
 			       COALESCE(a.risk_score, 0)                           AS risk_score,
@@ -429,7 +449,7 @@ func assembleNetworkMapAssets(rows []networkMapAssetRow, agg networkMapAggregate
 			AssetID:      r.AssetID,
 			DisplayName:  r.DisplayName,
 			ClassKey:     r.ClassKey,
-			SegmentID:    r.SegmentID,
+			PrefixID:     r.PrefixID,
 			Site:         r.Site,
 			AssetStatus:  r.AssetStatus,
 			RiskScore:    r.RiskScore,

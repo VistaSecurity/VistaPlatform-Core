@@ -113,7 +113,7 @@ func newReplayFixture(t *testing.T) *replayFixture {
 		SELECT $1,id,'{"quantity":100}'::jsonb,'retained replay' FROM billable_items WHERE key='max_assets'`, f.tenant); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := owner.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,metadata) VALUES($1,'LAN','cidr','198.51.100.0/24','private','production',true,'{"dynamic":true}')`, f.tenant); err != nil {
+	if _, err := owner.Exec(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,dhcp_managed,source_kind,status) VALUES($1,'LAN','198.51.100.0/24'::cidr,'private','production',true,'declared','active')`, f.tenant); err != nil {
 		t.Fatal(err)
 	}
 	f.sink = NewObservationSink(f.app)

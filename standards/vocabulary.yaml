@@ -1,0 +1,799 @@
+# Product vocabulary — THE single source of truth for object nouns (ADR-0010 D2).
+#
+# Why this file exists: two renames (Network Assets → Infrastructure Assets,
+# network spaces → network segments) each cost weeks because the noun lived in
+# UI strings, OpenAPI schema names, table names, lens keys and docs with no
+# registry tying them together. This file is that registry, and
+# `scripts/audit-vocabulary.mjs` (run by `make audit`) fails the build when a
+# forbidden synonym appears where a canonical noun belongs.
+#
+# Generated from this file by `scripts/generate-vocabulary.mjs` (via `make generate`):
+#   1. shared/dcim/objectkind_gen.go      — ObjectKind constants + label tables
+#   2. packages/primitives/src/dcim/object-kinds.gen.ts
+#   3. api/openapi/components/object-kind.yaml (the enum every polymorphic field uses;
+#                       also inlined into inventory-service.openapi.yaml)
+#   4. docsv4/core/concepts/vocabulary.md  — the customer-facing glossary table
+#
+# Fields per object:
+#   key           canonical snake_case key; also the ObjectKind value and the
+#                 table name's singular (table = plural below)
+#   label         UI singular label        plural: UI plural label
+#   table         Postgres table (null = not a table: a role on another table)
+#   go_type       Go type in shared/dcim or the owning service
+#   ts_type       TypeScript type in @vistasecurity/primitives
+#   openapi       OpenAPI schema name
+#   netbox        NetBox object it maps to (module/object), or null
+#   phase         BUILD_PLAN phase in which the table ships
+#   forbidden     words that must NOT be used for this object in UI strings,
+#                 OpenAPI names, table/column names, nav/lens labels or
+#                 docsv4/core. Checked case-insensitively, whole word, in the
+#                 scopes listed under `audit.scopes`. Each entry may carry
+#                 `after_phase` so a word is only forbidden once its replacement
+#                 ships.
+#
+# Exceptions to NetBox naming (ADR-0010 D2) are marked `exception: true` and
+# carry a `why`. Do not add an exception without an ADR amendment.
+
+version: 1
+
+# The BUILD_PLAN phase the tree has reached. The orchestrator bumps this at each
+# phase gate. A forbidden entry with `after_phase: N` is enforced only once
+# current_phase >= N (the phase in which its replacement ships); an entry with no
+# after_phase is enforced from day one.
+current_phase: 1
+
+audit:
+  scopes:
+    ui_strings:
+      - frontend-v2/src/**/*.{ts,tsx}
+      - admin-ui-v2/src/**/*.{ts,tsx}
+      - packages/primitives/src/**/*.{ts,tsx}
+    openapi:
+      - api/openapi/*.yaml
+    schema:
+      - scripts/database/schema.sql
+    customer_docs:
+      - docsv4/core/**/*.md
+      - docsv4/enterprise/**/*.md
+      - docsv4/msp/**/*.md
+  # Files that legitimately name the retired words (guards that hunt for them,
+  # the migration ADRs, this file's own tests). Keep this list short.
+  allow_files:
+    - scripts/audit-vocabulary.mjs
+    - scripts/audit-vocabulary.test.mjs
+    - docsv4/internal/**
+    - CHANGELOG.md
+    - docsv4/core/releases/**   # historical release notes name what they renamed
+
+# ---------------------------------------------------------------------------
+# Cross-cutting nouns that are NOT DCIM objects but whose names the guard
+# protects because they collide with NetBox's.
+# ---------------------------------------------------------------------------
+reserved:
+  - key: tenant
+    label: Tenant
+    plural: Tenants
+    meaning: The platform account. Never the ownership label on an object.
+    forbidden_as: [business unit, organization]
+  - key: asset
+    label: Asset
+    plural: Assets
+    meaning: The configuration item (ADR-0002). A NetBox Device or Virtual Machine is an asset.
+    netbox: dcim/device, virtualization/virtual-machine
+    exception: true
+    why: ADR-0002 made the asset the CI; a second "device" noun would be a second inventory.
+    forbidden_in_ui:
+      - { word: network asset, allow_paths: ['docsv4/enterprise/integrations/cmdb-terminology-glossary.md', 'docsv4/core/operate/deployment/database-migrations.md'], note: "The CMDB glossary's old-to-new table and the migration runbook name the retired term on purpose." }
+      - { word: CI, where: [ui_strings], allow_paths: ['frontend-v2/src/sections/settings/cmdb*', 'packages/primitives/src/connectors/**', 'packages/primitives/src/query/**'], note: "UI strings only: inventory pages say Asset. The CMDB connector UI and its registry keep CI because it is the connected system's own term (ServiceNow, Device42); docs are not scanned for the same reason. The query language's `ci` alias (query/) is a saved-query identifier; retiring it is a behaviour change, deferred." }
+      - { word: configuration item, where: [ui_strings], allow_paths: ['frontend-v2/src/sections/settings/cmdb*', 'packages/primitives/src/connectors/**'], note: "UI strings only; see CI." }
+  - key: endpoint
+    label: Endpoint
+    plural: Endpoints
+    meaning: A listening (address, port, transport, protocol) on an asset.
+    netbox: ipam/service
+    exception: true
+    why: Our `service` class is a declared business/technical service; NetBox's Service is our endpoint.
+  - key: service
+    label: Service
+    plural: Services
+    meaning: The `service` asset class (business or technical service). Never an L4 listener.
+  - key: crypto_configuration
+    label: Crypto Configuration
+    plural: Crypto Configurations
+    meaning: Existing term; table remains crypto_implementations (technical identifier).
+    forbidden_in_ui:
+      - { word: crypto implementation, allow_paths: ['docsv4/enterprise/integrations/cmdb-terminology-glossary.md'], note: "The CMDB glossary's old-to-new table names the retired term on purpose." }
+  - key: infrastructure_asset
+    label: Infrastructure Asset
+    plural: Infrastructure Assets
+    forbidden_in_ui:
+      - { word: network asset, allow_paths: ['docsv4/enterprise/integrations/cmdb-terminology-glossary.md', 'docsv4/core/operate/deployment/database-migrations.md'], note: "see the asset entry." }
+
+objects:
+  # ---- tenancy ------------------------------------------------------------
+  - key: business_unit
+    label: Business Unit
+    plural: Business Units
+    table: business_units
+    go_type: BusinessUnit
+    ts_type: BusinessUnit
+    openapi: BusinessUnit
+    netbox: tenancy/tenant (+ tenancy/tenant-group via parent)
+    exception: true
+    why: >
+      "Tenant" is the platform account; "Organization" collides with AWS/GCP
+      Organizations and Azure Management Groups, which become cloud inventory
+      items (ADR-0009). Business Unit is ServiceNow CSDM's term and our existing
+      column.
+    phase: 1
+    forbidden:
+      # Narrowed at gate 1: the tenant's own organisation ("your organization",
+      # Settings -> Organization, the AI provider's organisation key) is correct
+      # prose. Forbidden where it would name the OWNER of an asset or prefix:
+      # OpenAPI schema names, and the inventory / IPAM / sync documentation.
+      - { word: organization, where: [openapi], names_only: true, after_phase: 1, note: "OpenAPI schema names only; the owner of an object is a Business Unit." }
+      - { word: organization, where: [customer_docs], paths: ['docsv4/core/inventory/networks.md', 'docsv4/core/inventory/interfaces.md', 'docsv4/core/concepts/**'], after_phase: 1, note: "Settings -> Organization is the tenant's own organisation and stays; limited to the IPAM, interface and concepts pages, where the word would name an object's owner. Elsewhere it is the tenant's own organisation (audit log, trust decisions, Settings -> Organization)." }
+      - { word: organisation, where: [openapi], names_only: true, after_phase: 1, note: "OpenAPI schema names only; the owner of an object is a Business Unit." }
+      - { word: organisation, where: [customer_docs], paths: ['docsv4/core/inventory/networks.md', 'docsv4/core/inventory/interfaces.md', 'docsv4/core/concepts/**'], after_phase: 1, note: "Settings -> Organization is the tenant's own organisation and stays; limited to the inventory, IPAM and sync documentation, where the word would name an object's owner." }
+      - { word: tenant group, where: [ui_strings, openapi, customer_docs] }
+  - key: contact
+    label: Contact
+    plural: Contacts
+    table: contacts
+    go_type: Contact
+    ts_type: Contact
+    openapi: Contact
+    netbox: tenancy/contact
+    phase: 2
+  - key: contact_role
+    label: Contact Role
+    plural: Contact Roles
+    table: contact_roles
+    netbox: tenancy/contact-role
+    phase: 2
+  - key: contact_assignment
+    label: Contact Assignment
+    plural: Contact Assignments
+    table: contact_assignments
+    netbox: tenancy/contact-assignment
+    phase: 2
+
+  # ---- organisation -------------------------------------------------------
+  - key: region
+    label: Region
+    plural: Regions
+    table: regions
+    netbox: dcim/region
+    phase: 2
+  - key: site_group
+    label: Site Group
+    plural: Site Groups
+    table: site_groups
+    netbox: dcim/site-group
+    phase: 2
+  - key: site
+    label: Site
+    plural: Sites
+    table: sites
+    netbox: dcim/site
+    phase: 2
+    forbidden:
+      - { word: datacenter, where: [openapi], note: "a site's facility, not an object" }
+  - key: location
+    label: Location
+    plural: Locations
+    table: locations
+    netbox: dcim/location
+    phase: 2
+    forbidden:
+      - { word: room, where: [openapi], after_phase: 2, note: "2 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 2)." }
+      - { word: floor, where: [openapi], after_phase: 2, note: "7 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 2)." }
+  - key: rack_role
+    label: Rack Role
+    plural: Rack Roles
+    table: rack_roles
+    netbox: dcim/rack-role
+    phase: 2
+  - key: rack_type
+    label: Rack Type
+    plural: Rack Types
+    table: rack_types
+    netbox: dcim/rack-type
+    phase: 2
+  - key: rack
+    label: Rack
+    plural: Racks
+    table: racks
+    netbox: dcim/rack
+    phase: 2
+    forbidden:
+      - { word: cabinet, where: [ui_strings, openapi, customer_docs], note: "a form_factor value, not the object" }
+  - key: rack_reservation
+    label: Rack Reservation
+    plural: Rack Reservations
+    table: rack_reservations
+    netbox: dcim/rack-reservation
+    phase: 2
+
+  # ---- devices ------------------------------------------------------------
+  - key: manufacturer
+    label: Manufacturer
+    plural: Manufacturers
+    table: manufacturers
+    netbox: dcim/manufacturer
+    phase: 2
+    forbidden:
+      - { word: vendor, where: [openapi], after_phase: 2, note: "`vendor` stays as the OUI-derived attribute on an asset; the catalogue object is Manufacturer" }
+  - key: device_type
+    label: Device Type
+    plural: Device Types
+    table: device_types
+    netbox: dcim/device-type
+    phase: 2
+    forbidden:
+      - { word: model, where: [openapi], names_only: true, after_phase: 2, note: "`model` is a field of a device type, never a schema name; a `model` property is correct (names_only: schema names only)." }
+      - { word: hardware type, where: [ui_strings, customer_docs] }
+  - key: module_type
+    label: Module Type
+    plural: Module Types
+    table: module_types
+    netbox: dcim/module-type
+    phase: 2
+  - key: module_bay
+    label: Module Bay
+    plural: Module Bays
+    table: module_bays
+    netbox: dcim/module-bay
+    phase: 2
+  - key: module
+    label: Module
+    plural: Modules
+    table: modules
+    netbox: dcim/module
+    phase: 2
+    forbidden:
+      - { word: line card, where: [openapi] }
+  - key: device_role
+    label: Device Role
+    plural: Device Roles
+    table: device_roles
+    netbox: dcim/device-role
+    phase: 2
+  - key: platform
+    label: Platform
+    plural: Platforms
+    table: platforms
+    netbox: dcim/platform
+    phase: 2
+    note: "Collides with 'the platform' meaning Vista Platform in prose; the object is always 'Platform (OS)' in UI labels."
+    ui_label_override: Platform (OS)
+  - key: inventory_item
+    label: Inventory Item
+    plural: Inventory Items
+    table: inventory_items
+    netbox: dcim/inventory-item
+    phase: 2
+  - key: inventory_item_role
+    label: Inventory Item Role
+    plural: Inventory Item Roles
+    table: inventory_item_roles
+    netbox: dcim/inventory-item-role
+    phase: 2
+  - key: virtual_chassis
+    label: Virtual Chassis
+    plural: Virtual Chassis
+    table: virtual_chassis
+    netbox: dcim/virtual-chassis
+    phase: 2
+    forbidden:
+      - { word: stack, where: [openapi] }
+  - key: device_bay
+    label: Device Bay
+    plural: Device Bays
+    table: device_bays
+    netbox: dcim/device-bay
+    phase: 2
+
+  # ---- component templates (row 2.2) ---------------------------------------
+  # One table per component kind, keyed by a device type or a module type
+  # (DATA_MODEL §2). Assigning a device type to an asset instantiates them.
+  - key: interface_template
+    label: Interface Template
+    plural: Interface Templates
+    table: interface_templates
+    netbox: dcim/interface-template
+    phase: 2
+  - key: console_port_template
+    label: Console Port Template
+    plural: Console Port Templates
+    table: console_port_templates
+    netbox: dcim/console-port-template
+    phase: 2
+  - key: console_server_port_template
+    label: Console Server Port Template
+    plural: Console Server Port Templates
+    table: console_server_port_templates
+    netbox: dcim/console-server-port-template
+    phase: 2
+  - key: front_port_template
+    label: Front Port Template
+    plural: Front Port Templates
+    table: front_port_templates
+    netbox: dcim/front-port-template
+    phase: 2
+  - key: rear_port_template
+    label: Rear Port Template
+    plural: Rear Port Templates
+    table: rear_port_templates
+    netbox: dcim/rear-port-template
+    phase: 2
+  - key: module_bay_template
+    label: Module Bay Template
+    plural: Module Bay Templates
+    table: module_bay_templates
+    netbox: dcim/module-bay-template
+    phase: 2
+  - key: device_bay_template
+    label: Device Bay Template
+    plural: Device Bay Templates
+    table: device_bay_templates
+    netbox: dcim/device-bay-template
+    phase: 2
+  - key: power_port_template
+    label: Power Port Template
+    plural: Power Port Templates
+    table: power_port_templates
+    netbox: dcim/power-port-template
+    phase: 2
+  - key: power_outlet_template
+    label: Power Outlet Template
+    plural: Power Outlet Templates
+    table: power_outlet_templates
+    netbox: dcim/power-outlet-template
+    phase: 2
+
+  # ---- components ---------------------------------------------------------
+  - key: interface
+    label: Interface
+    plural: Interfaces
+    table: interfaces
+    netbox: dcim/interface, virtualization/vm-interface
+    exception: true
+    why: One table for physical and virtual interfaces; assets already unify hosts and VMs.
+    phase: 1
+    forbidden:
+      - { word: nic, where: [ui_strings, openapi, customer_docs], after_phase: 1, note: "15 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 1)." }
+      - { word: switch port, where: [openapi] }
+      - { word: switchport, where: [ui_strings, openapi, customer_docs] }
+      - { word: network port, where: [ui_strings, openapi, customer_docs], after_phase: 1, note: "1 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 1)." }
+  - key: mac_address
+    label: MAC Address
+    plural: MAC Addresses
+    table: mac_addresses
+    netbox: dcim/mac-address
+    phase: 1
+  - key: console_port
+    label: Console Port
+    plural: Console Ports
+    table: console_ports
+    netbox: dcim/console-port
+    phase: 3
+  - key: console_server_port
+    label: Console Server Port
+    plural: Console Server Ports
+    table: console_server_ports
+    netbox: dcim/console-server-port
+    phase: 3
+  - key: front_port
+    label: Front Port
+    plural: Front Ports
+    table: front_ports
+    netbox: dcim/front-port
+    phase: 3
+    forbidden:
+      - { word: patch port, where: [ui_strings, openapi, customer_docs] }
+  - key: rear_port
+    label: Rear Port
+    plural: Rear Ports
+    table: rear_ports
+    netbox: dcim/rear-port
+    phase: 3
+  - key: power_port
+    label: Power Port
+    plural: Power Ports
+    table: power_ports
+    netbox: dcim/power-port
+    phase: 3
+  - key: power_outlet
+    label: Power Outlet
+    plural: Power Outlets
+    table: power_outlets
+    netbox: dcim/power-outlet
+    phase: 3
+  - key: power_feed
+    label: Power Feed
+    plural: Power Feeds
+    table: power_feeds
+    netbox: dcim/power-feed
+    phase: planned
+  - key: power_panel
+    label: Power Panel
+    plural: Power Panels
+    table: power_panels
+    netbox: dcim/power-panel
+    phase: planned
+
+  # ---- cabling ------------------------------------------------------------
+  - key: cable
+    label: Cable
+    plural: Cables
+    table: cables
+    netbox: dcim/cable
+    phase: 3
+    forbidden:
+      - { word: link, where: [openapi], names_only: true, after_phase: 3, note: "`link` is reserved for wireless_link and HTML; a physical connection is a cable. Schema names only: a link property or prose is fine." }
+      - { word: connection, where: [openapi], names_only: true, after_phase: 3, note: "`connection` is the integration connection; never a cable. Schema names only: an integration connection stays valid." }
+  - key: cable_termination
+    label: Cable Termination
+    plural: Cable Terminations
+    table: cable_terminations
+    netbox: dcim/cable-termination
+    phase: 3
+  - key: cable_path
+    label: Cable Path
+    plural: Cable Paths
+    table: cable_paths
+    netbox: dcim/cable-path (internal)
+    phase: 3
+    forbidden:
+      - { word: trace, where: [openapi], note: "trace is the verb/UI action; the object is a cable path" }
+  - key: unresolved_termination
+    label: Unresolved Termination
+    plural: Unresolved Terminations
+    table: unresolved_terminations
+    netbox: null
+    phase: 1
+    forbidden:
+      - { word: pending edge, where: [ui_strings, openapi, customer_docs], after_phase: 1, note: "pending is a lifecycle status; this is a dangling far end. 7 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 1)." }
+      - { word: dangling edge, where: [ui_strings, openapi, customer_docs], after_phase: 1, note: "1 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 1)." }
+
+  # ---- IPAM ---------------------------------------------------------------
+  - key: rir
+    label: RIR
+    plural: RIRs
+    table: rirs
+    netbox: ipam/rir
+    phase: 1
+  - key: aggregate
+    label: Aggregate
+    plural: Aggregates
+    table: aggregates
+    netbox: ipam/aggregate
+    phase: 1
+  - key: vrf
+    label: VRF
+    plural: VRFs
+    table: vrfs
+    netbox: ipam/vrf
+    phase: 1
+  - key: route_target
+    label: Route Target
+    plural: Route Targets
+    table: route_targets
+    netbox: ipam/route-target
+    phase: 1
+  - key: prefix_role
+    label: Prefix Role
+    plural: Prefix Roles
+    table: prefix_roles
+    netbox: ipam/role
+    exception: true
+    why: NetBox's bare "Role" is shared by prefixes, ranges and VLANs; our name says what it is for. The table serves prefixes, IP ranges and VLANs alike.
+    phase: 1
+  - key: prefix
+    label: Prefix
+    plural: Prefixes
+    table: prefixes
+    netbox: ipam/prefix
+    phase: 1
+    forbidden:
+      - { word: subnet, where: [ui_strings, openapi, customer_docs], except: ['subnet-router anycast'], allow_paths: ['packages/primitives/src/facts/keys.gen.ts', 'api/openapi/device-interrogation-service.openapi.yaml'], after_phase: 1, note: "survives only inside provider type strings such as AWS::EC2::Subnet and the IPv6 term subnet-router anycast (excepted); the cloud_resource.subnet class key was retired by the ADR-0009 amendment (DCIM row 1.5f). Two wire names stay and are deferred, not allowed forever: the `subnet` field of a `net.vlans` fact item (read at ingest, generated into facts/keys.gen.ts) and the `subnets` count in the device-interrogation CloudEnumerationCounts response." }
+      - { word: network segment, where: [ui_strings, openapi, customer_docs, schema], after_phase: 1 }
+      - { word: network space, where: [ui_strings, openapi, customer_docs, schema], after_phase: 1, note: "8 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 1)." }
+      - { word: segment, where: [openapi], after_phase: 1 }
+      - { word: cidr block, where: [ui_strings, openapi, customer_docs], after_phase: 1, note: "10 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 1)." }
+  - key: ip_range
+    label: IP Range
+    plural: IP Ranges
+    table: ip_ranges
+    netbox: ipam/ip-range
+    phase: 1
+  - key: ip_address
+    label: IP Address
+    plural: IP Addresses
+    table: ip_addresses
+    netbox: ipam/ip-address
+    phase: 1
+    forbidden:
+      - { word: ip identifier, where: [ui_strings, openapi, customer_docs], after_phase: 1 }
+  - key: vlan_group
+    label: VLAN Group
+    plural: VLAN Groups
+    table: vlan_groups
+    netbox: ipam/vlan-group
+    phase: 1
+  - key: vlan
+    label: VLAN
+    plural: VLANs
+    table: vlans
+    netbox: ipam/vlan
+    phase: 1
+  - key: fhrp_group
+    label: FHRP Group
+    plural: FHRP Groups
+    table: fhrp_groups
+    netbox: ipam/fhrp-group
+    phase: 1
+    forbidden:
+      - { word: ha pair, where: [openapi] }
+      - { word: gateway candidate, where: [ui_strings, openapi, customer_docs], after_phase: 1 }
+  - key: fhrp_group_assignment
+    label: FHRP Group Assignment
+    plural: FHRP Group Assignments
+    table: fhrp_group_assignments
+    netbox: ipam/fhrp-group-assignment
+    phase: 1
+  - key: asn
+    label: ASN
+    plural: ASNs
+    table: asns
+    netbox: ipam/asn
+    phase: 1
+
+  # ---- circuits -----------------------------------------------------------
+  - key: provider
+    label: Provider
+    plural: Providers
+    table: providers
+    netbox: circuits/provider
+    phase: 4
+    note: "Collides with 'cloud provider' and 'AI provider' in prose; UI label is 'Circuit Provider' where ambiguous."
+    ui_label_override: Circuit Provider
+    forbidden:
+      - { word: carrier, where: [ui_strings, openapi, customer_docs], after_phase: 4, note: "18 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 4)." }
+      - { word: isp, where: [openapi] }
+  - key: provider_account
+    label: Provider Account
+    plural: Provider Accounts
+    table: provider_accounts
+    netbox: circuits/provider-account
+    phase: 4
+  - key: provider_network
+    label: Provider Network
+    plural: Provider Networks
+    table: provider_networks
+    netbox: circuits/provider-network
+    phase: 4
+  - key: circuit_type
+    label: Circuit Type
+    plural: Circuit Types
+    table: circuit_types
+    netbox: circuits/circuit-type
+    phase: 4
+  - key: circuit
+    label: Circuit
+    plural: Circuits
+    table: circuits
+    netbox: circuits/circuit
+    phase: 4
+    forbidden:
+      - { word: wan link, where: [ui_strings, openapi, customer_docs] }
+      - { word: uplink, where: [openapi], note: "uplink survives as the UniFi field name in collector code" }
+  - key: circuit_termination
+    label: Circuit Termination
+    plural: Circuit Terminations
+    table: circuit_terminations
+    netbox: circuits/circuit-termination
+    phase: 4
+  - key: circuit_group
+    label: Circuit Group
+    plural: Circuit Groups
+    table: circuit_groups
+    netbox: circuits/circuit-group
+    phase: 4
+  - key: circuit_group_assignment
+    label: Circuit Group Assignment
+    plural: Circuit Group Assignments
+    table: circuit_group_assignments
+    netbox: circuits/circuit-group-assignment
+    phase: 4
+
+  # ---- virtualisation -----------------------------------------------------
+  - key: cluster_type
+    label: Cluster Type
+    plural: Cluster Types
+    table: cluster_types
+    netbox: virtualization/cluster-type
+    phase: 4
+  - key: cluster_group
+    label: Cluster Group
+    plural: Cluster Groups
+    table: cluster_groups
+    netbox: virtualization/cluster-group
+    phase: 4
+  - key: cluster
+    label: Cluster
+    plural: Clusters
+    table: clusters
+    netbox: virtualization/cluster
+    phase: 4
+    note: "The `cluster` asset class (ADR-0002) was retired by DCIM row 4.2 in favour of this object: a cluster is never an asset. The class registry has no alias mechanism, so the key is simply gone from standards/asset-classes.yaml."
+  - key: virtual_disk
+    label: Virtual Disk
+    plural: Virtual Disks
+    table: virtual_disks
+    netbox: virtualization/virtual-disk
+    phase: 4
+
+  # ---- VPN ----------------------------------------------------------------
+  - key: tunnel_group
+    label: Tunnel Group
+    plural: Tunnel Groups
+    table: tunnel_groups
+    netbox: vpn/tunnel-group
+    phase: 4
+  - key: tunnel
+    label: Tunnel
+    plural: Tunnels
+    table: tunnels
+    netbox: vpn/tunnel
+    phase: 4
+    forbidden:
+      - { word: vpn connection, where: [ui_strings, openapi, customer_docs] }
+  - key: tunnel_termination
+    label: Tunnel Termination
+    plural: Tunnel Terminations
+    table: tunnel_terminations
+    netbox: vpn/tunnel-termination
+    phase: 4
+  - key: ike_proposal
+    label: IKE Proposal
+    plural: IKE Proposals
+    table: ike_proposals
+    netbox: vpn/ike-proposal
+    phase: 4
+  - key: ike_policy
+    label: IKE Policy
+    plural: IKE Policies
+    table: ike_policies
+    netbox: vpn/ike-policy
+    phase: 4
+  - key: ipsec_proposal
+    label: IPsec Proposal
+    plural: IPsec Proposals
+    table: ipsec_proposals
+    netbox: vpn/ipsec-proposal
+    phase: 4
+  - key: ipsec_policy
+    label: IPsec Policy
+    plural: IPsec Policies
+    table: ipsec_policies
+    netbox: vpn/ipsec-policy
+    phase: 4
+  - key: ipsec_profile
+    label: IPsec Profile
+    plural: IPsec Profiles
+    table: ipsec_profiles
+    netbox: vpn/ipsec-profile
+    phase: 4
+  - key: l2vpn
+    label: L2VPN
+    plural: L2VPNs
+    table: l2vpns
+    netbox: vpn/l2vpn
+    phase: 4
+  - key: l2vpn_termination
+    label: L2VPN Termination
+    plural: L2VPN Terminations
+    table: l2vpn_terminations
+    netbox: vpn/l2vpn-termination
+    phase: 4
+
+  # ---- wireless -----------------------------------------------------------
+  - key: wireless_lan_group
+    label: Wireless LAN Group
+    plural: Wireless LAN Groups
+    table: wireless_lan_groups
+    netbox: wireless/wireless-lan-group
+    phase: 4
+  - key: wireless_lan
+    label: Wireless LAN
+    plural: Wireless LANs
+    table: wireless_lans
+    netbox: wireless/wireless-lan
+    phase: 4
+    forbidden:
+      - { word: ssid, where: [openapi], names_only: true, note: "ssid is a field of a wireless LAN, never a schema name. Schema names only: the field itself is DATA_MODEL §7." }
+  - key: wireless_link
+    label: Wireless Link
+    plural: Wireless Links
+    table: wireless_links
+    netbox: wireless/wireless-link
+    phase: 4
+
+  # ---- extras -------------------------------------------------------------
+  - key: tag
+    label: Tag
+    plural: Tags
+    table: tags
+    netbox: extras/tag
+    phase: 1
+    forbidden:
+      - { word: label, where: [openapi], names_only: true, after_phase: 1, note: "label is a field name on components; the free-form marker is a tag. Schema names only." }
+  - key: custom_field
+    label: Custom Field
+    plural: Custom Fields
+    table: custom_fields
+    netbox: extras/custom-field
+    phase: 5
+  - key: custom_field_choice_set
+    label: Custom Field Choice Set
+    plural: Custom Field Choice Sets
+    table: custom_field_choice_sets
+    netbox: extras/custom-field-choice-set
+    phase: 5
+  - key: journal_entry
+    label: Journal Entry
+    plural: Journal Entries
+    table: journal_entries
+    netbox: extras/journal-entry
+    phase: 1
+    forbidden:
+      - { word: note, where: [openapi], names_only: true, allow_paths: ['api/openapi/admin-service.openapi.yaml'], after_phase: 1, note: "A journal entry is never a schema called Note (admin-service's TenantNote is a platform-admin note on a tenant, a different thing). Schema names only: a note property or description is fine." }
+  - key: object_change
+    label: Change
+    plural: Changes
+    table: object_changes
+    netbox: core/object-change
+    phase: 1
+    forbidden:
+      - { word: history entry, where: [ui_strings, openapi, customer_docs], after_phase: 1 }
+      - { word: audit entry, where: [ui_strings, customer_docs], after_phase: 1, note: "audit entries are the security audit log (audit-service); a change is an inventory edit. 4 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 1)." }
+  - key: config_context
+    label: Config Context
+    plural: Config Contexts
+    table: config_contexts
+    netbox: extras/config-context
+    phase: 5
+  - key: export_template
+    label: Export Template
+    plural: Export Templates
+    table: export_templates
+    netbox: extras/export-template
+    phase: 5
+  - key: saved_filter
+    label: Saved Filter
+    plural: Saved Filters
+    table: saved_filters
+    netbox: extras/saved-filter
+    phase: 5
+    forbidden:
+      - { word: saved view, where: [ui_strings, openapi, customer_docs], after_phase: 5 }
+  - key: image_attachment
+    label: Image Attachment
+    plural: Image Attachments
+    table: image_attachments
+    netbox: extras/image-attachment
+    phase: 2
+
+# Mappings that are NOT objects of ours but that sync must know (ADR-0010 D8).
+mappings:
+  - ours: cloud_account asset + cloud.region
+    netbox: virtualization/cluster of type <provider>
+    note: Mirrored for sync fidelity only; the account asset stays the inventory object.
+  - ours: asset_classes leaf under hardware / virtual
+    netbox: dcim/device-role
+    note: One seeded device role per class leaf; the role ↔ class table is generated into shared/dcim/roles_gen.go.
+  - ours: asset_endpoints
+    netbox: ipam/service
+    direction: push only

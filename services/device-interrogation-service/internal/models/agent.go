@@ -220,6 +220,12 @@ type JobResult struct {
 	Facts         []di.FactObservation         `json:"facts,omitempty"`
 	Relationships []di.RelationshipObservation `json:"relationships,omitempty"`
 
+	// Network is the interrogated device's own interfaces, addresses, VLANs
+	// and ARP cache (DCIM row 1.5), mirroring the shared core's
+	// InterrogateResult.Network. The platform files it through the identity
+	// engine; it is not a fact. An agent that does not send it sends none.
+	Network *di.NetworkObservation `json:"network,omitempty"`
+
 	// Warnings are the collection warnings the shared collector raised — an
 	// endpoint the account may not read, a command the device lacks, a table
 	// cut at its bound (finding P-17). Same shape on both executors. An agent

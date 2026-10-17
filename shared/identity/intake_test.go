@@ -280,24 +280,23 @@ func TestIntake_NameScopeRule(t *testing.T) {
 	r := memory.New()
 	must(t, r.AddSegment(intakeTenant, "192.0.2.0/24", "seg-a", false))
 	must(t, r.AddSegment(intakeTenant, "198.51.100.0/24", "seg-b", false))
-	must(t, r.AddDomainSegment(intakeTenant, "lab.local", "seg-domain"))
 
 	obs := assess(t, r, measuredSighting(identity.ChannelL2Frame,
-		sid(identity.KindIPAddress, "203.0.113.9"), // in no segment: not primary
+		sid(identity.KindIPAddress, "203.0.113.9"), // in no prefix: not primary
 		sid(identity.KindIPAddress, "192.0.2.10"),  // primary
-		// 1. its own address, in a real segment
+		// 1. its own address, in a real prefix
 		identity.SightedIdentifier{Kind: identity.KindHostname, Value: "own-addr", Address: "198.51.100.4"},
-		// 2. no address of its own → the sighting's primary segment
+		// 2. no address of its own → the sighting's primary prefix
 		sid(identity.KindHostname, "no-addr"),
-		// 3. its own address is in no segment → the domain rule
+		// 3. its own address in no prefix → tenant default (the domain rule
+		// retired with the segments, DCIM row 1.6)
 		identity.SightedIdentifier{Kind: identity.KindHostname, Value: "nas.lab.local", Address: "203.0.113.9"},
-		// 4. its own address in no segment, no domain match → tenant default
 		identity.SightedIdentifier{Kind: identity.KindHostname, Value: "orphan", Address: "203.0.113.9"},
 	)).Observation
 	for name, want := range map[string]string{
 		"own-addr":      "seg-b",
 		"no-addr":       "seg-a",
-		"nas.lab.local": "seg-domain",
+		"nas.lab.local": identity.ScopeTenantDefault,
 		"orphan":        identity.ScopeTenantDefault,
 	} {
 		if got := mustID(t, obs, identity.KindHostname, name).Scope; got != want {
@@ -305,34 +304,20 @@ func TestIntake_NameScopeRule(t *testing.T) {
 		}
 	}
 
-	// A sighting with no address at all: the domain rule places the name, and
-	// the observation's own segment is that domain segment.
+	// A sighting with no address at all lands in the tenant default.
 	obs = assess(t, r, measuredSighting(identity.ChannelAdvertisement,
 		sid(identity.KindHostname, "tv.lab.local"))).Observation
-	if got := mustID(t, obs, identity.KindHostname, "tv.lab.local").Scope; got != "seg-domain" {
+	if got := mustID(t, obs, identity.KindHostname, "tv.lab.local").Scope; got != identity.ScopeTenantDefault {
 		t.Errorf("address-less name scoped %q", got)
 	}
-	if obs.Network.SegmentID != "seg-domain" {
+	if obs.Network.SegmentID != identity.ScopeTenantDefault {
 		t.Errorf("Network.SegmentID = %q", obs.Network.SegmentID)
 	}
-
-	// An fqdn-only sighting: the fqdn stays unscoped (it identifies on its
-	// own), but the domain segment still places the SIGHTING — domain
-	// patterns are dotted, so the names they match are fqdns.
-	must(t, r.AddDomainSegment(intakeTenant, "corp.example.test", "seg-corp"))
-	obs = assess(t, r, measuredSighting(identity.ChannelL3Traffic,
-		sid(identity.KindFQDN, "shadow-store.corp.example.test"))).Observation
-	if id := mustID(t, obs, identity.KindFQDN, "shadow-store.corp.example.test"); id.Scope != "" {
-		t.Errorf("fqdn carries scope %q", id.Scope)
-	}
-	if obs.Network.SegmentID != "seg-corp" {
-		t.Errorf("fqdn-only sighting placed in %q, want its domain segment", obs.Network.SegmentID)
-	}
-	// An address in a real segment still outranks the domain pattern.
+	// An address in a real prefix places an fqdn-carrying sighting.
 	obs = assess(t, r, measuredSighting(identity.ChannelL3Traffic,
 		sid(identity.KindFQDN, "db.corp.example.test"), sid(identity.KindIPAddress, "192.0.2.77"))).Observation
 	if obs.Network.SegmentID != "seg-a" {
-		t.Errorf("fqdn + addressed sighting placed in %q, want the address's segment", obs.Network.SegmentID)
+		t.Errorf("fqdn + addressed sighting placed in %q, want the address's prefix", obs.Network.SegmentID)
 	}
 }
 
@@ -359,25 +344,29 @@ func TestIntake_NameFiling(t *testing.T) {
 
 func TestIntake_DynamicScopesFromStoredPostureOnly(t *testing.T) {
 	r := memory.New()
-	must(t, r.AddSegment(intakeTenant, "10.99.0.0/24", "seg-lan", false))
-	yes, no := true, false
-	must(t, r.StateSegmentPosture(intakeTenant, "seg-lan", "operator", nil))
-	must(t, r.StateSegmentPosture(intakeTenant, "seg-lan", "measured", &yes))
-
-	s := measuredSighting(identity.ChannelControllerInventory, sid(identity.KindIPAddress, "10.99.0.1"))
-	if obs := assess(t, r, s).Observation; !obs.DynamicScopes["seg-lan"] {
-		t.Fatalf("measured=dynamic with nothing above it: DynamicScopes = %v", obs.DynamicScopes)
+	must(t, r.AddLearnedPrefix(intakeTenant, "10.99.0.0/24", "seg-lan"))
+	wrote, err := r.RecordPrefixPosture(intakeTenant, "seg-lan", false)
+	must(t, err)
+	if !wrote {
+		t.Fatal("the first statement on a learned prefix was not written")
 	}
 
-	// The operator marks the segment static. The precedence rule stored that
-	// as the effective value, and Intake reads it — even on a sighting from
-	// the very controller whose measurement says DHCP ( item 7).
-	//
-	// Mutation check: rank `measured` above `operator` in the memory store's
-	// postureRank and this fails.
-	must(t, r.StateSegmentPosture(intakeTenant, "seg-lan", "operator", &no))
+	s := measuredSighting(identity.ChannelControllerInventory, sid(identity.KindIPAddress, "10.99.0.1"))
 	if obs := assess(t, r, s).Observation; obs.DynamicScopes["seg-lan"] {
-		t.Fatalf("operator=static must outrank measured=dynamic: DynamicScopes = %v", obs.DynamicScopes)
+		t.Fatalf("stored static posture read as dynamic: DynamicScopes = %v", obs.DynamicScopes)
+	}
+
+	// A controller later reports DHCP on it. The stored posture stands, and
+	// Intake reads it — even on a sighting from the very controller whose
+	// measurement says DHCP ( item 7).
+	//
+	// Mutation check: drop the `said` guard in the memory store's
+	// RecordPrefixPosture and this fails.
+	if wrote, err := r.RecordPrefixPosture(intakeTenant, "seg-lan", true); err != nil || wrote {
+		t.Fatalf("second statement = (%t, %v), want not written", wrote, err)
+	}
+	if obs := assess(t, r, s).Observation; obs.DynamicScopes["seg-lan"] {
+		t.Fatalf("a later statement overrode the stored posture: DynamicScopes = %v", obs.DynamicScopes)
 	}
 }
 

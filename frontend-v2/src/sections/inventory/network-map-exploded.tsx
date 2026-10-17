@@ -13,6 +13,7 @@
 //   certificate GET /certificates/{id}
 import { useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
+import { assetTabPath } from './asset-tabs';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 import { strengthRank } from '@vistasecurity/primitives/ratings';
@@ -180,6 +181,11 @@ export function ExplodedDevice({ asset, onClose, onShowNeighbourhood }: {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 11 }}>
             <Link to={`/inventory/assets/${asset.asset_id}`} className="ui-btn sm" style={{ textDecoration: 'none', fontSize: 12, justifyContent: 'center' }}>
               <Icon name="external-link" size={12} />Open asset
+            </Link>
+            {/* The device's ports and where each is cabled (DCIM row 3.6): the
+                faceplate on the asset page's Ports tab (row 3.4). */}
+            <Link to={assetTabPath(asset.asset_id, 'ports')} data-testid="exploded-faceplate" className="ui-btn sm ghost" style={{ textDecoration: 'none', fontSize: 12, justifyContent: 'center' }}>
+              <Icon name="cable" size={12} />Faceplate
             </Link>
             <button className="ui-btn sm ghost" style={{ fontSize: 12, justifyContent: 'center' }} onClick={() => onShowNeighbourhood(asset.asset_id)}>
               <Icon name="waypoints" size={12} />Show neighbourhood

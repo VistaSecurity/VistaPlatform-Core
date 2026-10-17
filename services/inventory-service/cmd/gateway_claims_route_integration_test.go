@@ -13,6 +13,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"github.com/vistasecurity/vistaplatform/shared/dcim/changes"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,6 +28,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/handlers"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	pgidentity "github.com/vistasecurity/vistaplatform/shared/identity/postgres"
 	"github.com/vistasecurity/vistaplatform/shared/serviceauth"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
@@ -61,12 +64,11 @@ func TestIntegration_SightingRoute_GatewayClaimRehomesAndPlacesNothing(t *testin
 	testdb.ApplySchemaAndSeed(t, raw)
 	tenant := testdb.NewTenant(t, raw)
 	location := uuid.New()
-	if _, err := raw.Exec(`INSERT INTO locations(id,tenant_id,name,location_type) VALUES($1,$2,'Branch','site')`, location, tenant); err != nil {
+	if _, err := raw.Exec(`WITH s AS (INSERT INTO sites(tenant_id,name,slug) VALUES($2,'Branch',regexp_replace(lower('Branch'),'[^a-z0-9]+','-','g')) RETURNING id) INSERT INTO locations(id,tenant_id,site_id,name,slug) SELECT $1,$2,s.id,'Branch',regexp_replace(lower('Branch'),'[^a-z0-9]+','-','g') FROM s`, location, tenant); err != nil {
 		t.Fatal(err)
 	}
 	var segment string
-	if err := raw.QueryRow(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,location_id,metadata)
-		VALUES($1,'Branch LAN','cidr','192.0.2.0/24','private','production',true,$2,'{"dynamic":true}') RETURNING id::text`, tenant, location).Scan(&segment); err != nil {
+	if err := raw.QueryRow(`INSERT INTO prefixes(tenant_id,description,prefix,network_type,environment,scope_kind,scope_id,dhcp_managed,source_kind,status) VALUES($1,'Branch LAN','192.0.2.0/24'::cidr,'private','production','location',$2,true,'declared','active') RETURNING id::text`, tenant, location).Scan(&segment); err != nil {
 		t.Fatal(err)
 	}
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
@@ -86,7 +88,7 @@ func TestIntegration_SightingRoute_GatewayClaimRehomesAndPlacesNothing(t *testin
 	if gateway == "" {
 		t.Fatalf("gateway not created: %+v", created[0])
 	}
-	if _, err := raw.Exec(`UPDATE assets SET network_segment_id=NULL, location_id=NULL, site=NULL WHERE id=$1`, gateway); err != nil {
+	if _, err := raw.Exec(`UPDATE assets SET prefix_id=NULL, location_id=NULL, site_id=NULL WHERE id=$1`, gateway); err != nil {
 		t.Fatal(err)
 	}
 	// A provisional guess holding the gateway's address on that network.
@@ -115,7 +117,7 @@ func TestIntegration_SightingRoute_GatewayClaimRehomesAndPlacesNothing(t *testin
 		t.Fatalf("claim = %+v, want matched on the gateway %s", res[0], gateway)
 	}
 	var holder, assignment string
-	if err := raw.QueryRowContext(ctx, `SELECT asset_id::text, coalesce(address_assignment,'') FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address' AND value='192.0.2.1'`,
+	if err := raw.QueryRowContext(ctx, `SELECT asset_id::text, coalesce(address_assignment,'') FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='ip_address' AND value='192.0.2.1'`,
 		tenant).Scan(&holder, &assignment); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +125,7 @@ func TestIntegration_SightingRoute_GatewayClaimRehomesAndPlacesNothing(t *testin
 		t.Errorf("192.0.2.1 held by %s (%q), want the gateway, pinned (the guess was %s)", holder, assignment, guess)
 	}
 	var site string
-	if err := raw.QueryRowContext(ctx, `SELECT coalesce(site,'') FROM assets WHERE id=$1`, gateway).Scan(&site); err != nil {
+	if err := raw.QueryRowContext(ctx, `SELECT coalesce((SELECT st.name FROM sites st WHERE st.id = assets.site_id),'') FROM assets WHERE id=$1`, gateway).Scan(&site); err != nil {
 		t.Fatal(err)
 	}
 	if site != "" {
@@ -131,24 +133,21 @@ func TestIntegration_SightingRoute_GatewayClaimRehomesAndPlacesNothing(t *testin
 	}
 }
 
-func TestIntegration_SightingRoute_InterrogatedHostsAutoApproveOnAutoApproveSegments(t *testing.T) {
+func TestIntegration_SightingRoute_InterrogatedHostsAutoApproveOnAutoApprovePrefixes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	raw := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, raw)
 	tenant := testdb.NewTenant(t, raw)
 	db := &database.DB{DB: sqlx.NewDb(raw, "postgres")}
-	segSvc := services.NewNetworkSegmentService(db, services.NewLocationService(db))
+	// Declared through the IPAM service, whose write generates the prefix's
+	// auto-approval rule (prefix_approval_rules.go).
 	for cidr, auto := range map[string]bool{"192.0.2.0/24": true, "198.51.100.0/24": false} {
-		if _, err := raw.Exec(`INSERT INTO network_segments(tenant_id,name,segment_type,value,network_type,environment,is_active,auto_approve_discoveries)
-			VALUES($1,$2,'cidr',$2,'private','production',true,$3)`, tenant, cidr, auto); err != nil {
+		body := fmt.Sprintf(`{"prefix":%q,"network_type":"private","environment":"production","auto_approve_discoveries":%t}`, cidr, auto)
+		if _, err := services.NewIPAMService(raw).Create(changes.WithSource(changes.WithActor(t.Context(), changes.Actor{UserID: uuid.New(), UserName: "op@example.test"}), changes.SourceUI), tenant, "prefixes", []byte(body)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := segSvc.ManageAutoApprovalRules(tenant, uuid.Nil); err != nil {
-		t.Fatalf("ManageAutoApprovalRules: %v", err)
-	}
 	svc := services.NewAssetService(db)
-	svc.SetEnrichmentServices(segSvc, nil)
 	r := gin.New()
 	mountSightingRoutes(r, handlers.NewSightingHandler(svc), sourceTestSecret)
 
@@ -188,9 +187,9 @@ func TestIntegration_SightingRoute_InterrogatedHostsAutoApproveOnAutoApproveSegm
 	}
 
 	// A PROVISIONAL asset the interrogation matches is not approved by the
-	// segment: a guess consumes no allowance until something promotes it.
+	// prefix: a guess consumes no allowance until something promotes it.
 	var segment string
-	if err := raw.QueryRow(`SELECT id::text FROM network_segments WHERE tenant_id=$1 AND value='192.0.2.0/24'`, tenant).Scan(&segment); err != nil {
+	if err := raw.QueryRow(`SELECT id::text FROM prefixes WHERE tenant_id=$1 AND prefix='192.0.2.0/24'`, tenant).Scan(&segment); err != nil {
 		t.Fatal(err)
 	}
 	guess, err := pgidentity.New(raw).CreateAsset(t.Context(), tenant.String(), identity.NewAsset{

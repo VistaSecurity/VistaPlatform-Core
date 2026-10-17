@@ -81,11 +81,11 @@ func TestEnumsMatchSchema(t *testing.T) {
 			{"findings_workflow_status_check", findingWorkflowStatusValues},
 			{"valid_certificate_state", certificateStateValues},
 			{"certificates_trust_status_check", certificateTrustStatusValues},
-			// The observation target has no table, but `network.type` is not
-			// computed: the classifier copies the matching segment's column
-			// through, so the segment's CHECK IS its range. Pinning it here is
-			// what would have caught it being written as {private, public}.
-			{"network_segments_network_type_check", observationNetworkTypeValues},
+			{"interfaces_mode_check", interfaceModeValues},
+			{"assets_face_check", rackFaceValues},
+			{"interfaces_status_check", interfaceStatusValues},
+			{"interfaces_operational_status_check", interfaceOperStatusValues},
+			{"tunnels_encapsulation_check", tunnelEncapsulationValues},
 		} {
 			got := checkConstraintValues(t, body, tc.constraint)
 			assertSameSet(t, tc.constraint, got, tc.want)

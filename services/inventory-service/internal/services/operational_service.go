@@ -14,7 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/severity"
 )
 
-// OperationalService provides location summary, environment drill-down, and remediation queue from materialized views.
+// OperationalService provides the site summary, environment drill-down, and remediation queue from materialized views.
 type OperationalService struct {
 	db *database.DB
 }
@@ -24,21 +24,21 @@ func NewOperationalService(db *database.DB) *OperationalService {
 	return &OperationalService{db: db}
 }
 
-// GetLocationSummaries returns all rows from mv_location_finding_summary for the tenant (all locations × environments).
-// Reads go through mv_location_finding_summary_tenant: the underlying matview is
-// cross-tenant and crypto_app's direct SELECT on it is revoked; the wrapper
-// scopes by app.tenant_id, which WithTenantTx sets.
-func (s *OperationalService) GetLocationSummaries(tenantID uuid.UUID) ([]models.LocationFindingSummaryRow, error) {
-	var rows []models.LocationFindingSummaryRow
+// GetSiteSummaries returns every row of mv_site_finding_summary for the tenant
+// (all sites × environments). Reads go through mv_site_finding_summary_tenant:
+// the underlying matview is cross-tenant and crypto_app's direct SELECT on it
+// is revoked; the wrapper scopes by app.tenant_id, which WithTenantTx sets.
+func (s *OperationalService) GetSiteSummaries(tenantID uuid.UUID) ([]models.SiteFindingSummaryRow, error) {
+	var rows []models.SiteFindingSummaryRow
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.Select(&rows, `
-		SELECT location_id, tenant_id, location_name, location_type, full_path, environment,
+		SELECT site_id, tenant_id, site_name, site_slug, environment,
 			asset_count, crypto_config_count, certificate_count,
 			critical_findings, high_findings, medium_findings, low_findings,
 			expiring_certs_30d, expired_certs
-		FROM mv_location_finding_summary_tenant
+		FROM mv_site_finding_summary_tenant
 		WHERE tenant_id = $1
-		ORDER BY location_name, environment
+		ORDER BY site_name, environment
 	`, tenantID)
 	})
 	if err != nil {
@@ -50,19 +50,20 @@ func (s *OperationalService) GetLocationSummaries(tenantID uuid.UUID) ([]models.
 	return rows, nil
 }
 
-// GetLocationEnvironments returns environment-level stats for a single location (from mv_location_finding_summary).
-func (s *OperationalService) GetLocationEnvironments(tenantID, locationID uuid.UUID) ([]models.EnvironmentSummary, error) {
-	var rows []models.LocationFindingSummaryRow
+// GetSiteEnvironments returns environment-level stats for one site (from
+// mv_site_finding_summary).
+func (s *OperationalService) GetSiteEnvironments(tenantID, siteID uuid.UUID) ([]models.EnvironmentSummary, error) {
+	var rows []models.SiteFindingSummaryRow
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.Select(&rows, `
-		SELECT location_id, tenant_id, location_name, location_type, full_path, environment,
+		SELECT site_id, tenant_id, site_name, site_slug, environment,
 			asset_count, crypto_config_count, certificate_count,
 			critical_findings, high_findings, medium_findings, low_findings,
 			expiring_certs_30d, expired_certs
-		FROM mv_location_finding_summary_tenant
-		WHERE tenant_id = $1 AND location_id = $2
+		FROM mv_site_finding_summary_tenant
+		WHERE tenant_id = $1 AND site_id = $2
 		ORDER BY environment
-	`, tenantID, locationID)
+	`, tenantID, siteID)
 	})
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -70,9 +71,14 @@ func (s *OperationalService) GetLocationEnvironments(tenantID, locationID uuid.U
 		}
 		return nil, err
 	}
-	out := make([]models.EnvironmentSummary, len(rows))
+	out := make([]models.EnvironmentSummary, 0, len(rows))
 	for i := range rows {
-		out[i] = models.EnvironmentSummary{
+		if rows[i].AssetCount == 0 {
+			// The LEFT JOIN's row for a site with no assets: there is no
+			// environment to report, and "unknown: 0 assets" would read as one.
+			continue
+		}
+		out = append(out, models.EnvironmentSummary{
 			Environment:       rows[i].Environment,
 			AssetCount:        rows[i].AssetCount,
 			CryptoConfigCount: rows[i].CryptoConfigCount,
@@ -83,14 +89,14 @@ func (s *OperationalService) GetLocationEnvironments(tenantID, locationID uuid.U
 			LowFindings:       rows[i].LowFindings,
 			ExpiringCerts30D:  rows[i].ExpiringCerts30D,
 			ExpiredCerts:      rows[i].ExpiredCerts,
-		}
+		})
 	}
 	return out, nil
 }
 
-// GetEnvironmentAssets returns assets for a given location and environment (from assets).
+// GetEnvironmentAssets returns the assets of one site in one environment (from assets).
 // Uses explicit column list and tags/metadata as text so JSONB scans correctly into models.Asset.
-func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID, environment string, page, pageSize int) ([]models.Asset, int, error) {
+func (s *OperationalService) GetEnvironmentAssets(tenantID, siteID uuid.UUID, environment string, page, pageSize int) ([]models.Asset, int, error) {
 	if pageSize <= 0 {
 		pageSize = 20
 	}
@@ -102,17 +108,17 @@ func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID
 	query := `
 		SELECT
 			a.id, a.tenant_id, a.hostname, host(a.primary_address), ep.port, a.class_key,
-			` + assetOperatingSystemSQL + `, a.environment::text, a.business_unit, a.owner_email,
+			` + assetOperatingSystemSQL + `, a.environment::text, ` + assetBusinessUnitSQL + `, a.owner_email,
 			a.description, a.tags::text, a.metadata::text, a.asset_ownership, a.asset_status,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at,
-			a.location_id, a.network_segment_id, ns.name AS network_segment_name,
+			a.location_id, a.prefix_id, pfx.prefix::text AS prefix,
 			ep.service_name, ep.service_version,
 			ep.service_confidence, ep.service_identification_method,
 			a.risk_score, ` + models.RiskLevelCaseSQL("COALESCE(a.risk_score, 0)") + ` AS risk_level
 		FROM assets a
-		LEFT JOIN network_segments ns ON ns.id = a.network_segment_id` + primaryEndpointJoin + `
-		WHERE a.tenant_id = $1 AND a.location_id = $2 AND a.deleted_at IS NULL
+		LEFT JOIN prefixes pfx ON pfx.tenant_id = a.tenant_id AND pfx.id = a.prefix_id` + primaryEndpointJoin + `
+		WHERE a.tenant_id = $1 AND a.site_id = $2 AND a.deleted_at IS NULL
 		  AND (a.environment::text = $3 OR ($3 = 'unknown' AND a.environment IS NULL))
 		ORDER BY a.risk_score DESC NULLS LAST, a.last_seen_at DESC, a.id
 		LIMIT $4 OFFSET $5
@@ -120,17 +126,17 @@ func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID
 
 	var total int
 	var assets []models.Asset
-	// RLS-scoped reads over assets (JOIN network_segments) — count + page in one tenant tx.
+	// RLS-scoped reads over assets (JOIN prefixes) — count + page in one tenant tx.
 	err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		if e := tx.QueryRow(`
 		SELECT COUNT(*) FROM assets
-		WHERE tenant_id = $1 AND location_id = $2 AND deleted_at IS NULL
+		WHERE tenant_id = $1 AND site_id = $2 AND deleted_at IS NULL
 		  AND (environment::text = $3 OR ($3 = 'unknown' AND environment IS NULL))
-	`, tenantID, locationID, environment).Scan(&total); e != nil {
+	`, tenantID, siteID, environment).Scan(&total); e != nil {
 			return e
 		}
 
-		rows, e := tx.Queryx(query, tenantID, locationID, environment, pageSize, offset)
+		rows, e := tx.Queryx(query, tenantID, siteID, environment, pageSize, offset)
 		if e != nil {
 			if e == sql.ErrNoRows {
 				return nil
@@ -149,7 +155,7 @@ func (s *OperationalService) GetEnvironmentAssets(tenantID, locationID uuid.UUID
 				&asset.ClassKey, &operatingSystem, &asset.Environment, &asset.BusinessUnit,
 				&asset.OwnerEmail, &asset.Description, &tagsText, &metadataText, &asset.AssetOwnership, &asset.AssetStatus,
 				&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
-				&asset.DeletedAt, &asset.LocationID, &asset.NetworkSegmentID, &asset.NetworkSegmentName, &ep.ServiceName, &ep.ServiceVersion,
+				&asset.DeletedAt, &asset.LocationID, &asset.PrefixID, &asset.Prefix, &ep.ServiceName, &ep.ServiceVersion,
 				&ep.ServiceConfidence, &ep.ServiceIdentificationMethod,
 				&asset.RiskScore, &asset.RiskLevel,
 			); e != nil {

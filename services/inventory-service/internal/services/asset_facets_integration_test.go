@@ -21,6 +21,7 @@ package services
 // test-integration-db).
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/google/uuid"
@@ -46,17 +47,18 @@ func TestIntegration_AssetFacets_RiskLevelIsPerAsset(t *testing.T) {
 	newAsset := func(hostname, bu, status string, riskScore int) uuid.UUID {
 		t.Helper()
 		id := uuid.New()
+		buID := seedBusinessUnit2(t, db, tenant, bu)
 		rollup := riskScore
 		if rollup < 0 {
 			rollup = 0
 		}
 		if _, err := db.Exec(`
-			INSERT INTO assets (id, tenant_id, hostname, business_unit, class_key, class_path, asset_status,
+			INSERT INTO assets (id, tenant_id, hostname, business_unit_id, class_key, class_path, asset_status,
 			                    risk_score, risk_assessed_by,
 			                    last_seen_at, first_discovered_at, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, 'server', 'hardware.computer.server', $5,
 			        $6, ARRAY['crypto']::text[], NOW(), NOW(), NOW(), NOW())`,
-			id, tenant, hostname, bu, status, rollup); err != nil {
+			id, tenant, hostname, buID, status, rollup); err != nil {
 			t.Fatalf("insert asset %s: %v", hostname, err)
 		}
 		if riskScore >= 0 {
@@ -125,15 +127,16 @@ func TestIntegration_AssetFacets_DefaultsToMonitoringScope(t *testing.T) {
 	tenant := testdb.NewTenant(t, raw)
 	svc := &AssetService{db: db}
 
+	opsBU := seedBusinessUnit(t, db, tenant, "ops")
 	for _, spec := range []struct{ hostname, status string }{
 		{"live-1.example.test", "monitoring"},
 		{"live-2.example.test", "monitoring"},
 		{"waiting.example.test", "pending_approval"},
 	} {
 		if _, err := db.Exec(`
-			INSERT INTO assets (id, tenant_id, hostname, business_unit, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
-			VALUES ($1, $2, $3, 'ops', 'server', 'hardware.computer.server', $4, NOW(), NOW(), NOW(), NOW())`,
-			uuid.New(), tenant, spec.hostname, spec.status); err != nil {
+			INSERT INTO assets (id, tenant_id, hostname, business_unit_id, class_key, class_path, asset_status, last_seen_at, first_discovered_at, created_at, updated_at)
+			VALUES ($1, $2, $3, $5, 'server', 'hardware.computer.server', $4, NOW(), NOW(), NOW(), NOW())`,
+			uuid.New(), tenant, spec.hostname, spec.status, opsBU); err != nil {
 			t.Fatalf("insert %s: %v", spec.hostname, err)
 		}
 	}
@@ -161,4 +164,18 @@ func TestIntegration_AssetFacets_DefaultsToMonitoringScope(t *testing.T) {
 		t.Errorf("ops bucket with an explicit asset_status = %d, want 1 — an explicit "+
 			"filter must still override the default", got)
 	}
+}
+
+// seedBusinessUnit2 is seedBusinessUnit that reuses the tenant's unit of that
+// name when an earlier call in the same test already created it.
+func seedBusinessUnit2(t *testing.T, db interface {
+	QueryRow(query string, args ...any) *sql.Row
+}, tenant uuid.UUID, name string) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := db.QueryRow(`INSERT INTO business_units (tenant_id, name, slug) VALUES ($1, $2, lower($2))
+		ON CONFLICT (tenant_id, slug) DO UPDATE SET name = excluded.name RETURNING id`, tenant, name).Scan(&id); err != nil {
+		t.Fatalf("seed business unit %s: %v", name, err)
+	}
+	return id
 }

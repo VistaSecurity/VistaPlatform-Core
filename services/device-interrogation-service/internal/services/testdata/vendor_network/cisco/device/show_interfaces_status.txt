@@ -1,0 +1,7 @@
+Port         Name               Status       Vlan       Duplex  Speed Type
+Gi1/0/1      desk 4-12 Planted  connected    10         a-full a-1000 10/100/1000BaseTX
+Gi1/0/2                         disabled     10           auto   auto 10/100/1000BaseTX
+Gi1/0/47                        connected    trunk      a-full a-1000 10/100/1000BaseTX
+Gi1/0/48                        connected    trunk      a-full a-1000 10/100/1000BaseTX
+Te1/1/1      uplink to core     connected    trunk        full    10G SFP-10GBase-SR
+Po1                             connected    trunk      a-full a-1000

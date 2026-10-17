@@ -1,0 +1,39 @@
+NAME: "c93xx Stack", DESCR: "c93xx Stack"
+PID: C9300-48P         , VID: V02  , SN: FOC2432L0AB
+
+NAME: "Switch 1", DESCR: "C9300-48P"
+PID: C9300-48P         , VID: V02  , SN: FOC2432L0AB
+
+NAME: "Switch 1 - Power Supply A", DESCR: "Switch 1 - Power Supply A"
+PID: PWR-C1-715WAC-P   , VID: V02  , SN: DCB2341G0A1
+
+NAME: "Switch 1 - Power Supply B", DESCR: "Switch 1 - Power Supply B"
+PID: PWR-C1-715WAC-P   , VID: V02  , SN: DCB2341G0A2
+
+NAME: "Switch 1 FRU Uplink Module 1", DESCR: "8x10G Uplink Module"
+PID: C9300-NM-8X       , VID: V02  , SN: FOC24320X11
+
+NAME: "Te1/1/1", DESCR: "SFP-10GBase-SR"
+PID: SFP-10G-SR          , VID: V03  , SN: AVD2201A001
+
+NAME: "Te1/1/2", DESCR: "SFP-10GBase-SR"
+PID: SFP-10G-SR          , VID: V03  , SN: AVD2201A002
+
+NAME: "Switch 2", DESCR: "C9300-48P"
+PID: C9300-48P         , VID: V02  , SN: FOC2432L0CD
+
+NAME: "Switch 2 - Power Supply A", DESCR: "Switch 2 - Power Supply A"
+PID: PWR-C1-715WAC-P   , VID: V02  , SN: DCB2341G0B1
+
+NAME: "Switch 2 - Power Supply B", DESCR: "Switch 2 - Power Supply B"
+PID: PWR-C1-715WAC-P   , VID: V02  , SN: DCB2341G0B2
+
+NAME: "Switch 2 FRU Uplink Module 1", DESCR: "8x10G Uplink Module"
+PID: C9300-NM-8X       , VID: V02  , SN: FOC24320X22
+
+NAME: "Te2/1/1", DESCR: "SFP-10GBase-SR"
+PID: SFP-10G-SR          , VID: V03  , SN: AVD2201A003
+
+NAME: "Te2/1/2", DESCR: "SFP-10GBase-LR"
+PID: SFP-10G-LR          , VID: V02  , SN: AVD2201A004
+

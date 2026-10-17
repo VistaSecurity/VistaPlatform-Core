@@ -1,0 +1,10 @@
+
+VLAN Name                             Status    Ports
+---- -------------------------------- --------- -------------------------------
+1    default                          active
+10   users                            active    Gi1/0/1, Gi1/0/2
+20   voice                            active
+30   lab                              active
+99   mgmt                             active
+1002 fddi-default                     act/unsup
+1003 token-ring-default               act/unsup

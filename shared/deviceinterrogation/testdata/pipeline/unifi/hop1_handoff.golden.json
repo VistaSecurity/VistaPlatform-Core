@@ -22,13 +22,13 @@
         {
           "kind": "ip_address",
           "value": "192.0.2.1",
-          "scope": "segment:192.0.2.0/24",
+          "scope": "prefix:192.0.2.0/24",
           "source_kind": "measured"
         },
         {
           "kind": "ip_address",
           "value": "198.51.100.1",
-          "scope": "segment:198.51.100.0/24",
+          "scope": "prefix:198.51.100.0/24",
           "source_kind": "measured"
         }
       ]
@@ -62,13 +62,13 @@
         {
           "kind": "hostname",
           "value": "linux-2",
-          "scope": "segment:192.0.2.0/24",
+          "scope": "prefix:192.0.2.0/24",
           "source_kind": "measured"
         },
         {
           "kind": "ip_address",
           "value": "192.0.2.68",
-          "scope": "segment:192.0.2.0/24",
+          "scope": "prefix:192.0.2.0/24",
           "source_kind": "measured"
         },
         {
@@ -88,7 +88,7 @@
         {
           "kind": "ip_address",
           "value": "192.0.2.11",
-          "scope": "segment:192.0.2.0/24",
+          "scope": "prefix:192.0.2.0/24",
           "source_kind": "measured"
         },
         {
@@ -114,7 +114,7 @@
         {
           "kind": "ip_address",
           "value": "192.0.2.12",
-          "scope": "segment:192.0.2.0/24",
+          "scope": "prefix:192.0.2.0/24",
           "source_kind": "measured"
         },
         {
@@ -277,58 +277,16 @@
       }
     }
   ],
-  "learned_segments": [
+  "learned_prefixes": [
     {
       "value": "192.0.2.0/24",
-      "segment_type": "cidr",
       "network_type": "public",
-      "metadata": {
-        "dhcp": "enabled",
-        "dynamic": true,
-        "dynamic_by_source": {
-          "measured": {
-            "dynamic": true,
-            "evidence": {
-              "observed_at": "{{TIMESTAMP}}",
-              "source_asset_id": "{{DEVICE_ASSET_ID}}"
-            }
-          }
-        },
-        "dynamic_evidence": {
-          "observed_at": "{{TIMESTAMP}}",
-          "source_asset_id": "{{DEVICE_ASSET_ID}}"
-        },
-        "dynamic_source": "measured",
-        "source": "interrogation",
-        "source_asset_id": "{{DEVICE_ASSET_ID}}",
-        "source_device_type": "unifi"
-      }
+      "dhcp_managed": true
     },
     {
       "value": "198.51.100.0/24",
-      "segment_type": "cidr",
       "network_type": "public",
-      "metadata": {
-        "dhcp": "disabled",
-        "dynamic": false,
-        "dynamic_by_source": {
-          "measured": {
-            "dynamic": false,
-            "evidence": {
-              "observed_at": "{{TIMESTAMP}}",
-              "source_asset_id": "{{DEVICE_ASSET_ID}}"
-            }
-          }
-        },
-        "dynamic_evidence": {
-          "observed_at": "{{TIMESTAMP}}",
-          "source_asset_id": "{{DEVICE_ASSET_ID}}"
-        },
-        "dynamic_source": "measured",
-        "source": "interrogation",
-        "source_asset_id": "{{DEVICE_ASSET_ID}}",
-        "source_device_type": "unifi"
-      }
+      "dhcp_managed": false
     }
   ]
 }

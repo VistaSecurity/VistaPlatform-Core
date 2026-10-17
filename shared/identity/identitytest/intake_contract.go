@@ -8,26 +8,16 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 )
 
-type (
-	// DomainSegmentWriter registers a `domain` segment — a name pattern —
-	// so the intake's domain rule has something to match. OPTIONAL, on the
-	// same terms as [SegmentWriter].
-	DomainSegmentWriter interface {
-		AddDomainSegment(tenantID, pattern, scope string) error
-	}
-
-	// SegmentPostureWriter states one source's DHCP posture for a segment
-	// registered through [SegmentWriter], the way the product does:
-	// `source` is "operator", "measured" or "inferred", and a nil `dynamic`
-	// withdraws that source's statement. The SQL implementation must route it
-	// through the real posture writer (shared/identity/postgres
-	// RecordSegmentPosture / ClearSegmentPosture), so the contract exercises
-	// the precedence rule that is actually deployed. OPTIONAL, on the same
-	// terms as [SegmentWriter].
-	SegmentPostureWriter interface {
-		StateSegmentPosture(tenantID, scope, source string, dynamic *bool) error
-	}
-)
+// PrefixPostureWriter registers a LEARNED prefix (one a collector reported,
+// with no posture stated) and states a DHCP posture for a prefix the way a
+// collector does: written only where nobody has said yet
+// (`prefixes.dhcp_managed IS NULL`), reporting whether it was. The SQL implementation must route it through the real writer
+// (shared/identity/postgres RecordPrefixPosture). OPTIONAL, on the same terms
+// as [SegmentWriter].
+type PrefixPostureWriter interface {
+	AddLearnedPrefix(tenantID, cidr, scope string) error
+	RecordPrefixPosture(tenantID, scope string, dynamic bool) (bool, error)
+}
 
 // RunIntakeContract holds a repository to what [identity.Intake] needs of it:
 // a [identity.Repository.SegmentSnapshot] that agrees with
@@ -80,8 +70,8 @@ func RunIntakeContract(t *testing.T, newRepo func() identity.Repository) {
 		if err != nil {
 			t.Fatalf("SegmentSnapshot: %v", err)
 		}
-		if len(snap.Segments) != 0 {
-			t.Errorf("snapshot has %d segments for a tenant with none", len(snap.Segments))
+		if len(snap.Prefixes) != 0 {
+			t.Errorf("snapshot has %d prefixes for a tenant with none", len(snap.Prefixes))
 		}
 		obs := build(t, r, sighting(ip("192.0.2.10")))
 		if got := scopeOf(obs, identity.KindIPAddress, "192.0.2.10"); got != identity.ScopeTenantDefault {
@@ -155,106 +145,87 @@ func RunIntakeContract(t *testing.T, newRepo func() identity.Repository) {
 		}
 	})
 
-	t.Run("Intake scopes a name no address placed by the domain rule", func(t *testing.T) {
+	t.Run("Intake scopes a name with no prefixed address to the tenant default", func(t *testing.T) {
 		r := newRepo()
-		dom, ok := r.(DomainSegmentWriter)
-		if !ok {
-			t.Skipf("%T cannot register domain segments", r)
-		}
-		if err := dom.AddDomainSegment(tenant, "corp.example", "seg-corp"); err != nil {
-			t.Fatalf("AddDomainSegment: %v", err)
-		}
-		// The name has an address of its own, and that address is in no
-		// segment: before Intake the name took the address's tenant-default
-		// scope and never reached its domain segment ( item 8).
+		// The domain rule retired with the segments (DCIM row 1.6): a prefix
+		// places addresses, not names. A short name whose address is in no
+		// prefix lands in the tenant default; an fqdn carries no scope.
 		obs := build(t, r, sighting(
 			ip("192.0.2.40"),
 			identity.SightedIdentifier{Kind: identity.KindHostname, Value: "db01.corp.example", Address: "192.0.2.40"},
 			identity.SightedIdentifier{Kind: identity.KindHostname, Value: "build-7", Address: "192.0.2.40"},
 		))
-		// A dotted name is an fqdn and carries no scope at all; the domain
-		// rule scopes a name that is NOT globally unique. So the case the
-		// rule matters for is a short name — which a domain pattern cannot
-		// match — or a `.local` one. Assert both halves of that.
 		if got := scopeOf(obs, identity.KindFQDN, "db01.corp.example"); got != "" {
 			t.Errorf("fqdn scoped %q, want unscoped", got)
 		}
 		if got := scopeOf(obs, identity.KindHostname, "build-7"); got != identity.ScopeTenantDefault {
 			t.Errorf("short name scoped %q, want the tenant default", got)
 		}
-		if err := dom.AddDomainSegment(tenant, "lab.local", "seg-lab"); err != nil {
-			t.Fatalf("AddDomainSegment: %v", err)
-		}
-		obs = build(t, r, sighting(
-			identity.SightedIdentifier{Kind: identity.KindFQDN, Value: "printer.lab.local", Address: "192.0.2.41"},
-		))
-		if got := scopeOf(obs, identity.KindHostname, "printer.lab.local"); got != "seg-lab" {
-			t.Errorf("`.local` name in a domain segment scoped %q, want seg-lab", got)
-		}
-		if obs.Network.SegmentID != "seg-lab" {
-			t.Errorf("Network.SegmentID = %q, want seg-lab", obs.Network.SegmentID)
-		}
 	})
 
-	// The dynamic-scope rule. Intake must read the posture the PRECEDENCE
-	// rule stored — operator > measured > inferred — and nothing a collector
-	// says on the run. Mutation check: swap the operator and measured
-	// branches of the precedence (postureUpdateSQL's CASE in
-	// shared/identity/postgres/segment_posture.go, or postureRank in the
-	// memory store) and the "operator says static" step goes red.
-	t.Run("Intake reads the stored effective posture: operator > measured > inferred", func(t *testing.T) {
+	// The dynamic-scope rule. Intake reads the posture STORED on the prefix
+	// and nothing a collector says on the run; a collector's statement is
+	// written only where nobody has said (DCIM row 1.6, the rule 1.5a's
+	// observed-network writer applies). Mutation check: drop the
+	// `dhcp_managed IS NULL` guard from RecordPrefixPosture (or the `said`
+	// check in the memory store) and the second statement overrides the first.
+	t.Run("Intake reads the stored posture; the first statement stands", func(t *testing.T) {
 		r := newRepo()
 		seg, ok := r.(SegmentWriter)
 		if !ok {
-			t.Skipf("%T cannot register segments", r)
+			t.Skipf("%T cannot register prefixes", r)
 		}
-		pw, ok := r.(SegmentPostureWriter)
+		pw, ok := r.(PrefixPostureWriter)
 		if !ok {
-			t.Skipf("%T cannot state segment posture", r)
+			t.Skipf("%T cannot record prefix posture", r)
 		}
-		const scope = "seg-posture"
-		if err := seg.AddSegment(tenant, "198.51.100.0/24", scope, false); err != nil {
+		if err := seg.AddSegment(tenant, "192.0.2.0/24", "seg-declared", false); err != nil {
 			t.Fatalf("AddSegment: %v", err)
 		}
-		yes, no := true, false
-		state := func(source string, v *bool) {
-			t.Helper()
-			if err := pw.StateSegmentPosture(tenant, scope, source, v); err != nil {
-				t.Fatalf("StateSegmentPosture(%s): %v", source, err)
-			}
+		if err := pw.AddLearnedPrefix(tenant, "198.51.100.0/24", "seg-learned"); err != nil {
+			t.Fatalf("AddLearnedPrefix: %v", err)
 		}
-		dynamic := func() bool {
+		probe := func(addr string) (string, bool) {
 			t.Helper()
-			obs := build(t, r, sighting(ip("198.51.100.20")))
-			if got := scopeOf(obs, identity.KindIPAddress, "198.51.100.20"); got != scope {
-				t.Fatalf("address scoped %q, want %q", got, scope)
+			obs := build(t, r, sighting(ip(addr)))
+			scope := scopeOf(obs, identity.KindIPAddress, addr)
+			if scope == identity.ScopeTenantDefault || scope == "<absent>" {
+				t.Fatalf("%s scoped %q, want a prefix", addr, scope)
 			}
-			return obs.DynamicScopes[scope]
+			return scope, obs.DynamicScopes[scope]
 		}
 
-		// AddSegment stored a bare legacy value, which reads as an operator's.
-		// Withdraw it so the automatic sources can speak.
-		state("operator", nil)
-		if dynamic() {
-			t.Fatal("no source has stated a posture, yet the segment reads dynamic")
+		// A declared prefix nobody stated a posture for reads static — and a
+		// collector's measurement is written there, since nobody has said
+		// ( C2).
+		declared, dyn := probe("192.0.2.20")
+		if dyn {
+			t.Fatal("a declared prefix with no posture reads dynamic")
 		}
-		state("inferred", &yes)
-		if !dynamic() {
-			t.Fatal("inferred=dynamic is the only statement, yet the segment reads static")
+		if wrote, err := pw.RecordPrefixPosture(tenant, declared, true); err != nil || !wrote {
+			t.Fatalf("RecordPrefixPosture on a silent declared prefix = (%t, %v), want written", wrote, err)
 		}
-		state("measured", &no)
-		if dynamic() {
-			t.Fatal("measured=static must outrank inferred=dynamic")
+		if _, dyn := probe("192.0.2.20"); !dyn {
+			t.Fatal("a measured dynamic posture on a silent declared prefix reads static")
 		}
-		state("measured", &yes)
-		state("operator", &no)
-		if dynamic() {
-			t.Fatal("operator=static must outrank measured=dynamic: a person who marked the segment " +
-				"static is not overruled by the controller's next report")
+
+		// A learned prefix nobody stated a posture for reads dynamic; the first
+		// collector statement is written and the next one is not.
+		learned, dyn := probe("198.51.100.20")
+		if !dyn {
+			t.Fatal("a learned prefix with no posture reads static")
 		}
-		state("operator", nil)
-		if !dynamic() {
-			t.Fatal("withdrawing the operator's statement must fall back to measured=dynamic")
+		if wrote, err := pw.RecordPrefixPosture(tenant, learned, false); err != nil || !wrote {
+			t.Fatalf("RecordPrefixPosture(false) = (%t, %v), want written", wrote, err)
+		}
+		if _, dyn := probe("198.51.100.20"); dyn {
+			t.Fatal("a stated static posture reads dynamic")
+		}
+		if wrote, err := pw.RecordPrefixPosture(tenant, learned, true); err != nil || wrote {
+			t.Fatalf("second RecordPrefixPosture = (%t, %v), want not written", wrote, err)
+		}
+		if _, dyn := probe("198.51.100.20"); dyn {
+			t.Fatal("a later collector statement overrode the stored posture")
 		}
 	})
 }

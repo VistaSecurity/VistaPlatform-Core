@@ -130,9 +130,9 @@ it('renders nothing about resource types for a job that reported none', async ()
 it('surfaces why account enumeration did not run', async () => {
   const text = await render({
     ...cloudResults,
-    enumeration_skipped: 'enumerate_compute is off for this integration',
+    enumeration_skipped: 'no compute, network or security-group listing was selected for this run',
   });
-  expect(text).toContain('enumerate_compute is off for this integration');
+  expect(text).toContain('no compute, network or security-group listing was selected for this run');
 });
 
 it('says a zero is a real zero when every type was collected', async () => {
@@ -145,4 +145,42 @@ it('says a zero is a real zero when every type was collected', async () => {
   expect(text).toMatch(/genuinely has none/i);
   expect(text).toContain('None in this account');
   expect(text).not.toContain('Could not collect');
+});
+
+// ADR-0009 D3: the outcome grid — types × regions — written by the real
+// collector (cloud_enumeration_aws_outcomes_test.go) and rendered here.
+// MUTATION-VERIFIED: removing <CloudOutcomeGrid/> from job-detail-modal.tsx
+// turns this red.
+it('renders the per-type, per-region outcome grid with the failed region marked', async () => {
+  await render({
+    ...cloudResults,
+    resource_types: [
+      {
+        resource_type: 'compute_instances', status: 'partial', found: 3, scopes_succeeded: 1, scopes_attempted: 2,
+        failures: [{ scope: 'eu-west-1', reason: 'access_denied', code: 'UnauthorizedOperation', message: 'not authorized' }],
+        regions: [
+          { region: 'us-east-1', status: 'succeeded', found: 3 },
+          { region: 'eu-west-1', status: 'failed', found: 0, failure: { scope: 'eu-west-1', reason: 'access_denied', code: 'UnauthorizedOperation', message: 'not authorized' } },
+        ],
+      },
+      {
+        resource_type: 's3', status: 'succeeded', found: 2, scopes_succeeded: 1, scopes_attempted: 1,
+        regions: [
+          { region: 'global', status: 'succeeded', found: 2 },
+          { region: 'us-east-1', status: 'succeeded', found: 2, from_account_listing: true },
+        ],
+      },
+    ],
+  });
+  const grid = host.querySelector('[data-testid="cloud-outcome-grid"]');
+  expect(grid).not.toBeNull();
+  const heads = [...grid!.querySelectorAll('thead th')].map((th) => th.textContent);
+  expect(heads).toEqual(['Type', 'global', 'eu-west-1', 'us-east-1']);
+  const failed = grid!.querySelector('[data-cell="compute_instances@eu-west-1"]');
+  expect(failed?.getAttribute('data-status')).toBe('failed');
+  expect(failed?.textContent).toBe('failed');
+  expect(failed?.getAttribute('title')).toContain('UnauthorizedOperation');
+  expect(grid!.querySelector('[data-cell="compute_instances@us-east-1"]')?.textContent).toBe('3');
+  // Not asked is a dash, never a zero.
+  expect(grid!.querySelector('[data-cell="compute_instances@global"]')?.textContent).toBe('—');
 });

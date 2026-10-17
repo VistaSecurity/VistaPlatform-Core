@@ -10,8 +10,8 @@ import type { CryptoConfig } from './drawers';
 // `asset-shape.test.ts` with ADR-0002: they read `ip_address`, `port`,
 // `asset_type` and `operating_system`, none of which are columns any more, and
 // the rules they pinned are pinned there against the new shape. The network
-// lens's display-time CIDR matcher went with the network lens — segment
-// membership is a `segment_id:` term on the class-faceted list now, matched
+// lens's display-time CIDR matcher went with the network lens — prefix
+// membership is a `prefix_id:` term on the class-faceted list now, matched
 // server-side.
 
 // M-4: a config with no resolved risk_score is NOT ASSESSED, not "Strong".
@@ -74,7 +74,7 @@ describe('stripInetMask', () => {
     expect(stripInetMask('104.18.4.149')).toBe('104.18.4.149');
   });
 
-  it('leaves a real subnet mask (not a bare host) untouched', () => {
+  it('leaves a real prefix length (not a bare host) untouched', () => {
     expect(stripInetMask('192.0.2.0/24')).toBe('192.0.2.0/24');
   });
 

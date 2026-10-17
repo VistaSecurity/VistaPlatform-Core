@@ -39,7 +39,7 @@ import (
 // of them is out of it.
 
 // reservedPrefixes are refused for every tenant, on every path, regardless of
-// what the tenant declared as a network segment. Exclusions are evaluated
+// what the tenant declared as a prefix. Exclusions are evaluated
 // before the allow rules (see Authorize), so declaring 169.254.0.0/16 as "my
 // network" cannot put the cloud metadata service back in scope.
 //
@@ -124,7 +124,7 @@ func reservedReason(p netip.Prefix) (string, bool) {
 	case "fe80::/10", "fec0::/10":
 		return "link-local addresses are never scanned", true
 	case addrscope.CGNATRange().String():
-		return "carrier-grade NAT space is shared between operators; register it as a network segment if it really is yours", true
+		return "carrier-grade NAT space is shared between operators; register it as a prefix if it really is yours", true
 	case "192.0.0.0/24":
 		return "IETF protocol-assignment space is not a host range", true
 	case "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32":
@@ -141,7 +141,7 @@ func reservedReason(p netip.Prefix) (string, bool) {
 
 // privatePrefixes is the address-class allowance: RFC 1918 and RFC 4193. A
 // tenant may always scan its own private space. Anything else — a public
-// address in particular — has to be inside a network segment the tenant
+// address in particular — has to be inside a prefix the tenant
 // explicitly registered as theirs, which is the statement of ownership this
 // code requires before the platform will send a packet at it.
 //
@@ -152,11 +152,11 @@ var privatePrefixes = addrscope.PrivateRanges()
 // TargetScope is one tenant's scannable address space at one moment.
 type TargetScope struct {
 	allowed []netip.Prefix
-	// allowedSegments[i] is the id of the network segment allowed[i] came
+	// allowedPrefixes[i] is the id of the prefix allowed[i] came
 	// from, so a plan can record which registration made a target the
 	// tenant's (ClassifyManual). Kept parallel rather than folded into
 	// allowed so the interval tests stay plain prefixes.
-	allowedSegments []string
+	allowedPrefixes []string
 	excluded        []netip.Prefix
 }
 
@@ -174,7 +174,7 @@ func (s TargetScope) ForPlatformSensor() TargetScope {
 	return s
 }
 
-// LoadTargetScope reads the tenant's registered network segments and its
+// LoadTargetScope reads the tenant's registered prefixes and its
 // exclusion policy inside the caller's transaction, and folds in the platform's
 // own self-protection ranges. Call it in the same transaction that queues or
 // starts the work, so a segment withdrawn or marked sensitive a moment ago wins
@@ -199,7 +199,7 @@ func LoadTargetScope(tx Queryer, tenantID string) (TargetScope, error) {
 	}
 
 	var segmentRaw []byte
-	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('id',id,'value',value,'network_type',network_type,'learned',`+learnedSegmentSQL+`,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, tenantID).Scan(&segmentRaw); err != nil {
+	if err := tx.QueryRow(prefixScopeSQL, tenantID).Scan(&segmentRaw); err != nil {
 		return scope, err
 	}
 	var segments []struct {
@@ -222,38 +222,52 @@ func LoadTargetScope(tx Queryer, tenantID string) (TargetScope, error) {
 			scope.excluded = append(scope.excluded, prefix)
 			continue
 		}
-		// A segment the tenant registered is a claim of ownership. The
-		// automatic sweep additionally refuses "public" segments; a person
-		// pressing scan on their own registered public estate is the case the
-		// segment registry exists to permit — but only one the tenant
+		// A prefix the tenant declared is a claim of ownership. The
+		// automatic sweep additionally refuses "public" prefixes; a person
+		// pressing scan on their own declared public estate is the case the
+		// prefix registry exists to permit — but only one the tenant
 		// DECLARED. See [SegmentGrantsOwnership].
-		if SegmentPrefixGrantsOwnership(prefix, seg.NetworkType, seg.Learned, false) {
+		if SegmentPrefixGrantsOwnership(prefix, PrefixNetworkType(seg.NetworkType, prefix), seg.Learned, false) {
 			scope.allowed = append(scope.allowed, prefix)
-			scope.allowedSegments = append(scope.allowedSegments, seg.ID)
+			scope.allowedPrefixes = append(scope.allowedPrefixes, seg.ID)
 		}
 	}
 	return scope, nil
 }
 
-// learnedSegmentSQL is true for a network segment the platform LEARNED from an
-// interrogated device's VLAN data rather than one an operator declared, and
-// that no person has since claimed. `unifi` is the label such segments carried
-// before every vendor could produce one.
+// prefixScopeSQL reads the tenant's live global-VRF prefixes as every scope
+// loader in this package judges them (DCIM row 1.6, ADR-0010 D3: the prefix
+// carries what the retired segments did). $1 is the tenant. Per prefix:
 //
-// A claim (SegmentClaimKey, written only by inventory-service's audited
-// "Claim as mine" action — owner decision D8 on) is a person stating the
-// range is theirs, which is exactly what declaring it would have said; from
-// then on the segment is read as declared everywhere this predicate is used.
-// The claim is an object; anything else under the key (a client cannot write
-// one, but a hand-edited row could) is not a claim.
-const learnedSegmentSQL = `(COALESCE(metadata->>'source','') IN ('interrogation','unifi') AND jsonb_typeof(metadata->'` + SegmentClaimKey + `') IS DISTINCT FROM 'object')`
+//   - learned: a collector reported it (`source_kind` measured or inferred) —
+//     where a device is connected, not what the tenant owns. A person CLAIMS a
+//     learned prefix by setting its source to declared (Inventory → Networks →
+//     the prefix → "Claim as ours", recorded in the prefix's change log —
+// owner decision D8 on); from then on it is declared everywhere
+//     this predicate is read;
+//   - imported: a connection brought it in (`source_kind = 'imported'`), so a
+//     NetBox connection's own prefix cannot vouch for its own devices
+//     ([SegmentDeclaresAutomaticScope]);
+//   - blocked: `sensitive` or `active_probes_disabled` — never probed
+//     automatically, learned or declared.
+//
+// Global VRF only: an address on the wire names no VRF.
+const prefixScopeSQL = `SELECT COALESCE(jsonb_agg(jsonb_build_object('id',id,'value',prefix::text,'network_type',COALESCE(network_type,''),` +
+	`'learned',source_kind IN ('measured','inferred'),'imported',source_kind='imported',` +
+	`'blocked',sensitive OR active_probes_disabled) ORDER BY created_at, id),'[]') ` +
+	`FROM prefixes WHERE tenant_id=$1 AND vrf_id IS NULL AND status NOT IN ('rejected','archived')`
 
-// SegmentClaimKey is the network_segments.metadata key a person's claim of a
-// learned segment is recorded under: {"by": <user id>, "by_name": ..., "at":
-// <RFC 3339>}. It is server-owned — the segment API's ordinary create and
-// update never accept it from a client — so its presence always means the
-// claim action ran and was audit-logged.
-const SegmentClaimKey = "claimed"
+// PrefixNetworkType is the network type a prefix is judged by: the one a
+// person or collector stated on it, else the address class of the prefix
+// itself (shared/network.PrefixNetworkType — RFC 1918 / ULA is private,
+// everything else, carrier-grade NAT included, public). A prefix created with
+// no network type is therefore never MORE trusted than its addresses say.
+func PrefixNetworkType(stored string, prefix netip.Prefix) string {
+	if t := strings.TrimSpace(stored); t != "" {
+		return t
+	}
+	return network.PrefixNetworkType(prefix)
+}
 
 // SegmentGrantsOwnership decides whether a registered segment puts its range
 // in scope for a scan.
@@ -267,9 +281,9 @@ const SegmentClaimKey = "claimed"
 //   - a LEARNED public segment is not a claim of ownership at all. A firewall
 //     reporting its ISP transit /30 or its carrier-NAT WAN VLAN is telling us
 //     where it is connected, not that the far end is the tenant's. Learned
-//     public segments exist to scope identities, and nothing else — until a
+//     public prefixes exist to scope identities, and nothing else — until a
 //     person CLAIMS one, after which `learned` is false for it (see
-//     learnedSegmentSQL) and it is a declared public segment in every respect,
+//     prefixScopeSQL) and it is a declared public prefix in every respect,
 //     manual-only scope included.
 func SegmentGrantsOwnership(networkType string, learned, automatic bool) bool {
 	switch networkType {
@@ -303,9 +317,8 @@ func SegmentPrefixGrantsOwnership(prefix netip.Prefix, networkType string, learn
 // are exclusions, not scope.
 //
 // "Declared" is the reading every scope loader already makes — not learned
-// from a device's VLAN data, or learned and since claimed (learnedSegmentSQL)
-// — with one more condition: the segment was not brought in by a CONNECTION
-// (connectionImportedSegmentSQL). A NetBox connection imports prefixes as
+// from a device, or learned and since claimed (prefixScopeSQL) — with one more
+// condition: the prefix was not brought in by a CONNECTION (`imported`). A NetBox connection imports prefixes as
 // well as devices; if its own prefix vouched for its own devices, a NetBox
 // connection with consent off would have its devices scanned anyway, and the
 // consent setting would mean nothing for NetBox.
@@ -313,22 +326,14 @@ func SegmentDeclaresAutomaticScope(prefix netip.Prefix, networkType string, lear
 	return !learned && !connectionImported && SegmentPrefixGrantsOwnership(prefix, networkType, false, true)
 }
 
-// connectionImportedSegmentSQL is true for a network segment a connection
-// imported, or stamped as its own when it found the segment already there
-// (inventory-service source_import.go createSegment / markSegmentImported).
-// The second case is a segment a person may have drawn first; treating it as
-// not declared only means consent is asked for there, the conservative
-// answer.
-const connectionImportedSegmentSQL = `(COALESCE(source_kind,'') = 'imported')`
-
-// DeclaredSegmentPrefixes returns the tenant's active segments for which
+// DeclaredSegmentPrefixes returns the tenant's live prefixes for which
 // [SegmentDeclaresAutomaticScope] holds, read exactly as AuthorizeAutomaticScan
 // reads them. The automatic-scan planner calls it so that it and the dispatch
 // guard agree on where connection consent is needed. Call it inside a
 // tenant-scoped transaction.
 func DeclaredSegmentPrefixes(tx Queryer, tenantID string) ([]netip.Prefix, error) {
 	var segmentRaw []byte
-	if err := tx.QueryRow(`SELECT COALESCE(jsonb_agg(jsonb_build_object('value',value,'network_type',network_type,'learned',`+learnedSegmentSQL+`,'imported',`+connectionImportedSegmentSQL+`,'blocked',COALESCE(metadata->>'sensitive','false')='true' OR COALESCE(metadata->>'active_probes_disabled','false')='true')),'[]') FROM network_segments WHERE tenant_id=$1 AND is_active AND segment_type='cidr'`, tenantID).Scan(&segmentRaw); err != nil {
+	if err := tx.QueryRow(prefixScopeSQL, tenantID).Scan(&segmentRaw); err != nil {
 		return nil, err
 	}
 	var segments []struct {
@@ -347,7 +352,7 @@ func DeclaredSegmentPrefixes(tx Queryer, tenantID string) ([]netip.Prefix, error
 		if err != nil || seg.Blocked {
 			continue
 		}
-		if SegmentDeclaresAutomaticScope(prefix, seg.NetworkType, seg.Learned, seg.Imported) {
+		if SegmentDeclaresAutomaticScope(prefix, PrefixNetworkType(seg.NetworkType, prefix), seg.Learned, seg.Imported) {
 			out = append(out, prefix.Masked())
 		}
 	}
@@ -382,7 +387,7 @@ func (s TargetScope) Authorize(target string) error {
 	case classInScope:
 		return nil
 	}
-	return denied(fmt.Sprintf("scan target %q is outside the network segments this tenant has registered", target))
+	return denied(fmt.Sprintf("scan target %q is outside the prefixes this tenant has declared", target))
 }
 
 // AuthorizeTargets is the call site guard: load the scope once, authorize every

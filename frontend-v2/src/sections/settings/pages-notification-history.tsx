@@ -48,7 +48,7 @@ export function NotificationHistoryPage({ meta }: { meta: SettingsNavItem }) {
   ];
 
   return (
-    <SPage eyebrow="Notifications & Alerts" title="Delivery History" job={meta.job} maxWidth={1100}>
+    <SPage eyebrow="Remediation" title="Notification Delivery" job={meta.job} maxWidth={1100}>
       <div className="panel" style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '12px 16px', marginBottom: 14, border: `1px solid color-mix(in srgb, ${AMBER} 35%, transparent)` }}>
         <Icon name="info" size={15} style={{ color: AMBER, flex: 'none', marginTop: 1 }} />
         <p style={{ margin: 0, fontSize: 12, lineHeight: 1.55, color: 'var(--app-t2)' }}>

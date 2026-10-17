@@ -7,16 +7,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// segmentRule builds the rule inventory-service's ManageAutoApprovalRules writes
-// for a network segment whose auto-approve toggle is ON. Keep this in step with
+// prefixRule builds the rule inventory-service's prefix rule generator writes
+// for a prefix whose auto-approve toggle is ON. Keep this in step with
 // that writer — it is the only producer of these rows.
 //
 // The query is written out here rather than generated, on purpose: if the
 // writer's shape changes, these tests should stop describing it loudly rather
 // than quietly follow it.
-func segmentRule(segmentID uuid.UUID, active bool) *Rule {
+func prefixRule(prefixID uuid.UUID, active bool) *Rule {
 	return ruleWithQuery(
-		"source:sensor and network.ownership:internal and network.type:private and network.segment_id="+segmentID.String(),
+		"source:sensor and network.ownership:internal and network.type:private and network.prefix_id="+prefixID.String(),
 		active)
 }
 
@@ -30,24 +30,24 @@ func ruleWithQuery(q string, active bool) *Rule {
 	}
 }
 
-// onSegment is the classification a discovery gets when its address falls
-// inside a registered tenant segment.
-func onSegment(segmentID uuid.UUID) *Classification {
+// onPrefix is the classification a discovery gets when its address falls
+// inside a registered tenant prefix.
+func onPrefix(prefixID uuid.UUID) *Classification {
 	return &Classification{
 		Ownership: "internal",
 		Type:      "private",
-		SegmentID: &segmentID,
+		PrefixID:  &prefixID,
 	}
 }
 
-// TestSegmentRuleQueryValidates is the write-time half, and the thing the jsonb
+// TestPrefixRuleQueryValidates is the write-time half, and the thing the jsonb
 // shape could not have: the rule the writer produces must be a legal query. A
 // misspelled field is now a refusal instead of a condition that silently
 // evaporates.
-func TestSegmentRuleQueryValidates(t *testing.T) {
-	canonical, err := ValidateRuleQuery(segmentRule(uuid.New(), true).Query)
+func TestPrefixRuleQueryValidates(t *testing.T) {
+	canonical, err := ValidateRuleQuery(prefixRule(uuid.New(), true).Query)
 	if err != nil {
-		t.Fatalf("the generated segment rule does not validate: %v", err)
+		t.Fatalf("the generated prefix rule does not validate: %v", err)
 	}
 	if canonical == "" {
 		t.Fatal("a non-empty rule must canonicalize to non-empty text")
@@ -61,24 +61,24 @@ func TestSegmentRuleQueryValidates(t *testing.T) {
 	}
 }
 
-// TestSegmentAutoApprovalContract pins the one gate on auto-approval: the
-// discovery is on a user-defined segment whose auto-approve toggle is on.
+// TestPrefixAutoApprovalContract pins the one gate on auto-approval: the
+// discovery is on a user-defined prefix whose auto-approve toggle is on.
 // Both polarities, because a guard that can only pass is not a guard.
-func TestSegmentAutoApprovalContract(t *testing.T) {
+func TestPrefixAutoApprovalContract(t *testing.T) {
 	svc := NewService(nil) // the WithRules path never touches the DB
-	segmentID := uuid.New()
-	otherSegmentID := uuid.New()
+	prefixID := uuid.New()
+	otherPrefixID := uuid.New()
 	discovery := Discovery{TenantID: uuid.New()}.WithConfidence(0.9)
 
-	t.Run("auto-approve on, discovery on that segment → approved", func(t *testing.T) {
-		rule := segmentRule(segmentID, true)
+	t.Run("auto-approve on, discovery on that prefix → approved", func(t *testing.T) {
+		rule := prefixRule(prefixID, true)
 		approved, ruleID, err := svc.EvaluateAutoApprovalWithRules(
-			[]*Rule{rule}, discovery, onSegment(segmentID))
+			[]*Rule{rule}, discovery, onPrefix(prefixID))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !approved {
-			t.Fatal("expected auto-approval for a discovery on an auto-approve segment")
+			t.Fatal("expected auto-approval for a discovery on an auto-approve prefix")
 		}
 		if ruleID == nil || *ruleID != rule.ID {
 			t.Fatalf("expected the matching rule id %s, got %v", rule.ID, ruleID)
@@ -87,7 +87,7 @@ func TestSegmentAutoApprovalContract(t *testing.T) {
 
 	t.Run("no rule at all → not approved", func(t *testing.T) {
 		approved, ruleID, err := svc.EvaluateAutoApprovalWithRules(
-			nil, discovery, onSegment(segmentID))
+			nil, discovery, onPrefix(prefixID))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -98,7 +98,7 @@ func TestSegmentAutoApprovalContract(t *testing.T) {
 
 	t.Run("rule inactive → not approved", func(t *testing.T) {
 		approved, _, err := svc.EvaluateAutoApprovalWithRules(
-			[]*Rule{segmentRule(segmentID, false)}, discovery, onSegment(segmentID))
+			[]*Rule{prefixRule(prefixID, false)}, discovery, onPrefix(prefixID))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -107,33 +107,33 @@ func TestSegmentAutoApprovalContract(t *testing.T) {
 		}
 	})
 
-	t.Run("rule for a different segment → not approved", func(t *testing.T) {
+	t.Run("rule for a different prefix → not approved", func(t *testing.T) {
 		approved, _, err := svc.EvaluateAutoApprovalWithRules(
-			[]*Rule{segmentRule(otherSegmentID, true)}, discovery, onSegment(segmentID))
+			[]*Rule{prefixRule(otherPrefixID, true)}, discovery, onPrefix(prefixID))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if approved {
-			t.Fatal("a rule scoped to another segment must not auto-approve")
+			t.Fatal("a rule scoped to another prefix must not auto-approve")
 		}
 	})
 
-	t.Run("discovery on no segment → not approved", func(t *testing.T) {
+	t.Run("discovery on no prefix → not approved", func(t *testing.T) {
 		approved, _, err := svc.EvaluateAutoApprovalWithRules(
-			[]*Rule{segmentRule(segmentID, true)}, discovery,
+			[]*Rule{prefixRule(prefixID, true)}, discovery,
 			&Classification{Ownership: "unknown", Type: "private"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if approved {
-			t.Fatal("a discovery matching no segment must not auto-approve")
+			t.Fatal("a discovery matching no prefix must not auto-approve")
 		}
 	})
 
 	t.Run("third-party ownership is never approved", func(t *testing.T) {
 		approved, _, err := svc.EvaluateAutoApprovalWithRules(
-			[]*Rule{segmentRule(segmentID, true)}, discovery,
-			&Classification{Ownership: "third_party", Type: "public", SegmentID: &segmentID})
+			[]*Rule{prefixRule(prefixID, true)}, discovery,
+			&Classification{Ownership: "third_party", Type: "public", PrefixID: &prefixID})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -145,7 +145,7 @@ func TestSegmentAutoApprovalContract(t *testing.T) {
 
 func TestEvaluateRuleSourceAndConfidence(t *testing.T) {
 	e := NewRuleEvaluator()
-	segmentID := uuid.New()
+	prefixID := uuid.New()
 
 	cloudDiscovery := Discovery{
 		TenantID: uuid.New(),
@@ -154,7 +154,7 @@ func TestEvaluateRuleSourceAndConfidence(t *testing.T) {
 	sensorDiscovery := Discovery{TenantID: uuid.New()}.WithConfidence(0.9)
 
 	t.Run("a sensor rule skips a cloud discovery", func(t *testing.T) {
-		matched, err := e.EvaluateRule(segmentRule(segmentID, true), cloudDiscovery, onSegment(segmentID))
+		matched, err := e.EvaluateRule(prefixRule(prefixID, true), cloudDiscovery, onPrefix(prefixID))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -163,55 +163,31 @@ func TestEvaluateRuleSourceAndConfidence(t *testing.T) {
 		}
 	})
 
-	// The cloud and any-source forms were unreachable until the segment rule
-	// gained a per-source setting: both writers hard-coded the sensor form and
-	// nothing else could author a rule. These pin them as live code, in both
-	// polarities.
-	cloudRule := func() *Rule {
-		return ruleWithQuery("source:cloud and network.ownership:internal and network.segment_id="+segmentID.String(), true)
-	}
-
-	t.Run("a cloud rule matches a cloud discovery", func(t *testing.T) {
-		matched, err := e.EvaluateRule(cloudRule(), cloudDiscovery, onSegment(segmentID))
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+	// A prefix rule never decides a cloud resource (ADR-0009 D5): the cloud
+	// form is refused outright (TestApprovalRules_NoCloudPrefixSource), and a
+	// prefix rule with no source term — what the writer used to emit for
+	// "sensor + cloud" — still covers sensor discoveries but no longer reaches
+	// a cloud one through its cloud prefix.
+	t.Run("a prefix rule with no source term covers sensor, not cloud", func(t *testing.T) {
+		anySource := ruleWithQuery("network.ownership:internal and network.prefix_id="+prefixID.String(), true)
+		matched, err := e.EvaluateRule(anySource, sensorDiscovery, onPrefix(prefixID))
+		if err != nil || !matched {
+			t.Fatalf("a rule with no source term must still match a sensor discovery on its prefix: matched=%v err=%v", matched, err)
 		}
-		if !matched {
-			t.Fatal("a cloud rule did not match a cloud discovery — the branch is dead code again")
-		}
-	})
-
-	t.Run("a cloud rule skips a sensor discovery", func(t *testing.T) {
-		matched, err := e.EvaluateRule(cloudRule(), sensorDiscovery, onSegment(segmentID))
+		matched, err = e.EvaluateRule(anySource, cloudDiscovery, onPrefix(prefixID))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if matched {
-			t.Fatal("a cloud-only rule matched a sensor discovery")
-		}
-	})
-
-	t.Run("no source term matches both sources", func(t *testing.T) {
-		// §8: `source: all` has no equivalent term, because "any source" is the
-		// ABSENCE of a constraint. This is what the writer emits for a segment
-		// covering both.
-		anySource := ruleWithQuery("network.ownership:internal and network.segment_id="+segmentID.String(), true)
-		for name, d := range map[string]Discovery{"cloud": cloudDiscovery, "sensor": sensorDiscovery} {
-			matched, err := e.EvaluateRule(anySource, d, onSegment(segmentID))
-			if err != nil {
-				t.Fatalf("unexpected error for %s: %v", name, err)
-			}
-			if !matched {
-				t.Fatalf("a rule with no source term did not match the %s discovery", name)
-			}
+			t.Fatal("a prefix rule matched a cloud discovery; cloud approval is decided per account")
 		}
 	})
 
 	t.Run("a confidence floor is enforced", func(t *testing.T) {
 		rule := ruleWithQuery(
-			"network.ownership:internal and network.segment_id="+segmentID.String()+" and confidence >= 0.8", true)
+			"network.ownership:internal and network.prefix_id="+prefixID.String()+" and confidence >= 0.8", true)
 
-		low, err := e.EvaluateRule(rule, Discovery{}.WithConfidence(0.5), onSegment(segmentID))
+		low, err := e.EvaluateRule(rule, Discovery{}.WithConfidence(0.5), onPrefix(prefixID))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -219,7 +195,7 @@ func TestEvaluateRuleSourceAndConfidence(t *testing.T) {
 			t.Fatal("a discovery below the floor must not match")
 		}
 
-		high, err := e.EvaluateRule(rule, Discovery{}.WithConfidence(0.9), onSegment(segmentID))
+		high, err := e.EvaluateRule(rule, Discovery{}.WithConfidence(0.9), onPrefix(prefixID))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -236,8 +212,8 @@ func TestEvaluateRuleSourceAndConfidence(t *testing.T) {
 	t.Run("an unmeasured confidence matches NEITHER the floor nor its negation", func(t *testing.T) {
 		unscored := Discovery{TenantID: uuid.New()}
 		for _, q := range []string{"confidence >= 0.8", "not confidence >= 0.8", "confidence < 0.8"} {
-			rule := ruleWithQuery("network.segment_id="+segmentID.String()+" and "+q, true)
-			matched, err := e.EvaluateRule(rule, unscored, onSegment(segmentID))
+			rule := ruleWithQuery("network.prefix_id="+prefixID.String()+" and "+q, true)
+			matched, err := e.EvaluateRule(rule, unscored, onPrefix(prefixID))
 			if err != nil {
 				t.Fatalf("unexpected error for %q: %v", q, err)
 			}
@@ -255,7 +231,7 @@ func TestRuleThatDoesNotValidateNeverMatches(t *testing.T) {
 	e := NewRuleEvaluator()
 	rule := ruleWithQuery("hostnaem:web-1", true)
 
-	matched, err := e.EvaluateRule(rule, Discovery{}, onSegment(uuid.New()))
+	matched, err := e.EvaluateRule(rule, Discovery{}, onPrefix(uuid.New()))
 	if matched {
 		t.Fatal("a rule that does not validate must not match")
 	}
@@ -268,7 +244,7 @@ func TestRuleThatDoesNotValidateNeverMatches(t *testing.T) {
 
 	// Compiled once: the second call returns the SAME cached failure rather
 	// than re-parsing per discovery in a batch of a thousand.
-	if _, err2 := e.EvaluateRule(rule, Discovery{}, onSegment(uuid.New())); err2 == nil {
+	if _, err2 := e.EvaluateRule(rule, Discovery{}, onPrefix(uuid.New())); err2 == nil {
 		t.Fatal("the cached failure must survive a second evaluation")
 	}
 }
@@ -287,24 +263,24 @@ func TestEmptyRuleMatchesEverything(t *testing.T) {
 	}
 }
 
-// TestSegmentIDFromQuery pins the lookup inventory-service uses to find the
-// rule it owns for a segment — including the spellings a text match would miss.
-func TestSegmentIDFromQuery(t *testing.T) {
+// TestPrefixIDFromQuery pins the lookup inventory-service uses to find the
+// rule it owns for a prefix — including the spellings a text match would miss.
+func TestPrefixIDFromQuery(t *testing.T) {
 	id := uuid.New()
 	for _, q := range []string{
-		"network.segment_id=" + id.String(),
-		"source:sensor and network.segment_id = " + id.String(),
-		`network.segment_id="` + id.String() + `"`,
-		"network.segment_id:" + id.String(),
+		"network.prefix_id=" + id.String(),
+		"source:sensor and network.prefix_id = " + id.String(),
+		`network.prefix_id="` + id.String() + `"`,
+		"network.prefix_id:" + id.String(),
 	} {
-		got, ok := SegmentIDFromQuery(q)
+		got, ok := PrefixIDFromQuery(q)
 		if !ok || got != id {
 			t.Fatalf("%q: got (%v, %v), want (%v, true)", q, got, ok, id)
 		}
 	}
-	for _, q := range []string{"", "source:sensor", "network.segment_id=not-a-uuid", "((("} {
-		if _, ok := SegmentIDFromQuery(q); ok {
-			t.Fatalf("%q should name no segment", q)
+	for _, q := range []string{"", "source:sensor", "network.prefix_id=not-a-uuid", "((("} {
+		if _, ok := PrefixIDFromQuery(q); ok {
+			t.Fatalf("%q should name no prefix", q)
 		}
 	}
 }
@@ -444,8 +420,8 @@ func TestObservationKindIsAPredicateARuleCanWrite(t *testing.T) {
 // "passive_host_observation"` — the sensor's own method string, and a value
 // normaliseSource did not know until workstream 2.5. An unrecognised method
 // yields the EMPTY string, which is absent, not a fallback: `source` is then
-// Unknown, and every segment rule a tenant had written (`source:sensor and
-// network.segment_id=…`) would have silently stopped auto-approving the moment
+// Unknown, and every prefix rule a tenant had written (`source:sensor and
+// network.prefix_id=…`) would have silently stopped auto-approving the moment
 // these rows started arriving, with nothing anywhere reporting it.
 //
 // Silent is the operative word and is why this is worth a test of its own. The
@@ -468,7 +444,7 @@ func TestPassiveHostObservationIsASensorSource(t *testing.T) {
 		t.Fatalf("evaluating a source rule against a host observation: %v", err)
 	}
 	if !match {
-		t.Error("a `source:sensor` rule did not match a passive host observation; every existing segment rule would stop auto-approving the moment these rows arrive")
+		t.Error("a `source:sensor` rule did not match a passive host observation; every existing prefix rule would stop auto-approving the moment these rows arrive")
 	}
 
 	// Directly, too, so the failure names the mapping rather than the rule.
@@ -494,10 +470,10 @@ func TestPassiveHostObservationIsASensorSource(t *testing.T) {
 // enricher stamps these "active_enrichment" — the rows that carry the
 // certificate chain and the protocol version it measured — and normaliseSource
 // did not know the value, so the empty string made `source` absent and every
-// `source:sensor` segment rule skipped them. Same silent shape as the passive
+// `source:sensor` prefix rule skipped them. Same silent shape as the passive
 // host observation above: a queue that fills instead of draining. Surfaced by
 // rc-verify's data path on v1.0.0-rc.2 (20 hosts, all pending on auto-approve
-// segments).
+// prefixes).
 //
 // Mutation check: remove "active_enrichment" from normaliseSource's sensor
 // case and this fails.
@@ -515,7 +491,7 @@ func TestActiveEnrichmentIsASensorSource(t *testing.T) {
 		t.Fatalf("evaluating a source rule against an enrichment discovery: %v", err)
 	}
 	if !match {
-		t.Error("a `source:sensor` rule did not match an active_enrichment discovery; segment auto-approval skips every actively enriched TLS row")
+		t.Error("a `source:sensor` rule did not match an active_enrichment discovery; prefix auto-approval skips every actively enriched TLS row")
 	}
 	if got, known := normaliseSource("active_enrichment"); !known || got != "sensor" {
 		t.Errorf("normaliseSource(active_enrichment) = %q (known=%v), want sensor", got, known)
@@ -526,7 +502,7 @@ func TestActiveEnrichmentIsASensorSource(t *testing.T) {
 // instance of one bug: pcap-processor stamps "pcap_upload" (processor.go, six
 // sites) while normaliseSource spelled only the bare "pcap". Unrecognised, the
 // value yields the empty string — absent, not "sensor" — so a `source:sensor`
-// segment rule set to auto-approve silently skipped every discovery from an
+// prefix rule set to auto-approve silently skipped every discovery from an
 // uploaded capture. Every other consumer of the value pairs the two spellings
 // (host_observation_ingest.go:356, asset_identity.go:802,
 // asset_service.go's discoveryMethodByProducerString); this was the one that
@@ -548,7 +524,7 @@ func TestPcapUploadIsASensorSource(t *testing.T) {
 		t.Fatalf("evaluating a source rule against a pcap discovery: %v", err)
 	}
 	if !match {
-		t.Error("a `source:sensor` rule did not match a pcap_upload discovery; segment auto-approval skips every uploaded capture")
+		t.Error("a `source:sensor` rule did not match a pcap_upload discovery; prefix auto-approval skips every uploaded capture")
 	}
 	if got, known := normaliseSource("pcap_upload"); !known || got != "sensor" {
 		t.Errorf("normaliseSource(pcap_upload) = %q (known=%v), want sensor", got, known)

@@ -49,10 +49,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
     },
   },
   "computer": {
@@ -66,10 +62,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "operating_system": {
         type: "string",
@@ -104,10 +96,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "operating_system": {
         type: "string",
@@ -147,10 +135,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "operating_system": {
         type: "string",
         description: "OS product name, e.g. \"Ubuntu\", \"Windows Server\".",
@@ -189,10 +173,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "operating_system": {
         type: "string",
         description: "OS product name, e.g. \"Ubuntu\", \"Windows Server\".",
@@ -230,10 +210,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "operating_system": {
         type: "string",
@@ -278,10 +254,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "firmware_version": {
         type: "string",
         description: "Running firmware or network-OS version.",
@@ -299,10 +271,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "firmware_version": {
         type: "string",
@@ -330,10 +298,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "firmware_version": {
         type: "string",
         description: "Running firmware or network-OS version.",
@@ -357,10 +321,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "firmware_version": {
         type: "string",
         description: "Running firmware or network-OS version.",
@@ -383,10 +343,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "firmware_version": {
         type: "string",
@@ -414,10 +370,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "firmware_version": {
         type: "string",
         description: "Running firmware or network-OS version.",
@@ -439,10 +391,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "firmware_version": {
         type: "string",
@@ -471,10 +419,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "firmware_version": {
         type: "string",
         description: "Running firmware or network-OS version.",
@@ -497,10 +441,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "firmware_version": {
         type: "string",
@@ -529,10 +469,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "firmware_version": {
         type: "string",
         description: "Running firmware version.",
@@ -555,10 +491,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "firmware_version": {
         type: "string",
@@ -587,10 +519,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "firmware_version": {
         type: "string",
         description: "Running firmware version.",
@@ -617,10 +545,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "firmware_version": {
         type: "string",
@@ -652,10 +576,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "firmware_version": {
         type: "string",
@@ -692,10 +612,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "firmware_version": {
         type: "string",
         description: "Running firmware version.",
@@ -727,10 +643,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "firmware_version": {
         type: "string",
         description: "Running firmware version.",
@@ -753,10 +665,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Manufacturer model designation.",
       },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
-      },
       "device_category": {
         type: "string",
         description: "What the thing is, e.g. tv, speaker, doorbell, console, appliance.",
@@ -774,10 +682,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "model": {
         type: "string",
         description: "Manufacturer model designation.",
-      },
-      "asset_tag": {
-        type: "string",
-        description: "Organisation's own inventory tag, if one is affixed.",
       },
       "firmware_version": {
         type: "string",
@@ -860,32 +764,6 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       },
     },
   },
-  "cluster": {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      "cpu_count": {
-        type: "integer",
-        description: "Allocated virtual CPUs.",
-      },
-      "memory_mb": {
-        type: "integer",
-        description: "Allocated memory in mebibytes.",
-      },
-      "orchestrator": {
-        type: "string",
-        description: "Cluster technology, e.g. kubernetes, vsphere, nomad.",
-      },
-      "orchestrator_version": {
-        type: "string",
-        description: "Version of that technology.",
-      },
-      "node_count": {
-        type: "integer",
-        description: "Member nodes reported by the cluster.",
-      },
-    },
-  },
   "hypervisor": {
     type: 'object',
     additionalProperties: false,
@@ -925,6 +803,10 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Provider region.",
       },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
     },
   },
   "compute_instance": {
@@ -944,6 +826,10 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Provider region.",
       },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
       "instance_type": {
         type: "string",
         description: "Provider instance size, e.g. m6i.large.",
@@ -959,6 +845,11 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "os_version": {
         type: "string",
         description: "Guest OS version string.",
+      },
+      "nat_outside_addresses": {
+        type: "array",
+        description: "Public addresses the provider translates onto this instance's private ones (the NAT-outside side), as the provider states them. The private side is an ip_address on the instance's ENI interface.",
+        items: { type: "string" },
       },
     },
   },
@@ -978,6 +869,10 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "region": {
         type: "string",
         description: "Provider region.",
+      },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
       },
       "engine": {
         type: "string",
@@ -1006,6 +901,10 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Provider region.",
       },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
       "encryption_algorithm": {
         type: "string",
         description: "Algorithm the provider reports for default encryption.",
@@ -1032,6 +931,10 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
       "region": {
         type: "string",
         description: "Provider region.",
+      },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
       },
       "key_store_kind": {
         type: "string",
@@ -1065,6 +968,10 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Provider region.",
       },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
       "scheme": {
         type: "string",
         description: "Whether the balancer is reachable from the internet.",
@@ -1097,6 +1004,10 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Provider region.",
       },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
       "endpoint_type": {
         type: "string",
         description: "Deployment type of the gateway endpoint.",
@@ -1121,6 +1032,10 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Provider region.",
       },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
       "origin_count": {
         type: "integer",
         description: "Configured origins.",
@@ -1144,6 +1059,10 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Provider region.",
       },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
       "runtime": {
         type: "string",
         description: "Execution runtime, e.g. nodejs, python, go.",
@@ -1156,33 +1075,23 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "integer",
         description: "Configured memory in mebibytes.",
       },
-    },
-  },
-  "virtual_network": {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      "provider": {
+      "handler": {
         type: "string",
-        description: "Cloud provider.",
-        enum: ["aws", "azure", "gcp", "oci", "other"],
+        description: "Entry point the provider invokes, e.g. index.handler.",
       },
-      "account_id": {
-        type: "string",
-        description: "Account, subscription or project the resource belongs to.",
-      },
-      "region": {
-        type: "string",
-        description: "Provider region.",
-      },
-      "cidr_blocks": {
+      "environment_variable_names": {
         type: "array",
-        description: "CIDR blocks assigned to the network.",
+        description: "The NAMES of the function's environment variables — never their values, which routinely hold credentials. The value is never persisted anywhere (the collector projects names only).",
+        items: { type: "string" },
+      },
+      "role_names": {
+        type: "array",
+        description: "Names of the identities the function runs as (AWS execution role, Azure managed identity, GCP service account) — names only, never a credential.",
         items: { type: "string" },
       },
     },
   },
-  "subnet": {
+  "container_cluster": {
     type: 'object',
     additionalProperties: false,
     properties: {
@@ -1199,17 +1108,149 @@ export const ATTRIBUTE_SCHEMAS: Readonly<Record<AssetClassKey, AssetAttributeSch
         type: "string",
         description: "Provider region.",
       },
-      "cidr_block": {
+      "provider_type": {
         type: "string",
-        description: "CIDR block of the subnet.",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
       },
-      "availability_zone": {
+      "kubernetes_version": {
         type: "string",
-        description: "Provider availability zone.",
+        description: "Control-plane Kubernetes version the provider reports.",
       },
-      "is_public": {
+      "endpoint_access": {
+        type: "string",
+        description: "Whether the API server endpoint is reachable from the internet.",
+        enum: ["public", "private", "public_and_private", "unknown"],
+      },
+    },
+  },
+  "secret_store": {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      "provider": {
+        type: "string",
+        description: "Cloud provider.",
+        enum: ["aws", "azure", "gcp", "oci", "other"],
+      },
+      "account_id": {
+        type: "string",
+        description: "Account, subscription or project the resource belongs to.",
+      },
+      "region": {
+        type: "string",
+        description: "Provider region.",
+      },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
+      "rotation_enabled": {
         type: "boolean",
-        description: "Whether the subnet routes to an internet gateway.",
+        description: "Whether the provider rotates the secret on a schedule.",
+      },
+      "last_rotated_at": {
+        type: "string",
+        description: "When the provider last rotated it (RFC 3339), when it says.",
+      },
+      "encryption_key_ref": {
+        type: "string",
+        description: "The provider's reference to the key that encrypts the secret (a KMS key ARN, a Key Vault key, a Cloud KMS key name), or empty for the provider's own default key.",
+      },
+    },
+  },
+  "dns_zone": {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      "provider": {
+        type: "string",
+        description: "Cloud provider.",
+        enum: ["aws", "azure", "gcp", "oci", "other"],
+      },
+      "account_id": {
+        type: "string",
+        description: "Account, subscription or project the resource belongs to.",
+      },
+      "region": {
+        type: "string",
+        description: "Provider region.",
+      },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
+      "zone_name": {
+        type: "string",
+        description: "The zone's domain, e.g. example.com.",
+      },
+      "visibility": {
+        type: "string",
+        description: "Whether the zone answers on the internet or only inside networks.",
+        enum: ["public", "private", "unknown"],
+      },
+      "record_count": {
+        type: "integer",
+        description: "Number of record sets the provider reports.",
+      },
+      "certificate_names": {
+        type: "array",
+        description: "Names (subject CN / SAN) of certificates in this tenant's inventory that fall under the zone, bounded. A cross-reference, not a link: the certificate rows stay where they are.",
+        items: { type: "string" },
+      },
+    },
+  },
+  "security_group": {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      "provider": {
+        type: "string",
+        description: "Cloud provider.",
+        enum: ["aws", "azure", "gcp", "oci", "other"],
+      },
+      "account_id": {
+        type: "string",
+        description: "Account, subscription or project the resource belongs to.",
+      },
+      "region": {
+        type: "string",
+        description: "Provider region.",
+      },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
+      "network_ref": {
+        type: "string",
+        description: "The provider id of the network the group belongs to (a VPC ARN, a GCP network), when it belongs to one.",
+      },
+    },
+  },
+  "cloud_account": {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      "provider": {
+        type: "string",
+        description: "Cloud provider.",
+        enum: ["aws", "azure", "gcp", "oci", "other"],
+      },
+      "account_id": {
+        type: "string",
+        description: "Account, subscription or project the resource belongs to.",
+      },
+      "region": {
+        type: "string",
+        description: "Provider region.",
+      },
+      "provider_type": {
+        type: "string",
+        description: "The provider's own type string for the resource, e.g. AWS::EC2::Instance, Microsoft.Compute/virtualMachines, compute.googleapis.com/Instance — the key of the class's `provider_types` mapping (ADR-0009 D2). `cloud.type` in the query language.",
+      },
+      "integration_ids": {
+        type: "array",
+        description: "The cloud integrations that read this account; several may.",
+        items: { type: "string" },
       },
     },
   },

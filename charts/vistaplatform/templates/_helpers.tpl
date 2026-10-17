@@ -95,6 +95,77 @@ THIS chart's schema.sql. Keyed on the content hash rather than "a marker
 exists", so on an upgrade it waits for the new schema instead of passing on the
 previous release's row.
 */}}
+{{/*
+The schema and seed SQL, one ConfigMap per ~600 KB chunk of whole lines.
+
+Kubernetes refuses any single object over 1 MiB, and seed.sql crossed that at
+5.0.0-rc.1 (the device-type library seed). Gzipping the SQL into binaryData
+was tried first and moved the failure to Helm's release Secret, which stores
+the chart files AND the rendered manifests gzipped: plain SQL compresses 6-8x
+there while a base64 gzip does not. So the SQL stays plain and is split by
+whole lines into <fullname>-<kind>-NN ConfigMaps, each carrying one
+<kind>-NN.sql key; the Job mounts them through one projected volume and
+concatenates the keys in order before psql (vistaplatform.sqlUnpackShell).
+A boundary never falls inside a line, so every key is valid UTF-8 and the
+concatenation restores the file. The schema hash is still computed from the
+whole file (vistaplatform.schemaHash).
+
+  vistaplatform.sqlConfigMaps      dict root kind component hook  -> the ConfigMap documents
+  vistaplatform.sqlProjectedSources dict root kind                -> projected-volume sources
+  vistaplatform.sqlUnpackShell     dict kind mount                -> shell setting SQL_FILE
+*/}}
+{{- define "vistaplatform.sqlChunkBytes" -}}600000{{- end -}}
+{{- define "vistaplatform.sqlChunkPlan" -}}
+{{- $sql := .root.Files.Get (printf "files/schema/%s.sql" .kind) -}}
+{{- $n := len (splitList "\n" $sql) -}}
+{{- $chunks := add (div (len $sql) (int (include "vistaplatform.sqlChunkBytes" .))) 1 -}}
+{{- $per := div (add $n (sub $chunks 1)) $chunks -}}
+{{- dict "lines" $n "chunks" (int $chunks) "per" (int $per) | toJson -}}
+{{- end -}}
+{{- define "vistaplatform.sqlConfigMaps" -}}
+{{- $plan := include "vistaplatform.sqlChunkPlan" . | fromJson -}}
+{{- $lines := splitList "\n" (.root.Files.Get (printf "files/schema/%s.sql" .kind)) -}}
+{{- range $i := until (int $plan.chunks) }}
+{{- $start := mul $i (int $plan.per) }}
+{{- if lt (int $start) (int $plan.lines) }}
+{{- $end := min (add $start (int $plan.per)) (int $plan.lines) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vistaplatform.fullname" $.root }}-{{ $.kind }}-{{ printf "%02d" $i }}
+  labels:
+    {{- include "vistaplatform.labels" $.root | nindent 4 }}
+    app.kubernetes.io/component: {{ $.component }}
+  {{- if $.hook }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-4"
+    helm.sh/hook-delete-policy: before-hook-creation
+  {{- end }}
+data:
+  {{- /* |2: explicit indentation indicator, because a chunk may start on an
+       indented SQL line and YAML would otherwise take that as the block indent
+       and end the scalar at the next less-indented line. Clip chomping drops
+       blank lines that fall at a boundary, which SQL does not notice. */}}
+  {{ $.kind }}-{{ printf "%02d" $i }}.sql: |2
+{{ slice $lines (int $start) (int $end) | join "\n" | indent 4 }}
+{{ end }}
+{{- end }}
+{{- end -}}
+{{- define "vistaplatform.sqlProjectedSources" -}}
+{{- $plan := include "vistaplatform.sqlChunkPlan" . | fromJson -}}
+{{- range $i := until (int $plan.chunks) }}
+{{- if lt (mul $i (int $plan.per)) (int $plan.lines) }}
+- configMap:
+    name: {{ include "vistaplatform.fullname" $.root }}-{{ $.kind }}-{{ printf "%02d" $i }}
+{{- end }}
+{{- end }}
+{{- end -}}
+{{- define "vistaplatform.sqlUnpackShell" -}}
+cat {{ .mount }}/{{ .kind }}-*.sql > /tmp/{{ .kind }}.sql; SQL_FILE=/tmp/{{ .kind }}.sql
+{{- end -}}
+
 {{- define "vistaplatform.schemaMarkerQuery" -}}
 SELECT 1 FROM public.schema_migration_status WHERE schema_hash = '{{ include "vistaplatform.schemaHash" . }}'
 {{- end -}}
@@ -263,20 +334,17 @@ true
      bring-your-own-cert operator who applies values before creating the
      Secret, or who mistypes its name.
 
-     Live-cluster only, using the same offline-detection as the cert-manager
-     probe below: `lookup` returns empty for EVERYTHING during `helm template`
-     and `--dry-run`, so a companion probe on kube-system distinguishes "no
-     cluster" from "genuinely missing". kube-system rather than the release
-     namespace, because on `--create-namespace` the release namespace does not
-     exist yet.
+     Live-cluster only, through "vistaplatform.clusterIsLive": `lookup`
+     returns empty for EVERYTHING during `helm template` and `--dry-run`, so a
+     companion probe distinguishes "no cluster" from "genuinely missing" (see
+     that helper for why it is namespace-scoped first).
 
      Note the interaction that follows from this: `helm install
      --create-namespace` with tls.mode=existingSecret cannot be satisfied — the
      Secret would have to live in a namespace that does not exist yet. Failing
      is correct, and the message says what to do instead. */}}
 {{- if or .Release.IsInstall .Release.IsUpgrade -}}
-{{- $live := lookup "v1" "Namespace" "" "kube-system" -}}
-{{- if $live -}}
+{{- if eq (include "vistaplatform.clusterIsLive" .) "true" -}}
 {{- $tlsSecret := lookup "v1" "Secret" .Release.Namespace .Values.tls.existingSecretName -}}
 {{- if not $tlsSecret -}}
 {{- fail (printf "tls.mode=existingSecret names Secret %q in namespace %q, but no such Secret exists. Traefik would silently serve its own default certificate instead, so the install would report success while every client failed on a hostname mismatch. Create the Secret first (kubectl -n %s create secret tls %s --cert=fullchain.crt --key=tls.key), then install. If the namespace does not exist yet, create it before the Secret rather than using --create-namespace. To have cert-manager issue and renew the certificate for you instead, use tls.mode=certManager with tls.issuerRef.name." .Values.tls.existingSecretName .Release.Namespace .Release.Namespace .Values.tls.existingSecretName) -}}
@@ -439,25 +507,47 @@ connect to anything. Refuse it instead of rendering a broken install. */}}
 {{- fail (printf "agentMtls.enabled is true (the DEFAULT since agent/sensor authentication became secure-by-default) but these agentMtls.backends entries have no dnsName: %s.\n\nAgent and sensor authentication is fail-closed: without a TLS-passthrough host, agents and sensors of that service cannot present their client certificate and every outbound call would 401. EVERY listed backend needs its own hostname — they share one passthrough entrypoint and are told apart by HostSNI, so one hostname cannot serve both.\n\nChoose one:\n  1. RECOMMENDED — set a passthrough hostname per backend:\n       --set agentMtls.backends.sensor-manager.dnsName=sensors.example.com \\\n       --set agentMtls.backends.device-interrogation-service.dnsName=agents.example.com\n     Each must be distinct, must differ from tls.dnsName (that host is terminated at the edge), and must resolve to a cluster-Traefik TLS-PASSTHROUGH entrypoint on port %v (the chart does not create that entrypoint). Existing agents/sensors must be re-enrolled or re-pointed at it.\n  2. EXPLICIT OPT-OUT — keep the previous, UNAUTHENTICATED behavior with\n       --set agentMtls.enabled=false\n     Agents and sensors then authenticate by their UUID alone; certificate rotation stays refused because it requires a client certificate in every mode.\n\nDev installs need none of this: docker compose sets AGENT_MTLS_REQUIRED=false for both services explicitly.\n\nMigration steps: docsv4/core/operate/security/service-mesh-mtls.md (Agent and sensor mTLS)." (join ", " (sortAlpha $missing)) .Values.agentMtls.port) -}}
 {{- end -}}
 {{- end -}}
-{{- if .Values.serviceMtls.enabled -}}
-{{/* Probe for cert-manager on a live cluster only (lookup is empty offline). */}}
+{{- if and .Values.serviceMtls.enabled .Release.IsInstall -}}
+{{/* Probe for cert-manager on a live INSTALL only. A CustomResourceDefinition
+     is cluster-scoped, so this lookup is a hard error for the in-product
+     updater's namespace-scoped Role — and on an upgrade the prerequisite was
+     already proven at install; if cert-manager has since been removed, the
+     Certificate objects fail to apply with their own clear error. Offline
+     (`helm template`/dry-run) lookup is empty for everything, so
+     "vistaplatform.clusterIsLive" tells the two apart. */}}
 {{- $cmCrd := lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "certificates.cert-manager.io" -}}
-{{- if and (not $cmCrd) (or .Release.IsInstall .Release.IsUpgrade) -}}
-{{/* $cmCrd empty on a real cluster => cert-manager genuinely absent. It is
-     also empty during `helm template`/dry-run, but there lookup returns
-     empty for EVERYTHING, so a companion probe distinguishes the two. Probe
-     kube-system rather than .Release.Namespace: kube-system exists on every
-     real Kubernetes cluster from cluster bring-up, whereas the release
-     namespace may not exist yet on a fresh `helm install --create-namespace`
-     (the common first-install path, incl. the EKS production runbook) — that
-     would make the release namespace probe empty on a genuinely live
-     cluster too, silently skipping this check exactly when it matters most.
-     kube-system is only ever absent when we're offline (template/dry-run). */}}
-{{- $ns := lookup "v1" "Namespace" "" "kube-system" -}}
-{{- if $ns -}}
+{{- if not $cmCrd -}}
+{{- if eq (include "vistaplatform.clusterIsLive" .) "true" -}}
 {{- fail (printf "serviceMtls.enabled=true but cert-manager is not installed in this cluster (CRD certificates.cert-manager.io not found). Encrypted internal transport is ON by default (#965) and REQUIRES cert-manager v1.13+ (issues the Platform CA + per-service certs) and Stakater Reloader (restarts pods on cert rotation). Install both prerequisites, or opt out by setting serviceMtls.enabled, datastores.postgres.tls.enabled, datastores.nats.tls.enabled and agentMtls.enabled all to false. See docsv4/core/operate/deployment/production-checklist.md (Cluster prerequisites the chart does not install).") -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* "true" when rendering against a live cluster, "" during `helm template`
+     and `--dry-run` (where lookup returns empty for everything). The render-time
+     validations that read cluster state use this to tell "no cluster" from
+     "genuinely missing".
+
+     The FIRST probe is namespace-scoped: the release namespace's `default`
+     ServiceAccount, which Kubernetes creates in every namespace and recreates
+     if deleted. That is what the in-product updater can read — its Role is
+     namespace-scoped by design (platform-maintenance D1: no ClusterRole), and
+     a cluster-scoped lookup is not "empty" for it but a hard error
+     (`namespaces "kube-system" is forbidden`), which took every console
+     update down at render time in the first 4.6.0 candidate. The kube-system
+     fallback only runs when that probe is empty, i.e. the release namespace
+     does not exist yet (`helm install --create-namespace` by a cluster admin,
+     who may read it) or we are offline. An upgrade of an existing release
+     never reaches it. scripts/test-chart-maintenance-rbac.mjs pins that no
+     other cluster-scoped lookup is reachable on upgrade. */}}
+{{- define "vistaplatform.clusterIsLive" -}}
+{{- $sa := lookup "v1" "ServiceAccount" .Release.Namespace "default" -}}
+{{- if $sa -}}
+true
+{{- else -}}
+{{- $ns := lookup "v1" "Namespace" "" "kube-system" -}}
+{{- if $ns -}}true{{- end -}}
 {{- end -}}
 {{- end -}}
 

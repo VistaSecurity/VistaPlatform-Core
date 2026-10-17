@@ -40,6 +40,14 @@ var assetChildTables = map[string]bool{
 	// same insert-on-conflict rule the endpoints and identifiers need and is
 	// moved by name alongside them.
 	"producer_assessments": true,
+	// DCIM row 1.2: moved by moveMergeInterfaces with a same-name collision rule.
+	"interfaces": true,
+	// DCIM row 3.1: the port components, moved by moveMergeComponents with a
+	// same-name collision rule (device_bays also names the INSTALLED asset).
+	"console_ports": true, "console_server_ports": true, "front_ports": true, "rear_ports": true,
+	"device_bays": true, "power_ports": true, "power_outlets": true,
+	// DCIM row 2.4: moved by moveMergeHardware with same-name collision rules.
+	"module_bays": true, "modules": true, "inventory_items": true,
 }
 
 var fkPattern = regexp.MustCompile(

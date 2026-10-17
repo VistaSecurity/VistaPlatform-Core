@@ -73,9 +73,9 @@ export function CommandCenterPage() {
     <PageWrap>
       <div className="fade-up" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontFamily: 'var(--font-head)', fontWeight: 700, fontSize: 16, color: 'var(--app-t1)' }}>Command Center</h2>
-        {/* Two gates: the spreadsheet import creates assets or network
-            segments (POST /infrastructure-assets/bulk → assets.create,
-            POST /network-segments/bulk → settings.update — the modal gates its
+        {/* Two gates: the spreadsheet import creates assets or prefixes
+            (POST /infrastructure-assets/bulk → assets.create, POST
+            /ipam/prefixes → ipam.manage — the modal gates its
             own submit per target), while "Discover assets" queues a discovery
             job (POST /discovery/jobs → discovery.create). */}
         <div style={{ display: 'flex', gap: 8 }}>

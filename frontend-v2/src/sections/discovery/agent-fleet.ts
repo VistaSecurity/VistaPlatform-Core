@@ -60,7 +60,7 @@ export function jobsSummary(a: AgentFleetRow): { last: string; count: string } {
 /**
  * The host's primary address plus a count of the others it holds.
  *
- * A discovery agent is routinely multi-homed, and which segments it can reach is
+ * A discovery agent is routinely multi-homed, and which networks it can reach is
  * the operator's real question; `ip_address` alone answers only "where does it
  * call home from". Prefers the agent's self-reported primary, then the address
  * flagged primary in its inventory, then any address at all — so a row is only
@@ -71,9 +71,9 @@ export function jobsSummary(a: AgentFleetRow): { last: string; count: string } {
  * "Ethernet 192.0.2.173/24 · Ethernet 2 198.51.100.20/24".
  *
  * The cell itself can only show the primary and a count, but the whole point of
- * recording every address is that an operator can find out which segments the
+ * recording every address is that an operator can find out which networks the
  * agent actually sits on — so the detail has to be reachable somewhere, and the
- * prefix is what makes it a segment rather than a bare address.
+ * prefix length is what makes it a network rather than a bare address.
  *
  * Empty string when there is nothing to show, so the caller can omit the
  * attribute entirely rather than render an empty tooltip.
@@ -153,7 +153,7 @@ export interface SensorFleetRow {
  * is attributed to. The row is load-bearing and must not be removed — but it
  * describes a command-driven interrogation agent, not a passive libpcap
  * capture, so the Sensors table is the wrong place to show it: it renders "—"
- * for Segment and carries `sensor_type = 'api'` under a column headed Type.
+ * for Network and carries `sensor_type = 'api'` under a column headed Type.
  *
  * BOTH markers are required, and that is the whole point of the predicate:
  *

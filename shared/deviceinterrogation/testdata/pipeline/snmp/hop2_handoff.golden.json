@@ -1,6 +1,6 @@
 {
   "vendor": "snmp",
-  "input_sha256": "eda81ba1a1c9c7d1e711230672be16504645d4739bc12a9e5ed028454b3793c5",
+  "input_sha256": "acedb94a1fe8758d0ef11b4eb292bb28e88c35dbb9745cd71c022303268ee6cf",
   "imports": [
     {
       "findings": [
@@ -47,7 +47,7 @@
     }
   ],
   "process_error": "",
-  "learned_segments": [],
+  "learned_prefixes": [],
   "assets": [
     {
       "label": "device",

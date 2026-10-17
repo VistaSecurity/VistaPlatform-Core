@@ -29,6 +29,7 @@ import (
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 const (
@@ -65,7 +66,7 @@ func assetOwning(t *testing.T, db *database.DB, tenant uuid.UUID, kind, value st
 	t.Helper()
 	var id uuid.UUID
 	if err := db.QueryRow(`
-		SELECT asset_id FROM asset_identifiers
+		SELECT asset_id FROM (`+identifiersql.All+`) ident_rows
 		 WHERE tenant_id = $1 AND kind = $2 AND value = $3`, tenant, kind, value).Scan(&id); err != nil {
 		t.Fatalf("no asset owns %s=%s: %v", kind, value, err)
 	}
@@ -122,7 +123,7 @@ func TestIntegration_FloatingAddress_VIPAnnouncementDoesNotProposeAMerge(t *test
 		t.Errorf("%d merge_proposed rows; a node announcing a floating address is not a merge question", n)
 	}
 	// The node's MAC was NOT written onto the VIP's asset.
-	if n := countRows(t, db, `SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'mac_address'`, tenant, vip); n != 0 {
+	if n := countRows(t, db, `SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'mac_address'`, tenant, vip); n != 0 {
 		t.Errorf("the VIP's asset carries %d mac_address identifier(s); the announcer's MAC must not be attached to it", n)
 	}
 	if owner := assetOwning(t, db, tenant, "mac_address", itNodeMAC); owner != node {
@@ -217,7 +218,7 @@ func TestIntegration_FloatingAddress_NamedEvidenceStillProposes(t *testing.T) {
 	if n := countRows(t, db, `SELECT count(*) FROM asset_relationships WHERE tenant_id = $1 AND type = 'hosted_on' AND attributes ? 'floating_address'`, tenant); n != 0 {
 		t.Errorf("%d floating-address edges were written for a genuine conflict", n)
 	}
-	if n := countRows(t, db, `SELECT count(*) FROM asset_identifiers WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'mac_address'`, tenant, vip); n != 0 {
+	if n := countRows(t, db, `SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id = $1 AND asset_id = $2 AND kind = 'mac_address'`, tenant, vip); n != 0 {
 		t.Errorf("the VIP's asset acquired %d MAC(s) on the conflict path", n)
 	}
 }

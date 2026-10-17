@@ -78,7 +78,7 @@ func (h *SensorConfigHandler) Exchange(c *gin.Context, tenantID, sensorID uuid.U
 // decide locally which passively-seen destinations it may handshake with
 // ( W5.13). See dispatchguard.OwnedNetworks for what is and is not in it.
 //
-// Inside WithTenantTx: network_segments, assets, external_connections and
+// Inside WithTenantTx: prefixes, assets, external_connections and
 // tenant_admin_settings are RLS tables, and a plain-pool read on the app role
 // would see none of the tenant's rows — which here would silently mean "this
 // tenant owns nothing" and switch off enrichment of its declared estate.

@@ -23,6 +23,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/attrlist"
 	"github.com/vistasecurity/vistaplatform/shared/identity/hostnamequality"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 // hostObsFinding wraps a payload the way discovery-processor's converter does:
@@ -1111,7 +1112,7 @@ func TestHostObservationBuilder_SyntheticOnlyName(t *testing.T) {
 func TestIntegration_HostObservation_NameScopeIsTheFirstAddressInASegment(t *testing.T) {
 	svc, db, tenant := newHostObsFixture(t)
 	segment := uuid.New()
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Office','cidr','192.0.2.0/24','production')`, segment, tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Office','192.0.2.0/24'::cidr,'production','declared','active')`, segment, tenant); err != nil {
 		t.Fatal(err)
 	}
 	ho := &hostobs.HostObservation{
@@ -1146,7 +1147,7 @@ func TestIntegration_HostObservation_NameScopeIsTheFirstAddressInASegment(t *tes
 
 func TestIntegration_HostObservation_SyntheticNamesBecomeAnAttribute(t *testing.T) {
 	svc, db, tenant := newHostObsFixture(t)
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Office','cidr','192.0.2.0/24','production')`, uuid.New(), tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Office','192.0.2.0/24'::cidr,'production','declared','active')`, uuid.New(), tenant); err != nil {
 		t.Fatal(err)
 	}
 	// DHCP: a direct, device-binding sighting, so the second one matches the
@@ -1176,7 +1177,7 @@ func TestIntegration_HostObservation_SyntheticNamesBecomeAnAttribute(t *testing.
 		t.Errorf("synthetic_names = %v, want [%s %s] (most recent first)", got, testCastInstance2, testCastInstance)
 	}
 	var names []string
-	rows, err := db.Query(`SELECT value FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind IN ('hostname','fqdn') ORDER BY value`, tenant, assetID)
+	rows, err := db.Query(`SELECT value FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND asset_id=$2 AND kind IN ('hostname','fqdn') ORDER BY value`, tenant, assetID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1202,7 +1203,7 @@ func TestIntegration_HostObservation_SyntheticOnlyNameAdmitsLikeARealName(t *tes
 	outcome := func(name string) (int, string, int) {
 		svc, db, tenant := newHostObsFixture(t)
 		for _, q := range []string{
-			`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES(gen_random_uuid(),$1,'Office','cidr','192.0.2.0/24','production')`,
+			`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES(gen_random_uuid(),$1,'Office','192.0.2.0/24'::cidr,'production','declared','active')`,
 			// Admission is only consulted in enforce mode; the default
 			// (disabled) creates a legacy asset from anything.
 			`INSERT INTO tenant_admin_settings(tenant_id,config) VALUES($1,'{"identity_admission":{"mode":"enforce"}}') ON CONFLICT(tenant_id) DO UPDATE SET config=EXCLUDED.config`,
@@ -1226,7 +1227,7 @@ func TestIntegration_HostObservation_SyntheticOnlyNameAdmitsLikeARealName(t *tes
 		if err := db.QueryRow(`SELECT count(*), COALESCE(max(identity_status),'') FROM assets WHERE tenant_id=$1 AND deleted_at IS NULL`, tenant).Scan(&assets, &status); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND kind IN ('hostname','fqdn')`, tenant).Scan(&nameIDs); err != nil {
+		if err := db.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind IN ('hostname','fqdn')`, tenant).Scan(&nameIDs); err != nil {
 			t.Fatal(err)
 		}
 		return assets, status, nameIDs

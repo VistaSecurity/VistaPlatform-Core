@@ -38,3 +38,21 @@ describe('asset CSV risk_score', () => {
     expect(assetCsvRow(asset({ risk_score: 0, risk_assessed_by: [] }))).toHaveLength(ASSET_CSV_HEADER.length);
   });
 });
+
+// DCIM rows 2.1/2.3: the export carries where the asset is — Site, Location,
+// Rack, U and Face — blank when it is not placed.
+describe('asset CSV placement columns', () => {
+  const col = (name: string) => ASSET_CSV_HEADER.indexOf(name);
+  it('names the site, location path, rack, lowest unit and face', () => {
+    const row = assetCsvRow(asset({
+      site: { id: 's', name: 'AMS-1', slug: 'ams-1' },
+      location: { id: 'l', name: 'Row 3', path: 'AMS-1 / Row 3' },
+      rack: { id: 'r', name: 'R12', position: 40, face: 'front' },
+    }));
+    expect([row[col('site')], row[col('location')], row[col('rack')], row[col('u')], row[col('face')]]).toEqual(['AMS-1', 'AMS-1 / Row 3', 'R12', 40, 'front']);
+  });
+  it('is blank, not a guess, for an unplaced asset', () => {
+    const row = assetCsvRow(asset({ site: null, location: null, rack: null }));
+    expect([row[col('site')], row[col('location')], row[col('rack')], row[col('u')], row[col('face')]]).toEqual(['', '', '', '', '']);
+  });
+});

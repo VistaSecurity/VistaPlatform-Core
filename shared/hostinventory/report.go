@@ -18,7 +18,7 @@
 // a fake local runner and a fake SSH runner and requires byte-identical
 // Reports.
 //
-// There is exactly one documented divergence: when `ip -j addr` is unavailable,
+// There is exactly one documented divergence: when `ip -d -j addr` is unavailable,
 // LOCAL mode falls back to net.Interfaces(). It is opt-in on the Options, it
 // only fires after the command has already failed, and the Report records it as
 // a step error so the fallback is visible rather than silent.
@@ -214,6 +214,24 @@ type Interface struct {
 	// static address decides identity matches its lease neighbours cannot.
 	StaticAddresses  []string `json:"static_addresses,omitempty"`
 	DynamicAddresses []string `json:"dynamic_addresses,omitempty"`
+
+	// The interface's posture (DCIM row 1.5), each absent rather than guessed
+	// when the platform's tooling does not say:
+	//
+	//   - MTU in bytes;
+	//   - SpeedMbps, the negotiated link speed (Windows; Linux's `ip` does not
+	//     report one, and a down link's 0 is "unknown", not a speed);
+	//   - Kind, the OS's own kind for a software interface: "vlan", "bond",
+	//     "bridge" (Linux `ip -d` linkinfo);
+	//   - Parent, the interface a VLAN sub-interface rides on, and VLAN, its
+	//     802.1Q id (Linux linkinfo; Windows VlanID on the adapter itself);
+	//   - LAG, the bond / team an interface is enslaved to.
+	MTU       int    `json:"mtu,omitempty"`
+	SpeedMbps int64  `json:"speed_mbps,omitempty"`
+	Kind      string `json:"kind,omitempty"`
+	Parent    string `json:"parent,omitempty"`
+	VLAN      int    `json:"vlan,omitempty"`
+	LAG       string `json:"lag,omitempty"`
 }
 
 // assign records how one of the interface's addresses is assigned.

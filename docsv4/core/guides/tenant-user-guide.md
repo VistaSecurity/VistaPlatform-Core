@@ -10,7 +10,7 @@ that carries the full detail.
 
 It covers what a **tenant user** does day to day. Configuration that belongs to a
 **Tenant Admin** — members and roles, connected systems, notification channels and
-routing, retention, locations and network segments, billing — lives in the
+routing, retention, locations and prefixes, billing — lives in the
 [Tenant Admin Guide](./tenant-admin-guide.md), and this guide points there rather
 than repeating it.
 
@@ -76,13 +76,14 @@ lifecycle of an asset:
 |---|---|
 | **Dashboard** | Where you stand right now — two heroes, a triage strip, and the lifecycle end to end |
 | **Discovery** | Finding things: sensors and agents, jobs, devices, scans, the review queue, and file/cloud sources |
-| **Inventory** | Everything the platform tracks, viewed through switchable **lenses** |
+| **Infrastructure** | Everything the platform tracks: assets, facilities, networks, compute, catalogs, and cryptography |
 | **Risk & Compliance** | Posture, findings, and the evidence documents you hand an auditor |
 | **Remediation** | Fixing what was found: alerts, the ticket queue, and plans |
 
 Click a section to open it; its sub-navigation appears beneath it in the rail.
-Inventory's sub-items are **lenses** — they all live at the same page and differ
-by what they show.
+Most Infrastructure sub-items are **lenses** — views over the same inventory.
+Operational catalogs and registries open focused workspace pages in the same
+section.
 
 **Settings** and **My Profile** are not in the rail. Click your account chip at
 the bottom of the rail to open the profile menu:
@@ -102,7 +103,7 @@ to slide the same navigation in, tap a link to go, and it closes itself.
 **Profile chip → Getting Started** opens a short checklist that makes the
 platform useful faster. It tracks three steps:
 
-1. **Add network segments** — so discovery is scoped and results carry location
+1. **Add prefixes** — so discovery is scoped and results carry location
    and environment context.
 2. **Add locations** — so assets can be organized by site or cloud region.
 3. **Add an agent** — register a sensor or discovery agent so things start being
@@ -163,7 +164,7 @@ tickets**. Each opens the filtered list behind it.
 
 ### The lifecycle, end to end
 
-Four stages — **Discovery**, **Inventory**, **Risk & Compliance**, **Remediation**
+Four stages — **Discovery**, **Infrastructure**, **Risk & Compliance**, **Remediation**
 — each showing its own headline number (sensors online, crypto configurations,
 critical findings, overdue tickets) and linking into that section.
 
@@ -190,7 +191,7 @@ Two buttons in the header start work immediately:
 
 - **Discover assets** — opens the scan dialog (see below).
 - **Import from spreadsheet** — brings in a CSV or Excel file of assets or
-  network segments. See [Spreadsheet Import](../features/spreadsheet-import.md).
+  prefixes. See [Spreadsheet Import](../features/spreadsheet-import.md).
 
 **To run a discovery scan:** click **Discover assets** — it finds everything
 that answers on a host or a network — then
@@ -237,7 +238,7 @@ that answers on a host or a network — then
    range), where the scan will run and why, and any target that will be scanned
    at less depth than you chose. A target outside your registered networks is
    scanned at *Standard* at most; if the range is yours, register it under
-   **Settings → Infrastructure → Network Segments** and it is scanned at the
+   **Infrastructure → Networks & IPAM** and it is scanned at the
    depth you choose. A scan too large for one job is refused here, with the
    numbers. If the preview cannot be worked out, you can still start.
 6. Click **Start discovery**. Targets outside your registered networks ask you
@@ -246,7 +247,7 @@ that answers on a host or a network — then
    on it. **Discovery → Discovery Jobs** shows its progress, lets you stop it,
    and shows what it found.
 
-What it finds flows into your inventory automatically: hosts on a network segment
+What it finds flows into your inventory automatically: hosts on a prefix
 marked auto-approve are monitored straight away, everything else waits in
 **Approvals**.
 
@@ -261,7 +262,7 @@ the scan from a sensor on that network.
 they are two different things:
 
 **Sensors** — the passive capture binaries deployed on your network. Columns:
-Sensor, Type, Segment, Assets found, Version, Status. A coloured dot shows
+Sensor, Type, Network, Assets found, Version, Status. A coloured dot shows
 online/offline based on the last heartbeat.
 
 **Discovery agents** — the command-driven binaries that log in to network devices
@@ -269,7 +270,7 @@ online/offline based on the last heartbeat.
 is hidden entirely if you have none. Columns: Agent, Host, Interrogates, Jobs,
 Version, Status. **Host** is the address the agent reaches the platform from, plus
 a count of the other addresses its host holds — hover for the full list with
-network prefixes, which answers which segments the agent can actually reach.
+network prefixes, which answers which prefixes the agent can actually reach.
 **Jobs** shows when it last ran work and how many it has run; one that never has
 reads "Never run".
 
@@ -307,7 +308,7 @@ shows the first two only):
   If the sensor reports them, a **Host observations** block shows **Hosts seen**,
   **Shed**, and **Accumulating now**: devices seen on the wire without connecting
   to them, each of which becomes a pending asset in Approvals. A non-zero *Shed*
-  count means the segment is busier than the sensor is sized for — that is
+  count means the network is busier than the sensor is sized for — that is
   actionable, not cosmetic.
 - **Control** — **Send command** queues a typed command with an optional JSON
   payload, and **Command history** shows every command sent, its lifecycle and
@@ -320,7 +321,7 @@ Full reference: [Sensor Registration & Management](../features/SENSOR_REGISTRATI
 **Discovery → Discovery Jobs** (under **Activity** in the rail) lists every job: id,
 type, target, source, how many assets it found, duration and status. Under the
 status, an interrogation's row says what the run produced — "12 instances,
-3 subnets", "412 packages, 18 listeners", "5 awaiting approval" — and a failed
+3 network prefixes", "412 packages, 18 listeners", "5 awaiting approval" — and a failed
 run shows its own error message. A failed or cancelled interrogation can be
 **retried** from its row; a running job can be **cancelled**. If a cancel is
 refused — the job finished in the meantime, say — the page says why. Click a row
@@ -397,7 +398,7 @@ See [Device Interrogation](../features/device-interrogation.md) and the
 
 ### Active Scan
 
-Scanning assets you already have is done from **Inventory**. **Inventory → All
+Scanning assets you already have is done from **Infrastructure**. **Infrastructure → All
 assets → Views → Never scanned** lists assets that have **never been actively
 scanned** — typically ones that arrived by import, by SBOM, or from a CMDB. Tick
 them (or **Select all matching**) and choose **Scan** in the bar above the list;
@@ -463,9 +464,9 @@ What each **Needs** means:
   those assets (merge them if they are the same device), link the observation
   to the right one yourself, or dismiss it.
 - **Needs a network** — the address is not inside any network you have set up.
-  **Add network** opens **Settings → Network Segments**; one segment covering
+  **Add network** opens **Infrastructure → Networks & IPAM**; one prefix covering
   the range resolves every host in it. (A row with only a hardware address and
-  no network address is not asked for a network — no segment could cover it —
+  no network address is not asked for a network — no prefix could cover it —
   and shows as **Likely noise** instead.)
 - **Needs a sensor** — another device advertised this name, or no sensor can
   reach the network it was seen on. **See options** explains: install a sensor
@@ -480,7 +481,7 @@ every endpoint, first and last seen with the number of sightings, enrichment
 status and which sensor can reach its network. On the right, **What this
 needs** says why the platform did not create an asset itself, what will fix
 it, and the alternatives: **Link to an asset**, **Dismiss**, and — for a DHCP
-host — **Treat this network as stable…**, a shortcut to Network Segments: if
+host — **Treat this network as stable…**, a shortcut to Networks: if
 addresses on that network do not move, set its DHCP to off, and future scans
 can create and approve assets there directly.
 
@@ -514,10 +515,10 @@ first thing worth knowing because it decides how much scrutiny is owed:
 **Proposed by classifier**, **Proposed by assistant**. Click a chip to filter;
 **Clear** removes the filter.
 
-Four kinds of row can be waiting:
+Five kinds of row can be waiting:
 
 **Discovered assets.** A table of things found but not yet admitted: name,
-address, class, segment, source, confidence, when it was found. **Accept** admits
+address, class, prefix, source, confidence, when it was found. **Accept** admits
 it — and materializes its deferred certificates and crypto configurations into
 Inventory. **Reject** denies it and suppresses rediscovery. **Accept all** (or
 "Accept these *n*" when a source filter is on) decides the whole visible set at
@@ -544,6 +545,12 @@ again. See [Relationships](../features/relationships.md).
 class. Where the evidence was ambiguous you get **Candidates** to choose between
 before accepting. Accepting sets the class and records which rule — or which
 model — decided it. Rejecting stops that class being proposed again.
+
+**Proposed cables.** When a device reports an LLDP or CDP neighbour, the platform
+proposes the cable between the two ports — read left to right, near end to far end.
+**Approve** makes it an active cable and computes its paths; **Reject** keeps it as
+rejected so the same pairing is not proposed again. See [Cabling](../inventory/cabling.md).
+
 
 **Merged automatically.** Lists the merges that already happened inside the
 recent window without a person deciding — each marked **Auto-accepted by the
@@ -585,7 +592,7 @@ configurations from the handshakes in it. Drop a `.pcap` or `.pcapng` file on th
 zone, or click **Choose file**. **Recent uploads** underneath shows each file with
 its size, packet count, how many discoveries it produced, and when.
 
-This is the route for a segment no sensor covers — a capture taken elsewhere
+This is the route for a prefix no sensor covers — a capture taken elsewhere
 becomes inventory. See [PCAP Ingestion](../features/pcap-ingestion.md).
 
 #### SBOM Upload
@@ -612,14 +619,20 @@ See [SBOM Upload](../features/sbom.md).
 
 ## Inventory
 
-**Inventory** is one list of everything, reshaped by **lenses**. The lenses are
+**Infrastructure** is one list of everything, reshaped by **lenses**. The lenses are
 grouped in the rail exactly as they are here.
 
 | Group | Lenses |
 |---|---|
-| **Assets** | All assets · Map · Software |
-| **Cryptography** | Certificates · Keys · Configuration · TLS · SSH · Data Protection · 3rd Party |
-| **Lifecycle** | Stale · Pending (a cross-link to Discovery → Approvals) |
+| **Assets** | All assets · Map · Software · Networks · VLANs · Clusters · Circuits · Sites · Cloud · Racks · Cabling |
+| **Cryptography** | Certificates · Keys · Configuration · TLS · SSH · Data Protection · 3rd Party · Tunnels |
+| **Lifecycle** | Stale · Changes · Pending (a cross-link to Discovery → Approvals) |
+
+The infrastructure lenses each have a guide: [Networks](../inventory/networks.md),
+[Sites](../inventory/sites.md), [Racks](../inventory/racks.md),
+[Cabling](../inventory/cabling.md), [Circuits](../inventory/circuits.md),
+[Clusters](../inventory/virtualization.md), [Tunnels](../inventory/vpn.md) and
+[Changes](../inventory/changes-and-journal.md).
 
 **Pending** carries an arrow because it leaves the section: pending assets are
 reviewed in Approvals, and a second queue here would be a second inbox.
@@ -632,7 +645,7 @@ The default lens, and the one that answers "what is out there". It has three
 controls above the table and a facet rail beside it.
 
 **The filter rail** (left) builds the query for you. Facets: **Class**,
-**Status**, **Environment**, **Site**, **Segment**, **Owner**, **Business unit**,
+**Status**, **Environment**, **Site**, **Prefix**, **Owner**, **Business unit**,
 **Tag**, **Risk**, **Provenance**, and a findings toggle. Each value carries its
 own count.
 
@@ -680,14 +693,14 @@ discovery, import a spreadsheet, or add one by hand.
 ### The asset page
 
 Click any row to open the asset. Overview lives at the bare URL and each other tab
-deep-links, so the link you copy off the first tab is the short one. Seven tabs:
+deep-links, so the link you copy off the first tab is the short one. The tabs:
 
 1. **Overview** — **Identity** (what this thing is called), **Identifiers** (every
    way it is known, each with its kind, value, source, confidence and when it was
    last seen; an address marked **static** is pinned, and still identifies this
    asset on a network flagged DHCP), the **class attributes** for its class, **Risk**, **Context**
-   (environment, business unit, owner, support group, location, segment — with
-   *via* its gateway when the segment's router has been interrogated),
+   (environment, business unit, owner, support group, location, prefix — with
+   *via* its gateway when the prefix's router has been interrogated),
    **Status**, and **Tags**. A router or firewall also shows **Networks
    routed**: each network it is the gateway of, its address there, the VLAN,
    DHCP, how many assets are on it (click for the list) and whether a sensor
@@ -695,14 +708,26 @@ deep-links, so the link you copy off the first tab is the short one. Seven tabs:
 2. **Services & Endpoints** — every network face it has: address, port, transport,
    service, exposure, status and last seen. An asset with no network face simply
    has none, rather than a fabricated port.
-3. **Relationships** — what it is attached to, where each edge came from, and what
+3. **Interfaces** — its physical and virtual interfaces, addresses and VLAN modes
+   ([Interfaces](../inventory/interfaces.md)).
+4. **Ports** — the faceplate, with **Connect**, **Trace** and the cryptography
+   overlay ([Cabling](../inventory/cabling.md)).
+5. **Hardware** — device type, modules, inventory items and virtual chassis.
+6. **Relationships** — what it is attached to, where each edge came from, and what
    is affected if it changes.
-4. **Cryptography** — its cryptographic configurations, each drilling through to
+7. **Cryptography** — its cryptographic configurations, each drilling through to
    the protocol, cipher suite and certificate behind it.
-5. **Findings** — what is open against it, and what was not assessed.
-6. **Software** — what is installed, from a host agent or an uploaded SBOM.
-7. **History** — reclassification, context edits, merges and approvals, recorded
-   as they happen.
+8. **Findings** — what is open against it, and what was not assessed.
+9. **Software** — what is installed, from a host agent or an uploaded SBOM.
+10. **History** — reclassification, context edits, merges and approvals, recorded
+    as they happen.
+11. **Changes** — who changed each field, from where, with a diff, plus the journal
+    ([Changes and journal](../inventory/changes-and-journal.md)).
+12. **Config Context** — the merged JSON that applies to the asset
+    ([Config contexts](../inventory/config-contexts.md)).
+
+An asset placed in a rack also shows its **Placement**, and an asset with a device
+type, contacts or custom fields shows those on the page too.
 
 ### The drawer
 
@@ -807,7 +832,7 @@ view.
   hops, with the impact overlay and a GraphML/Cytoscape export. It also opens full
   screen, which returns you to the lens carrying your depth and selection rather
   than resetting.
-- **Topology** — the tenant-wide "where is everything", as a site → segment →
+- **Topology** — the tenant-wide "where is everything", as a site → prefix →
   class tree with counts.
 
 **Software** is anchored on the *product*, not the asset: it answers "who runs
@@ -820,7 +845,7 @@ See [The Map](../features/map.md) and [SBOM Upload](../features/sbom.md).
 
 ### Stale
 
-**Inventory → Stale** lists assets not observed for more than **30 days**. That
+**Infrastructure → Stale** lists assets not observed for more than **30 days**. That
 number is the product's one definition of stale: the lens, the hygiene finding and
 the compliance control all mean the same thing by the word.
 
@@ -937,7 +962,7 @@ The rail groups the lenses by what they read:
 
 #### Filtering
 
-Above the list: a filter box, and segment chips for **Open**, **Critical +
+Above the list: a filter box, and filter chips for **Open**, **Critical +
 High**, **Mine** and **Unassigned**. A **producer facet** gives one chip per
 registered producer with its count under the current filters — a producer with no
 findings shows a zero rather than disappearing, because zero is an answer.
@@ -997,7 +1022,7 @@ Click **Generate** and choose:
 
 - **Kind** — one of the four above.
 - **Scope** — the boundary the artifact attests to. Scopes are named, versioned
-  asset definitions managed under **Settings → Policies → Scopes**; see
+  asset definitions managed under **Risk & Compliance → Scopes**; see
   [Scopes](../features/scopes.md).
 - **Name** — optional. For an audit submission, name it after the engagement.
 
@@ -1075,7 +1100,7 @@ organization:
 | **Hygiene score drop** | Your Inventory Hygiene score fell more than 10 points in 24 hours. Split out from the above because data quality is worth routing — and silencing — separately from security posture. |
 | **Known vulnerability** | An installed software product matched the vulnerability catalogue. |
 | **End of life** | Something on an asset passed, or is approaching, the date its vendor stops shipping fixes — its operating system, its hardware, or an installed package. |
-| **Drift detected** | Something about a subject changed relative to its recent baseline: a new device class on its segment, a protocol it has not spoken before, a different set of listening ports, a certificate from an unfamiliar issuer. Drift is not automatically bad — most are planned changes, and resolving the finding is how you tell the baseline so. |
+| **Drift detected** | Something about a subject changed relative to its recent baseline: a new device class on its prefix, a protocol it has not spoken before, a different set of listening ports, a certificate from an unfamiliar issuer. Drift is not automatically bad — most are planned changes, and resolving the finding is how you tell the baseline so. |
 | **Sensor offline** | A sensor stopped reporting, or registered and never reported at all (after a 15-minute dwell — measured from the last heartbeat, or from registration if there has never been one, so a sensor whose install silently failed is not invisible). Sensors marked air-gapped, pending or inactive are not expected to check in and do not raise this. |
 | **Discovery agent offline** | A discovery agent stopped reporting, or registered and never reported at all (same dwell, measured the same way). Agents switched to inactive do not raise this. |
 | **Discovery job failed** | A discovery job failed. |
@@ -1174,13 +1199,13 @@ your permissions and your edition; the detail for each is in the
 | Group | Pages | In one line |
 |---|---|---|
 | **Organization** | Overview, Branding | Organization metadata, and white-labelling the console |
-| **Account** | Usage & Limits, Billing | Consumption against plan limits, and (on the commercial editions) the subscription itself |
+| **Plan & Usage** | Usage & Limits, Billing | Consumption against plan limits, and (on the commercial editions) the subscription itself |
 | **People & Access** | Members, Roles & Permissions, Security & SSO | Who is in the organization, what each role grants, and how people sign in |
 | **Integrations** | Integrations, AI assistant | Connected systems — CMDB/ITSM, messaging, storage, SIEM — and which AI capabilities are on |
-| **Notifications & Alerts** | Routing Rules, Alert Rules, Delivery History | Which events reach which channel, what raises an alert, and what was actually sent |
-| **Policies** | Compliance Frameworks, Custom Policies, Asset Lifecycle, Scopes, Classes, Identification rules | The rules the platform applies to your data |
-| **Audit** | Audit | Search and export the full trail of who did what, when |
-| **Infrastructure** | Locations, Network Segments | The physical/cloud location registry and the network boundaries discovery scopes against |
+| **Notifications** | Routing Rules, Alert Rules | Which events reach which channel and what raises an alert |
+| **Discovery & Reconciliation** | Active Scanning, Identification rules | How the platform discovers and reconciles records |
+| **Policies & Trust** | Compliance Frameworks, Custom Policies, Asset Lifecycle, Trusted CAs | The policy and trust decisions the platform applies to your data |
+| **Data & Schema** | Custom Fields, Export Templates | Tenant-wide fields and export formats |
 
 Some of these belong to the commercial editions and are simply absent from the
 rail on a Core deployment: **Billing**, **Security & SSO**, **Custom Policies**,
@@ -1190,16 +1215,16 @@ and the free frameworks, with no subscription to manage.
 Three pages are worth knowing about as a user even though you may not administer
 them:
 
-- **Policies → Scopes** defines the asset boundaries a bill of materials attests
+- **Risk & Compliance → Scopes** defines the asset boundaries a bill of materials attests
   to ([Scopes](../features/scopes.md)).
-- **Policies → Classes** browses the asset class taxonomy and the attributes each
+- **Infrastructure → Asset Classes** browses the asset class taxonomy and the attributes each
   class carries — which is what the New asset form is built from.
 - **Policies → Identification rules** shows how a new sighting is matched to an
   existing asset, and whether a high enough match may be accepted without you.
   That page's settings are what fill the **Merged automatically** section in
   Approvals.
 
-Billing, retention, locations and network segments are administrator work; the
+Billing, retention, locations and prefixes are administrator work; the
 [Tenant Admin Guide](./tenant-admin-guide.md) covers each.
 
 ---
@@ -1306,7 +1331,7 @@ drawer's **Health** tab for the last heartbeat and the reporting interval, and
 confirm the host can reach the platform.
 
 **"Host observations show a large *Shed* count."**
-The segment is busier than the sensor is sized for, so observations are being
+The network is busier than the sensor is sized for, so observations are being
 dropped rather than emitted. That is a capacity signal.
 
 **"A compliance control says Not assessed."**

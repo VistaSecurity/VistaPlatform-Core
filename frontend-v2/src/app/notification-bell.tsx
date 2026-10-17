@@ -150,7 +150,7 @@ export function NotificationBell() {
                 View alerts →
               </Link>
               <Link
-                to="/settings/notification-history"
+                to="/remediation/delivery"
                 onClick={() => setOpen(false)}
                 className="nav-sub"
                 style={{ display: 'block', padding: '8px 10px', borderRadius: 8, textDecoration: 'none', fontSize: 12.5, fontWeight: 600, color: 'var(--accent)' }}

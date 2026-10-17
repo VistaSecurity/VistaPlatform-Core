@@ -1,0 +1,47 @@
+{
+  "_comment": "DCIM row 1.5e parity fixture: a sensor's self-report as sensor-manager stores it (sensor_discoveries raw metadata), the host's own interface table with the capture interface flagged.",
+  "kind": "host_observation",
+  "source_sensor_id": "3f0c9a52-6f1d-4b8e-9a77-1c2d3e4f5a61",
+  "raw_data": {
+    "discovery_method": "sensor_self_report",
+    "discovery_type": "host_observation",
+    "host_observation": {
+      "observed_at": "2026-10-15T09:00:00Z",
+      "agent_id": "3f0c9a52-6f1d-4b8e-9a77-1c2d3e4f5a61",
+      "platform": "linux",
+      "profile": "datacenter_host",
+      "mac": "00:1a:2b:3c:4d:01",
+      "other_macs": [
+        "00:1a:2b:3c:4d:02"
+      ],
+      "addresses": [
+        "192.0.2.10",
+        "2001:db8:5::10",
+        "198.51.100.7"
+      ],
+      "hostnames": [
+        "sensor-a"
+      ],
+      "source": "",
+      "wifi_psk": "PARITY-SECRET-wifi-psk-91c2",
+      "interfaces": [
+        {
+          "name": "enp1s0",
+          "mac": "00:1a:2b:3c:4d:01",
+          "addresses": [
+            "192.0.2.10/24",
+            "2001:db8:5::10/64"
+          ]
+        },
+        {
+          "name": "enp2s0",
+          "mac": "00:1a:2b:3c:4d:02",
+          "addresses": [
+            "198.51.100.7/24"
+          ],
+          "capture": true
+        }
+      ]
+    }
+  }
+}

@@ -157,6 +157,28 @@ const (
 	// four — audit.security and audit.export were demanded by no route at all.
 	PermissionAuditRead   = "audit.read"
 	PermissionAuditManage = "audit.manage"
+
+	PermissionDcimRead   = "dcim.read"
+	PermissionDcimManage = "dcim.manage"
+
+	PermissionIpamRead   = "ipam.read"
+	PermissionIpamManage = "ipam.manage"
+
+	PermissionCircuitsRead   = "circuits.read"
+	PermissionCircuitsManage = "circuits.manage"
+
+	PermissionVirtualizationRead   = "virtualization.read"
+	PermissionVirtualizationManage = "virtualization.manage"
+
+	PermissionVpnRead   = "vpn.read"
+	PermissionVpnManage = "vpn.manage"
+
+	PermissionWirelessRead   = "wireless.read"
+	PermissionWirelessManage = "wireless.manage"
+
+	PermissionBusinessUnitsManage = "business_units.manage"
+
+	PermissionCustomFieldsManage = "custom_fields.manage"
 )
 
 // END GENERATED: tenant permission constants

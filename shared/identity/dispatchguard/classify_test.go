@@ -10,7 +10,7 @@ import (
 // the segment that made a public target the tenant's ( WP3, D3).
 func TestClassifyManual(t *testing.T) {
 	s := scope([]string{"203.0.114.0/24", "93.184.217.0/28"}, nil)
-	s.allowedSegments = []string{"seg-a", "seg-b"}
+	s.allowedPrefixes = []string{"seg-a", "seg-b"}
 	r := stubResolver{
 		"intranet.example.com": {"10.9.9.9"},
 		"mixed.example.com":    {"10.9.9.9", "93.184.217.5"},
@@ -34,12 +34,12 @@ func TestClassifyManual(t *testing.T) {
 	want := []TargetVerdict{
 		{Target: "10.20.30.0/24", Class: ClassPrivate},
 		{Target: "fd00::1", Class: ClassPrivate},
-		{Target: "203.0.114.7", Class: ClassRegisteredSegment, SegmentID: "seg-a"},
-		{Target: "93.184.217.0/29", Class: ClassRegisteredSegment, SegmentID: "seg-b"},
+		{Target: "203.0.114.7", Class: ClassRegisteredPrefix, PrefixID: "seg-a"},
+		{Target: "93.184.217.0/29", Class: ClassRegisteredPrefix, PrefixID: "seg-b"},
 		{Target: "93.184.216.34", Class: ClassExternal},
 		{Target: "93.184.217.0/27", Class: ClassExternal},
 		{Target: "intranet.example.com", Class: ClassPrivate},
-		{Target: "mixed.example.com", Class: ClassRegisteredSegment, SegmentID: "seg-b"},
+		{Target: "mixed.example.com", Class: ClassRegisteredPrefix, PrefixID: "seg-b"},
 		{Target: "www.example.com", Class: ClassExternal},
 	}
 	if !reflect.DeepEqual(got, want) {

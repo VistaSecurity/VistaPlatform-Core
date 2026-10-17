@@ -19,6 +19,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/shared/hostobs"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/attrlist"
+	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 )
 
 const (
@@ -178,7 +179,7 @@ func TestIntegration_HostObservation_EUI64DerivedMACJoinsTheLaterReport(t *testi
 		t.Fatalf("expected exactly one asset after the mDNS sighting: %v", err)
 	}
 	var kind, ref string
-	if err := db.QueryRow(`SELECT source_kind, COALESCE(source_ref,'') FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind='mac_address' AND value=$3`,
+	if err := db.QueryRow(`SELECT source_kind, COALESCE(source_ref,'') FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND asset_id=$2 AND kind='mac_address' AND value=$3`,
 		tenant, assetID, testEUI64MAC).Scan(&kind, &ref); err != nil {
 		t.Fatalf("the derived MAC was not stored: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestIntegration_HostObservation_EUI64DerivedMACJoinsTheLaterReport(t *testi
 		t.Errorf("ipv6_temporary_addresses = %q (%v), want [%s]", temps, err, testTempAddr)
 	}
 	var tempIdentifiers int
-	if err := db.QueryRow(`SELECT count(*) FROM asset_identifiers WHERE tenant_id=$1 AND value=$2`, tenant, testTempAddr).Scan(&tempIdentifiers); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND value=$2`, tenant, testTempAddr).Scan(&tempIdentifiers); err != nil {
 		t.Fatal(err)
 	}
 	if tempIdentifiers != 0 {
@@ -223,7 +224,7 @@ func TestIntegration_HostObservation_EUI64DerivedMACJoinsTheLaterReport(t *testi
 	if decidedBy != string(identity.KindMACAddress) {
 		t.Errorf("decided_by = %q, want mac_address", decidedBy)
 	}
-	if err := db.QueryRow(`SELECT source_kind FROM asset_identifiers WHERE tenant_id=$1 AND asset_id=$2 AND kind='mac_address' AND value=$3`,
+	if err := db.QueryRow(`SELECT source_kind FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND asset_id=$2 AND kind='mac_address' AND value=$3`,
 		tenant, assetID, testEUI64MAC).Scan(&kind); err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +242,7 @@ func TestIntegration_HostObservation_EUI64DerivedMACJoinsTheLaterReport(t *testi
 func TestIntegration_HostObservation_LinkLocalScopedToTheSegment(t *testing.T) {
 	svc, db, tenant := newHostObsFixture(t)
 	segment := uuid.New()
-	if _, err := db.Exec(`INSERT INTO network_segments(id,tenant_id,name,segment_type,value,environment) VALUES($1,$2,'Office','cidr','192.0.2.0/24','production')`, segment, tenant); err != nil {
+	if _, err := db.Exec(`INSERT INTO prefixes(id,tenant_id,description,prefix,environment,source_kind,status) VALUES($1,$2,'Office','192.0.2.0/24'::cidr,'production','declared','active')`, segment, tenant); err != nil {
 		t.Fatal(err)
 	}
 	ho := &hostobs.HostObservation{
@@ -254,7 +255,7 @@ func TestIntegration_HostObservation_LinkLocalScopedToTheSegment(t *testing.T) {
 		t.Fatal(err)
 	}
 	var scope string
-	if err := db.QueryRow(`SELECT COALESCE(scope,'') FROM asset_identifiers WHERE tenant_id=$1 AND kind='ip_address' AND value='fe80::1c2d:3e4f:5a6b:7c8d'`, tenant).Scan(&scope); err != nil {
+	if err := db.QueryRow(`SELECT COALESCE(scope,'') FROM (`+identifiersql.All+`) ident_rows WHERE tenant_id=$1 AND kind='ip_address' AND value='fe80::1c2d:3e4f:5a6b:7c8d'`, tenant).Scan(&scope); err != nil {
 		t.Fatalf("the link-local address is not an identifier: %v", err)
 	}
 	if scope != segment.String() {
