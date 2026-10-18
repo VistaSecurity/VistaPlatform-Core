@@ -30,13 +30,15 @@ image:
   pullSecrets: []
 
 # Image for the `helm test` smoke-test pod (a curl client). Rendered as
-# <registry>/<repository>:<tag> (or @<digest> when set), so a mirror or an
-# air-gapped registry can host it: set `smokeTest.image.registry`, or leave it
-# empty to follow `image.registry`.
+# <registry>/<repository>:<tag> (or @<digest> when set). It defaults to
+# docker.io independently of the product-image registry: the Core export moves
+# product images to GHCR, where curlimages/curl does not exist. A mirror or an
+# air-gapped registry can still host it by setting `smokeTest.image.registry`;
+# explicitly setting that value empty follows `image.registry`.
 smokeTest:
   image:
-    # -- Registry for the smoke-test image. Empty = use image.registry.
-    registry: ""
+    # -- Registry for the smoke-test image. Set empty to use image.registry.
+    registry: docker.io
     # -- Repository path under the registry (NOT prefixed with image.repoPrefix).
     repository: curlimages/curl
     tag: "8.22.0"

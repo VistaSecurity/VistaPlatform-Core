@@ -108,8 +108,10 @@ documented here but is not tested by the project.
 - Every product image, frontends included, is pinned by `image.digest` when one is set and rendered
   by tag otherwise. Set a digest to `""` (for example `--set frontend.webUi.image.digest=`) to force
   the tag form.
-- The `helm test` pod image is `smokeTest.image.{registry,repository,tag,digest}`; an empty
-  `registry` follows `image.registry`, so a mirror or an air-gapped registry can host it.
+- The `helm test` pod image is `smokeTest.image.{registry,repository,tag,digest}`. Its registry
+  defaults to `docker.io`, independently of the product-image registry; explicitly set it empty
+  to follow `image.registry`, or name the registry that hosts the image in a mirrored/air-gapped
+  installation.
 - With `replicas > 1` (for example `values-ha.yaml`) every backend and both frontends get a
   PodDisruptionBudget.
 
