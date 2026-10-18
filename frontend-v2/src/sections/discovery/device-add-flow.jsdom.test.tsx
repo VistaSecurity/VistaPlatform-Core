@@ -3,7 +3,7 @@ import { act, type ReactNode, type InputHTMLAttributes, type SelectHTMLAttribute
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DeviceFormModal, TestConnectionModal } from './device-modals';
+import { DeviceFormModal, FORTINET_TOKEN_USERNAME, TestConnectionModal } from './device-modals';
 
 // Add device — one flow ( slice A) — and Test connection, in every screen
 // state. The Modal primitive is mocked down to its content, primary button and
@@ -246,6 +246,24 @@ describe('Add device', () => {
     expect(init.body.interface_name).toBeUndefined();
   });
 
+  it('Fortinet asks for an API token and sends the token marker', async () => {
+    mocks.post.mockResolvedValue({ data: { id: 'dev-1' }, response: { ok: true, status: 201 } });
+    await renderAdd();
+    await choose('fortinet');
+    expect(field('username')).toBeNull();
+    expect(host.textContent).toContain('API token');
+    expect(host.textContent).toContain('read-only FortiGate REST API administrator token');
+    await type('management_url', 'https://192.0.2.10');
+    await type('password', 'fortigate-token');
+    expect(primary().disabled).toBe(false);
+    await click(primary());
+    await vi.waitFor(() => expect(mocks.post).toHaveBeenCalledOnce());
+    const [, init] = mocks.post.mock.calls[0] as [string, { body: Record<string, unknown> }];
+    expect(init.body).toMatchObject({
+      device_type: 'fortinet', username: FORTINET_TOKEN_USERNAME, password: 'fortigate-token',
+    });
+  });
+
   it('the by-hand toggle reveals the fields without probing, and back', async () => {
     await renderAdd();
     const toggle = host.querySelector('[data-testid="device-form-mode-toggle"]') as HTMLButtonElement;
@@ -266,7 +284,8 @@ describe('Edit device (unchanged)', () => {
       vendor: 'Fortinet', model: 'FortiGate 60F', ip_address: '192.0.2.10', username: 'admin', tls_insecure_skip_verify: true,
     } as never;
     await act(async () => { root.render(<QueryClientProvider client={cache}><DeviceFormModal open device={device} onClose={mocks.close} /></QueryClientProvider>); });
-    for (const name of [...FOUR, ...REMAINING]) expect(field(name), name).not.toBeNull();
+    for (const name of ['device_type', 'management_url', 'password', ...REMAINING]) expect(field(name), name).not.toBeNull();
+    expect(field('username')).toBeNull();
     // The interface is stated when a device is added; editing does not move it.
     expect(field('mac_address')).toBeNull();
     expect(field('interface_name')).toBeNull();
@@ -277,6 +296,8 @@ describe('Edit device (unchanged)', () => {
     await vi.waitFor(() => expect(mocks.close).toHaveBeenCalledOnce());
     expect(mocks.post).not.toHaveBeenCalled();
     expect(mocks.put.mock.calls[0][0]).toBe('/devices/{id}');
+    const [, init] = mocks.put.mock.calls[0] as [string, { body: Record<string, unknown> }];
+    expect(init.body.username).toBe(FORTINET_TOKEN_USERNAME);
   });
 });
 

@@ -36,6 +36,10 @@ type DeviceType = typeof DEVICE_TYPES[number];
 // so the form never offers it for these types and never sends it true
 // ( review B1). Mirrors services.IsSSHManagedDeviceType.
 const SSH_DEVICE_TYPES: readonly string[] = ['cisco', 'cisco_router', 'cisco_switch', 'cisco_asa'];
+// Stored in the ordinary non-secret username column while the token itself uses
+// the encrypted password column. The shared Fortinet collector recognizes this
+// marker and sends Authorization: Bearer instead of Basic authentication.
+export const FORTINET_TOKEN_USERNAME = '__api_token__';
 export function isSSHManagedDeviceType(deviceType: string | null | undefined): boolean {
   return !!deviceType && SSH_DEVICE_TYPES.includes(deviceType);
 }
@@ -216,6 +220,9 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
 
   const canProbe = !isEdit && PROBE_TYPES.includes(deviceType);
   const isSsh = isSSHManagedDeviceType(deviceType);
+  const isFortinet = deviceType === 'fortinet';
+  const credentialUsername = isFortinet ? FORTINET_TOKEN_USERNAME : username.trim();
+  const credentialsReady = !!password.trim() && (isFortinet || !!username.trim());
   const offersReinterrogation = offersPlatformReinterrogation(device);
   // Sent only where the control is shown: for an agent-interrogated device the
   // stored value is left exactly as it is.
@@ -231,7 +238,7 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
   // Probe: all four fields. By hand: a way to reach the device (hostname/IP or
   // a management URL) and a type.
   const valid = probing
-    ? !!managementUrl.trim() && !!username.trim() && !!password.trim()
+    ? !!managementUrl.trim() && credentialsReady
     : !!deviceType && hostnameValid && !!(hostname.trim() || ipAddress.trim() || managementUrl.trim());
 
   const afterCreate = (result: { observation_id?: string; message?: string } | object) => {
@@ -252,7 +259,7 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
       const body: deviceInterrogationComponents['schemas']['DiscoverAndCreateDeviceRequest'] = {
         device_type: deviceType as deviceInterrogationComponents['schemas']['DiscoverAndCreateDeviceRequest']['device_type'],
         management_url: managementUrl.trim(),
-        username: username.trim(),
+        username: credentialUsername,
         password: password.trim(),
         tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
         ...reinterrogationField,
@@ -278,7 +285,7 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
       const body: deviceInterrogationComponents['schemas']['CreateDeviceDiscoveryRequest'] = {
         device_type: deviceType as deviceInterrogationComponents['schemas']['CreateDeviceDiscoveryRequest']['device_type'],
         management_url: managementUrl.trim(),
-        username: username.trim(),
+        username: credentialUsername,
         password: password.trim(),
         tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
         agent_id: viaAgent!.id,
@@ -305,7 +312,7 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
           management_url: managementUrl.trim() || undefined,
           serial_number: serialNumber.trim() || undefined,
           firmware_version: firmwareVersion.trim() || undefined,
-          username: username.trim() || undefined,
+          username: credentialUsername || undefined,
           password: password.trim() || undefined,
           tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
           ...reinterrogationField,
@@ -326,7 +333,7 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
         management_url: managementUrl.trim() || undefined,
         serial_number: serialNumber.trim() || undefined,
         firmware_version: firmwareVersion.trim() || undefined,
-        username: username.trim() || undefined,
+        username: credentialUsername || undefined,
         password: password.trim() || undefined,
         tls_insecure_skip_verify: isSsh ? false : tlsInsecure,
         ...reinterrogationField,
@@ -395,7 +402,7 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
         <FailurePanel
           error={probeFailure}
           addByHandHint
-          onRetry={managementUrl.trim() && username.trim() && password.trim() ? () => attempt.mutate() : undefined}
+          onRetry={managementUrl.trim() && credentialsReady ? () => attempt.mutate() : undefined}
           retrying={attempt.isPending}
         />
       )}
@@ -423,9 +430,10 @@ export function DeviceFormModal({ open, device, onClose, agents = [] }: {
             </ModalSelect>
           </ModalField>
         )}
-        <ModalField label="Username"><ModalInput name="username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="admin" autoComplete="off" disabled={probe.isPending} /></ModalField>
-        <ModalField label={isEdit ? 'Password (leave blank to keep)' : 'Password'}>
+        {!isFortinet && <ModalField label="Username"><ModalInput name="username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="admin" autoComplete="off" disabled={probe.isPending} /></ModalField>}
+        <ModalField label={isFortinet ? (isEdit ? 'API token (leave blank to keep)' : 'API token') : (isEdit ? 'Password (leave blank to keep)' : 'Password')}>
           <ModalInput name="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" autoComplete="new-password" disabled={probe.isPending} />
+          {isFortinet && <span style={{ color: 'var(--app-t3)', fontSize: 12 }}>Use a read-only FortiGate REST API administrator token.</span>}
         </ModalField>
         {showAllFields && (
           <>

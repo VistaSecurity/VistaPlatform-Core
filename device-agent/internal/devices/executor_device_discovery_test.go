@@ -28,13 +28,19 @@ import (
 // nor may the device password.
 func TestExecute_DeviceDiscovery_PostsAllowlistedIdentification(t *testing.T) {
 	const secretKey = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7\n-----END PRIVATE KEY-----"
+	const deviceToken = "fortigate-agent-token-123"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if strings.HasSuffix(r.URL.Path, "/system/status") {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+deviceToken {
+			t.Errorf("Authorization = %q, want the FortiGate bearer token", got)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == "/api/v2/monitor/system/status" {
 			body, _ := json.Marshal(map[string]interface{}{
 				"status": "success", "serial": "FGT60F0000000001", "version": "v7.4.4",
 				"psksecret": "branch-tunnel-psk", "private-key": secretKey,
-				"results": []map[string]interface{}{{"hostname": "fw-branch-01", "model_name": "FortiGate 60F", "version": "v7.4.4", "psksecret": "branch-tunnel-psk"}},
+				"results": map[string]interface{}{"hostname": "fw-branch-01", "model_name": "FortiGate 60F", "psksecret": "branch-tunnel-psk"},
 			})
 			_, _ = w.Write(body)
 			return
@@ -50,7 +56,7 @@ func TestExecute_DeviceDiscovery_PostsAllowlistedIdentification(t *testing.T) {
 		ID:          uuid.New(),
 		Type:        di.JobTypeDeviceDiscovery,
 		DeviceType:  "fortinet",
-		Credentials: map[string]interface{}{"username": "readonly", "password": "device-password-123"},
+		Credentials: map[string]interface{}{"username": "__api_token__", "password": deviceToken},
 		Parameters:  map[string]interface{}{"device_type": "fortinet", "management_url": srv.URL},
 	}
 	if err := exec.Execute(context.Background(), job); err != nil {
@@ -67,7 +73,7 @@ func TestExecute_DeviceDiscovery_PostsAllowlistedIdentification(t *testing.T) {
 		t.Errorf("a discovery posts the identification only; got assets/facts/metadata: %+v", got)
 	}
 	blob, _ := json.Marshal(got)
-	for _, leak := range []string{"branch-tunnel-psk", "PRIVATE KEY", "device-password-123", "psksecret", "private-key", "password"} {
+	for _, leak := range []string{"branch-tunnel-psk", "PRIVATE KEY", deviceToken, "psksecret", "private-key", "password"} {
 		if strings.Contains(string(blob), leak) {
 			t.Errorf("posted result carries %q: %s", leak, blob)
 		}

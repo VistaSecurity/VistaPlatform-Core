@@ -284,6 +284,13 @@ func hardwareComponents(snap *Snapshot) []formatters.CDXComponent {
 		if t, ok := resolveCycloneDXType(a); !ok || t != "device" {
 			continue
 		}
+		// `unknown_host` is typed `device` only because CycloneDX has no
+		// "unknown" type; it names a reachable address nothing has classified,
+		// which may be a phone, a VM or a container host. Hardware is claimed
+		// for it only when a collector measured a hw.* fact on it.
+		if a.ClassKey == classUnknownHost && !hasFactPrefix(factsByAsset[a.ID], "hw.") {
+			continue
+		}
 		comp := formatters.CDXComponent{
 			Type:   "device",
 			BOMRef: refAsset + a.ID.String(),
@@ -704,9 +711,29 @@ func baseAssetProperties(a Asset) []formatters.CDXProperty {
 // that disagreement to one value here would publish a reconciliation this
 // package did not perform.
 func factProperties(facts []Fact, namespace string) []formatters.CDXProperty {
-	bySourceCount := map[string]int{}
+	// A key reported by several sources is emitted once when they all agree.
+	// Only a real disagreement keeps one property per source, which is the case
+	// the @source suffix exists for.
+	type keyState struct {
+		sources int
+		first   string
+		agree   bool
+		emitted bool
+	}
+	state := map[string]*keyState{}
 	for _, f := range facts {
-		bySourceCount[f.Key]++
+		if f.Value == "" {
+			continue
+		}
+		st, ok := state[f.Key]
+		if !ok {
+			state[f.Key] = &keyState{sources: 1, first: f.Value, agree: true}
+			continue
+		}
+		st.sources++
+		if f.Value != st.first {
+			st.agree = false
+		}
 	}
 	out := make([]formatters.CDXProperty, 0, len(facts))
 	for _, f := range facts {
@@ -716,13 +743,31 @@ func factProperties(facts []Fact, namespace string) []formatters.CDXProperty {
 		if f.Value == "" {
 			continue
 		}
+		st := state[f.Key]
 		name := propFactPrefix + f.Key
-		if bySourceCount[f.Key] > 1 && f.SourceRef != "" {
+		if st.agree {
+			if st.emitted {
+				continue
+			}
+			st.emitted = true
+		} else if f.SourceRef != "" {
 			name = name + "@" + f.SourceRef
 		}
 		out = append(out, formatters.CDXProperty{Name: name, Value: f.Value})
 	}
 	return out
+}
+
+// classUnknownHost is the registry key of the catch-all class.
+const classUnknownHost = "unknown_host"
+
+func hasFactPrefix(facts []Fact, prefix string) bool {
+	for _, f := range facts {
+		if f.Value != "" && strings.HasPrefix(f.Key, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // factValue returns the value of one fact key, or empty.

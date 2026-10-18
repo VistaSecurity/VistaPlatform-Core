@@ -36,7 +36,7 @@ repository.
 
 ## Release notes
 
-- **Changelog:** [`CHANGELOG.md`](../../../CHANGELOG.md) at the repo root carries a
+- **Changelog:** [`CHANGELOG.md`](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/CHANGELOG.md) at the repo root carries a
   section per version (Keep a Changelog format).
 - **GitHub Releases:** every release is published on the repository it was built
   from, with the changelog section as its notes. This is generated automatically
@@ -102,7 +102,7 @@ This release upgrades the NATS server bundled with the chart
 
 **1.0.0 is a fresh install only — there is no upgrade path from a `core-v0.x`
 release.** See `INSTALL.md`'s "Run it" section and the "Breaking / Upgrading"
-notes under `[1.0.0]` in [`CHANGELOG.md`](../../../CHANGELOG.md) before
+notes under `[1.0.0]` in [`CHANGELOG.md`](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/CHANGELOG.md) before
 upgrading an existing deployment: the port-as-asset tables were dropped rather
 than migrated, and credential encryption moved to v2, so credentials need
 re-entering and sensors re-enrolling on the first 1.0.0 deploy.

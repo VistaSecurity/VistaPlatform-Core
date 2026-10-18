@@ -1536,9 +1536,8 @@ export const CABLE_COMPATIBLE_TERMINATIONS: Readonly<Record<string, readonly str
   console_server_port: ["console_port", "front_port", "rear_port"],
   front_port: ["circuit_termination", "console_port", "console_server_port", "front_port", "interface", "rear_port"],
   interface: ["circuit_termination", "front_port", "interface", "rear_port"],
-  power_feed: ["power_port"],
   power_outlet: ["power_port"],
-  power_port: ["power_feed", "power_outlet"],
+  power_port: ["power_outlet"],
   rear_port: ["circuit_termination", "console_port", "console_server_port", "front_port", "interface", "rear_port"],
 };
 

@@ -24344,8 +24344,6 @@ components:
       - rear_port
       - power_port
       - power_outlet
-      - power_feed
-      - power_panel
       - cable
       - cable_termination
       - cable_path

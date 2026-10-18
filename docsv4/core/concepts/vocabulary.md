@@ -52,8 +52,6 @@ data with a NetBox instance. A dash means there is no counterpart.
 | Rear Port | Rear Ports | A Rear Port. | `dcim/rear-port` |
 | Power Port | Power Ports | A Power Port. | `dcim/power-port` |
 | Power Outlet | Power Outlets | A Power Outlet. | `dcim/power-outlet` |
-| Power Feed | Power Feeds | A Power Feed. | `dcim/power-feed` |
-| Power Panel | Power Panels | A Power Panel. | `dcim/power-panel` |
 | Cable | Cables | A Cable. | `dcim/cable` |
 | Cable Termination | Cable Terminations | A Cable Termination. | `dcim/cable-termination` |
 | Cable Path | Cable Paths | A Cable Path. | `dcim/cable-path` |

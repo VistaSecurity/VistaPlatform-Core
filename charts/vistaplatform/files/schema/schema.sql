@@ -20848,7 +20848,7 @@ CREATE TABLE IF NOT EXISTS public.cable_terminations (
     CONSTRAINT cable_terminations_cable_fkey FOREIGN KEY (tenant_id, cable_id) REFERENCES public.cables(tenant_id, id) ON DELETE CASCADE,
     CONSTRAINT cable_terminations_cable_end_check CHECK (cable_end IN ('A', 'B')),
     CONSTRAINT cable_terminations_kind_check CHECK (termination_kind IN ('interface', 'front_port', 'rear_port', 'console_port',
-        'console_server_port', 'circuit_termination', 'power_port', 'power_outlet', 'power_feed'))
+        'console_server_port', 'circuit_termination', 'power_port', 'power_outlet'))
 );
 -- A port is on at most one cable (DATA_MODEL §4; NetBox CableTermination
 -- unique (termination_type, termination_id)). Global, not per tenant: the id
@@ -20880,7 +20880,7 @@ CREATE TABLE IF NOT EXISTS public.cable_paths (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT cable_paths_pkey PRIMARY KEY (id),
     CONSTRAINT cable_paths_origin_kind_check CHECK (origin_kind IN ('interface', 'console_port', 'console_server_port',
-        'circuit_termination', 'power_port', 'power_outlet', 'power_feed')),
+        'circuit_termination', 'power_port', 'power_outlet')),
     CONSTRAINT cable_paths_destination_pair_check CHECK ((destination_kind IS NULL) = (destination_id IS NULL)),
     CONSTRAINT cable_paths_path_array_check CHECK (jsonb_typeof(path) = 'array')
 );
@@ -22585,7 +22585,7 @@ CREATE OR REPLACE FUNCTION public.dcim_object_kinds() RETURNS text[]
         'module_bay_template', 'device_bay_template', 'power_port_template',
         'power_outlet_template', 'interface', 'mac_address', 'console_port',
         'console_server_port', 'front_port', 'rear_port', 'power_port',
-        'power_outlet', 'power_feed', 'power_panel', 'cable', 'cable_termination',
+        'power_outlet', 'cable', 'cable_termination',
         'cable_path', 'unresolved_termination', 'rir', 'aggregate', 'vrf',
         'route_target', 'prefix_role', 'prefix', 'ip_range', 'ip_address',
         'vlan_group', 'vlan', 'fhrp_group', 'fhrp_group_assignment', 'asn',

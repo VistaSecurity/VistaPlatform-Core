@@ -410,18 +410,6 @@ objects:
     table: power_outlets
     netbox: dcim/power-outlet
     phase: 3
-  - key: power_feed
-    label: Power Feed
-    plural: Power Feeds
-    table: power_feeds
-    netbox: dcim/power-feed
-    phase: planned
-  - key: power_panel
-    label: Power Panel
-    plural: Power Panels
-    table: power_panels
-    netbox: dcim/power-panel
-    phase: planned
 
   # ---- cabling ------------------------------------------------------------
   - key: cable

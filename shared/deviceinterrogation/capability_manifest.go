@@ -218,7 +218,8 @@ func fortinetManifest() CollectorManifest {
 			FactCapability(facts.KeyMgmtPlaintext):        Supplies(),
 		},
 		Endpoints: []Endpoint{
-			fortinetGet("/api/v2/cmdb/system/status", "model, serial, FortiOS version"),
+			fortinetGet("/api/v2/monitor/system/status", "model, serial, FortiOS version"),
+			fortinetGet("/api/v2/cmdb/system/status", "legacy compatibility fallback for model, serial and FortiOS version"),
 			fortinetGet("/api/v2/cmdb/system/interface", "configured interfaces, addresses and VLAN tags"),
 			fortinetGet("/api/v2/monitor/system/interface", "link state and negotiated speed"),
 			fortinetGet("/api/v2/monitor/router/ipv4", "distinct next hops, counted; nothing else is kept"),

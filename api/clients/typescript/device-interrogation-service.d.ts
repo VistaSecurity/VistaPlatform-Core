@@ -1411,7 +1411,9 @@ export interface components {
             device_type: "f5" | "palo_alto" | "cisco" | "fortinet" | "unifi";
             /** @description https://host[:port] for the web-API vendors. For Cisco, the SSH address: a host, host:port or ssh://host[:port] (an https:// URL is accepted and SSH is then tried on port 22). */
             management_url: string;
+            /** @description Login username. For Fortinet, the UI supplies the reserved API-token marker. */
             username: string;
+            /** @description Login password. For Fortinet, this is the REST API administrator token and is encrypted at rest. */
             password: string;
             /** @description Explicit opt-in for appliances with a self-signed management certificate. Defaults to false. Persisted on the created device. Ignored and stored as false for an SSH-managed type (Cisco), where it would otherwise disable SSH host-key verification. */
             tls_insecure_skip_verify?: boolean;
@@ -1430,7 +1432,9 @@ export interface components {
             device_type: "f5" | "palo_alto" | "cisco" | "fortinet" | "unifi";
             /** @description As for discover-and-create. May not carry credentials, a query or a fragment. */
             management_url: string;
+            /** @description Login username. For Fortinet, the UI supplies the reserved API-token marker. */
             username: string;
+            /** @description Login password. For Fortinet, this is the REST API administrator token and is encrypted before agent delivery. */
             password: string;
             /** @description As for discover-and-create; ignored for Cisco. */
             tls_insecure_skip_verify?: boolean;

@@ -2299,8 +2299,10 @@ components:
             SSH is then tried on port 22).
         username:
           type: string
+          description: Login username. For Fortinet, the UI supplies the reserved API-token marker.
         password:
           type: string
+          description: Login password. For Fortinet, this is the REST API administrator token and is encrypted at rest.
         tls_insecure_skip_verify:
           type: boolean
           description: >
@@ -2359,8 +2361,10 @@ components:
           description: As for discover-and-create. May not carry credentials, a query or a fragment.
         username:
           type: string
+          description: Login username. For Fortinet, the UI supplies the reserved API-token marker.
         password:
           type: string
+          description: Login password. For Fortinet, this is the REST API administrator token and is encrypted before agent delivery.
         tls_insecure_skip_verify:
           type: boolean
           description: As for discover-and-create; ignored for Cisco.

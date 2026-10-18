@@ -180,7 +180,7 @@ func (c *fortinetClient) apiRequestRaw(ctx context.Context, method, url string) 
 	if err != nil {
 		return nil, err
 	}
-	req.SetBasicAuth(c.username, c.password)
+	c.authorize(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)

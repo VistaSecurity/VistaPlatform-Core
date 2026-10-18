@@ -244,9 +244,8 @@ var netboxMatrix = map[ObjectKind][]ObjectKind{
 	ObjectKindConsoleServerPort:  {ObjectKindConsolePort, ObjectKindFrontPort, ObjectKindRearPort},
 	ObjectKindFrontPort:          {ObjectKindInterface, ObjectKindConsolePort, ObjectKindConsoleServerPort, ObjectKindFrontPort, ObjectKindRearPort, ObjectKindCircuitTermination},
 	ObjectKindRearPort:           {ObjectKindInterface, ObjectKindConsolePort, ObjectKindConsoleServerPort, ObjectKindFrontPort, ObjectKindRearPort, ObjectKindCircuitTermination},
-	ObjectKindPowerPort:          {ObjectKindPowerOutlet, ObjectKindPowerFeed},
+	ObjectKindPowerPort:          {ObjectKindPowerOutlet},
 	ObjectKindPowerOutlet:        {ObjectKindPowerPort},
-	ObjectKindPowerFeed:          {ObjectKindPowerPort},
 	ObjectKindCircuitTermination: {ObjectKindInterface, ObjectKindFrontPort, ObjectKindRearPort, ObjectKindCircuitTermination},
 }
 
@@ -264,9 +263,9 @@ func TestCableCompatibleIsExactlyNetBoxsMatrix(t *testing.T) {
 	}
 }
 
-// NetBox's matrix is symmetric (a power feed lists only power ports, and power ports
-// list the feed back). The test asserts symmetry for every pair, and the one-sided
-// shape the brief names: a feed cables to a power port and nothing else.
+// NetBox's matrix is symmetric. The test asserts symmetry for every pair. Power feeds
+// and panels are out of the registry until power ships (ADR-0010 D9); an outlet cables
+// to a power port and nothing else.
 func TestCableCompatibleIsSymmetric(t *testing.T) {
 	for _, a := range AllObjectKinds {
 		for _, b := range AllObjectKinds {
@@ -275,11 +274,13 @@ func TestCableCompatibleIsSymmetric(t *testing.T) {
 			}
 		}
 	}
-	if got := CableCompatibleKinds(ObjectKindPowerFeed); !reflect.DeepEqual(got, []ObjectKind{ObjectKindPowerPort}) {
-		t.Errorf("power_feed cables to %v, want only power_port", got)
+	if got := CableCompatibleKinds(ObjectKindPowerOutlet); !reflect.DeepEqual(got, []ObjectKind{ObjectKindPowerPort}) {
+		t.Errorf("power_outlet cables to %v, want only power_port", got)
 	}
-	if CableCompatible(ObjectKindPowerFeed, ObjectKindPowerOutlet) || CableCompatible(ObjectKindPowerOutlet, ObjectKindPowerFeed) {
-		t.Error("a power feed must not cable to an outlet")
+	for _, k := range AllObjectKinds {
+		if k == "power_feed" || k == "power_panel" {
+			t.Errorf("%s is registered but has no table: it returns with power (ADR-0010 D9)", k)
+		}
 	}
 	if CableCompatible(ObjectKindAsset, ObjectKindAsset) || CableCompatible("nope", ObjectKindInterface) {
 		t.Error("non-termination kinds must not be cable-compatible")
@@ -388,9 +389,21 @@ func TestRegistriesAreExactlyNetBoxs(t *testing.T) {
 		}
 	}
 
-	// The termination matrix, NetBox model names mapped to our kind keys.
+	// The termination matrix, NetBox model names mapped to our kind keys. Power feeds
+	// are deferred until power ships (ADR-0010 D9) and are left out on both sides.
+	deferred := map[string]bool{"powerfeed": true}
+	wantKinds := 0
 	for a, list := range nb.Compatible {
-		want := append([]string(nil), list...)
+		if deferred[a] {
+			continue
+		}
+		wantKinds++
+		var want []string
+		for _, k := range list {
+			if !deferred[k] {
+				want = append(want, k)
+			}
+		}
 		sort.Strings(want)
 		var got []string
 		for _, k := range AllObjectKinds {
@@ -405,7 +418,7 @@ func TestRegistriesAreExactlyNetBoxs(t *testing.T) {
 			t.Errorf("matrix %s: ours %v, NetBox %v", a, got, want)
 		}
 	}
-	if len(nb.Compatible) != len(compatibleTerminations) {
-		t.Errorf("matrix has %d kinds, NetBox %d", len(compatibleTerminations), len(nb.Compatible))
+	if wantKinds != len(compatibleTerminations) {
+		t.Errorf("matrix has %d kinds, NetBox %d", len(compatibleTerminations), wantKinds)
 	}
 }

@@ -88,7 +88,7 @@ func (n *Node) UnmarshalJSON(b []byte) error {
 var TerminationKinds = []dcim.ObjectKind{
 	dcim.ObjectKindInterface, dcim.ObjectKindFrontPort, dcim.ObjectKindRearPort, dcim.ObjectKindConsolePort,
 	dcim.ObjectKindConsoleServerPort, dcim.ObjectKindCircuitTermination, dcim.ObjectKindPowerPort,
-	dcim.ObjectKindPowerOutlet, dcim.ObjectKindPowerFeed,
+	dcim.ObjectKindPowerOutlet,
 }
 
 // IsTermination reports whether k is a cable termination kind.

@@ -38,7 +38,7 @@ Fortinet Device Interrogation enables direct collection of cryptographic configu
     key algorithm and size, signature algorithm, SANs and fingerprints are parsed
 
 #### System Information
-- **Endpoint**: `/api/v2/cmdb/system/status`
+- **Endpoint**: `/api/v2/monitor/system/status` (with the legacy CMDB endpoint as a compatibility fallback)
 - **Data Collected**:
   - Device firmware version, build and branch point
   - Model and serial number
@@ -65,11 +65,11 @@ them with.
 ### 1. Add the FortiGate
 
 **Where:** **Discovery → Devices → Add device**. Give the management URL,
-username and password; the platform asks the FortiGate for its own model,
+and a read-only FortiGate REST API administrator token; the platform asks the FortiGate for its own model,
 serial, firmware and host name (`system/status` only).
 
-**Credentials belong to the device.** A FortiGate carries its own username and
-password, entered on the device form and encrypted at rest — there is no
+**Credentials belong to the device.** A FortiGate carries its own REST API token,
+entered on the device form and encrypted at rest — there is no
 separate integration record to create and link. **Skip TLS verification** is
 there for a management interface with a self-signed certificate.
 
@@ -83,10 +83,14 @@ there for a management interface with a self-signed certificate.
   "hostname": "fw01.example.com",
   "ip_address": "10.0.1.1",
   "management_url": "https://fw01.example.com",
-  "username": "vista-readonly",
-  "password": "…"
+  "username": "__api_token__",
+  "password": "<FortiGate API token>"
 }
 ```
+
+The reserved username value is an internal transport marker. The platform and
+device agent use it to send the encrypted secret as `Authorization: Bearer`
+instead of HTTP Basic authentication.
 
 ### 2. Interrogate
 

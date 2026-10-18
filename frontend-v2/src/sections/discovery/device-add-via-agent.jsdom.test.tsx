@@ -3,7 +3,7 @@ import { act, type ReactNode, type InputHTMLAttributes, type SelectHTMLAttribute
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DeviceFormModal } from './device-modals';
+import { DeviceFormModal, FORTINET_TOKEN_USERNAME } from './device-modals';
 
 // Add device through a device agent ( slice B). Same harness as
 // device-add-flow.jsdom.test.tsx: the Modal is mocked to its content and
@@ -95,6 +95,22 @@ describe('Add device — reach it from an agent', () => {
     });
     expect(mocks.close).toHaveBeenCalled();
     expect(mocks.toastSuccess.mock.calls[0][0]).toContain('branch-agent');
+  });
+
+  it('through an agent: carries a FortiGate API token in the encrypted credential fields', async () => {
+    await render([AGENT]);
+    await setValue('device_type', 'fortinet');
+    expect(field('username')).toBeNull();
+    await setValue('management_url', 'https://192.0.2.10');
+    await setValue('password', 'fortigate-token');
+    await setValue('reach_via', AGENT.id);
+    mocks.post.mockResolvedValue({ data: { id: 'd1', status: 'queued' } });
+    await act(async () => { primary().click(); });
+    const [path, { body }] = mocks.post.mock.calls[0] as [string, { body: Record<string, unknown> }];
+    expect(path).toBe('/devices/discoveries');
+    expect(body).toMatchObject({
+      device_type: 'fortinet', username: FORTINET_TOKEN_USERNAME, password: 'fortigate-token', agent_id: AGENT.id,
+    });
   });
 
   it('an unavailable agent says so and does not fall back to the by-hand fields', async () => {

@@ -75,7 +75,7 @@ key.
 ### Database Schema
 
 The integration schema is part of the consolidated
-[`scripts/database/schema.sql`](../../../../scripts/database/schema.sql) — there
+[`scripts/database/schema.sql`](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/scripts/database/schema.sql) — there
 is no separate migration script (see
 [Database Migrations](../deployment/database-migrations.md)).
 

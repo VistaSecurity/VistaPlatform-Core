@@ -64,7 +64,6 @@ compatible_terminations:
   console_server_port: [console_port, front_port, rear_port]
   interface: [interface, circuit_termination, front_port, rear_port]
   front_port: [console_port, console_server_port, interface, front_port, rear_port, circuit_termination]
-  power_feed: [power_port]
   power_outlet: [power_port]
-  power_port: [power_outlet, power_feed]
+  power_port: [power_outlet]
   rear_port: [console_port, console_server_port, interface, front_port, rear_port, circuit_termination]

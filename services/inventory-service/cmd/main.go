@@ -1138,6 +1138,12 @@ func main() {
 	// sightings batch that files interfaces, and hourly here.
 	go jobs.StartCableResolverWorker(ctx, bypassDB, services.CableResolverTenants, cableIntake)
 
+	// References to a deleted object (tags, journal entries, contacts, images,
+	// scopes, assignments) have no foreign key to cascade them; the daily sweep
+	// in shared/dcim/orphans removes or clears whatever a delete path missed.
+	go jobs.StartOrphanSweepWorker(ctx, bypassDB, services.ClassFloorSweepTenants,
+		services.NewOrphanSweeper(rawDB, services.NewBlobStore(initDcimImageStorage(rawDB, bypassDB), "")))
+
 	// Keeps the persisted crypto risk judgement (crypto_risk_judgments) warm and
 	// back-fills the rows a schema upgrade creates stale. Readers
 	// re-judge anything stale themselves; this only keeps requests free of it.

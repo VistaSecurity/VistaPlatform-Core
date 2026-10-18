@@ -56,7 +56,8 @@ func CableStatuses() []string {
 }
 
 // terminationTables maps a termination kind onto the table holding it.
-// power_feed has no table until the power rows; a cable onto one is refused.
+// power_feed and power_panel are not object kinds until power ships
+// (ADR-0010 D9); a cable onto one is refused as an unknown kind.
 var terminationTables = map[dcim.ObjectKind]string{
 	dcim.ObjectKindInterface:          "interfaces",
 	dcim.ObjectKindFrontPort:          "front_ports",

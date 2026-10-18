@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -31,7 +33,11 @@ func (*FortinetInterrogator) Interrogate(ctx context.Context, device DeviceInfo,
 	if err != nil {
 		return nil, err
 	}
-	client := newFortinetClient(baseURL, creds.Username, creds.Password, creds.InsecureSkipVerify)
+	username, password := creds.Username, creds.Password
+	if creds.Token != "" {
+		username, password = fortinetTokenUsername, creds.Token
+	}
+	client := newFortinetClient(baseURL, username, password, creds.InsecureSkipVerify)
 	result, err := client.interrogate(ctx)
 	if result != nil {
 		result.setNetworkManagementAddress(device)
@@ -44,16 +50,31 @@ type fortinetClient struct {
 	baseURL    string
 	username   string
 	password   string
+	token      string
 	httpClient *http.Client
 }
 
+// fortinetTokenUsername is the storage marker used by the device form. Device
+// credentials have one encrypted secret column; for FortiOS that secret is an
+// API token, not a login password. Keeping the marker in the non-secret
+// username column lets the platform and remote agent distinguish the two
+// authentication schemes without putting the token in metadata or changing
+// the encrypted-at-rest contract.
+const fortinetTokenUsername = "__api_token__"
+
 func newFortinetClient(baseURL, username, password string, insecureSkipVerify bool) *fortinetClient {
-	return &fortinetClient{
+	c := &fortinetClient{
 		baseURL:    baseURL,
 		username:   username,
 		password:   password,
 		httpClient: newDeviceHTTPClient(insecureSkipVerify, deviceHTTPTimeout),
 	}
+	if username == fortinetTokenUsername {
+		c.token = password
+		c.username = ""
+		c.password = ""
+	}
+	return c
 }
 
 // fortinetAPIResponse represents a FortiOS REST API response envelope.
@@ -117,9 +138,38 @@ func (c *fortinetClient) interrogate(ctx context.Context) (*InterrogateResult, e
 }
 
 func (c *fortinetClient) getSystemInfo(ctx context.Context) (map[string]interface{}, error) {
-	resp, err := c.apiRequest(ctx, "GET", c.baseURL+"/api/v2/cmdb/system/status")
-	if err != nil {
-		return nil, err
+	// FortiOS 7.4 serves identity from the monitor API and returns results as a
+	// singleton object. Older releases used the CMDB path and an array. Prefer
+	// the current endpoint, but retain the old path for appliances already
+	// supported by earlier Vista releases.
+	raw, monitorErr := c.apiRequestRaw(ctx, "GET", c.baseURL+"/api/v2/monitor/system/status")
+	if monitorErr == nil {
+		var singleton map[string]interface{}
+		if err := json.Unmarshal(raw.Results, &singleton); err == nil && len(singleton) > 0 {
+			info := projectFortinet(singleton, fortinetSystemStatusFields)
+			if _, ok := info["serial"]; !ok && raw.Serial != "" {
+				info["serial"] = raw.Serial
+			}
+			if _, ok := info["version"]; !ok && raw.Version != "" {
+				info["version"] = raw.Version
+			}
+			return info, nil
+		}
+	}
+
+	// A credential refusal is final: retrying on the legacy path would double
+	// the login attempts against a stale password and risk an account lockout.
+	var statusErr *deviceStatusError
+	if errors.As(monitorErr, &statusErr) && (statusErr.status == http.StatusUnauthorized || statusErr.status == http.StatusForbidden) {
+		return nil, monitorErr
+	}
+
+	resp, legacyErr := c.apiRequest(ctx, "GET", c.baseURL+"/api/v2/cmdb/system/status")
+	if legacyErr != nil {
+		if monitorErr != nil {
+			return nil, monitorErr
+		}
+		return nil, legacyErr
 	}
 	info := make(map[string]interface{})
 	if len(resp.Results) > 0 {
@@ -172,7 +222,7 @@ func (c *fortinetClient) apiRequest(ctx context.Context, method, url string) (*f
 	if err != nil {
 		return nil, err
 	}
-	req.SetBasicAuth(c.username, c.password)
+	c.authorize(req)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -197,6 +247,17 @@ func (c *fortinetClient) apiRequest(ctx context.Context, method, url string) (*f
 		return nil, fmt.Errorf("API error (FortiOS code %d)", apiResp.Error)
 	}
 	return &apiResp, nil
+}
+
+// authorize applies the one authentication scheme configured for this client.
+// FortiOS 7.4 supports token authentication for the REST API; Basic remains as
+// a compatibility path for older FortiOS releases and existing devices.
+func (c *fortinetClient) authorize(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+		return
+	}
+	req.SetBasicAuth(c.username, c.password)
 }
 
 func fortinetIdentity(sysInfo map[string]interface{}) *DeviceIdentity {

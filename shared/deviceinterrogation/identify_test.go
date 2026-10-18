@@ -53,6 +53,10 @@ func newFortinetIdentifyServer(t *testing.T, rec *pathRecorder) *httptest.Server
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/monitor/system/status") {
+			_, _ = w.Write([]byte(`{"status":"success","serial":"FGT60F0000000001","version":"v7.4.4","results":{"hostname":"fw-branch-01","model_name":"FortiGate 60F"}}`))
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/cmdb/system/status") {
 			_, _ = w.Write([]byte(fortinetSystemStatusResponse))
 			return
@@ -202,7 +206,7 @@ func TestRegistryIdentify_EveryHTTPVendor(t *testing.T) {
 				DeviceIdentity: DeviceIdentity{Vendor: fortinetVendor, Model: "FortiGate 60F", SerialNumber: "FGT60F0000000001", FirmwareVersion: "v7.4.4"},
 				Hostname:       "fw-branch-01",
 			},
-			allowed: []string{"/api/v2/cmdb/system/status"},
+			allowed: []string{"/api/v2/monitor/system/status"},
 		},
 		{
 			deviceType: "palo_alto",

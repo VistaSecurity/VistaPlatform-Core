@@ -11,7 +11,7 @@ render_macros: false
 > migration path from a `core-v0.x` database to 1.0.0; start a new database
 > and `pg_dump` the old one first if you want to keep it for reference. See
 > `INSTALL.md`'s "Run it" section and the `[1.0.0]` entry in
-> [`CHANGELOG.md`](../../../../CHANGELOG.md).
+> [`CHANGELOG.md`](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/CHANGELOG.md).
 
 ## Overview
 

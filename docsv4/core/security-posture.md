@@ -8,7 +8,7 @@ inverted its purpose.
 This page describes the practices behind the code, in enough detail to check.
 Where a claim is enforced by something automated, the enforcing mechanism is
 named so you can go read it. Where something is a deliberate weakness we accept,
-it is in [SECURITY.md](../../SECURITY.md#known-design-tradeoffs) rather than
+it is in [SECURITY.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/SECURITY.md#known-design-tradeoffs) rather than
 here, because a posture page that only lists strengths is marketing.
 
 ## Tenant isolation
@@ -26,7 +26,7 @@ That choice has a cost worth stating: it means a service which acquires a
 connection without setting the tenant sees an empty database, and that has
 broken features during development. We consider a self-inflicted empty screen
 much the better failure than a cross-tenant read, and cross-tenant access is the
-highest-severity bug class in our [security policy](../../SECURITY.md#scope).
+highest-severity bug class in our [security policy](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/SECURITY.md#scope).
 
 ## Service-to-service authentication
 
@@ -35,7 +35,7 @@ method, path, query, body hash, timestamp and tenant. An unsigned or
 badly-signed internal call is rejected.
 
 Signing alone leaves a replay window, which is documented as a known tradeoff
-in [SECURITY.md](../../SECURITY.md#known-design-tradeoffs) rather than glossed:
+in [SECURITY.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/SECURITY.md#known-design-tradeoffs) rather than glossed:
 the nonce is signed entropy, not a recorded dedup key, so a captured internal
 request can be replayed until its timestamp ages out of the clock-skew window.
 
@@ -131,7 +131,7 @@ and never stored in the repository.
 Note the boundary we deliberately do **not** defend: edition gating is a
 commercial boundary backed by a licence agreement, not a security control, and
 it is not designed to resist an operator with source access. That is stated in
-the [security policy's out-of-scope list](../../SECURITY.md#scope) so nobody
+the [security policy's out-of-scope list](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/SECURITY.md#scope) so nobody
 spends a weekend on it expecting a bounty.
 
 ## Supply chain
@@ -236,7 +236,7 @@ Some specific instances that produced this rule:
 ## Reporting a vulnerability
 
 Privately, through GitHub Security Advisories or email — see
-**[SECURITY.md](../../SECURITY.md)** for the process, the response times we
+**[SECURITY.md](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/SECURITY.md)** for the process, the response times we
 commit to, what is in and out of scope, and the design tradeoffs we have
 knowingly accepted.
 

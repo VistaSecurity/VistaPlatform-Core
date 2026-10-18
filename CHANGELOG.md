@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [5.0.0-rc.3] - 2026-10-16
+## [5.0.0-rc.4] - 2026-10-17
 
 **Version 5.0.0 is the DCIM release: Vista Platform is now an asset inventory, map and
 DCIM, with cryptographic posture laid over every rack, faceplate and map.** Sites, racks and
@@ -47,8 +47,8 @@ are cut from the same commit: `v5.0.0` (commercial) and `core-v5.0.0` (Core).
 
 There is nothing to upgrade from: install 5.0.0 onto an empty database. Anything encrypted
 under the retired v0/v1 key derivation is undecryptable, so credentials must be re-entered
-and sensors re-enrolled. The `[Unreleased]` entries above record every removed route and
-renamed concept; they move to `docsv4/core/releases/5.0.0.md` when 5.0.0 is cut.
+and sensors re-enrolled. The full per-change list, including every removed route and renamed concept, is in
+[`docsv4/core/releases/5.0.0.md`](docsv4/core/releases/5.0.0.md).
 
 ### Editions
 

@@ -316,7 +316,7 @@ For API clients, use tenant-authenticated `GET` and `PUT`
 `/api/v2/inventory-service/settings/identity-discovery`. Read the current version
 and release capabilities before updating. A write includes the version, reason,
 admission mode and enrichment policy; a stale version returns a refreshable 409.
-See the [inventory API specification](../../../api/openapi/inventory-service.openapi.yaml).
+See the [inventory API specification](https://github.com/VistaSecurity/VistaPlatform-Core/blob/main/api/openapi/inventory-service.openapi.yaml).
 
 ## Rollout evidence
 

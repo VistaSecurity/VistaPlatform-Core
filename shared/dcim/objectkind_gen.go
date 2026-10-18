@@ -52,8 +52,6 @@ const (
 	ObjectKindRearPort                  ObjectKind = "rear_port"
 	ObjectKindPowerPort                 ObjectKind = "power_port"
 	ObjectKindPowerOutlet               ObjectKind = "power_outlet"
-	ObjectKindPowerFeed                 ObjectKind = "power_feed"
-	ObjectKindPowerPanel                ObjectKind = "power_panel"
 	ObjectKindCable                     ObjectKind = "cable"
 	ObjectKindCableTermination          ObjectKind = "cable_termination"
 	ObjectKindCablePath                 ObjectKind = "cable_path"
@@ -151,8 +149,6 @@ var AllObjectKinds = []ObjectKind{
 	ObjectKindRearPort,
 	ObjectKindPowerPort,
 	ObjectKindPowerOutlet,
-	ObjectKindPowerFeed,
-	ObjectKindPowerPanel,
 	ObjectKindCable,
 	ObjectKindCableTermination,
 	ObjectKindCablePath,
@@ -253,8 +249,6 @@ var objectKindInfos = map[ObjectKind]objectKindInfo{
 	ObjectKindRearPort:                  {label: "Rear Port", plural: "Rear Ports", table: "rear_ports", phase: "3", netbox: "dcim/rear-port"},
 	ObjectKindPowerPort:                 {label: "Power Port", plural: "Power Ports", table: "power_ports", phase: "3", netbox: "dcim/power-port"},
 	ObjectKindPowerOutlet:               {label: "Power Outlet", plural: "Power Outlets", table: "power_outlets", phase: "3", netbox: "dcim/power-outlet"},
-	ObjectKindPowerFeed:                 {label: "Power Feed", plural: "Power Feeds", table: "power_feeds", phase: "planned", netbox: "dcim/power-feed"},
-	ObjectKindPowerPanel:                {label: "Power Panel", plural: "Power Panels", table: "power_panels", phase: "planned", netbox: "dcim/power-panel"},
 	ObjectKindCable:                     {label: "Cable", plural: "Cables", table: "cables", phase: "3", netbox: "dcim/cable"},
 	ObjectKindCableTermination:          {label: "Cable Termination", plural: "Cable Terminations", table: "cable_terminations", phase: "3", netbox: "dcim/cable-termination"},
 	ObjectKindCablePath:                 {label: "Cable Path", plural: "Cable Paths", table: "cable_paths", phase: "3", netbox: "dcim/cable-path (internal)"},

@@ -17,7 +17,10 @@ import (
 // Identify implements DeviceIdentifier: FortiOS `system/status`.
 func (*FortinetInterrogator) Identify(ctx context.Context, device DeviceInfo, creds Credentials) (*DeviceIdentification, error) {
 	username, password := usernamePassword(creds)
-	if username == "" || password == "" {
+	if creds.Token != "" {
+		username, password = fortinetTokenUsername, creds.Token
+	}
+	if password == "" || (username == "" && creds.Token == "") {
 		return nil, missingCredentials()
 	}
 	baseURL, err := managementURL(device)
