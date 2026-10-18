@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-10-17T08:58:11Z",
-  "generated_date": "2026-10-17",
+  "generated_at": "2026-10-18T09:16:06Z",
+  "generated_date": "2026-10-18",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/39019203453",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/39114515505",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -14,14 +14,12 @@
   },
   "totals": {
     "images_expected": 18,
-    "images_scanned": 17,
-    "images_not_scanned": 1,
-    "critical": 0,
-    "high": 2
+    "images_scanned": 18,
+    "images_not_scanned": 0,
+    "critical": 1,
+    "high": 46
   },
-  "not_scanned": [
-    "maintenance-service"
-  ],
+  "not_scanned": [],
   "images": [
     {
       "image": "admin-service",
@@ -34,18 +32,8 @@
       "image": "admin-ui",
       "ref": "ghcr.io/vistasecurity/admin-ui:latest",
       "critical": 0,
-      "high": 1,
-      "findings": [
-        {
-          "severity": "HIGH",
-          "id": "CVE-2026-78669",
-          "package": "golang.org/x/net",
-          "installed": "v0.59.0",
-          "fixed": "0.60.0",
-          "title": "net/http: net/http/internal/http2: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
-          "target": "usr/bin/caddy"
-        }
-      ]
+      "high": 0,
+      "findings": []
     },
     {
       "image": "audit-service",
@@ -104,6 +92,437 @@
       "findings": []
     },
     {
+      "image": "maintenance-service",
+      "ref": "ghcr.io/vistasecurity/maintenance-service:latest",
+      "critical": 1,
+      "high": 46,
+      "findings": [
+        {
+          "severity": "CRITICAL",
+          "id": "CVE-2026-33186",
+          "package": "google.golang.org/grpc",
+          "installed": "v1.77.0",
+          "fixed": "1.79.3",
+          "title": "google.golang.org/grpc/grpc-go: google.golang.org/grpc/authz: gRPC-Go: Authorization bypass due to improper HTTP/2 path validation",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2025-15558",
+          "package": "github.com/docker/cli",
+          "installed": "v29.0.3+incompatible",
+          "fixed": "29.2.0",
+          "title": "docker/cli: Docker CLI for Windows: Privilege escalation via malicious plugin binaries",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-24051",
+          "package": "go.opentelemetry.io/otel/sdk",
+          "installed": "v1.38.0",
+          "fixed": "1.40.0",
+          "title": "opentelemetry-go: OpenTelemetry-Go Affected by Arbitrary Code Execution via PATH Hijacking",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-25681",
+          "package": "golang.org/x/net",
+          "installed": "v0.48.0",
+          "fixed": "0.55.0",
+          "title": "golang.org/x/net/html: golang.org/x/net/html: Arbitrary code execution via Cross-Site Scripting",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-27136",
+          "package": "golang.org/x/net",
+          "installed": "v0.48.0",
+          "fixed": "0.55.0",
+          "title": "golang.org/x/net/html: golang: golang.org/x/net/html: Cross-Site Scripting via HTML parsing bypass",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-29181",
+          "package": "go.opentelemetry.io/otel",
+          "installed": "v1.38.0",
+          "fixed": "1.41.0",
+          "title": "github.com/open-telemetry/opentelemetry-go: OpenTelemetry-Go: Denial of Service via crafted multi-value baggage headers",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-33814",
+          "package": "golang.org/x/net",
+          "installed": "v0.48.0",
+          "fixed": "0.53.0",
+          "title": "net/http/internal/http2: golang: golang.org/x/net: Go HTTP/2: Denial of Service via malformed SETTINGS_MAX_FRAME_SIZE frame",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-33818",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.25.13, 1.26.6, 1.27.0-rc.3",
+          "title": "encoding/asn1: golang: Go encoding/asn1: Denial of Service via excessive recursion in Unmarshal",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-34986",
+          "package": "github.com/go-jose/go-jose/v4",
+          "installed": "v4.1.3",
+          "fixed": "4.1.4",
+          "title": "github.com/go-jose/go-jose/v3: github.com/go-jose/go-jose/v4: Go JOSE: Denial of Service via crafted JSON Web Encryption (JWE) object",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39821",
+          "package": "golang.org/x/net",
+          "installed": "v0.48.0",
+          "fixed": "0.55.0",
+          "title": "golang.org/x/net/idna: golang: net/http: golang.org/x/net/idna: Privilege escalation via incorrect Punycode label processing",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39821",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.25.13, 1.26.6, 1.27.0-rc.3",
+          "title": "golang.org/x/net/idna: golang: net/http: golang.org/x/net/idna: Privilege escalation via incorrect Punycode label processing",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39822",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.25.12, 1.26.5, 1.27.0-rc.2",
+          "title": "golang: Go os.Root: Symlink following vulnerability allows directory traversal",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39828",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.52.0",
+          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Unauthorized command execution via discarded SSH permissions",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39829",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.52.0",
+          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Denial of Service via crafted public key with excessive parameters",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39830",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.52.0",
+          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Denial of Service via resource leak from unsolicited SSH responses",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39831",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.52.0",
+          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Security key bypass due to missing user presence check",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39832",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.52.0",
+          "title": "golang.org/x/crypto/ssh/agent: golang.org/x/crypto/ssh/agent: Security bypass due to improper handling of key restrictions",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39835",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.52.0",
+          "title": "golang.org/x/crypto/ssh: golang: golang.org/x/crypto/ssh: Denial of Service via crafted SSH certificate",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-39883",
+          "package": "go.opentelemetry.io/otel/sdk",
+          "installed": "v1.38.0",
+          "fixed": "1.43.0",
+          "title": "github.com/open-telemetry/opentelemetry-go: OpenTelemetry-Go: Arbitrary code execution via PATH hijacking on BSD/Solaris",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-42508",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.52.0",
+          "title": "golang.org/x/crypto/ssh/knownhosts: golang: golang.org/x/crypto/ssh/knownhosts: Revocation bypass via unchecked SignatureKey",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-46595",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.52.0",
+          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authorization bypass due to skipped source-address validation",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-46597",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.52.0",
+          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Denial of Service via crafted AES-GCM packet decoder inputs",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-46600",
+          "package": "golang.org/x/net",
+          "installed": "v0.48.0",
+          "fixed": "0.56.0",
+          "title": "golang.org/x/net/dns/dnsmessage: golang.org/x/net/dns/dnsmessage: Denial of Service via invalid DNS record parsing",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-46600",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.26.6, 1.27.0-rc.3",
+          "title": "golang.org/x/net/dns/dnsmessage: golang.org/x/net/dns/dnsmessage: Denial of Service via invalid DNS record parsing",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-48702",
+          "package": "github.com/sigstore/rekor",
+          "installed": "v1.4.3",
+          "fixed": "1.5.2",
+          "title": "github.com/sigstore/rekor: Rekor: Denial of Service due to unbounded gzip decompression in Alpine APK parsing",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-49478",
+          "package": "github.com/sigstore/fulcio",
+          "installed": "v1.8.4",
+          "fixed": "1.8.6",
+          "title": "github.com/sigstore/fulcio: Fulcio: Server-Side Request Forgery and Kubernetes ServiceAccount token leakage",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56851",
+          "package": "golang.org/x/text",
+          "installed": "v0.32.0",
+          "fixed": "0.41.0",
+          "title": "The Nickname profile can panic with an out-of-bounds slice error when  ...",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56852",
+          "package": "golang.org/x/text",
+          "installed": "v0.32.0",
+          "fixed": "0.39.0",
+          "title": "golang.org/x/text: golang.org/x/text: Denial of Service via invalid UTF-8 input",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56853",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.25.13, 1.26.6, 1.27.0-rc.3",
+          "title": "net/http: golang: Go net/http: Unencrypted HTTP/2 connections vulnerable to Denial of Service",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56854",
+          "package": "golang.org/x/crypto",
+          "installed": "v0.46.0",
+          "fixed": "0.55.0",
+          "title": "golang.org/x/crypto/ssh: golang.org/x/crypto/ssh: Authentication bypass due to unenforced source-address restrictions",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56858",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.25.13, 1.26.6, 1.27.0-rc.3",
+          "title": "html/template: golang: Go html/template: Cross-Site Scripting via pathological input",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56859",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.25.13, 1.26.6, 1.27.0-rc.3",
+          "title": "encoding/xml: golang: Go: Denial of Service via XML decoding recursion depth issue",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56860",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.25.13, 1.26.6, 1.27.0-rc.3",
+          "title": "net/url: golang: golang net/url: Denial of Service from quadratic complexity in path resolution",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56862",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.25.13, 1.26.6, 1.27.0-rc.3",
+          "title": "crypto/tls: golang: Golang crypto/tls: Denial of Service via indefinite KeyUpdate messages",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56864",
+          "package": "golang.org/x/mod",
+          "installed": "v0.30.0",
+          "fixed": "0.40.0",
+          "title": "golang.org/x/mod/sumdb: golang.org/x/mod/sumdb: Integrity bypass via malicious GOSUMDB",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-56865",
+          "package": "golang.org/x/mod",
+          "installed": "v0.30.0",
+          "fixed": "0.40.0",
+          "title": "golang.org/x/mod/sumdb/tlog: golang.org/x/mod/sumdb/tlog: Supply chain compromise via transparency log tile verification bypass",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78667",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78667",
+          "package": "stdlib",
+          "installed": "v1.26.8",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: golang: golang: Denial of Service via crafted HTTP Range headers",
+          "target": "usr/local/bin/helm"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.48.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "golang.org/x/net",
+          "installed": "v0.57.0",
+          "fixed": "0.60.0",
+          "title": "net/http: net/http/internal/http2: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "usr/local/bin/helm"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-78669",
+          "package": "stdlib",
+          "installed": "v1.26.8",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "net/http: net/http/internal/http2: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
+          "target": "usr/local/bin/helm"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-84304",
+          "package": "google.golang.org/grpc",
+          "installed": "v1.77.0",
+          "fixed": "1.83.1",
+          "title": "google.golang.org/grpc: gRPC-Go: Denial of Service via HTTP/2 DATA Frame Fragmentation",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-84445",
+          "package": "google.golang.org/grpc",
+          "installed": "v1.77.0",
+          "fixed": "1.82.2, 1.83.2, 1.84.0-dev.0.20260825144003-d5a41119e0e3, 1.85.0-dev.0.20260825072537-93e31b48545e",
+          "title": "google.golang.org/grpc: gRPC-Go: Denial of Service via malformed RPC requests",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-97031",
+          "package": "stdlib",
+          "installed": "v1.26.4",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "crypto/tls: golang: crypto/tls: Denial of Service via multiple ECH outer extension references",
+          "target": "usr/local/bin/cosign"
+        },
+        {
+          "severity": "HIGH",
+          "id": "CVE-2026-97031",
+          "package": "stdlib",
+          "installed": "v1.26.8",
+          "fixed": "1.26.9, 1.27.2",
+          "title": "crypto/tls: golang: crypto/tls: Denial of Service via multiple ECH outer extension references",
+          "target": "usr/local/bin/helm"
+        },
+        {
+          "severity": "HIGH",
+          "id": "GHSA-hrxh-6v49-42gf",
+          "package": "google.golang.org/grpc",
+          "installed": "v1.77.0",
+          "fixed": "1.82.1",
+          "title": "gRPC-Go: xDS RBAC and HTTP/2 Vulnerabilities",
+          "target": "usr/local/bin/cosign"
+        }
+      ]
+    },
+    {
       "image": "mcp-service",
       "ref": "ghcr.io/vistasecurity/mcp-service:latest",
       "critical": 0,
@@ -149,18 +568,8 @@
       "image": "web-ui",
       "ref": "ghcr.io/vistasecurity/web-ui:latest",
       "critical": 0,
-      "high": 1,
-      "findings": [
-        {
-          "severity": "HIGH",
-          "id": "CVE-2026-78669",
-          "package": "golang.org/x/net",
-          "installed": "v0.59.0",
-          "fixed": "0.60.0",
-          "title": "net/http: net/http/internal/http2: golang.org/x/net/http2: net/http: Denial of Service via excessive HTTP/2 SETTINGS frames",
-          "target": "usr/bin/caddy"
-        }
-      ]
+      "high": 0,
+      "findings": []
     }
   ]
 }
