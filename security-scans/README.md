@@ -3,15 +3,17 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-10-18T09:16:06Z
+- **Generated**: 2026-10-19T10:25:14Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
-## 1 CRITICAL · 46 HIGH (fixable, across 18 scanned images)
+> [!WARNING]
+> **1 of 18 images could not be scanned on this run.** The counts below therefore describe only the images that were: they are not a clean bill of health for the release. Unscanned images are listed at the bottom.
+
+## 1 CRITICAL · 46 HIGH (fixable, across 17 scanned images)
 
 | Image | CRITICAL | HIGH |
 |---|---:|---:|
-| `admin-service` | 0 | 0 ✅ |
 | `admin-ui` | 0 | 0 ✅ |
 | `audit-service` | 0 | 0 ✅ |
 | `auth-service` | 0 | 0 ✅ |
@@ -29,6 +31,7 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | `sensor-manager` | 0 | 0 ✅ |
 | `tenant-health-service` | 0 | 0 ✅ |
 | `web-ui` | 0 | 0 ✅ |
+| `admin-service` | ❌ not scanned | ❌ not scanned |
 
 ## Findings
 
@@ -84,6 +87,12 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | HIGH | [CVE-2026-97031](https://nvd.nist.gov/vuln/detail/CVE-2026-97031) | `stdlib` | `v1.26.8` | `1.26.9, 1.27.2` |
 | HIGH | [GHSA-hrxh-6v49-42gf](https://github.com/advisories/GHSA-hrxh-6v49-42gf) | `google.golang.org/grpc` | `v1.77.0` | `1.82.1` |
 
+## Not scanned on this run
+
+Trivy did not produce a usable report for these images. An image that was not scanned is reported as unscanned rather than as clean.
+
+- `ghcr.io/vistasecurity/admin-service:latest`
+
 ## How to read this
 
 - **Fixable only.** Findings with no fix available upstream are excluded, because they are not actionable by upgrading. A count of zero here does not mean zero known CVEs.
@@ -98,4 +107,4 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/39114515505).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/39237140768).</sub>
