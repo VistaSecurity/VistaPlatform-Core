@@ -97,9 +97,9 @@ infrastructure:
 # =============================================================================
 docker_images:
   # Standard Docker Hub images (default for all environments)
-  go_builder: "golang:1.26-alpine"   # Multi-stage build stage for all Go services
+  go_builder: "golang:1.26.9-alpine"   # Multi-stage build stage for all Go services
   runtime: "alpine:3.24.2"           # Final runtime stage for all Go services
-  node: "node:24-alpine"             # Node.js services and frontend builds
+  node: "node:24.18.1-alpine3.24"             # Node.js services and frontend builds
 
   # Docker Hardened Images (dhi.io) — used when dhi.enabled=true in .dev-config.json
   # These are the CVE-scanned equivalents of the standard images above.
@@ -108,7 +108,7 @@ docker_images:
   # alpine3.23 lags by days-to-weeks (sometimes skipping a patch release). Stay
   # on whichever Alpine track DHI is actively prioritizing to avoid CVE lag.
   dhi:
-    go_builder: "dhi.io/golang:1.26-alpine3.24-dev"
+    go_builder: "dhi.io/golang:1.26.9-alpine3.24-dev"
     runtime: "dhi.io/alpine-base:3.24-dev"
     node: "dhi.io/node:24-alpine3.24-dev"
 

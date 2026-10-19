@@ -1,29 +1,26 @@
 package services
 
-// The upgrade-path guard is disarmed by DECISION, and nothing re-arms it.
+// The upgrade-path guard must stay armed once a 5.x release exists.
 //
-// `upgradeFromTagCount` is 0 because asset-inventory ADR-0010 D11 re-baselined
-// scripts/database/schema.sql for 5.0.0 as a fresh install: the 4.x migration
-// block is gone, every 5.0 release candidate is installed onto an empty
-// database, and there is no 4.x install to carry forward. That is correct
-// today and wrong the moment core-v5.0.0 ships: 5.0.0 is the first release of
-// the re-baselined shape and therefore the first one anything can upgrade
-// FROM. (ADR-0007 D2.5 disarmed the same guard the same way until core-v1.0.0.)
+// `upgradeFromTagCount` was 0 for the 5.0 cycle by decision (asset-inventory
+// ADR-0010 D11): schema.sql was re-baselined as the 5.0.0 fresh install, every
+// 5.0 release candidate went onto an empty database, and there was no install
+// to carry forward. core-v5.0.0 shipped on — the first release of the
+// re-baselined shape and the first one anything can upgrade FROM — and this
+// tripwire fired, as designed, until the constant was re-armed to 2. (ADR-0007
+// D2.5 disarmed the same guard the same way until core-v1.0.0.)
 //
-// A comment saying "re-arm this at core-v5.0.0" is a reminder nobody receives.
-// This is a tripwire: the day a FINAL `core-v5.Y.Z` tag exists in the
-// repository, the constant being 0 becomes a failing test with the reason
-// attached. Re-arming also brings back the rest of the upgrade rules ADR-0010
-// D11 suspends: the POST-MIGRATIONS block, the two-edit enum rule, DROP POLICY
-// + CREATE POLICY for a changed policy (CLAUDE.md, "Database").
+// Its first job is done; it stays as the cheap half of the guard. The upgrade
+// test itself only runs under TEST_DATABASE_URL (nightly / make
+// test-integration-db), so setting the constant back to 0 would turn it into a
+// silent skip that no PR gate notices. This test runs in the ordinary unit suite
+// — one `git tag` call, no database — and fails that change with the reason
+// attached.
 //
-// Release CANDIDATES do not arm it. `core-v5.0.0-rc.1` is not a release anyone
+// Release CANDIDATES do not count. `core-v5.0.0-rc.1` is not a release anyone
 // runs and then upgrades away from — it exists so we can install it, look at
-// it and throw it away — so there is no prior shape for the upgrade test to
-// start from, and firing on one is the over-strict polarity of this guard.
-//
-// It is deliberately CHEAP — one `git tag` call, no database — so it runs in the
-// ordinary unit suite rather than waiting for a nightly.
+// it and throw it away — so firing on one is the over-strict polarity of this
+// guard.
 
 import (
 	"os/exec"
@@ -55,14 +52,12 @@ func upgradePathArmingError(tags []string, count int) string {
 	if len(tags) == 0 || count != 0 {
 		return ""
 	}
-	return "core-v5 has shipped (" + strings.Join(tags, ", ") + ") and upgradeFromTagCount is still 0, so " +
+	return "core-v5 has shipped (" + strings.Join(tags, ", ") + ") and upgradeFromTagCount is 0, so " +
 		"TestIntegration_Schema_UpgradesFromPriorReleases skips.\n\n" +
-		"asset-inventory ADR-0010 D11 disarmed it for the 5.0 cycle only: schema.sql was re-baselined " +
-		"as the 5.0.0 fresh install, with no migration block, because no 4.x database is carried " +
-		"forward. A released 5.0 IS carried forward, so from now on the upgrade rules apply again: " +
-		"set upgradeFromTagCount to 2, and restore the POST-MIGRATIONS block (ADD COLUMN IF NOT " +
-		"EXISTS, the two-edit enum rule, DROP POLICY + CREATE POLICY for a changed policy) — retire " +
-		"TestIntegration_Schema_HasNoMigrationBlock in the same change.\n\n" +
+		"asset-inventory ADR-0010 D11 disarmed it for the 5.0 cycle only, while schema.sql was the " +
+		"5.0.0 fresh-install baseline and no database was carried forward. A released 5.0 IS carried " +
+		"forward, so the upgrade rules apply (CLAUDE.md, \"Database\": POST-MIGRATIONS, the two-edit " +
+		"enum rule, DROP POLICY + CREATE POLICY for a changed policy) and the count must stay at 2.\n\n" +
 		"The upgrade test is the ONLY thing that catches a statement which is fine against today's " +
 		"tables and fails against the shape a prior release left behind — a SET NOT NULL on a " +
 		"column old rows hold NULL in, a CHECK old-format data violates. A populated double-apply " +
@@ -78,10 +73,10 @@ func TestUpgradePathGuardIsArmedOnceV5Exists(t *testing.T) {
 		t.Skipf("cannot list git tags (%v); the tripwire needs a checkout with tags", err)
 	}
 	tags := finalV5Tags(strings.Fields(strings.TrimSpace(string(out))))
-	if len(tags) == 0 && upgradeFromTagCount != 0 {
-		// Armed early. Harmless, and worth knowing about.
-		t.Logf("upgradeFromTagCount = %d before any core-v5 tag exists; the upgrade test will "+
-			"try to apply 5.0 release shapes that do not exist yet (ADR-0010 D11)",
+	if len(tags) == 0 {
+		// core-v5.0.0 has shipped, so no visible tag means a checkout without
+		// tags (a shallow clone), not a world before 5.0. Nothing to check.
+		t.Logf("no final core-v5 tag visible in this checkout; upgradeFromTagCount = %d is not checked",
 			upgradeFromTagCount)
 	}
 	if msg := upgradePathArmingError(tags, upgradeFromTagCount); msg != "" {

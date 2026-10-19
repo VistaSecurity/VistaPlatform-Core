@@ -109,9 +109,9 @@ in `INSTALL.md`.
 | Service | Image reference |
 |---------|-----------------|
 | postgres | `postgres:17-alpine` |
-| redis | `redis:8-alpine` |
+| redis (Valkey) | `valkey/valkey:8.1.10-alpine` |
 | nats | `nats:2.14-alpine` |
-| api-gateway | `traefik:v3.6.12` |
+| api-gateway | `traefik:v3.7.15` |
 | otel-collector | `otel/opentelemetry-collector-contrib:0.151.0` |
 | jaeger | `jaegertracing/jaeger:2.17.0` |
 | prometheus | `prom/prometheus:v3.11.3` |
@@ -132,8 +132,15 @@ answering a supply-chain question, the sets are not identical:
 | Datastore | Image reference | vs. `docker-compose.yml` |
 |-----------|-----------------|---------------------------|
 | postgres | `postgres:17-alpine` | same |
-| redis | `redis:7-alpine` | dev compose runs `8-alpine` |
+| redis (Valkey) | `valkey/valkey:8.1.10-alpine` | same |
 | nats | `nats:2.14-alpine` | same |
+
+The cache is **Valkey** (BSD-3-Clause), a Redis-protocol drop-in maintained under the
+Linux Foundation. The compose service, the `redis` Service/hostname, the `datastores.redis` values
+key, and the `REDIS_URL` / `REDIS_PASSWORD` variables keep the Redis name because they
+name the protocol, not the server. Releases up to 5.0.0 shipped Redis (7.4 in the chart,
+8 in compose); see [Upgrading](deployment/production-checklist.md#upgrading) for what the
+switch does to an existing install.
 
 `helm test` additionally runs a short-lived pod from `curlimages/curl:8.22.0`
 (exact tag) that calls the auth-service and admin-service `/health` endpoints;

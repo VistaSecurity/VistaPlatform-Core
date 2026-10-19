@@ -6,8 +6,16 @@ global:
 entryPoints:
   web:
     address: :80
+    http:
+      aliasHeadersStrategy: delete
   metrics:
     address: :8099
+    http:
+      aliasHeadersStrategy: delete
+  traefik:
+    address: :8080
+    http:
+      aliasHeadersStrategy: delete
 ping:
   entryPoint: web
 metrics:

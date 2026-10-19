@@ -121,7 +121,7 @@ documented here but is not tested by the project.
 - 2 React frontends (web-ui for tenants, admin-ui for platform admins)
 - Traefik `IngressRoute` + `Middleware` CRDs consumed by the cluster's own
   Traefik (kube-system on RKE2, ALB+Traefik on EKS). No in-cluster gateway pod.
-- 3 datastores (Postgres, Redis, NATS JetStream)
+- 3 datastores (Postgres, Valkey — the Redis-protocol cache, still addressed as `redis` — and NATS JetStream)
 - NetworkPolicies, schema-migration Job, helm-test smoke check
 - Hardened pod security defaults (non-root, read-only FS, dropped caps, RuntimeDefault seccomp, no SA token mount)
 

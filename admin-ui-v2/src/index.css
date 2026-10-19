@@ -1,9 +1,84 @@
-@import './styles/tokens.css';      /* VISTA brand atoms (fonts, accent, blue) */
-@import './styles/operator.css';    /* operator theme + component classes */
+/* Tailwind CSS 4, CSS-first. Layer order is declared up front so the brand +
+   operator sheets (imported into `base`, ahead of Tailwind's preflight) keep the
+   cascade position they had under Tailwind 3's `@tailwind base/components/
+   utilities`: tokens → operator → preflight → utilities. Without this statement
+   the first `layer(base)` import would declare `base` before `theme`. */
+@layer theme, base, components, utilities;
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import './styles/tokens.css' layer(base); /* VISTA brand atoms (fonts, accent, blue) */
+@import './styles/operator.css' layer(base); /* operator theme + component classes */
+
+@import 'tailwindcss' source(none);
+
+/* Same scan set as the Tailwind 3 `content` globs. */
+@source '../index.html';
+@source './**/*.{ts,tsx}';
+
+/* Surface the operator design-token CSS variables to Tailwind utilities
+   (e.g. bg-op-panel / text-t1) alongside the ported .op-* component classes.
+   `inline`: utilities reference the design tokens directly. The Tailwind 3
+   config also mapped font-head/body/label/display; they are left out here
+   because a `--font-head: var(--font-head)` theme entry is circular (the theme
+   namespace and the brand token share the name), and no class uses them —
+   components set `font-family: var(--font-*)` directly. */
+@theme inline {
+  --color-op-bg: var(--op-bg);
+  --color-op-bg2: var(--op-bg2);
+  --color-op-panel: var(--op-panel);
+  --color-op-panel2: var(--op-panel2);
+  --color-op-border: var(--op-border);
+  --color-op-border2: var(--op-border2);
+  --color-op-accent: var(--op-accent);
+
+  --color-t1: var(--op-t1);
+  --color-t2: var(--op-t2);
+  --color-t3: var(--op-t3);
+  --color-accent: var(--accent);
+  --color-blue: var(--vista-blue);
+}
+
+/* Tailwind 3 preflight compatibility — keeps the output identical:
+   - the default border colour became `currentcolor` in v4 (was gray-200);
+   - buttons lost `cursor: pointer` in v4;
+   - placeholders became 50% currentcolor in v4 (was gray-400);
+   - v4 preflight sets `opacity: 1`, `border-radius: 0` and
+     `letter-spacing: inherit` on form controls, which v3 left to the browser
+     (visible on a disabled <select>, which Chrome draws at 0.7 opacity);
+   - v4 also makes inputs, selects and textareas transparent, where v3 cleared
+     the background of buttons only (an unstyled <select> lost Chrome's grey). */
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: #e5e7eb;
+  }
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: #9ca3af;
+  }
+  button,
+  input,
+  select,
+  optgroup,
+  textarea,
+  ::file-selector-button {
+    letter-spacing: revert;
+    border-radius: revert;
+    opacity: revert;
+  }
+  input:where(:not([type='button'], [type='reset'], [type='submit'])),
+  select,
+  optgroup,
+  textarea {
+    background-color: revert;
+  }
+}
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body, #root { height: 100%; }

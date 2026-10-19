@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 // The shared workspace packages ship TypeScript source (not a prebuilt dist),
 // so exclude them from dep pre-bundling — Vite compiles their source directly.
@@ -7,7 +8,7 @@ import react from '@vitejs/plugin-react';
 // Dev port 3007: admin-ui (v1) holds :3006, and frontend-v2 holds :3001, so
 // the admin rebuild gets its own port for parallel (strangler) running.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   optimizeDeps: {
     exclude: ['@vistasecurity/primitives', '@vistasecurity/api-contract'],
   },

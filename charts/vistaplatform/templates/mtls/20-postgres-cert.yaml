@@ -68,8 +68,10 @@ spec:
   # platform-CA-signed + SAN-checked — not insecureSkipVerify).
   serverName: {{ .Release.Name }}-backends
   insecureSkipVerify: false
-  rootCAsSecrets:
-    - {{ default "platform-ca-secret" .Values.serviceMtls.platformCa.externalCaSecretName }}
+  # rootCAs (Traefik >= v3.4) replaces the deprecated rootCAsSecrets. The Secret
+  # holds the CA under ca.crt, which is where cert-manager puts it.
+  rootCAs:
+    - secret: {{ default "platform-ca-secret" .Values.serviceMtls.platformCa.externalCaSecretName }}
   certificatesSecrets:
     - api-gateway-client-mtls
 {{- end }}

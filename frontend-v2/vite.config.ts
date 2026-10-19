@@ -1,5 +1,6 @@
 import { defineConfig, type ProxyOptions } from 'vite';
 import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
 // The shared workspace packages ship TypeScript source (not a prebuilt dist),
 // so exclude them from dep pre-bundling — Vite compiles their source directly.
@@ -46,7 +47,7 @@ const devProxy: ProxyOptions = {
 };
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   optimizeDeps: {
     exclude: ['@vistasecurity/primitives', '@vistasecurity/api-contract'],
   },

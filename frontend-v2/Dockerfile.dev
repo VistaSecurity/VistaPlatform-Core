@@ -11,7 +11,7 @@
 # for live edits; node_modules stays in the image (anonymous volume in compose).
 # The Vite dev proxy forwards /api -> $VITE_DEV_PROXY_TARGET (api-gateway:8080 in
 # compose); the UI uses relative /api/* paths so there is no VITE_API_URL.
-ARG NODE_IMAGE=node:24-alpine
+ARG NODE_IMAGE=node:24.18.1-alpine3.24
 FROM ${NODE_IMAGE}
 WORKDIR /repo
 

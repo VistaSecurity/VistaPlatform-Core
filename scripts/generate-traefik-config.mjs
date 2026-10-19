@@ -147,25 +147,39 @@ async function main() {
     entryPoints: {
       web: {
         address: ':80',
-        // In TLS environments, redirect HTTP to HTTPS
-        ...(useTLS ? {
-          http: {
+        http: {
+          // Traefik 3.7.12+: drop request headers that merely alias a header
+          // name (X_Auth_User, X.Auth.User) so a client cannot spoof headers
+          // the gateway or backends trust; unset, Traefik warns at startup.
+          aliasHeadersStrategy: 'delete',
+          // In TLS environments, redirect HTTP to HTTPS
+          ...(useTLS ? {
             redirections: {
               entryPoint: {
                 to: 'websecure',
                 scheme: 'https',
               },
             },
-          },
-        } : {}),
+          } : {}),
+        },
       },
       metrics: {
         address: ':8099',
+        http: { aliasHeadersStrategy: 'delete' },
       },
+      // api.insecure serves the dashboard on the implicit `traefik` entrypoint
+      // (:8080); declare it so it can carry the same header policy.
+      ...(environment === 'development' ? {
+        traefik: {
+          address: ':8080',
+          http: { aliasHeadersStrategy: 'delete' },
+        },
+      } : {}),
       // HTTPS entrypoint for TLS-terminating environments
       ...(useTLS ? {
         websecure: {
           address: ':443',
+          http: { aliasHeadersStrategy: 'delete' },
         },
       } : {}),
     },

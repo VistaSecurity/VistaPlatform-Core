@@ -5,23 +5,17 @@
 -- PostgreSQL runs this file as 01-schema.sql from docker-entrypoint-initdb.d.
 -- All schema changes are made directly here; no migration scripts are run.
 --
--- THIS FILE IS THE 5.0.0 BASELINE (asset-inventory ADR-0010 D11).
+-- 5.0.0 WAS A FRESH-INSTALL BASELINE (asset-inventory ADR-0010 D11).
 --
--- 5.0.0 is a fresh install: there is no upgrade path from 4.x, and every 5.0
--- release candidate is installed onto an empty database. Until 5.0.0 ships,
--- EDIT IN PLACE: a new column goes into its CREATE TABLE, a new enum value
--- into its CREATE TYPE, a changed policy, view or function into its one
--- definition. There is NO POST-MIGRATIONS block — no ADD COLUMN IF NOT EXISTS,
--- no ALTER TYPE ... ADD VALUE, no data backfill (UPDATE / DELETE), and no
--- DROP ... IF EXISTS for something only a 4.x database could hold.
--- TestIntegration_Schema_HasNoMigrationBlock fails on any of them.
---
--- Once 5.0.0 ships, an installed 5.0 database exists to be carried forward,
--- and the upgrade rules in CLAUDE.md ("Database") return with it: the
+-- The file was re-baselined for 5.0.0: no upgrade path from 4.x, every 5.0
+-- release candidate installed onto an empty database, each object's shape in
+-- its one definition and no migration block. That cycle ENDED when
+-- core-v5.0.0 shipped: an installed 5.0 database now exists to be
+-- carried forward, and the upgrade rules in CLAUDE.md ("Database") apply — the
 -- POST-MIGRATIONS block, the two-edit enum rule, the DROP POLICY + CREATE
--- POLICY form for a changed policy. The upgrade-path tripwire
--- (schema_upgrade_tripwire_test.go) fails the build until it is re-armed
--- against the first core-v5 tag.
+-- POLICY form for a changed policy. TestIntegration_Schema_UpgradesFromPriorReleases
+-- (schema_upgrade_path_integration_test.go) applies this file over each recent
+-- final core-v5 release's populated database.
 --
 -- This file is re-applied by the chart's schema-migration Job on every
 -- helm upgrade under `psql -v ON_ERROR_STOP=1`. Every statement here must

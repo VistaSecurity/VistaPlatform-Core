@@ -304,7 +304,7 @@ build-services-parallel: ## Build all Go services in parallel
 # ---------------------------------------------------------------------------
 # --- Container base images -----------------------------------------------------
 # The Dockerfiles declare ARG GO_BUILDER_IMAGE / ARG RUNTIME_IMAGE with PUBLIC
-# defaults (golang:1.26-alpine / alpine:3.24.2) so that a plain `docker build`
+# defaults (golang:1.26.9-alpine / alpine:3.24.2) so that a plain `docker build`
 # from a source checkout works with no internal infrastructure — that is what an
 # open-source consumer gets.
 #
@@ -323,7 +323,7 @@ build-services-parallel: ## Build all Go services in parallel
 # garble (build-dist) patches the linker through an overlay and Go refuses
 # overlays beneath GOMODCACHE: "cannot get modified linker … Files beneath
 # GOMODCACHE must not be replaced". Every dist backend failed that way for 4.0.0.
-GO_BUILDER_IMAGE ?= golang:1.26-alpine
+GO_BUILDER_IMAGE ?= golang:1.26.9-alpine
 RUNTIME_IMAGE    ?= alpine:3.24.2
 BASE_IMAGE_ARGS  := --build-arg GO_BUILDER_IMAGE=$(GO_BUILDER_IMAGE) --build-arg RUNTIME_IMAGE=$(RUNTIME_IMAGE)
 

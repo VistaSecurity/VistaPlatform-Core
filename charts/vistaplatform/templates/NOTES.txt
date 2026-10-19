@@ -286,6 +286,36 @@ UPGRADE NOTES
   - For other edge-case upgrade scenarios (env-shape migrations, RWO PVC
     deadlocks), see "Upgrading" in
     docsv4/core/operate/deployment/production-checklist.md
+{{- if .Values.datastores.redis.enabled }}
+{{- $prevRedis := lookup "apps/v1" "StatefulSet" .Release.Namespace "redis" }}
+{{- $prevImage := "" }}
+{{- range (dig "spec" "template" "spec" "containers" list $prevRedis) }}
+{{- if eq .name "redis" }}{{ $prevImage = .image }}{{ end }}
+{{- end }}
+{{- if and $prevImage (not (contains "valkey" $prevImage)) }}
+
+  - THE CACHE SERVER CHANGED: this release ran {{ $prevImage }}; the chart
+    now defaults to Valkey 8, a BSD-3 Redis-protocol drop-in, under the same
+    `redis` name and settings. Valkey cannot read the files Redis wrote,
+    so it starts EMPTY beside them on the same volume (the old files are left
+    in place, so a helm rollback finds them). Nothing of record is lost — it
+    holds caches and short-lived state — but expect:
+      - pending password-reset and email-verification links stop working
+        (request new ones), and in-progress SSO sign-ins must be restarted;
+      - token revocations made in the last JWT lifetime (default 1 hour) —
+        logout, password change, session revoke, deactivating or erasing a
+        user — are forgotten, so an access token revoked in that hour works
+        until it expires. Refresh tokens stay revoked (they live in
+        PostgreSQL). If that matters, upgrade at least one JWT lifetime after
+        the last such action.
+{{- if not (contains "valkey" .Values.datastores.redis.image.repository) }}
+    THIS UPGRADE STILL RUNS {{ .Values.datastores.redis.image.repository }}:{{ .Values.datastores.redis.image.tag }}: either you set
+    datastores.redis.image yourself, or you used --reuse-values (which keeps
+    the OLD chart's defaults). Re-run with --reset-then-reuse-values to move
+    to Valkey. On this image, too, the cache starts empty (new file names).
+{{- end }}
+{{- end }}
+{{- end }}
 {{- if .Values.serviceMtls.enabled }}
 
   - ENCRYPTED INTERNAL TRANSPORT is now ON by default (#965). If you are

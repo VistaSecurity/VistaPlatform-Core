@@ -34,6 +34,8 @@ in `INSTALL.md`.
   without it; internal mTLS quietly breaks at the first renewal, ~60 days in.
 - **Traefik**, with its CRDs. The chart creates `IngressRoute` and `Middleware`
   *resources*; it does not install the controller or the CRDs that define them.
+  **Traefik v3.4 or newer** is required when `serviceMtls` is on: the chart's
+  `ServersTransport` uses the `rootCAs` field, which older releases do not know.
 - **A StorageClass** for the PostgreSQL, Redis, NATS and upload volumes. The
   chart defaults to `datastores.storageClassName: ""`, which omits
   `storageClassName` so your cluster's **default** StorageClass is used; check
@@ -307,6 +309,39 @@ by hand). The chart's `NOTES.txt` repeats this on every `helm upgrade`.
 on every `helm upgrade`; `NOTES.txt` reminds you of this on every run. Use
 **Maintenance → Backups → Create backup** in the admin console, or `pg_dump`
 yourself; the console's update takes a backup automatically as its first step.
+
+### The cache server changed from Redis to Valkey
+
+Releases up to 5.0.0 shipped Redis (`redis:7-alpine` in the chart). Later releases ship
+**Valkey 8** (`valkey/valkey`, BSD-3-Clause), a Redis-protocol drop-in. The values key
+(`datastores.redis`), the `redis` Service, the `redis-password` / `redis-url` secret keys
+and the `REDIS_URL` variable are unchanged, so your values file needs no edit.
+
+Valkey cannot read the files Redis 7.4 wrote (RDB format 12; it stops with
+`Can't handle RDB format version 12`). So the chart gives Valkey its own files on the
+same volume (`valkey-dump.rdb`, `valkey-appendonlydir/`) and **the cache starts empty on
+the first upgrade**. The Redis files stay where they are, untouched, so a
+`helm rollback` to the previous chart finds them again.
+
+Redis holds caches and short-lived state, not records — inventory, users, sessions'
+refresh tokens and jobs are all in PostgreSQL. After the upgrade:
+
+- pending password-reset and email-verification links stop working (request new ones),
+  and SSO or login flows in progress must be restarted;
+- rate-limit and login-throttle counters start from zero (account lockout lives in
+  PostgreSQL and still applies);
+- **token revocations from the last access-token lifetime are forgotten.** Logging out,
+  changing or resetting a password, revoking a session, deactivating or erasing a user,
+  and ending an impersonation all revoke access tokens in the cache. A token revoked in
+  the hour before the upgrade (`JWT_EXPIRY`, default `1h`) is accepted again until it
+  expires. Refresh tokens are revoked in PostgreSQL and stay revoked, so no new access
+  token can be minted. If this matters, upgrade at least one access-token lifetime after
+  the last such action.
+
+`--reuse-values` keeps the previous chart's defaults, so it would leave you on
+`redis:7-alpine`: use `--reset-then-reuse-values` (above). If you set
+`datastores.redis.image` yourself (a mirror, for example), point it at a Valkey 8 image.
+An external Redis-protocol server (`datastores.redis.enabled: false`) is not affected.
 
 ### Single-node clusters
 

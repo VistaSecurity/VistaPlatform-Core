@@ -387,11 +387,16 @@ datastores:
       requests: {cpu: 250m, memory: 512Mi}
       limits: {cpu: 1000m, memory: 1Gi}
 
+  # The in-cluster cache is Valkey 8 (BSD-3, a Redis-protocol drop-in); the
+  # key stays `redis` — like REDIS_URL, the Service name `redis` and the
+  # redis-password secret key, it names the protocol, not the server. Upgrading
+  # from a chart that shipped Redis 7.4 starts the cache EMPTY (Valkey cannot
+  # read Redis 7.4's RDB format 12); see templates/datastores/redis.yaml.
   redis:
     enabled: true
     image:
-      repository: redis
-      tag: "7-alpine"
+      repository: valkey/valkey
+      tag: "8.1.10-alpine"
     persistence:
       size: 5Gi
     # -- Per-datastore storage class override.

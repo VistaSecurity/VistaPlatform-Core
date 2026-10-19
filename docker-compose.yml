@@ -3,7 +3,7 @@ services:
   # Database Services
   # =================================================================
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17.11-alpine3.24
     container_name: crypto-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-crypto_inventory}
@@ -35,7 +35,7 @@ services:
   # database volume is upgraded in place. Re-run by hand: `make db-roles`.
   # The compose counterpart of the Helm chart's rls-roles Job.
   db-roles:
-    image: postgres:17-alpine
+    image: postgres:17.11-alpine3.24
     container_name: crypto-db-roles
     environment:
       PGHOST: postgres
@@ -54,15 +54,18 @@ services:
     restart: "no"
 
   redis:
-    image: redis:8-alpine
+    # Valkey 8 (BSD-3), a Redis-protocol drop-in. It keeps its own files in the
+    # volume (valkey-dump.rdb, valkey-appendonlydir/) because it cannot read the
+    # RDB format Redis 8 wrote: an existing redis_data volume starts empty.
+    image: valkey/valkey:8.1.10-alpine
     container_name: crypto-redis
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    command: valkey-server --dbfilename valkey-dump.rdb --appenddirname valkey-appendonlydir --appendonly yes --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
     volumes:
       - redis_data:/data
     ports:
       - "${REDIS_HOST_PORT:-6379}:6379"
     healthcheck:
-      test: [ "CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping" ]
+      test: [ "CMD", "valkey-cli", "-a", "${REDIS_PASSWORD}", "ping" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -74,7 +77,7 @@ services:
   # Message Queue
   # =================================================================
   nats:
-    image: nats:2.14-alpine
+    image: nats:2.14.8-alpine3.22
     container_name: crypto-nats
     command: [ "-js", "-m", "8222", "--user", "${NATS_USER:-nats_user}", "--pass", "${NATS_PASSWORD:?Set NATS_PASSWORD in .env}" ]
     ports:
@@ -97,7 +100,7 @@ services:
       context: .
       dockerfile: ./services/auth-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-auth-service
     environment:
@@ -155,7 +158,7 @@ services:
       context: .
       dockerfile: ./services/inventory-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-inventory-service
     environment:
@@ -205,7 +208,7 @@ services:
       context: .
       dockerfile: ./services/compliance-engine/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-compliance-engine
     environment:
@@ -256,7 +259,7 @@ services:
       context: .
       dockerfile: ./services/sensor-manager/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-sensor-manager
     environment:
@@ -313,7 +316,7 @@ services:
       context: .
       dockerfile: ./services/cbom-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-cbom-service
     environment:
@@ -365,7 +368,7 @@ services:
       context: .
       dockerfile: ./services/mcp-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-mcp-service
     environment:
@@ -401,7 +404,7 @@ services:
       context: .
       dockerfile: ./services/tenant-health-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-tenant-health-service
     environment:
@@ -449,7 +452,7 @@ services:
       context: .
       dockerfile: ./services/device-interrogation-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-device-interrogation-service
     environment:
@@ -505,7 +508,7 @@ services:
       context: .
       dockerfile: ./services/audit-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-audit-service
     environment:
@@ -549,7 +552,7 @@ services:
   # API Gateway (Traefik v3)
   # =================================================================
   api-gateway:
-    image: traefik:v3.6.12
+    image: traefik:v3.7.15
     container_name: crypto-api-gateway
     ports:
       - "${API_GATEWAY_HOST_PORT:-8080}:80"
@@ -586,7 +589,7 @@ services:
       context: .
       dockerfile: frontend-v2/Dockerfile.dev
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-node:24-alpine}
+        NODE_IMAGE: ${NODE_IMAGE:-node:24.18.1-alpine3.24}
     container_name: crypto-web-ui
     environment:
       # frontend-v2 uses relative /api/* paths; the Vite dev proxy forwards them
@@ -635,7 +638,7 @@ services:
   # Development Tools
   # =================================================================
   adminer:
-    image: adminer:latest
+    image: adminer:6.1.2
     container_name: crypto-adminer
     environment:
       ADMINER_DEFAULT_SERVER: postgres
@@ -662,7 +665,7 @@ services:
       context: .
       dockerfile: ./services/cluster-sensor-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-cluster-sensor-service
     environment:
@@ -725,7 +728,7 @@ services:
       context: .
       dockerfile: ./services/monitoring-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-monitoring-service
     environment:
@@ -783,7 +786,7 @@ services:
       context: .
       dockerfile: ./services/admin-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-admin-service
     environment:
@@ -840,7 +843,7 @@ services:
       context: .
       dockerfile: ./services/notification-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-notification-service
     environment:
@@ -896,7 +899,7 @@ services:
       context: .
       dockerfile: ./services/discovery-processor-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-discovery-processor-service
     environment:
@@ -943,7 +946,7 @@ services:
       context: .
       dockerfile: ./services/maintenance-service/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-maintenance-service
     environment:
@@ -988,7 +991,7 @@ services:
       context: .
       dockerfile: ./services/pcap-processor/Dockerfile.dev
       args:
-        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26-alpine}
+        GO_BUILDER_IMAGE: ${GO_BUILDER_IMAGE:-golang:1.26.9-alpine}
         RUNTIME_IMAGE: ${RUNTIME_IMAGE:-alpine:3.24.2}
     container_name: crypto-pcap-processor
     environment:

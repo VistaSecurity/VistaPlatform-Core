@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0-rc.1] - 2026-10-19
+
+**Version 5.1.0 is a security and platform-maintenance release.** It moves the bundled
+cache from Redis to Valkey, updates the web build toolchain, refreshes cloud SDKs and
+container/tool dependencies, and makes every Go builder use the exact Go patch declared by
+the repository. Both product lines will be cut from the same commit: `v5.1.0` (commercial)
+and `core-v5.1.0` (Core). Upgrade from 5.0.0.
+
+### Upgrading
+
+Back up PostgreSQL before upgrading, as always. The schema shape is unchanged from 5.0.0;
+the schema-migration Job still runs because its content hash changed when upgrade-path
+verification was re-enabled.
+
+The cache starts empty on the first upgrade to 5.1.0. Valkey uses separate files on the
+existing volume because it cannot read the RDB/AOF formats written by the previously bundled
+Redis versions. Database records and refresh-token revocations remain intact, but pending
+password-reset and email-verification links, in-progress SSO sign-ins, rate-limit counters
+and recent access-token denylist entries are cleared. If access-token revocation continuity
+matters, wait at least one configured access-token lifetime after the last revocation before
+upgrading. Use `--reset-then-reuse-values`; plain `--reuse-values` can retain the old Redis
+image. The original Redis files remain available to a Helm rollback.
+
+When service mTLS is enabled, the cluster's Traefik controller must be v3.4 or newer before
+this chart is installed.
+
+### Verify
+
+Core images and chart:
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v5.1.0 \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the Core chart, substitute
+`oci://ghcr.io/vistasecurity/vistaplatform:5.1.0`. Enterprise and MSP releases use the
+commercial release workflow identity printed by `helm install`.
+
+<!-- release-notes-end -->
+
+### Changed
+
+- **The in-cluster cache is now Valkey 8 instead of Redis.** The chart ships
+  `valkey/valkey:8.1.10-alpine` (BSD-3-Clause) in place of `redis:7-alpine` (Redis 7.4,
+  RSALv2/SSPL), and every compose file moves from `redis:8-alpine` to the same image.
+  Valkey speaks the Redis protocol; the `datastores.redis` key, the `redis` Service,
+  `REDIS_URL` and `REDIS_PASSWORD` keep their names. **Upgrading a 5.0.0 install starts the
+  cache empty**: Valkey cannot load Redis 7.4's RDB files, so it keeps its own files beside
+  them on the same volume (a `helm rollback` finds the Redis data again). Pending
+  password-reset and email-verification links and in-progress SSO sign-ins are lost, and
+  access tokens revoked in the hour before the upgrade (`JWT_EXPIRY`) are accepted until
+  they expire; refresh tokens stay revoked. Upgrade with `--reset-then-reuse-values` —
+  `--reuse-values` keeps Redis. See "The cache server changed from Redis to Valkey" in the
+  production checklist.
+
+- **Chart: minimum Traefik is now v3.4 when `serviceMtls` is on.** The `backends-mtls`
+  `ServersTransport` uses `rootCAs` (`- secret: platform-ca-secret`) instead of the deprecated
+  `rootCAsSecrets`, which Traefik v3.7 warns about on every load. `rootCAs` first appeared in
+  Traefik v3.4.0; on an older Traefik the field is ignored and backend verification fails, so
+  upgrade Traefik before upgrading the chart. The chart's own api-gateway image is
+  Traefik v3.6.
+
+- **The tenant, admin and QA web applications now build with Tailwind CSS 4.** Their
+  existing appearance and browser defaults are preserved while removing Tailwind 3's
+  vulnerable build-time dependency chain. The production builds and application tests are
+  unchanged at runtime.
+
+- **Go builder images now use the exact patch declared by `go.work`.** Public and hardened
+  builder fallbacks, Compose generation, seed utilities and the public-tree export all pin
+  Go 1.26.9 instead of a floating 1.26 tag. A repository guard rejects future floating or
+  stale builder tags.
+
+### Security
+
+- **Bundled maintenance tools and external dependencies were refreshed.** The maintenance
+  image now carries cosign 3.1.3 and Helm 3.22.1, removing the critical finding present in
+  the prior cosign binary. Azure Identity, the AWS SDK for Go v2 family, Go cryptography and
+  networking modules, and pinned runtime/CI images move to current patch releases. The
+  called-code vulnerability gate remains clear.
+
 ## [5.0.0] - 2026-10-17
 
 **Version 5.0.0 is the DCIM release: Vista Platform is now an asset inventory, map and

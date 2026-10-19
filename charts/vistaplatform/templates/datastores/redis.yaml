@@ -35,8 +35,26 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          # The server is Valkey (BSD-3, Redis-protocol compatible). The
+          # redis-server / redis-cli names are the compat symlinks the Valkey
+          # image ships, kept so an operator who points
+          # datastores.redis.image at a Redis-protocol mirror still starts.
+          #
+          # --dbfilename / --appenddirname give Valkey its OWN files on the
+          # existing PVC. Valkey 8 cannot load the RDB that Redis 7.4 (format
+          # 12) or Redis 8 (format 15) wrote — it exits with "Can't handle RDB
+          # format version 12", a crash-loop on helm upgrade. With new names it
+          # starts empty (Redis holds only caches and short-lived state), and
+          # the old Redis files stay untouched beside it, so a helm rollback
+          # to a Redis-image chart finds its data again.
           command:
             - redis-server
+            - --dir
+            - /data
+            - --dbfilename
+            - valkey-dump.rdb
+            - --appenddirname
+            - valkey-appendonlydir
             - --appendonly
             - "yes"
             - --requirepass

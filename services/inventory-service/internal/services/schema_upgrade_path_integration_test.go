@@ -59,32 +59,26 @@ import (
 // newest first. Raise it with SCHEMA_UPGRADE_FROM_COUNT when auditing a risky
 // schema change; each extra tag costs a full schema+seed apply cycle.
 //
-// It is ZERO for the 5.0 cycle, by decision (asset-inventory ADR-0010 D11).
-// scripts/database/schema.sql was re-baselined for 5.0.0: every ADD COLUMN was
-// folded into its CREATE TABLE, every backfill and 4.x-only DROP deleted, and
-// the POST-MIGRATIONS block removed. 5.0.0 is a fresh install — there is no
-// upgrade path from 4.x — so "does the current schema apply over the shape
-// release X left behind?" has no X to ask about: every 4.x tag is a shape the
-// re-baseline deliberately does not converge, and every 5.0 release candidate
-// is installed onto an empty database.
+// It is 2: the newest final release and the one before it, which is what an
+// install that skipped a patch upgrades from. Only FINAL releases at or above
+// firstSupportedUpgradeFrom count, so right after core-v5.0.0 shipped there is
+// exactly one qualifying tag and the test runs against that one (see the
+// fewer-than-asked log below) rather than failing for want of a second.
 //
-// The day core-v5.0.0 ships it becomes the first release anything can upgrade
-// FROM, and this goes back to 2 — the newest release and the one an install
-// that skipped a patch upgrades from. The tripwire in
-// schema_upgrade_tripwire_test.go fails the unit suite until it does.
-// Only FINAL releases at or above firstSupportedUpgradeFrom count.
-const upgradeFromTagCount = 0
+// It was 0 for the 5.0 cycle (asset-inventory ADR-0010 D11): schema.sql was
+// re-baselined as the 5.0.0 fresh install and every release candidate went onto
+// an empty database, so there was no release to upgrade from. core-v5.0.0
+// shipped on and is that first release. The tripwire in
+// schema_upgrade_tripwire_test.go fails the unit suite if this is set back to 0
+// while a final core-v5 release exists.
+const upgradeFromTagCount = 2
 
 func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
-	// Disarmed for the 5.0 cycle (ADR-0010 D11): the skip is the constant at
-	// work, not an absent dependency. The tripwire in
-	// schema_upgrade_tripwire_test.go fails the unit suite once core-v5.0.0
-	// exists and the constant is still 0.
+	// Only an explicit override can disarm it; upgradeFromTagCount is 2.
 	if n := upgradeFromTagCountFromEnv(); n == 0 {
-		t.Skip("upgrade-path verification is disarmed: upgradeFromTagCount is 0 until " +
-			"core-v5.0.0 ships (asset-inventory ADR-0010 D11: 5.0.0 is a fresh install, " +
-			"so no prior release is an upgrade path). Set SCHEMA_UPGRADE_FROM_COUNT to " +
-			"run against that many final releases at or above firstSupportedUpgradeFrom.")
+		t.Skip("upgrade-path verification is disarmed: upgradeFromTagCount is 0. It must " +
+			"stay armed while any final release at or above firstSupportedUpgradeFrom " +
+			"exists (the tripwire in schema_upgrade_tripwire_test.go enforces this).")
 	}
 	admin := testdb.Connect(t)
 	root := testdb.RepoRoot(t)
@@ -97,9 +91,10 @@ func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
 			"Release CANDIDATES and releases below the floor do not count; see "+
 			"firstSupportedUpgradeFrom.", firstSupportedUpgradeFrom)
 	}
-	// Fewer tags than asked for is normal right after 5.0.0 — there is only one
-	// release at or above the floor — and says so rather than looking like the
-	// loop silently did less work than the constant advertises.
+	// Fewer tags than asked for is normal right after a fresh-install release —
+	// after core-v5.0.0 there is only one release at or above the floor — and it
+	// tests the one it has, saying so rather than looking like the loop silently
+	// did less work than the constant advertises.
 	if want := upgradeFromTagCountFromEnv(); len(tags) < want {
 		t.Logf("only %d release(s) at or above %v exist; asked for %d",
 			len(tags), firstSupportedUpgradeFrom, want)
