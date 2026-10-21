@@ -628,7 +628,10 @@ producers:
         description: >-
           An active interface on a monitored asset has the type `other` or
           no type at all — what a collector records when it could not say
-          what the port is.
+          what the port is. The identity engine's placeholder interfaces
+          (`observed-N`, holding an address no collector named an interface
+          for) are not reported: nothing measured them, and they are replaced
+          when a collector names the interface.
       - key: duplicate_address
         severity_model: fixed
         default_severity: high

@@ -636,7 +636,7 @@ var measurementTypeRegistry = []MeasurementTypeDef{
 	{
 		Code:             "untyped_interface_count",
 		Name:             "Interfaces With No Type",
-		Description:      "How many open `interface_no_type` findings the hygiene producer holds against this asset: active interfaces whose type is `other` or empty. One finding per asset, whatever the number of interfaces; the evidence lists them. Zero is the compliant value.",
+		Description:      "How many open `interface_no_type` findings the hygiene producer holds against this asset: active interfaces whose type is `other` or empty, other than the identity engine's `observed-N` placeholders. One finding per asset, whatever the number of interfaces; the evidence lists them. Zero is the compliant value.",
 		DataType:         "integer",
 		Category:         "hygiene",
 		Units:            "findings",

@@ -326,6 +326,13 @@ func readCableUnconfirmed(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, t
 
 // readInterfaceNoType: active interfaces whose type is `other` (the column's
 // default, and what a collector writes when it cannot say) or blank.
+//
+// Not the identity engine's placeholders (`observed-N`, source_ref
+// identity.SyntheticInterfaceSourceRef): an address no collector named an
+// interface for is filed on one, typed `other` because nothing measured it.
+// It stands in for an interface nobody has reported, so there is nothing for
+// a person to type; it turns into a real interface, and is checked, when a
+// collector names it (the rename takes over its provenance).
 func readInterfaceNoType(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, today string, _ time.Time) ([]dcimHit, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT a.id, i.id, i.name
@@ -334,8 +341,9 @@ func readInterfaceNoType(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID, to
 		WHERE i.tenant_id = $1
 		  AND i.status = 'active'
 		  AND (i.type IS NULL OR btrim(i.type) = '' OR i.type = 'other')
+		  AND i.source_ref IS DISTINCT FROM $3
 		  AND `+dcimAssetScope+`
-		ORDER BY a.id, i.name, i.id`, tenantID, today)
+		ORDER BY a.id, i.name, i.id`, tenantID, today, identity.SyntheticInterfaceSourceRef)
 	if err != nil {
 		return nil, fmt.Errorf("query untyped interfaces: %w", err)
 	}

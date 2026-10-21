@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [5.1.0-rc.2] - 2026-10-19
+## [5.1.0-rc.3] - 2026-10-21
 
 **Version 5.1.0 completes the DCIM model and is a security and platform-maintenance
 release.** It adds virtual device contexts, power panels, feeds and PDU collection, floor
@@ -41,6 +41,9 @@ image. The original Redis files remain available to a Helm rollback.
 When service mTLS is enabled, the cluster's Traefik controller must be v3.4 or newer before
 this chart is installed.
 
+The full per-change list is in
+[`docsv4/core/releases/5.1.0.md`](docsv4/core/releases/5.1.0.md).
+
 ### Verify
 
 Core images and chart:
@@ -56,69 +59,6 @@ To verify the Core chart, substitute
 commercial release workflow identity printed by `helm install`.
 
 <!-- release-notes-end -->
-
-### Added
-
-- **Virtual circuits, ASN ranges and VLAN translation** (DCIM gap 10, NetBox 4.2 parity): virtual circuits over a provider network with interface terminations (Circuits lens → Virtual circuits, the interface page, `virtual_circuit.*` query fields); ASN ranges with their free numbers (IPAM workspace); VLAN translation policies and rules (VLANs lens → Translation policies) picked per interface; NetBox sync class *Virtual circuits, ASN ranges and VLAN translation (NetBox 4.2+)*, off by default. Adds six tables and `interfaces.vlan_translation_policy_id` (on upgrade).
-- **NetBox sync — virtual machines**: NetBox virtual machines, VM interfaces and virtual disks sync both ways (class *Virtual machines*, off by default) as `virtual_machine` assets, interfaces on them and their disks; a new VM comes in through the identity engine and your approval policy, a pending one is never pushed, and NetBox's device and VM id spaces never meet. An address NetBox assigns to a VM interface is no longer read as the device interface with the same id. Widens `sync_conflicts.object_kind` (on upgrade).
-- **Spares, stock and RMA** (DCIM gap 8): an inventory item can be a spare at a stock location with a quantity and a stock state (in stock, reserved, out for RMA, retired); install a spare into an asset (a row splits; optionally into a module bay), remove a part from an asset to stock, and follow a return case from open through shipped and received (the replacement lands in stock) to closed — Infrastructure → Catalog & Data → **Spares & RMA**, a **Spares** card on the site page, and **To stock** / **RMA** on the Hardware tab; query field `inventory_item.stock_state`; a spare is never pushed to NetBox. Makes `inventory_items.asset_id` nullable, adds `location_id`, `quantity`, `stock_state` and the `rma_cases` table.
-- **Floor plans** (DCIM gap 9): a location carries a grid floor plan (width × depth in m or ft) and its racks a place on it (x, y, rotation); the site page's **Floor plan** tab draws it with racks coloured by unit or power utilisation (80 / 95 %), drag-to-place, an Unplaced racks tray and arrow-key nudging, bounds-checked by the server (`GET /dcim/locations/{id}/floor-plan`, the rack PATCH). Adds `floor_plan_*` to `locations` and `floor_*` to `racks` (on upgrade).
-- **Inventory change notifications reach discovery changes from every path**: a rule that includes discovery now also receives changes from discovery data that arrived over the message bus (the discovery pipeline import), cloud discovery runs and background passes (LLDP cable proposals, evidence re-resolution, same-device merges); delivery falls back from NATS to an HMAC-only compliance-engine route (`POST /api/v1/compliance-engine/internal/alerts/raise`) and logs a notification as lost only when both fail; notification-service logs a routing-rule row it cannot read instead of skipping it silently.
-- **Columns menu on Inventory → All assets**: show or hide any column the list knows — the optional ones, the lifecycle dates (warranty end, end of support, purchased, seller) and all of a class's attributes — with search and Reset to default, remembered per user in the browser; the selection export adds every shown column it did not already carry. `interfaces.vdcs` is dropped on upgrade, after any names a 5.0 database still holds there become virtual device contexts.
-- **Palo Alto vsys display names**: a discovered virtual system's context takes the display name its administrator set as its description (a rename on the firewall follows; a declared context's description is never overwritten).
-- **Automatic end-of-life catalogue links**: a device type or platform with no catalogue entry is linked to the single entry that fits (vendor and model or part number; platform name), when created or imported and daily; ambiguous matches are left alone and a person's link is never replaced; the edit form says whether a link was made automatically or by you.
-- chore: Go 1.26.10 (GO-2026-6809, crypto/x509)
-- fix(compliance): stored framework scores no longer count assets outside a control's population as passing — the Posture scorecards and framework preview scores now agree with the control results, so a control with nothing in its population (no racked asset, no warranty date recorded) reads Not assessed and scores may move down to their honest values.
-- **Discovered virtual device contexts** (DCIM gap 1, part 2): interrogating a FortiGate (VDOMs, `root` included), Palo Alto (vsys), F5 BIG-IP (route domains) or Cisco Nexus (VDCs, `show vdc membership`) records its contexts and the interfaces each owns, pending until the asset is approved; a declared or NetBox-synced context of the same name is matched and never overwritten, and a context the device stops reporting goes stale after the asset stale window, never deleted.
-- **Virtual device contexts** (DCIM gap 1): an asset's VDOMs, vsys, VDCs and route domains (NetBox VirtualDeviceContext) with identifier, status, business unit and primary IPs, on the Hardware tab; interfaces join them from the Interfaces tab (Context column, `virtual_device_context_ids`); query field `interface:(virtual_device_context:…)`; NetBox sync class *Virtual device contexts* (off by default) with the interface `vdcs` membership. Adds `virtual_device_contexts` and `interface_virtual_device_contexts`; names a 5.0 database holds in `interfaces.vdcs` become contexts on upgrade.
-- **DCIM hygiene controls (DCIM gaps 4 + 6).** Inventory Hygiene gains IH-007 to IH-015: rack-mountable assets racked and positioned, no planned cable older than 90 days, declared cables confirmed by LLDP/CDP (asked only of assets that report neighbours), typed interfaces, no duplicate address within a VRF, no expired warranty, nothing past or within 12 months of end of support — each a hygiene finding that names the page to fix it on, and not assessed where the record holds nothing to judge.
-- **Asset commercial lifecycle (DCIM gap 4).** Assets record purchase date, cost and currency, purchase order, seller, warranty, support contract, install and decommission dates (Hardware tab → Lifecycle card, the asset import, the API and the query language); device types and platforms carry end-of-sale / support / life dates with an end-of-life catalogue fallback, and every asset read reports its warranty and end-of-support state — `unknown` when nothing is recorded.
-- Dashboard → Facilities: a fifth dashboard rolling up free rack space per site, fullest racks, switches and prefixes nearing full and the ageing cabling backlog from one `GET /dcim/capacity` read.
-- **IP Addresses tab on the asset page** — every address an asset holds in one table, with Primary and OOB badges and Set as primary / Set as OOB actions; the ip-addresses list gains an `asset_id` filter and `PATCH /dcim/assets/{id}/primary-ips` writes the asset's primary IPv4, IPv6 and OOB address.
-- **Inventory change notifications and webhooks** (DCIM gap 5): a routing rule with the new **Inventory changes** source delivers object creates, updates and deletes — filtered by object kind and action, discovery and sync changes opt-in — to any channel; webhooks carry the change fields at the top level. Adds `tenant_notification_rules.change_filter` (added on upgrade).
-- **Power panels, feeds and power cabling** (DCIM gap 3, row 6.1): power panels and feeds (NetBox-shaped, with available power) on the site and rack pages; power ports and outlets with their draws on the asset's Ports tab; Connect, trace and bulk cabling for power ends, traced from a server through its PDU to the feed; `power_feed.*` search fields; NetBox sync of panels and feeds. Adds `power_panels` and `power_feeds`, and widens the cable termination and path kinds (on upgrade).
-- **Rack power budget and PDU collection** (DCIM gap 3, row 6.2): a rack's power budget per feed and leg (NetBox Rack.get_power_utilization) on the rack page's Power card, a power overlay on the elevation, a Power column on the Racks list and *Racks over power budget* on the Facilities dashboard (`GET /dcim/racks/{id}/power`); SNMP PDU collectors (APC PowerNet-MIB, Raritan PDU2-MIB, Eaton EATON-EPDU-MIB, ENTITY-SENSOR-MIB power supplies) record measured outlet state, current and power beside the declared draws. Adds `measured_*` columns to `power_ports` and `power_outlets` (on upgrade).
-- Prefixes, VLANs, circuits, cables and interfaces each have a page of their own (`/inventory/prefixes/:id`, `/vlans/:id`, `/circuits/:id`, `/cables/:id`, `/interfaces/:id`) with Back to the lens, and every one shows custom fields, tags, contacts, images, changes and journal.
-
-### Changed
-
-- **The in-cluster cache is now Valkey 8 instead of Redis.** The chart ships
-  `valkey/valkey:8.1.10-alpine` (BSD-3-Clause) in place of `redis:7-alpine` (Redis 7.4,
-  RSALv2/SSPL), and every compose file moves from `redis:8-alpine` to the same image.
-  Valkey speaks the Redis protocol; the `datastores.redis` key, the `redis` Service,
-  `REDIS_URL` and `REDIS_PASSWORD` keep their names. **Upgrading a 5.0.0 install starts the
-  cache empty**: Valkey cannot load Redis 7.4's RDB files, so it keeps its own files beside
-  them on the same volume (a `helm rollback` finds the Redis data again). Pending
-  password-reset and email-verification links and in-progress SSO sign-ins are lost, and
-  access tokens revoked in the hour before the upgrade (`JWT_EXPIRY`) are accepted until
-  they expire; refresh tokens stay revoked. Upgrade with `--reset-then-reuse-values` —
-  `--reuse-values` keeps Redis. See "The cache server changed from Redis to Valkey" in the
-  production checklist.
-
-- **Chart: minimum Traefik is now v3.4 when `serviceMtls` is on.** The `backends-mtls`
-  `ServersTransport` uses `rootCAs` (`- secret: platform-ca-secret`) instead of the deprecated
-  `rootCAsSecrets`, which Traefik v3.7 warns about on every load. `rootCAs` first appeared in
-  Traefik v3.4.0; on an older Traefik the field is ignored and backend verification fails, so
-  upgrade Traefik before upgrading the chart. The chart's own api-gateway image is
-  Traefik v3.6.
-
-- **The tenant, admin and QA web applications now build with Tailwind CSS 4.** Their
-  existing appearance and browser defaults are preserved while removing Tailwind 3's
-  vulnerable build-time dependency chain. The production builds and application tests are
-  unchanged at runtime.
-
-- **Go builder images now use the exact patch declared by `go.work`.** Public and hardened
-  builder fallbacks, Compose generation, seed utilities and the public-tree export all pin
-  Go 1.26.9 instead of a floating 1.26 tag. A repository guard rejects future floating or
-  stale builder tags.
-
-### Security
-
-- **Bundled maintenance tools and external dependencies were refreshed.** The maintenance
-  image now carries cosign 3.1.3 and Helm 3.22.1, removing the critical finding present in
-  the prior cosign binary. Azure Identity, the AWS SDK for Go v2 family, Go cryptography and
-  networking modules, and pinned runtime/CI images move to current patch releases. The
-  called-code vulnerability gate remains clear.
 
 ## [5.0.0] - 2026-10-17
 

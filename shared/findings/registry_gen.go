@@ -493,7 +493,7 @@ var All = []Kind{
 		FeedsRisk:       false,
 		TitleTemplate:   "{subject} has {detail} with no type",
 		Guidance:        "Open the asset's Interfaces tab and set the type of each interface the finding lists, or apply the asset's device type on the Hardware tab so its interface templates set the types. The type is what cable compatibility, speed reporting and the faceplate drawing read.",
-		Description:     "An active interface on a monitored asset has the type `other` or no type at all — what a collector records when it could not say what the port is.",
+		Description:     "An active interface on a monitored asset has the type `other` or no type at all — what a collector records when it could not say what the port is. The identity engine's placeholder interfaces (`observed-N`, holding an address no collector named an interface for) are not reported: nothing measured them, and they are replaced when a collector names the interface.",
 	},
 	{
 		Producer:        "hygiene",

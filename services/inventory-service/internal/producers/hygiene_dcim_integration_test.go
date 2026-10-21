@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vistasecurity/vistaplatform/shared/findings"
+	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/testdb"
 )
 
@@ -118,7 +119,7 @@ func newDCIMHygieneFixture(t *testing.T) *dcimHygieneFixture {
 	asset("decommissioned", map[string]any{"device_type_id": dtOld, "warranty_end": daysFromNow(-10),
 		"decommissioned_at": daysFromNow(-1)})
 	// Cabling and addressing.
-	for _, n := range []string{"sw-heard", "sw-quiet", "host-a", "host-b", "host-c", "host-d", "planner", "sw-parked", "sw-drift", "sw-measured", "host-p", "host-q", "host-r", "host-s", "dup-1", "dup-2", "dup-global", "vip-1", "vip-2"} {
+	for _, n := range []string{"sw-heard", "sw-quiet", "host-a", "host-b", "host-c", "host-d", "planner", "sw-parked", "sw-drift", "sw-measured", "host-p", "host-q", "host-r", "host-s", "dup-1", "dup-2", "dup-global", "vip-1", "vip-2", "synthetic-only", "collected-untyped"} {
 		asset(n, nil)
 	}
 
@@ -141,6 +142,19 @@ func newDCIMHygieneFixture(t *testing.T) *dcimHygieneFixture {
 		iface(k.key, k.asset, "1000base-t")
 	}
 	iface("host-a:1", "host-a", "other") // the one untyped interface
+	// The identity engine's placeholder for an address no collector named an
+	// interface for: invented, so there is nothing for a person to type. Not
+	// a finding (IH-011 counts only interfaces something reported).
+	measuredIface := func(key, assetName, name, sourceRef string) {
+		id := uuid.New()
+		f.ifaces[key] = id
+		exec(t, owner, `INSERT INTO interfaces (id, tenant_id, asset_id, name, type, source_kind, source_ref)
+		                VALUES ($1, $2, $3, $4, 'other', 'measured', $5)`, id, tenant, f.assets[assetName], name, sourceRef)
+	}
+	measuredIface("synthetic-only:0", "synthetic-only", identity.SyntheticInterfacePrefix+"1", identity.SyntheticInterfaceSourceRef)
+	// A NIC a collector reported but could not type: real, and a person can
+	// set its type, so it is a finding.
+	measuredIface("collected-untyped:0", "collected-untyped", "eth0", "agent:qa-collector")
 
 	cable := func(key, status, sourceKind string, created time.Time, confirmed any, a, b string) {
 		id := uuid.New()
@@ -259,7 +273,8 @@ func TestIntegration_HygieneDCIM_EachKindLandsOnItsAsset(t *testing.T) {
 		// neighbours; the hosts on the far ends report none either (host-s is
 		// heard, through the proposal, but holds no declared cable).
 		findings.KindCableUnconfirmed: {"sw-drift", "sw-heard", "sw-measured", "sw-parked"},
-		findings.KindInterfaceNoType:  {"host-a"},
+		// synthetic-only's one interface is the identity engine's placeholder.
+		findings.KindInterfaceNoType: {"collected-untyped", "host-a"},
 		// Both ends of the pair; not dup-global (another VRF), not the VRRP pair.
 		findings.KindDuplicateAddress: {"dup-1", "dup-2"},
 		// warranty-ok is in the future; every asset with NO warranty date is
@@ -304,6 +319,7 @@ func TestIntegration_HygieneDCIM_EachKindLandsOnItsAsset(t *testing.T) {
 	exec(t, o, `UPDATE cables SET operational_status = 'connected' WHERE tenant_id = $1 AND id = $2`, tn, f.cables["planned-old"])
 	exec(t, o, `UPDATE cables SET lldp_confirmed_at = now() WHERE tenant_id = $1 AND source_kind <> 'measured' AND operational_status = 'connected'`, tn)
 	exec(t, o, `UPDATE interfaces SET type = '10gbase-x-sfpp' WHERE tenant_id = $1 AND id = $2`, tn, f.ifaces["host-a:1"])
+	exec(t, o, `UPDATE interfaces SET type = '1000base-t' WHERE tenant_id = $1 AND id = $2`, tn, f.ifaces["collected-untyped:0"])
 	exec(t, o, `UPDATE ip_addresses SET address = '10.20.30.41/24' WHERE tenant_id = $1 AND id = $2`, tn, f.ips["dup-2"])
 	exec(t, o, `UPDATE assets SET warranty_end = $1 WHERE tenant_id = $2 AND id = $3`, daysFromNow(400), tn, f.assets["warranty-gone"])
 	exec(t, o, `UPDATE device_types SET end_of_support = $1 WHERE tenant_id = $2 AND model = 'OLD1'`, daysFromNow(3*365), tn)

@@ -133,7 +133,7 @@ what you are reporting on do you actually know anything about?
 | IH-008 | An asset in a rack has a unit position (0 U devices and children in a bay are exempt) | Low |
 | IH-009 | No cable at the asset's A end has stayed *planned* for more than 90 days | Low |
 | IH-010 | Every declared, connected cable has been confirmed by LLDP or CDP in the last 30 days — asked only of an asset that reports neighbours | Medium |
-| IH-011 | Every active interface has a type (not `other`, not blank) | Low |
+| IH-011 | Every active interface has a type (not `other`, not blank); the platform's `observed-N` placeholder interfaces are not counted | Low |
 | IH-012 | No address on the asset is shared with another asset in the same VRF, unless its role allows sharing (anycast, VIP, VRRP, HSRP, GLBP, CARP) | High |
 | IH-013 | The asset's warranty has not expired | Medium |
 | IH-014 | The asset is not past its effective end of support | High |

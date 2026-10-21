@@ -19,6 +19,7 @@ Documentation for **tenants** and **tenant admins** — people who use Vista Pla
 ## Contents
 
 ### Release notes
+- [5.1.0](./releases/5.1.0.md) — the full, per-change record for the 5.1.0 (DCIM completion) release.
 - [5.0.0](./releases/5.0.0.md) — the full, per-change record for the 5.0.0 (DCIM) release.
 - [4.6.0](./releases/4.6.0.md) — the full, per-change record for the 4.6.0 (platform maintenance) release.
 - [4.5.0](./releases/4.5.0.md) — the full, per-change record for the 4.5.0 (security hardening) release.
