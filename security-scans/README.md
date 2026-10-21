@@ -3,34 +3,94 @@
 Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 - **Scanned**: `ghcr.io/vistasecurity/*:latest` (18 images)
-- **Generated**: 2026-10-20T09:45:41Z
+- **Generated**: 2026-10-21T09:46:57Z
 - **Scanner**: [Trivy](https://github.com/aquasecurity/trivy)
 - **Scope**: fixable `CRITICAL` and `HIGH` findings (`--ignore-unfixed`) in OS packages and application dependencies
 
-## 1 CRITICAL · 46 HIGH (fixable, across 18 scanned images)
+## 1 CRITICAL · 67 HIGH (fixable, across 18 scanned images)
 
 | Image | CRITICAL | HIGH |
 |---|---:|---:|
-| `admin-service` | 0 | 0 ✅ |
-| `admin-ui` | 0 | 0 ✅ |
-| `audit-service` | 0 | 0 ✅ |
-| `auth-service` | 0 | 0 ✅ |
-| `cbom-service` | 0 | 0 ✅ |
-| `cluster-sensor-service` | 0 | 0 ✅ |
-| `compliance-engine` | 0 | 0 ✅ |
-| `device-interrogation-service` | 0 | 0 ✅ |
-| `discovery-processor-service` | 0 | 0 ✅ |
-| `inventory-service` | 0 | 0 ✅ |
-| `maintenance-service` | 1 | 46 |
-| `mcp-service` | 0 | 0 ✅ |
-| `monitoring-service` | 0 | 0 ✅ |
-| `notification-service` | 0 | 0 ✅ |
-| `pcap-processor` | 0 | 0 ✅ |
-| `sensor-manager` | 0 | 0 ✅ |
-| `tenant-health-service` | 0 | 0 ✅ |
-| `web-ui` | 0 | 0 ✅ |
+| `admin-service` | 0 | 1 |
+| `admin-ui` | 0 | 1 |
+| `audit-service` | 0 | 1 |
+| `auth-service` | 0 | 1 |
+| `cbom-service` | 0 | 1 |
+| `cluster-sensor-service` | 0 | 1 |
+| `compliance-engine` | 0 | 1 |
+| `device-interrogation-service` | 0 | 1 |
+| `discovery-processor-service` | 0 | 1 |
+| `inventory-service` | 0 | 1 |
+| `maintenance-service` | 1 | 50 |
+| `mcp-service` | 0 | 1 |
+| `monitoring-service` | 0 | 1 |
+| `notification-service` | 0 | 1 |
+| `pcap-processor` | 0 | 1 |
+| `sensor-manager` | 0 | 1 |
+| `tenant-health-service` | 0 | 1 |
+| `web-ui` | 0 | 1 |
 
 ## Findings
+
+### `admin-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `admin-ui`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `audit-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `auth-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `cbom-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `cluster-sensor-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `compliance-engine`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `device-interrogation-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `discovery-processor-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `inventory-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
 
 ### `maintenance-service`
 
@@ -38,6 +98,9 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 |---|---|---|---|---|
 | CRITICAL | [CVE-2026-33186](https://nvd.nist.gov/vuln/detail/CVE-2026-33186) | `google.golang.org/grpc` | `v1.77.0` | `1.79.3` |
 | HIGH | [CVE-2025-15558](https://nvd.nist.gov/vuln/detail/CVE-2025-15558) | `github.com/docker/cli` | `v29.0.3+incompatible` | `29.2.0` |
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.4` | `1.26.10, 1.27.3` |
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.8` | `1.26.10, 1.27.3` |
 | HIGH | [CVE-2026-24051](https://nvd.nist.gov/vuln/detail/CVE-2026-24051) | `go.opentelemetry.io/otel/sdk` | `v1.38.0` | `1.40.0` |
 | HIGH | [CVE-2026-25681](https://nvd.nist.gov/vuln/detail/CVE-2026-25681) | `golang.org/x/net` | `v0.48.0` | `0.55.0` |
 | HIGH | [CVE-2026-27136](https://nvd.nist.gov/vuln/detail/CVE-2026-27136) | `golang.org/x/net` | `v0.48.0` | `0.55.0` |
@@ -72,6 +135,7 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | HIGH | [CVE-2026-56862](https://nvd.nist.gov/vuln/detail/CVE-2026-56862) | `stdlib` | `v1.26.4` | `1.25.13, 1.26.6, 1.27.0-rc.3` |
 | HIGH | [CVE-2026-56864](https://nvd.nist.gov/vuln/detail/CVE-2026-56864) | `golang.org/x/mod` | `v0.30.0` | `0.40.0` |
 | HIGH | [CVE-2026-56865](https://nvd.nist.gov/vuln/detail/CVE-2026-56865) | `golang.org/x/mod` | `v0.30.0` | `0.40.0` |
+| HIGH | [CVE-2026-63209](https://nvd.nist.gov/vuln/detail/CVE-2026-63209) | `github.com/klauspost/compress` | `v1.18.1` | `1.18.7` |
 | HIGH | [CVE-2026-78667](https://nvd.nist.gov/vuln/detail/CVE-2026-78667) | `stdlib` | `v1.26.4` | `1.26.9, 1.27.2` |
 | HIGH | [CVE-2026-78667](https://nvd.nist.gov/vuln/detail/CVE-2026-78667) | `stdlib` | `v1.26.8` | `1.26.9, 1.27.2` |
 | HIGH | [CVE-2026-78669](https://nvd.nist.gov/vuln/detail/CVE-2026-78669) | `golang.org/x/net` | `v0.48.0` | `0.60.0` |
@@ -83,6 +147,48 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 | HIGH | [CVE-2026-97031](https://nvd.nist.gov/vuln/detail/CVE-2026-97031) | `stdlib` | `v1.26.4` | `1.26.9, 1.27.2` |
 | HIGH | [CVE-2026-97031](https://nvd.nist.gov/vuln/detail/CVE-2026-97031) | `stdlib` | `v1.26.8` | `1.26.9, 1.27.2` |
 | HIGH | [GHSA-hrxh-6v49-42gf](https://github.com/advisories/GHSA-hrxh-6v49-42gf) | `google.golang.org/grpc` | `v1.77.0` | `1.82.1` |
+
+### `mcp-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `monitoring-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `notification-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `pcap-processor`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `sensor-manager`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `tenant-health-service`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
+
+### `web-ui`
+
+| Severity | CVE | Package | Installed | Fixed in |
+|---|---|---|---|---|
+| HIGH | [CVE-2026-111943](https://nvd.nist.gov/vuln/detail/CVE-2026-111943) | `stdlib` | `v1.26.9` | `1.26.10, 1.27.3` |
 
 ## How to read this
 
@@ -98,4 +204,4 @@ Automatically generated. **Do not edit** — the next nightly run overwrites it.
 
 To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do not open a public issue.
 
-<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/39402720375).</sub>
+<sub>Produced by [this workflow run](https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/39579319223).</sub>
