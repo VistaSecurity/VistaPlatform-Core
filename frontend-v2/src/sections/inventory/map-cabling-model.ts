@@ -8,6 +8,7 @@
 // person go from the first to the second.
 import type { inventoryComponents } from '@vistasecurity/api-contract';
 import type { Neighbourhood } from './relationships';
+import { cableHref } from './object-pages/object-links';
 import type { MapEdge } from './map-model';
 
 export type NeighbourhoodCablePath = inventoryComponents['schemas']['NeighbourhoodCablePath'];
@@ -124,5 +125,5 @@ export function physicalPathTarget(edge: Pick<MapEdge, 'synthetic' | 'fromInterf
   return { enabled: false, reason: 'No interface is known for this relationship, so there is no port to trace from.' };
 }
 
-/** The Cabling lens with this cable's drawer open. */
-export const cableLensHref = (cableId: string): string => `/inventory?lens=cabling&cable=${encodeURIComponent(cableId)}`;
+/** This cable's own page (`/inventory/cables/:id`). */
+export const cableLensHref = (cableId: string): string => cableHref(cableId);

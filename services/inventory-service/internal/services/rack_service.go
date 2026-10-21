@@ -17,6 +17,9 @@ package services
 //     device and reserved unit; a move to another site or location carries the
 //     placed devices with it; the rack_utilization row is kept in step; and a
 //     delete unplaces the devices first.
+//   - racks on a floor plan (floor_plan.go): placed only on the rack's own
+//     location's plan, inside it; a move to another location takes the rack
+//     off the old plan.
 //   - rack reservations: the units exist in the rack, and overlap neither
 //     another reservation nor an installed device (under the rack's lock).
 
@@ -234,6 +237,11 @@ func rackSpecs() []*ipamSpec {
 				{Name: "asset_tag", Type: colText},
 				{Name: "form_factor", Type: colText},
 				{Name: "airflow", Type: colText},
+				// The rack on its location's floor plan (DCIM gap 9,
+				// floor_plan.go).
+				{Name: "floor_x", Type: colNumeric},
+				{Name: "floor_y", Type: colNumeric},
+				{Name: "floor_rotation", Type: colInt},
 			}, append(rackDimensionSpec(), externalIDsCol)...)...),
 			Filters: []ipamFilter{
 				{Param: "site_id", Column: "site_id", Type: colUUID},
@@ -247,14 +255,16 @@ func rackSpecs() []*ipamSpec {
 			Search: []string{"name", "facility_id", "serial", "asset_tag", "description"},
 			Order:  "lower(st.name), lower(t.name), t.id",
 			// The list carries what the Racks table shows — site, location,
-			// role, type, utilisation and device count — so it is one request.
+			// role, type, utilisation, device count and the power budget
+			// (rack_power.go, row 6.2) — so it is one request.
 			ListSelect: `to_jsonb(t) || jsonb_build_object(
 				'site', jsonb_build_object('id', st.id, 'name', st.name, 'slug', st.slug),
 				'location', CASE WHEN lc.id IS NULL THEN NULL ELSE jsonb_build_object('id', lc.id, 'name', lc.name) END,
 				'role', CASE WHEN rr.id IS NULL THEN NULL ELSE jsonb_build_object('id', rr.id, 'name', rr.name, 'slug', rr.slug, 'color', rr.color) END,
 				'rack_type', CASE WHEN rt.id IS NULL THEN NULL ELSE jsonb_build_object('id', rt.id, 'model', rt.model, 'slug', rt.slug) END,
 				'utilization', CASE WHEN ru.rack_id IS NULL THEN NULL ELSE jsonb_build_object('used_units', ru.used_units, 'total_units', ru.total_units, 'utilization', ru.utilization) END,
-				'device_count', (SELECT count(*) FROM public.assets a WHERE a.tenant_id = t.tenant_id AND a.rack_id = t.id AND a.deleted_at IS NULL))`,
+				'device_count', (SELECT count(*) FROM public.assets a WHERE a.tenant_id = t.tenant_id AND a.rack_id = t.id AND a.deleted_at IS NULL),
+				'power_utilization', ` + rackPowerUtilizationSQL + `)`,
 			Join: `JOIN public.sites st ON st.id = t.site_id
 				LEFT JOIN public.locations lc ON lc.id = t.location_id
 				LEFT JOIN public.rack_roles rr ON rr.id = t.role_id
@@ -363,6 +373,11 @@ func prepareRack(ctx context.Context, tx *sql.Tx, tenant, id uuid.UUID, row map[
 				return err
 			}
 		}
+	}
+	// After the type stamp: the footprint the floor plan checks is the
+	// rack's outer size as this write leaves it.
+	if err := prepareRackFloor(ctx, tx, id, row); err != nil {
+		return err
 	}
 	if id == uuid.Nil {
 		return nil

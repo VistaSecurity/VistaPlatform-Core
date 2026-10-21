@@ -249,7 +249,7 @@ func TestIntegration_Cables_TerminationRules(t *testing.T) {
 		{"marked connected", []map[string]any{term(dcim.ObjectKindConsoleServerPort, marked)}, []map[string]any{term(dcim.ObjectKindConsolePort, con)}, ErrIPAMInvalid},
 		{"mixed kinds on one end", []map[string]any{term(dcim.ObjectKindInterface, eth), term(dcim.ObjectKindConsoleServerPort, csp)}, []map[string]any{term(dcim.ObjectKindInterface, other)}, ErrIPAMInvalid},
 		{"empty end", []map[string]any{term(dcim.ObjectKindInterface, eth)}, []map[string]any{}, ErrIPAMInvalid},
-		{"power feed (removed until power ships)", []map[string]any{term(dcim.ObjectKind("power_feed"), uuid.New())}, []map[string]any{term(dcim.ObjectKindInterface, other)}, ErrIPAMInvalid},
+		{"unknown power feed", []map[string]any{term(dcim.ObjectKindPowerFeed, uuid.New())}, []map[string]any{term(dcim.ObjectKindInterface, other)}, ErrIPAMInvalid},
 		{"unknown termination", []map[string]any{term(dcim.ObjectKindInterface, uuid.New())}, []map[string]any{term(dcim.ObjectKindInterface, other)}, ErrIPAMInvalid},
 	}
 	for _, c := range cases {

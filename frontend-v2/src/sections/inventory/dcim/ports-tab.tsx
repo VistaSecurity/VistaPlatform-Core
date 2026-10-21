@@ -1,13 +1,15 @@
 // The asset page's Ports tab (DCIM BUILD_PLAN row 3.1; asset-inventory
 // ADR-0010 D3), headed by row 3.4's faceplate: the asset's console ports, console server ports, front ports,
-// rear ports and device bays, one section per kind, with add / edit / delete
+// rear ports, device bays and (row 6.1, D9) power ports and power outlets, one
+// section per kind, with add / edit / delete
 // and an "Apply templates" action that instantiates the device type's templates
 // for EVERY component kind (interfaces included) and reports what it did.
 //
 // Five states per section: loading, error, empty (nothing reported or declared,
 // which is not "this asset has none"), the table, and the result panel after
-// Apply templates. Reads need dcim.read; writes need dcim.manage. Power ports
-// and outlets have an API and no UI (ADR-0010 D9).
+// Apply templates. Reads need dcim.read; writes need dcim.manage. The power
+// sections add the asset's power summary (declared draws, where each port's
+// path ends, the feeds reached; PowerSummary's own five states).
 import { useState } from 'react';
 import { Link } from 'react-router';
 import type { UseQueryResult } from '@tanstack/react-query';
@@ -15,13 +17,16 @@ import type { Asset } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
 import {
   CONSOLE_PORT_TYPES, CONSOLE_PORT_TYPE_LABELS, PORT_TYPES, PORT_TYPE_LABELS,
+  POWER_OUTLET_TYPES, POWER_OUTLET_TYPE_LABELS, POWER_PORT_TYPES, POWER_PORT_TYPE_LABELS,
 } from '@vistasecurity/primitives/dcim';
 import { DrawerCloseBtn, DrawerShell, Icon, Modal, ModalField, ModalInput, ModalSelect, SectionLabel } from '../../../components/ui';
 import {
   PORT_KINDS, PORT_OBJECT_KIND, PortWriteError, applySummary, useApplyTemplates, useAssetHardware, useAssetPorts,
   useCreatePort, useDeletePort, usePatchPort,
-  type ApplyDeviceTypeResult, type ConsolePort, type DeviceBay, type FrontPort, type PortKind, type PortPage, type PortRow, type RearPort,
+  type ApplyDeviceTypeResult, type ConsolePort, type DeviceBay, type FrontPort, type PortKind, type PortPage, type PortRow,
+  type PowerOutlet, type PowerPort, type RearPort,
 } from './component-queries';
+import { PowerSummary, drawText } from './power-summary';
 import { ObjectChanges } from './object-changes';
 import { PanelEmpty, PanelError, PanelLoading } from './substrate-states';
 import { CableCell } from './cable-column';
@@ -56,6 +61,14 @@ export const PORT_KIND_INFO: Record<PortKind, KindInfo> = {
     label: 'Device bays', singular: 'device bay', icon: 'server-cog',
     emptyMessage: 'No device bays are declared. A bay holds one child asset, such as a blade in a chassis.',
   },
+  'power-ports': {
+    label: 'Power ports', singular: 'power port', icon: 'plug-zap',
+    emptyMessage: 'Nothing has reported this asset\'s power supplies and none has been declared, so this says nothing about whether it has any.',
+  },
+  'power-outlets': {
+    label: 'Power outlets', singular: 'power outlet', icon: 'zap',
+    emptyMessage: 'No power outlets are declared. A PDU lists the outlets other devices plug into, each drawing from one of its power ports.',
+  },
 };
 
 export function PortsTab({ asset }: { asset: Asset }) {
@@ -82,6 +95,8 @@ function PortsBody({ asset }: { asset: Asset }) {
     'front-ports': useAssetPorts(asset.id, 'front-ports'),
     'rear-ports': useAssetPorts(asset.id, 'rear-ports'),
     'device-bays': useAssetPorts(asset.id, 'device-bays'),
+    'power-ports': useAssetPorts(asset.id, 'power-ports'),
+    'power-outlets': useAssetPorts(asset.id, 'power-outlets'),
   };
   const [applied, setApplied] = useState<ApplyDeviceTypeResult | null>(null);
 
@@ -113,6 +128,7 @@ function PortsBody({ asset }: { asset: Asset }) {
         {canManage && editable && <ApplyTemplates asset={asset} onApplied={setApplied} />}
       </div>
       {applied && <ApplyResult result={applied} onDismiss={() => setApplied(null)} />}
+      {(kind === 'power-ports' || kind === 'power-outlets') && <PowerSummary assetId={asset.id} />}
       <KindSection asset={asset} kind={kind} canManage={canManage && editable} lists={lists} />
     </div>
   );
@@ -185,6 +201,7 @@ function KindSection({ asset, kind, canManage, lists }: { asset: Asset; kind: Po
   const cables = useAssetCables(asset.id);
   const rows = (q.data?.rows ?? []) as PortRow[];
   const rearById = new Map((lists['rear-ports'].data?.rows ?? []).map((r) => [r.id, r]));
+  const powerById = new Map((lists['power-ports'].data?.rows ?? []).map((p) => [p.id, p]));
   const frontsPerRear = new Map<string, number>();
   for (const f of lists['front-ports'].data?.rows ?? []) frontsPerRear.set(f.rear_port_id, (frontsPerRear.get(f.rear_port_id) ?? 0) + 1);
 
@@ -208,7 +225,7 @@ function KindSection({ asset, kind, canManage, lists }: { asset: Asset; kind: Po
                 <td style={{ padding: '8px 11px', whiteSpace: 'nowrap' }}>
                   <span className="mono" style={{ fontWeight: 600, color: 'var(--app-t1)' }}>{r.name}</span>
                 </td>
-                {cellsFor(kind, r, rearById, frontsPerRear).map((c, i) => <td key={i} style={{ padding: '8px 11px', color: 'var(--app-t2)' }}>{c}</td>)}
+                {cellsFor(kind, r, rearById, frontsPerRear, powerById).map((c, i) => <td key={i} style={{ padding: '8px 11px', color: 'var(--app-t2)' }}>{c}</td>)}
                 {CABLED_KIND[kind] && (
                   <td style={{ padding: '8px 11px' }} data-testid="port-cable">
                     <CableCell
@@ -256,6 +273,7 @@ function KindSection({ asset, kind, canManage, lists }: { asset: Asset; kind: Po
           kind={kind}
           row={editing === 'new' ? null : editing}
           rearPorts={lists['rear-ports'].data?.rows ?? []}
+          powerPorts={lists['power-ports'].data?.rows ?? []}
           readOnly={!canManage}
           onClose={() => setEditing(null)}
         />
@@ -267,7 +285,9 @@ function KindSection({ asset, kind, canManage, lists }: { asset: Asset; kind: Po
         tone="danger"
         icon="trash-2"
         title={`Delete ${deleting?.name ?? info.singular}?`}
-        description={kind === 'rear-ports' ? 'The front ports mapped to this rear port are deleted with it. The change log keeps what they were.' : 'The change log keeps what it was.'}
+        description={kind === 'rear-ports' ? 'The front ports mapped to this rear port are deleted with it. The change log keeps what they were.'
+          : kind === 'power-ports' ? 'Outlets that draw from it keep their place but no longer name a power port. The change log keeps what it was.'
+            : 'The change log keeps what it was.'}
         secondary={<button type="button" className="ui-btn" onClick={() => setDeleting(null)}>Cancel</button>}
         primary={(
           <button
@@ -291,6 +311,8 @@ const CABLED_KIND: Record<PortKind, CableTerminationKind | null> = {
   'front-ports': 'front_port',
   'rear-ports': 'rear_port',
   'device-bays': null,
+  'power-ports': 'power_port',
+  'power-outlets': 'power_outlet',
 };
 
 function columnsFor(kind: PortKind): string[] {
@@ -300,6 +322,8 @@ function columnsFor(kind: PortKind): string[] {
     case 'front-ports': return ['Name', 'Type', 'Rear port', 'Position'];
     case 'rear-ports': return ['Name', 'Type', 'Positions', 'Mapped'];
     case 'device-bays': return ['Name', 'Installed asset'];
+    case 'power-ports': return ['Name', 'Type', 'Maximum draw', 'Allocated draw', 'Measured'];
+    case 'power-outlets': return ['Name', 'Type', 'Power port', 'Feed leg', 'Measured'];
   }
 }
 
@@ -308,7 +332,7 @@ function typeText(type: string | null, labels: Record<string, string>): string {
   return labels[type] ?? type;
 }
 
-function cellsFor(kind: PortKind, r: PortRow, rear: Map<string, RearPort>, fronts: Map<string, number>): React.ReactNode[] {
+function cellsFor(kind: PortKind, r: PortRow, rear: Map<string, RearPort>, fronts: Map<string, number>, power: Map<string, PowerPort>): React.ReactNode[] {
   switch (kind) {
     case 'console-ports':
     case 'console-server-ports': {
@@ -330,7 +354,34 @@ function cellsFor(kind: PortKind, r: PortRow, rear: Map<string, RearPort>, front
         ? <Link key="i" to={`/inventory/assets/${b.installed_asset_id}`} style={{ color: 'var(--accent)' }}>Open installed asset</Link>
         : <span key="i" style={{ color: 'var(--app-t3)' }}>Empty</span>];
     }
+    case 'power-ports': {
+      const p = r as PowerPort;
+      return [typeText(p.type, POWER_PORT_TYPE_LABELS), drawText(p.maximum_draw), drawText(p.allocated_draw), <MeasuredCell key="m" row={p} />];
+    }
+    case 'power-outlets': {
+      const o = r as PowerOutlet;
+      return [typeText(o.type, POWER_OUTLET_TYPE_LABELS),
+        o.power_port_id ? (power.get(o.power_port_id)?.name ?? 'unknown') : <span key="p" style={{ color: 'var(--app-t3)' }}>None</span>,
+        o.feed_leg ?? '—', <MeasuredCell key="m" row={o} />];
+    }
   }
+}
+
+/** What a PDU collector measured (row 6.2), beside the declared draws: the
+ *  reading, an outlet's on / off state, and when. "Not measured" is never a
+ *  0 W. */
+function MeasuredCell({ row }: { row: { measured_draw: number | null; measured_current: number | null; measured_at: string | null; measured_state?: string | null } }) {
+  if (row.measured_at == null) return <span data-testid="power-measured" style={{ color: 'var(--app-t3)' }}>not measured</span>;
+  const parts = [
+    row.measured_state === 'on' ? 'On' : row.measured_state === 'off' ? 'Off' : null,
+    row.measured_draw != null ? `${row.measured_draw} W` : null,
+    row.measured_current != null ? `${row.measured_current} A` : null,
+  ].filter(Boolean);
+  return (
+    <span data-testid="power-measured" title={`Measured ${new Date(row.measured_at).toLocaleString()}`}>
+      {parts.length ? parts.join(' · ') : 'measured, no reading'}
+    </span>
+  );
 }
 
 // ------------------------------------------------------------------ drawer --
@@ -346,10 +397,14 @@ export interface PortDraft {
   rear_port_id: string;
   rear_port_position: string;
   installed_asset_id: string;
+  maximum_draw: string;
+  allocated_draw: string;
+  power_port_id: string;
+  feed_leg: string;
 }
 
 export function draftOf(_kind: PortKind, r: PortRow | null): PortDraft {
-  const any = (r ?? {}) as Partial<ConsolePort & FrontPort & RearPort & DeviceBay>;
+  const any = (r ?? {}) as Partial<ConsolePort & FrontPort & RearPort & DeviceBay & PowerPort & PowerOutlet>;
   return {
     name: any.name ?? '',
     label: any.label ?? '',
@@ -361,6 +416,10 @@ export function draftOf(_kind: PortKind, r: PortRow | null): PortDraft {
     rear_port_id: any.rear_port_id ?? '',
     rear_port_position: any.rear_port_position != null ? String(any.rear_port_position) : '1',
     installed_asset_id: any.installed_asset_id ?? '',
+    maximum_draw: any.maximum_draw != null ? String(any.maximum_draw) : '',
+    allocated_draw: any.allocated_draw != null ? String(any.allocated_draw) : '',
+    power_port_id: any.power_port_id ?? '',
+    feed_leg: any.feed_leg ?? '',
   };
 }
 
@@ -379,8 +438,15 @@ export function bodyOf(kind: PortKind, d: PortDraft): Record<string, unknown> {
       return { ...common, type: d.type, color: nullIfEmpty(d.color), positions: Number(d.positions) };
     case 'device-bays':
       return { ...common, installed_asset_id: nullIfEmpty(d.installed_asset_id) };
+    // A draw left empty is "not recorded", sent as null — never 0 W.
+    case 'power-ports':
+      return { ...common, type: nullIfEmpty(d.type), maximum_draw: wattsOf(d.maximum_draw), allocated_draw: wattsOf(d.allocated_draw) };
+    case 'power-outlets':
+      return { ...common, type: nullIfEmpty(d.type), power_port_id: nullIfEmpty(d.power_port_id), feed_leg: nullIfEmpty(d.feed_leg) };
   }
 }
+
+const wattsOf = (s: string): number | null => (s.trim() === '' ? null : Number(s));
 
 /** What stops a draft saving, before the server is asked. */
 export function draftProblem(kind: PortKind, d: PortDraft, rearPorts: readonly RearPort[]): string | null {
@@ -400,11 +466,20 @@ export function draftProblem(kind: PortKind, d: PortDraft, rearPorts: readonly R
     if (rp && pos > rp.positions) return `${rp.name} has ${rp.positions} position${rp.positions === 1 ? '' : 's'}.`;
   }
   if ((kind === 'front-ports' || kind === 'rear-ports') && d.color.trim() && !/^#?[0-9a-fA-F]{6}$/.test(d.color.trim())) return 'Colour is six hex digits.';
+  if (kind === 'power-ports') {
+    for (const [k, what] of [['maximum_draw', 'Maximum draw'], ['allocated_draw', 'Allocated draw']] as const) {
+      const v = d[k].trim();
+      if (v && !(Number.isInteger(Number(v)) && Number(v) >= 1)) return `${what} is a whole number of watts from 1.`;
+    }
+    if (d.maximum_draw.trim() && d.allocated_draw.trim() && Number(d.allocated_draw) > Number(d.maximum_draw)) {
+      return 'Allocated draw cannot exceed the maximum draw.';
+    }
+  }
   return null;
 }
 
-function PortDrawer({ asset, kind, row, rearPorts, readOnly, onClose }: {
-  asset: Asset; kind: PortKind; row: PortRow | null; rearPorts: readonly RearPort[]; readOnly: boolean; onClose: () => void;
+function PortDrawer({ asset, kind, row, rearPorts, powerPorts, readOnly, onClose }: {
+  asset: Asset; kind: PortKind; row: PortRow | null; rearPorts: readonly RearPort[]; powerPorts: readonly PowerPort[]; readOnly: boolean; onClose: () => void;
 }) {
   const info = PORT_KIND_INFO[kind];
   const [d, setD] = useState<PortDraft>(() => draftOf(kind, row));
@@ -424,9 +499,12 @@ function PortDrawer({ asset, kind, row, rearPorts, readOnly, onClose }: {
     else create.mutate({ ...body, asset_id: asset.id }, done);
   };
 
-  const typeOptions = kind === 'console-ports' || kind === 'console-server-ports'
+  const typeOptions: readonly (readonly [string, string])[] = kind === 'console-ports' || kind === 'console-server-ports'
     ? CONSOLE_PORT_TYPES.map((t) => [t, CONSOLE_PORT_TYPE_LABELS[t]] as const)
-    : PORT_TYPES.map((t) => [t, PORT_TYPE_LABELS[t]] as const);
+    : kind === 'power-ports' ? POWER_PORT_TYPES.map((t) => [t, POWER_PORT_TYPE_LABELS[t]] as const)
+      : kind === 'power-outlets' ? POWER_OUTLET_TYPES.map((t) => [t, POWER_OUTLET_TYPE_LABELS[t]] as const)
+        : PORT_TYPES.map((t) => [t, PORT_TYPE_LABELS[t]] as const);
+  const optionalType = kind === 'console-ports' || kind === 'console-server-ports' || kind === 'power-ports' || kind === 'power-outlets';
   const hasType = kind !== 'device-bays';
 
   return (
@@ -444,7 +522,7 @@ function PortDrawer({ asset, kind, row, rearPorts, readOnly, onClose }: {
           {hasType && (
             <ModalField label="Type">
               <ModalSelect aria-label="Type" value={d.type} onChange={(e) => set('type', e.target.value)}>
-                <option value="">{kind === 'console-ports' || kind === 'console-server-ports' ? 'Unspecified' : 'Choose a type…'}</option>
+                <option value="">{optionalType ? 'Unspecified' : 'Choose a type…'}</option>
                 {typeOptions.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
               </ModalSelect>
             </ModalField>
@@ -476,6 +554,32 @@ function PortDrawer({ asset, kind, row, rearPorts, readOnly, onClose }: {
             <ModalField label="Colour" hint="Six hex digits, e.g. 2196f3.">
               <ModalInput aria-label="Colour" value={d.color} onChange={(e) => set('color', e.target.value)} />
             </ModalField>
+          )}
+          {kind === 'power-ports' && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <ModalField label="Maximum draw (W)" hint="The most this port can draw. Empty means not recorded.">
+                <ModalInput aria-label="Maximum draw" inputMode="numeric" value={d.maximum_draw} onChange={(e) => set('maximum_draw', e.target.value)} />
+              </ModalField>
+              <ModalField label="Allocated draw (W)" hint="The draw budgeted for it. Empty means not recorded.">
+                <ModalInput aria-label="Allocated draw" inputMode="numeric" value={d.allocated_draw} onChange={(e) => set('allocated_draw', e.target.value)} />
+              </ModalField>
+            </div>
+          )}
+          {kind === 'power-outlets' && (
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 12 }}>
+              <ModalField label="Power port" hint={powerPorts.length === 0 ? 'Declare the PDU\'s power port (its inlet) to name it here.' : 'The power port of this asset the outlet draws from.'}>
+                <ModalSelect aria-label="Power port" value={d.power_port_id} disabled={powerPorts.length === 0} onChange={(e) => set('power_port_id', e.target.value)}>
+                  <option value="">None</option>
+                  {powerPorts.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </ModalSelect>
+              </ModalField>
+              <ModalField label="Feed leg">
+                <ModalSelect aria-label="Feed leg" value={d.feed_leg} onChange={(e) => set('feed_leg', e.target.value)}>
+                  <option value="">—</option>
+                  {['A', 'B', 'C'].map((l) => <option key={l} value={l}>{l}</option>)}
+                </ModalSelect>
+              </ModalField>
+            </div>
           )}
           {kind === 'device-bays' && (
             <ModalField label="Installed asset" hint="The id of the asset sitting in this bay; leave empty for an empty bay.">

@@ -359,6 +359,9 @@ const TENANT_TO_PLATFORM: Record<string, string | null> = {
   // sign-in has no tenant analogue to refuse, so there is nothing to mirror.
   PlatformAccountError: null,
   PLATFORM_ACCOUNT_CODE: null,
+  // The tenant inventory lens keys a remembered column choice by user and must
+  // render without a provider; admin-ui has no such per-user convenience yet.
+  useOptionalAuth: null,
   // Legacy tenant wire types from auth/types.ts (web-ui shapes), no platform analogue:
   ApiResponse: null, User: null, Tenant: null, AuthResponseType: null,
   LoginRequest: null, RegisterRequest: null, AuthContextType: null,

@@ -6,5 +6,5 @@
   "management_ip": "198.51.100.10",
   "management_port": 443,
   "tenant_segments": [],
-  "provenance": "SYNTHESISED for the DCIM row 1.5c parity test, in the iControl REST shapes of the package's unit-test and pipeline fixtures: a copper port untagged in one VLAN, a two-port LACP trunk tagged in two, self IPs (one in route domain 2), the route-domain list and the ARP table. sys/version and sys/hardware are the pipeline fixtures with the serial changed. A secret is planted in an interface description, which the typed projection has no field for."
+  "provenance": "SYNTHESISED for the DCIM row 1.5c parity test, in the iControl REST shapes of the package's unit-test and pipeline fixtures: a copper port untagged in one VLAN, a two-port LACP trunk tagged in two, self IPs (one in route domain 2), the route-domain list with each route domain's VLANs (servers is in no list, so its self IP decides) and the ARP table. sys/version and sys/hardware are the pipeline fixtures with the serial changed. A secret is planted in an interface description, which the typed projection has no field for."
 }

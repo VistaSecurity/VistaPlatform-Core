@@ -129,6 +129,27 @@ what you are reporting on do you actually know anything about?
 | IH-004 | Something has observed the asset within the last 30 days | Low |
 | IH-005 | No suspected duplicate records for the asset | Medium |
 | IH-006 | No relationships pointing at an asset that has been archived or deleted | Low |
+| IH-007 | A rack-mountable hardware asset (its device type is taller than 0 U) is in a rack | Low |
+| IH-008 | An asset in a rack has a unit position (0 U devices and children in a bay are exempt) | Low |
+| IH-009 | No cable at the asset's A end has stayed *planned* for more than 90 days | Low |
+| IH-010 | Every declared, connected cable has been confirmed by LLDP or CDP in the last 30 days — asked only of an asset that reports neighbours | Medium |
+| IH-011 | Every active interface has a type (not `other`, not blank) | Low |
+| IH-012 | No address on the asset is shared with another asset in the same VRF, unless its role allows sharing (anycast, VIP, VRRP, HSRP, GLBP, CARP) | High |
+| IH-013 | The asset's warranty has not expired | Medium |
+| IH-014 | The asset is not past its effective end of support | High |
+| IH-015 | The asset does not reach its effective end of support within 12 months | Medium |
+
+IH-007 to IH-015 judge the asset's **DCIM record** — where it is mounted, how it
+is cabled, how its interfaces and addresses are recorded, and its commercial
+lifecycle. Each finding says where the fix is made: **Infrastructure → Racks**
+for placement (IH-007, IH-008), the asset's **Ports** tab for cables (IH-009,
+IH-010), its **Interfaces** tab for interface types (IH-011),
+**Infrastructure → Networks** for duplicate addresses (IH-012), and the
+**Lifecycle** card on its **Hardware** tab for warranty and end of support
+(IH-013 to IH-015). The effective end of support is the one the Lifecycle card
+shows: the earlier of the device type's and the platform's, each declared or
+taken from the end-of-life catalogue. IH-014 and IH-015 are exclusive — an asset
+already past end of support fails IH-014, not both.
 
 Nothing here contributes to an asset's **risk score**. A host with no owner is
 not less secure; it is less *manageable*, and the two are worth keeping apart.
@@ -139,10 +160,17 @@ Everything here is a worklist, not a threat.
 - **It ignores assets still waiting in Approvals.** A discovery nobody has
   approved has no owner by construction, so counting it would make your hygiene
   score a function of how much you scanned this week.
-- **It does not guess about duplicates or orphan relationships.** IH-005 and
-  IH-006 report **Not assessed** until the platform's hygiene checks have
+- **It does not guess about duplicates or orphan relationships.** IH-005 to
+  IH-015 report **Not assessed** until the platform's hygiene checks have
   actually evaluated the asset. A count of zero from a check that never ran is
   not a clean bill of health, and the platform will not show it as one.
+- **Unknown is not compliant.** The DCIM controls judge only assets that record
+  what they ask about: an asset with no warranty end date is not assessed by
+  IH-013, one with no end of support recorded is not assessed by IH-014 or
+  IH-015, one with no rack by IH-008, and one with no device type by IH-007. An
+  asset that reports no LLDP or CDP neighbours is never failed by IH-010 —
+  absent data is not a contradiction. If a cable's far device genuinely does not
+  speak LLDP or CDP, record a control override with that rationale.
 
 ### Lifecycle
 
@@ -251,6 +279,23 @@ Each control has:
 > severity), and **Not assessed** when it could not be checked. Severity labels
 > each finding and weights the score (Critical 4× … Low 1×). Full explanation:
 > [Control results and how the score is computed](./framework-transparency.md#control-results-pass-fail-and-not-assessed).
+
+### How a score is computed
+
+A framework's score is the severity-weighted share of its **assessed** controls
+that pass. A control is assessed only over its **population** — the assets it is
+about, as its measurement defines them: IH-001 asks only of approved assets,
+IH-008 only of racked assets, IH-013 only of assets with a warranty end date
+recorded. An asset outside a control's population is in neither the numerator
+nor the denominator, and a control whose population is empty is **Not assessed**
+— never a pass. Not-assessed controls are left out of the score and counted in
+the coverage line beside it (*"9 of 15 controls assessed"*).
+
+The same rule produces every score you see: the scorecards on
+**Risk & Compliance → Posture**, the preview score on each framework card, and
+the control-by-control results. An inventory with no racks or warranty dates
+recorded therefore does not score higher than one that records them — it scores
+over fewer controls, and the coverage line says how many.
 
 ## Measurement Structure
 

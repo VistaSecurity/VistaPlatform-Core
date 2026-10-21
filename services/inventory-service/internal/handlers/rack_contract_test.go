@@ -33,7 +33,7 @@ func TestRackContract_SchemasMatchTablesAndEngine(t *testing.T) {
 	}
 	listExtras := map[string][]string{
 		"rack_types":        {"manufacturer"},
-		"racks":             {"site", "location", "role", "rack_type", "utilization", "device_count"},
+		"racks":             {"site", "location", "role", "rack_type", "utilization", "device_count", "power_utilization"},
 		"rack_reservations": {"rack"},
 	}
 	keys := func(m map[string]interface{}) []string {

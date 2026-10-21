@@ -1,0 +1,12 @@
+Flags : b - breakout port
+---------------------------------
+
+vdc_id: 0 vdc_name: Unallocated interfaces:
+        Ethernet3/8
+
+vdc_id: 1 vdc_name: core-a interfaces:
+        Ethernet3/1           Ethernet3/2           Ethernet3/3
+        Ethernet3/4
+
+vdc_id: 2 vdc_name: agg-b interfaces:
+        Ethernet4/1           Ethernet4/2(b)        Eth4/3

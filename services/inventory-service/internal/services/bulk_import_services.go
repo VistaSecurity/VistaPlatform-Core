@@ -708,6 +708,19 @@ func assetBulk(db *sql.DB, deps BulkDeps) *bulkSimple {
 			{Name: "serial", Example: "FOC1234ABCD"},
 			{Name: "asset_tag", Example: "A-0001", Help: "When present, the asset is matched on it."},
 			{Name: "description", Example: ""},
+			// The commercial lifecycle (DCIM gap 4), written through the same
+			// hardware PATCH as serial and asset_tag.
+			{Name: "purchase_date", Example: "2024-03-01", Help: "YYYY-MM-DD."},
+			{Name: "warranty_start", Example: "2024-03-01", Help: "YYYY-MM-DD."},
+			{Name: "warranty_end", Example: "2027-02-28", Help: "YYYY-MM-DD; not before warranty_start."},
+			{Name: "purchase_cost", Example: "4200.00", Help: "A non-negative amount, at most two decimals."},
+			{Name: "purchase_currency", Example: "USD", Help: "ISO 4217 code."},
+			{Name: "purchase_order", Example: "PO-1001"},
+			{Name: "vendor", Example: "", Help: "Who sold it (the reseller), not the manufacturer."},
+			{Name: "support_contract", Example: ""},
+			{Name: "support_contract_end", Example: "", Help: "YYYY-MM-DD."},
+			{Name: "installed_at", Example: "", Help: "YYYY-MM-DD."},
+			{Name: "decommissioned_at", Example: "", Help: "YYYY-MM-DD; not before installed_at."},
 		},
 	}
 	// Placement columns (site, location, rack, position, face) are one more
@@ -732,7 +745,11 @@ func assetBulk(db *sql.DB, deps BulkDeps) *bulkSimple {
 				SELECT a.id::text, COALESCE(a.display_name, ''), a.class_key, COALESCE(a.hostname, ''), COALESCE(host(a.primary_address), ''),
 				       COALESCE(a.environment::text, ''), COALESCE(bu.path, ''), COALESCE(a.owner_email, ''), COALESCE(a.support_group, ''),
 				       COALESCE(m.name || '/' || dt.model, ''), COALESCE(r.name, ''), COALESCE(p.name, ''),
-				       COALESCE(a.serial, ''), COALESCE(a.asset_tag, ''), COALESCE(a.description, '')
+				       COALESCE(a.serial, ''), COALESCE(a.asset_tag, ''), COALESCE(a.description, ''),
+				       COALESCE(a.purchase_date::text, ''), COALESCE(a.warranty_start::text, ''), COALESCE(a.warranty_end::text, ''),
+				       COALESCE(a.purchase_cost::text, ''), COALESCE(a.purchase_currency::text, ''), COALESCE(a.purchase_order, ''),
+				       COALESCE(a.vendor, ''), COALESCE(a.support_contract, ''), COALESCE(a.support_contract_end::text, ''),
+				       COALESCE(a.installed_at::text, ''), COALESCE(a.decommissioned_at::text, '')
 				  FROM public.assets a
 				  LEFT JOIN public.device_types dt ON dt.id = a.device_type_id
 				  LEFT JOIN public.manufacturers m ON m.id = dt.manufacturer_id
@@ -750,14 +767,23 @@ func assetBulk(db *sql.DB, deps BulkDeps) *bulkSimple {
 			defer func() { _ = rows.Close() }()
 			for rows.Next() {
 				var id string
-				v := make([]string, 14)
-				if err := rows.Scan(&id, &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9], &v[10], &v[11], &v[12], &v[13]); err != nil {
+				commercial := CommercialFields()
+				v := make([]string, 14+len(commercial))
+				dest := []any{&id}
+				for i := range v {
+					dest = append(dest, &v[i])
+				}
+				if err := rows.Scan(dest...); err != nil {
 					return err
 				}
-				out = append(out, bulkExisting{ID: id, Vals: map[string]string{
+				vals := map[string]string{
 					"display_name": v[0], "class_key": v[1], "hostname": v[2], "ip_address": v[3], "environment": v[4],
 					"business_unit": v[5], "owner_email": v[6], "support_group": v[7], "device_type": v[8], "device_role": v[9],
-					"platform": v[10], "serial": v[11], "asset_tag": v[12], "description": v[13]}})
+					"platform": v[10], "serial": v[11], "asset_tag": v[12], "description": v[13]}
+				for i, k := range commercial {
+					vals[k] = v[14+i]
+				}
+				out = append(out, bulkExisting{ID: id, Vals: vals})
 			}
 			return rows.Err()
 		})
@@ -767,6 +793,17 @@ func assetBulk(db *sql.DB, deps BulkDeps) *bulkSimple {
 	b.check = func(ctx context.Context, tenant uuid.UUID, v map[string]string, create bool, st *bulkCustomState) error {
 		if create && v["display_name"] == "" && v["hostname"] == "" && v["asset_tag"] == "" {
 			return errors.New("display_name, hostname or asset_tag is required to identify a new asset")
+		}
+		// The commercial cells are checked here, in the dry run, by the same
+		// parser the write uses — a bad date is a row error, not a failed apply.
+		for _, col := range CommercialFields() {
+			if v[col] == "" {
+				continue
+			}
+			raw, _ := json.Marshal(v[col])
+			if _, err := parseHardwareValue(col, hardwareFields[col], raw); err != nil {
+				return err
+			}
 		}
 		for col, key := range refCols {
 			if v[col] != "" {
@@ -803,7 +840,7 @@ func assetBulk(db *sql.DB, deps BulkDeps) *bulkSimple {
 			}
 			put(field, rid)
 		}
-		for _, col := range []string{"serial", "asset_tag"} {
+		for _, col := range append([]string{"serial", "asset_tag"}, CommercialFields()...) {
 			if only != nil && !only[col] {
 				continue
 			}
@@ -877,7 +914,9 @@ func assetBulk(db *sql.DB, deps BulkDeps) *bulkSimple {
 			switch c {
 			case "device_type", "device_role", "platform", "serial", "asset_tag":
 			default:
-				ctxCols = true
+				if _, commercial := hardwareFields[c]; !commercial {
+					ctxCols = true
+				}
 			}
 		}
 		if ctxCols {

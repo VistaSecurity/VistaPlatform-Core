@@ -223,6 +223,8 @@ export const SETTINGS_NAV: SettingsNavSection[] = [
     // behind it); the Apply button inside is gated by each kind's own manage
     // permission, so a reader can check a file but not write it.
     { key: 'import', label: 'Import', icon: 'file-up', built: true, permission: TENANT_PERMISSIONS.dcim.read, workspacePath: '/inventory/manage/import', job: 'Bring objects in from a CSV — check every row first, then apply. Business units, locations, assets, interfaces, the device catalogue and IPAM.' },
+    // DCIM gap 8. dcim.read opens the page; its write controls are behind dcim.manage.
+    { key: 'spares', label: 'Spares & RMA', icon: 'package', built: true, permission: TENANT_PERMISSIONS.dcim.read, workspacePath: '/inventory/manage/spares', job: 'Keep the spare parts on your shelves — quantities, stock locations, reservations — install them into assets, and follow each unit out for RMA until its replacement is back in stock.' },
     // DCIM row 4.1. circuits.read: the page reads /circuits/*; its write
     // controls are behind circuits.manage.
     { key: 'circuit-providers', label: 'Circuit Providers', icon: 'globe', built: true, permission: TENANT_PERMISSIONS.circuits.read, workspacePath: '/inventory/manage/circuit-providers', job: 'Maintain the circuit providers, their accounts and networks, and the circuit types and groups the Circuits view builds on.' },

@@ -89,6 +89,9 @@ func (virtCRUD) UpdateHardware(context.Context, uuid.UUID, uuid.UUID, services.H
 func (virtCRUD) ApplyDeviceType(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*services.ApplyDeviceTypeResult, error) {
 	return nil, services.ErrIPAMNotFound
 }
+func (virtCRUD) EOLCatalogueEntries(context.Context, uuid.UUID, string, string, int) ([]services.EOLCatalogueRef, error) {
+	return nil, services.ErrIPAMNotFound
+}
 
 // ClusterHosts is GET /clusters/{id}/hosts.
 func (h *VirtualizationHandler) ClusterHosts(c *gin.Context) {

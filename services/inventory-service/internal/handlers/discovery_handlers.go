@@ -501,7 +501,7 @@ func (h *DiscoveryHandler) IngestPipelineFindings(c *gin.Context) {
 			findings[0].Protocol, findings[0].CipherSuite)
 	}
 
-	report, err := h.assets.IngestPipelineFindingsReport(tenantUUID, findings)
+	report, err := h.assets.IngestPipelineFindingsReport(c.Request.Context(), tenantUUID, findings)
 	if err != nil {
 		log.Printf("[DiscoveryHandler] IngestPipelineFindings failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "ingest_failed"})

@@ -109,8 +109,15 @@ func snmpCollectNetwork(ctx context.Context, result *InterrogateResult, conn net
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
+	// A column two phases read (entPhysicalClass: the hardware and the
+	// power supplies' sensors) is walked once.
+	walked := map[string]map[string]snmpVarBind{}
 	walk := func(column string) map[string]snmpVarBind {
+		if m, ok := walked[column]; ok {
+			return m
+		}
 		m, _ := snmpWalkColumn(ctx, result, conn, community, column, timeout, deadline)
+		walked[column] = m
 		return m
 	}
 
@@ -144,6 +151,9 @@ func snmpCollectNetwork(ctx context.Context, result *InterrogateResult, conn net
 		ifName[i.index] = i.obs.Name
 	}
 	n.InventoryItems, n.Modules, n.VirtualChassis = snmpHardware(walk, ifName, snmpObjectIDHint(sysObjectID).Vendor)
+	// The power sockets a PDU (or a power supply's sensors) measure (DCIM
+	// row 6.2, snmp_power.go).
+	n.PowerPorts, n.PowerOutlets = snmpPower(walk, sysObjectID)
 	if n.Empty() {
 		return nil
 	}

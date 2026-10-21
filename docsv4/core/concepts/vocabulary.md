@@ -35,6 +35,8 @@ data with a NetBox instance. A dash means there is no counterpart.
 | Inventory Item Role | Inventory Item Roles | An Inventory Item Role. | `dcim/inventory-item-role` |
 | Virtual Chassis | Virtual Chassis | A Virtual Chassis. | `dcim/virtual-chassis` |
 | Device Bay | Device Bays | A Device Bay. | `dcim/device-bay` |
+| Virtual Device Context | Virtual Device Contexts | A Virtual Device Context. | `dcim/virtual-device-context` |
+| RMA Case | RMA Cases | A RMA Case. | — |
 | Interface Template | Interface Templates | An Interface Template. | `dcim/interface-template` |
 | Console Port Template | Console Port Templates | A Console Port Template. | `dcim/console-port-template` |
 | Console Server Port Template | Console Server Port Templates | A Console Server Port Template. | `dcim/console-server-port-template` |
@@ -52,6 +54,8 @@ data with a NetBox instance. A dash means there is no counterpart.
 | Rear Port | Rear Ports | A Rear Port. | `dcim/rear-port` |
 | Power Port | Power Ports | A Power Port. | `dcim/power-port` |
 | Power Outlet | Power Outlets | A Power Outlet. | `dcim/power-outlet` |
+| Power Panel | Power Panels | A Power Panel. | `dcim/power-panel` |
+| Power Feed | Power Feeds | A Power Feed. | `dcim/power-feed` |
 | Cable | Cables | A Cable. | `dcim/cable` |
 | Cable Termination | Cable Terminations | A Cable Termination. | `dcim/cable-termination` |
 | Cable Path | Cable Paths | A Cable Path. | `dcim/cable-path` |
@@ -66,9 +70,12 @@ data with a NetBox instance. A dash means there is no counterpart.
 | IP Address | IP Addresses | An IP Address. | `ipam/ip-address` |
 | VLAN Group | VLAN Groups | A VLAN Group. | `ipam/vlan-group` |
 | VLAN | VLANs | A VLAN. | `ipam/vlan` |
+| VLAN Translation Policy | VLAN Translation Policies | A VLAN Translation Policy. | `ipam/vlan-translation-policy` |
+| VLAN Translation Rule | VLAN Translation Rules | A VLAN Translation Rule. | `ipam/vlan-translation-rule` |
 | FHRP Group | FHRP Groups | An FHRP Group. | `ipam/fhrp-group` |
 | FHRP Group Assignment | FHRP Group Assignments | An FHRP Group Assignment. | `ipam/fhrp-group-assignment` |
 | ASN | ASNs | An ASN. | `ipam/asn` |
+| ASN Range | ASN Ranges | An ASN Range. | `ipam/asn-range` |
 | Circuit Provider | Providers | A Provider. | `circuits/provider` |
 | Provider Account | Provider Accounts | A Provider Account. | `circuits/provider-account` |
 | Provider Network | Provider Networks | A Provider Network. | `circuits/provider-network` |
@@ -77,6 +84,9 @@ data with a NetBox instance. A dash means there is no counterpart.
 | Circuit Termination | Circuit Terminations | A Circuit Termination. | `circuits/circuit-termination` |
 | Circuit Group | Circuit Groups | A Circuit Group. | `circuits/circuit-group` |
 | Circuit Group Assignment | Circuit Group Assignments | A Circuit Group Assignment. | `circuits/circuit-group-assignment` |
+| Virtual Circuit Type | Virtual Circuit Types | A Virtual Circuit Type. | `circuits/virtual-circuit-type` |
+| Virtual Circuit | Virtual Circuits | A Virtual Circuit. | `circuits/virtual-circuit` |
+| Virtual Circuit Termination | Virtual Circuit Terminations | A Virtual Circuit Termination. | `circuits/virtual-circuit-termination` |
 | Cluster Type | Cluster Types | A Cluster Type. | `virtualization/cluster-type` |
 | Cluster Group | Cluster Groups | A Cluster Group. | `virtualization/cluster-group` |
 | Cluster | Clusters | A Cluster. | `virtualization/cluster` |

@@ -214,6 +214,19 @@ var assetFields = []catalog.FieldInfo{
 	colAs("platform.id", "platform_id", ast.TypeUUID),
 	col("serial", ast.TypeKeyword),
 	col("asset_tag", ast.TypeKeyword),
+	// The commercial lifecycle (DCIM gap 4; QUERY_LANGUAGE §15): the declared
+	// date columns and the seller compare like any timestamp / keyword;
+	// `end_of_support` is the EFFECTIVE date — the earlier of the device
+	// type's and the platform's, each declared or else its linked end-of-life
+	// catalogue entry's eol_date (shared/query/sql AssetEffectiveEndOfSupportSQL).
+	col("purchase_date", ast.TypeTimestamp),
+	col("warranty_end", ast.TypeTimestamp),
+	col("support_contract_end", ast.TypeTimestamp),
+	col("installed_at", ast.TypeTimestamp),
+	col("decommissioned_at", ast.TypeTimestamp),
+	col("vendor", ast.TypeKeyword),
+	withDescription(derived("end_of_support", "asset.end_of_support", ast.TypeTimestamp),
+		"the effective end of support: the earlier of the device type's and the platform's, declared or from the end-of-life catalogue"),
 	// Virtualisation (DCIM row 4.2): the asset's cluster — a VM's
 	// (assets.cluster_id) or a hypervisor's (cluster_hosts). `cluster`
 	// matches the cluster's name, `cluster.type` its type's name or slug,
@@ -244,6 +257,10 @@ var assetFields = []catalog.FieldInfo{
 	// domain.
 	derived("module_type", "asset.module_type", ast.TypeKeyword),
 	derived("inventory_item.serial", "asset.inventory_item_serial", ast.TypeKeyword),
+	// DCIM gap 8: the stock state of one of the asset's items. An item on an
+	// asset is installed, or rma while a part out for RMA is still in it.
+	withDescription(withEnum(derived("inventory_item.stock_state", "asset.inventory_item_stock_state", ast.TypeKeyword), inventoryItemStockStateValues...),
+		"the stock state of one of the asset's inventory items (rma: a part out for RMA still in the asset)"),
 	derived("virtual_chassis", "asset.virtual_chassis", ast.TypeKeyword),
 	col("position", ast.TypeNumber),
 	enumAs("face", "face", rackFaceValues...),
@@ -290,6 +307,16 @@ var assetFields = []catalog.FieldInfo{
 	withDescription(derived("wireless_lan.ssid", "asset.wireless_lan.ssid", ast.TypeKeyword), "the SSID of a wireless LAN one of the asset's interfaces serves"),
 	withDescription(withEnum(derived("wireless_lan.auth_type", "asset.wireless_lan.auth_type", ast.TypeKeyword), wirelessAuthTypeValues...),
 		"the authentication of a wireless LAN the asset serves"),
+	// Virtual circuits (DCIM gap 10; QUERY_LANGUAGE §15): a virtual circuit
+	// one of the asset's interfaces terminates (shared/query/sql/virtualcircuit.go).
+	withDescription(derived("virtual_circuit", "asset.virtual_circuit", ast.TypeKeyword),
+		"a virtual circuit one of the asset's interfaces terminates, by circuit ID or type"),
+	withDescription(derived("virtual_circuit.cid", "asset.virtual_circuit.cid", ast.TypeKeyword),
+		"the circuit ID of a virtual circuit the asset terminates"),
+	withDescription(derived("virtual_circuit.provider", "asset.virtual_circuit.provider", ast.TypeKeyword),
+		"the provider of a virtual circuit the asset terminates, by name or slug"),
+	withDescription(withEnum(derived("virtual_circuit.role", "asset.virtual_circuit.role", ast.TypeKeyword), virtualCircuitRoleValues...),
+		"the role (peer, hub, spoke) of the asset's interface in a virtual circuit"),
 	// Cabling (DCIM row 3.2; QUERY_LANGUAGE §15): the cables on the asset's
 	// components (shared/query/sql/cabling.go). cable.status is the cable's
 	// operational status; cabled_to the asset on a cable's far end.
@@ -299,6 +326,20 @@ var assetFields = []catalog.FieldInfo{
 		"the operational status (connected, planned, decommissioning) of a cable on one of the asset's ports"),
 	withDescription(derived("cabled_to", "asset.cabled_to", ast.TypeKeyword),
 		"an asset on the far end of one of the asset's cables, by hostname or display name"),
+	// Power (DCIM row 6.1; QUERY_LANGUAGE §15): the power feeds the asset's
+	// power ports reach through their cable paths (shared/query/sql/power.go).
+	withDescription(withEnum(derived("power_feed.status", "asset.power_feed.status", ast.TypeKeyword), powerFeedStatusValues...),
+		"the status of a power feed one of the asset's power ports reaches"),
+	withEnum(derived("power_feed.type", "asset.power_feed.type", ast.TypeKeyword), powerFeedTypeValues...),
+	withEnum(derived("power_feed.supply", "asset.power_feed.supply", ast.TypeKeyword), powerFeedSupplyValues...),
+	withEnum(derived("power_feed.phase", "asset.power_feed.phase", ast.TypeKeyword), powerFeedPhaseValues...),
+	withDescription(derived("power_feed.voltage", "asset.power_feed.voltage", ast.TypeNumber), "the voltage of a power feed the asset draws from"),
+	withDescription(derived("power_feed.amperage", "asset.power_feed.amperage", ast.TypeNumber), "the amperage of a power feed the asset draws from"),
+	withDescription(derived("power_feed.available_power", "asset.power_feed.available_power", ast.TypeNumber),
+		"the available power (VA) of a power feed the asset draws from"),
+	withDescription(derived("power_feed.panel", "asset.power_feed.panel", ast.TypeKeyword), "the power panel of a feed the asset draws from, by name"),
+	withDescription(derived("power_feed.rack", "asset.power_feed.rack", ast.TypeKeyword), "the rack a feed the asset draws from serves, by name"),
+	withDescription(derived("power_feed.site", "asset.power_feed.site", ast.TypeKeyword), "the site of a feed the asset draws from, by name or slug"),
 	{
 		Name: "risk", Type: ast.TypeBand,
 		Accessor: ast.Accessor{
@@ -534,6 +575,9 @@ var interfaceFields = []catalog.FieldInfo{
 	enumAs("operational_status", "operational_status", interfaceOperStatusValues...),
 	col("description", ast.TypeText),
 	col("id", ast.TypeUUID),
+	// DCIM gap 1: a virtual device context the interface belongs to, by name.
+	withDescription(derived("virtual_device_context", "interface.virtual_device_context", ast.TypeKeyword),
+		"the name of a virtual device context (VDOM, vsys, VDC) the interface belongs to"),
 }
 
 // measurementFields carries only §8's reserved scalar; everything else a

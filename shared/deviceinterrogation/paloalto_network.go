@@ -20,6 +20,11 @@ import (
 //     aggregate (`ae1`) its members.
 //   - A sub-interface (`ethernet1/2.100`, tag 100) is its parent plus its
 //     untagged VLAN, exactly as row 1.5a models a host's VLAN sub-interface.
+//   - <ifnet>'s <vsys> is the number of the virtual system that owns the
+//     interface: the virtual device context (DCIM gap 1) `vsys<N>` with
+//     identifier N, the name PAN-OS itself gives it. 0 or absent is an
+//     interface no vsys owns. A single-vsys firewall's interfaces are all in
+//     vsys1, which is what the device says.
 
 // panNetIfnet is the <ifnet> entry the network projection reads.
 type panNetIfnet struct {
@@ -27,6 +32,67 @@ type panNetIfnet struct {
 	IP   string `xml:"ip"`
 	Tag  string `xml:"tag"`
 	Fwd  string `xml:"fwd"`
+	Vsys string `xml:"vsys"`
+}
+
+// panVsys is the context <vsys> names: "vsys<N>" and N, ok false for 0, an
+// absent value or one that is not a number.
+func panVsys(v string) (string, int, bool) {
+	id, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || id < 1 || id > maxContextIdentifier {
+		return "", 0, false
+	}
+	return "vsys" + strconv.Itoa(id), id, true
+}
+
+// panVsysXPath is the config node the operator's vsys display names live under:
+// <vsys><entry name="vsys2"><display-name>…</display-name>…</entry></vsys>. The
+// entry also holds the vsys's import lists and settings; only its name and
+// display-name are read.
+const panVsysXPath = "/config/devices/entry/vsys"
+
+type panVsysEntry struct {
+	Name        string `xml:"name,attr"`
+	DisplayName string `xml:"display-name"`
+}
+
+type panVsysBlock struct {
+	Entries []panVsysEntry `xml:"entry"`
+}
+
+// panVsysDisplayNames maps a vsys's name (`vsys2`) to the display name its
+// operator gave it, from a config get of panVsysXPath. A vsys with no display
+// name, or one that only repeats its own name, is left out: it adds nothing to
+// the name the context already has.
+func panVsysDisplayNames(body string) (map[string]string, error) {
+	blocks, err := panFindElements[panVsysBlock](body, "vsys")
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, b := range blocks {
+		for _, e := range b.Entries {
+			name, display := strings.TrimSpace(e.Name), strings.TrimSpace(e.DisplayName)
+			if name == "" || display == "" || display == name {
+				continue
+			}
+			if _, dup := out[name]; !dup {
+				out[name] = display
+			}
+		}
+	}
+	return out, nil
+}
+
+// panApplyVsysNames puts each display name on the context it names. A name for
+// a vsys the interfaces never named is dropped: the observation lists only the
+// contexts the device's interfaces are in.
+func panApplyVsysNames(n *vendorNetwork, names map[string]string) {
+	for i := range n.Contexts {
+		if d, ok := names[n.Contexts[i].Name]; ok {
+			n.Contexts[i].Description = d
+		}
+	}
 }
 
 type panNetIfnetBlock struct {
@@ -94,6 +160,10 @@ func panNetwork(body string, info panSystemInfo, arpBody string) (*vendorNetwork
 				ifc := upsert(name)
 				vrf := panVRF(e.Fwd)
 				vrfOf[strings.ToLower(name)] = vrf
+				if vsys, id, ok := panVsys(e.Vsys); ok {
+					ifc.Context = vsys
+					n.addContext(vsys, id, true)
+				}
 				if a := netAddressFromCIDR(panNormalizeCIDR(e.IP)); a != "" {
 					ifc.Addresses = append(ifc.Addresses, netAddr{Address: a, VRF: vrf})
 				}

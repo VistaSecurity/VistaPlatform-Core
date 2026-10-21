@@ -59,6 +59,7 @@ import { CoverageText, GatewayLink } from './prefix-gateway-view';
 // change record, journal and tags, mounted here on the asset first.
 import { ObjectChanges } from './dcim/object-changes';
 import { InterfacesTab } from './dcim/interfaces-tab';
+import { IpAddressesTab } from './dcim/ip-addresses-tab';
 import { PortsTab } from './dcim/ports-tab';
 import { HardwareTab } from './dcim/hardware-tab';
 import { PlacementCard } from './racks/placement-card';
@@ -1448,6 +1449,7 @@ export function AssetPage() {
           : tab.key === 'overview' ? <OverviewTab asset={asset} />
           : tab.key === 'endpoints' ? <EndpointsTab asset={asset} />
           : tab.key === 'interfaces' ? <InterfacesTab asset={asset} />
+          : tab.key === 'ip-addresses' ? <IpAddressesTab asset={asset} />
           : tab.key === 'ports' ? <PortsTab asset={asset} />
           : tab.key === 'hardware' ? <HardwareTab asset={asset} />
           : tab.key === 'relationships' ? <RelationshipsTab asset={asset} />

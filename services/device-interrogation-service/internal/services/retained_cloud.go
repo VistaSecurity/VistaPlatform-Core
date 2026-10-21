@@ -118,7 +118,14 @@ func (s *CloudDiscoveryService) retainCloudContext(ctx context.Context, repo *pg
 // ReplayRetainedCloudContext uses one transaction for facts, downstream durable
 // discoveries and acknowledgement. It never re-observes identity or sets its
 // timestamp to replay time. Lifecycle locks exclude merge/approval changes.
+//
+// One change-notification unit (ChangeUnit) per call: the site and location
+// placement it materialises raises object_changed once committed.
 func (s *CloudDiscoveryService) ReplayRetainedCloudContext(ctx context.Context, tenant uuid.UUID) error {
+	return ChangeUnit(ctx, func(ctx context.Context) error { return s.replayRetainedCloudContext(ctx, tenant) })
+}
+
+func (s *CloudDiscoveryService) replayRetainedCloudContext(ctx context.Context, tenant uuid.UUID) error {
 	repo := s.devices.Repo()
 	for range 50 {
 		var observation, asset uuid.UUID

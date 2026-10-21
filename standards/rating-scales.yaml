@@ -871,6 +871,19 @@ bindings:
         - medium
         - high
         - critical
+  compliance-engine.openapi.yaml#/components/schemas/AlertRaiseEvent/properties/severity:
+    concept: severity
+    delivery: implement
+    contract:
+      type: string
+      nullable: false
+      required: true
+      enum:
+        - info
+        - low
+        - medium
+        - high
+        - critical
   compliance-engine.openapi.yaml#/components/schemas/Alert/properties/severity:
     concept: severity
     delivery: implement

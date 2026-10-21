@@ -121,3 +121,91 @@ it('success: import from library sends the YAML and shows what each document did
   expect(result).toContain('Imported · 48 templates');
   expect(result).toContain('Already in the catalogue');
 });
+
+// DCIM gap 4: the device type form carries the three lifecycle dates and the
+// end-of-life catalogue link (hardware entries only); an edit sends only what
+// changed.
+it('success: the edit form sets end of support and links an end-of-life catalogue entry', async () => {
+  routes();
+  const entry = { id: 'e1', product_kind: 'hardware', vendor: 'Cisco', product: 'Lab-Switch', cycle: '1', eol_date: '2030-10-31', extended_support_date: null };
+  const base = api.GET.getMockImplementation() as (path: string, init?: unknown) => Promise<unknown>;
+  api.GET.mockImplementation(async (path: string, init?: { params?: { query?: Record<string, unknown> } }) => {
+    if (path === '/dcim/eol-catalogue') {
+      expect(init?.params?.query?.product_kind).toBe('hardware');
+      return { data: { data: [entry] } };
+    }
+    return base(path, init);
+  });
+  api.PATCH.mockResolvedValue({ data: { data: { ...TYPES[1], end_of_support: '2031-01-31', eol_catalogue_id: 'e1' } } });
+  await render(['dcim.read', 'dcim.manage']);
+  await act(async () => { btn(/Edit Lab-Switch/)!.click(); });
+  await flush();
+  const eos = document.querySelector<HTMLInputElement>('[aria-label="End of support"]')!;
+  expect(eos.type).toBe('date');
+  expect(document.querySelector('[aria-label="End of sale"]')).not.toBeNull();
+  expect(document.querySelector('[aria-label="End of life"]')).not.toBeNull();
+  const select = document.querySelector<HTMLSelectElement>('[aria-label="End-of-life catalogue entry"]')!;
+  await vi.waitFor(() => expect([...select.options].map((o) => o.textContent)).toContain('Cisco Lab-Switch · 1 (support ends 2030-10-31)'));
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(eos, '2031-01-31');
+    eos.dispatchEvent(new Event('input', { bubbles: true }));
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(select, 'e1');
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await act(async () => { (document.querySelector('[data-testid="catalogue-save"]') as HTMLButtonElement).click(); });
+  await vi.waitFor(() => expect(api.PATCH).toHaveBeenCalledTimes(1));
+  expect(api.PATCH.mock.calls[0][1]).toEqual({ params: { path: { id: 'd2' } }, body: { end_of_support: '2031-01-31', eol_catalogue_id: 'e1' } });
+});
+
+// Power templates (DCIM row 6.1): a power port template shows its draws
+// ("not recorded" for one nobody declared, never 0 W) and an outlet template
+// the power port template it draws from and its feed leg; the add form offers
+// the draws and, for an outlet, the type's power port templates.
+it('detail: power port and outlet templates show their draws, inlet and leg', async () => {
+  routes();
+  const base = api.GET.getMockImplementation()!;
+  api.GET.mockImplementation(async (path: string, init?: unknown) => {
+    if (path === '/dcim/device-types/{id}/power-port-templates') {
+      return { data: { data: [{ id: 'pp1', name: 'Inlet', type: 'nema-l5-30p', label: null, maximum_draw: 2880, allocated_draw: null }] } };
+    }
+    if (path === '/dcim/device-types/{id}/power-outlet-templates') {
+      return { data: { data: [{ id: 'po1', name: 'Outlet 1', type: 'iec-60320-c13', label: null, power_port_id: 'pp1', feed_leg: 'B' }] } };
+    }
+    return base(path, init) as unknown;
+  });
+  await render(['dcim.read', 'dcim.manage']);
+  const row = [...host.querySelectorAll('[data-testid="device-type-model"]')].find((e) => e.textContent === 'Lab-Switch')!;
+  await act(async () => { (row.closest('[role="row"], div') as HTMLElement).click(); });
+  await flush();
+  await act(async () => { btn(/^Power ports$/)!.click(); });
+  await vi.waitFor(() => expect(document.querySelector('[data-testid="template-power"]')?.textContent).toBe('max 2880 W · allocated not recorded'));
+  await act(async () => { btn(/^Power outlets$/)!.click(); });
+  await vi.waitFor(() => expect(document.querySelector('[data-testid="template-power"]')?.textContent).toBe('from Inlet · leg B'));
+  await act(async () => { btn(/^Add$/)!.click(); });
+  await flush();
+  const portSelect = document.querySelector<HTMLSelectElement>('select[aria-label="Power port"]')
+    ?? [...document.querySelectorAll('select')].find((s) => [...s.options].some((o) => o.textContent === 'Inlet'));
+  expect(portSelect).toBeDefined();
+  expect([...portSelect!.options].map((o) => o.textContent)).toContain('Inlet');
+  expect(document.body.textContent).toContain('Feed leg');
+});
+
+// The link says whether it was made automatically or by a person; no link says
+// nothing (never "linked by you" for a row with no link).
+it.each([
+  ['automatic', 'Linked automatically'],
+  ['manual', 'Linked by you'],
+  [null, null],
+])('success: the edit form says how the catalogue link was made (%s)', async (source, hint) => {
+  const linked = dt('d2', 'Lab-Switch', 't');
+  routes([{ ...linked, eol_catalogue_id: source ? 'e1' : null, eol_link_source: source }]);
+  await render(['dcim.read', 'dcim.manage']);
+  await act(async () => { btn(/Edit Lab-Switch/)!.click(); });
+  await flush();
+  const text = document.body.textContent ?? '';
+  if (hint) expect(text).toContain(hint);
+  else {
+    expect(text).not.toContain('Linked automatically');
+    expect(text).not.toContain('Linked by you');
+  }
+});

@@ -111,6 +111,31 @@ type ObservedInterface struct {
 	// LAN of the same observation's [ObservedNetwork.WirelessLANs]; the engine
 	// adds the LAN to the interface's wireless_lan_ids and never removes one.
 	SSIDs []string `json:"ssids,omitempty"`
+	// VirtualDeviceContext names the virtual device context the interface
+	// belongs to on the device (DCIM gap 1): a Fortinet VDOM, a Palo Alto
+	// vsys, a Cisco Nexus VDC, an F5 route domain. Empty is none, or not
+	// said. The Fortinet, Palo Alto, F5 and Cisco NX-OS collectors fill it;
+	// the engine records the context (one of the same observation's
+	// [ObservedNetwork.VirtualDeviceContexts], or a new name) and adds the
+	// interface to it.
+	VirtualDeviceContext string `json:"virtual_device_context,omitempty"`
+}
+
+// ObservedVirtualDeviceContext is a virtual device context a collector read
+// off the device (DCIM gap 1): its name and, where the platform numbers its
+// contexts, its identifier (a vsys number, a route-domain id, a VDC id; a
+// Fortinet VDOM has none) and, where the operator gave it one, the display
+// name they chose (a Palo Alto vsys's). Nothing else of a context is measured.
+type ObservedVirtualDeviceContext struct {
+	// Name as the device spells it, 1–64 characters.
+	Name string `json:"name"`
+	// Identifier is the device's number for the context, 0–32767; nil when
+	// the platform has none or did not say.
+	Identifier *int `json:"identifier,omitempty"`
+	// Description is the operator's display name for the context, written to
+	// the context's description on a measured row only; empty when the
+	// platform has none or did not say (empty never clears a stored one).
+	Description string `json:"description,omitempty"`
 }
 
 // ObservedWirelessLAN is a wireless LAN a collector measured on an access
@@ -194,6 +219,9 @@ type ObservedNetwork struct {
 	// point-to-point links (row 4.4).
 	WirelessLANs  []ObservedWirelessLAN
 	WirelessLinks []ObservedWirelessLink
+	// VirtualDeviceContexts are the device's contexts (DCIM gap 1); the
+	// interfaces name theirs.
+	VirtualDeviceContexts []ObservedVirtualDeviceContext
 	// Source is the observation's provenance; ObservedAt its time.
 	Source     Source
 	ObservedAt time.Time
@@ -202,7 +230,7 @@ type ObservedNetwork struct {
 // Empty reports whether there is nothing to record.
 func (n ObservedNetwork) Empty() bool {
 	return len(n.Interfaces) == 0 && len(n.Prefixes) == 0 && len(n.VLANs) == 0 &&
-		len(n.WirelessLANs) == 0 && len(n.WirelessLinks) == 0
+		len(n.WirelessLANs) == 0 && len(n.WirelessLinks) == 0 && len(n.VirtualDeviceContexts) == 0
 }
 
 // ObservedNetworkResult is what one recording did, for logs and tests.
@@ -213,6 +241,9 @@ type ObservedNetworkResult struct {
 	VLANsCreated, VLANsUpdated                 int
 	WirelessLANsCreated, WirelessLANsUpdated   int
 	WirelessLinksCreated, WirelessLinksUpdated int
+	// Virtual device contexts (DCIM gap 1): rows created, rows matched and
+	// refreshed, and measured rows marked stale.
+	ContextsCreated, ContextsUpdated, ContextsMarkedStale int
 	// Skipped names what could not be stored, with the reason.
 	Skipped []string
 }
@@ -279,7 +310,8 @@ func recordsObservedNetwork(res Resolution) bool {
 // recordObservedNetwork hands the posture half of obs to the repository.
 func (e *Engine) recordObservedNetwork(ctx context.Context, obs Observation, res Resolution) error {
 	n := ObservedNetwork{Interfaces: obs.Interfaces, Prefixes: obs.Prefixes, VLANs: obs.VLANs,
-		WirelessLANs: obs.WirelessLANs, WirelessLinks: obs.WirelessLinks, Source: obs.Source, ObservedAt: obs.ObservedAt}
+		WirelessLANs: obs.WirelessLANs, WirelessLinks: obs.WirelessLinks, VirtualDeviceContexts: obs.VirtualDeviceContexts,
+		Source: obs.Source, ObservedAt: obs.ObservedAt}
 	if n.Empty() || !recordsObservedNetwork(res) {
 		return nil
 	}
@@ -610,4 +642,86 @@ func NormalizeObservedWireless(lans []ObservedWirelessLAN, links []ObservedWirel
 		outK = append(outK, o)
 	}
 	return outL, outK, dropped
+}
+
+// maxContextName and maxContextIdentifier are the virtual_device_contexts
+// columns' bounds (name 1–64, identifier a smallint the service holds to
+// 0–32767).
+const (
+	maxContextName        = 64
+	maxContextIdentifier  = 32767
+	maxContextDescription = 200
+)
+
+// boundContextDescription trims a display name and cuts it to the bound the
+// description column is held to, on a character boundary.
+func boundContextDescription(s string) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > maxContextDescription {
+		s = strings.TrimSpace(string(r[:maxContextDescription]))
+	}
+	return s
+}
+
+// NormalizeObservedVirtualDeviceContexts canonicalises a sighting's virtual
+// device contexts (DCIM gap 1) against its (already normalised) interfaces:
+// names trimmed and bounded, an identifier outside 0–32767 dropped (the
+// context is kept without it), duplicate names keeping the first occurrence
+// (and the first identifier stated for it), and every name an interface gives
+// that the list lacks added without an identifier, so the engine records the
+// context each interface names. An interface naming a context the table cannot
+// hold loses the name and is reported.
+func NormalizeObservedVirtualDeviceContexts(contexts []ObservedVirtualDeviceContext, ifaces []ObservedInterface) ([]ObservedVirtualDeviceContext, []ObservedInterface, []string) {
+	var (
+		out     []ObservedVirtualDeviceContext
+		dropped []string
+	)
+	at := map[string]int{}
+	add := func(name string, id *int, description string) {
+		if i, ok := at[name]; ok {
+			if out[i].Identifier == nil && id != nil {
+				out[i].Identifier = id
+			}
+			if out[i].Description == "" {
+				out[i].Description = description
+			}
+			return
+		}
+		at[name] = len(out)
+		out = append(out, ObservedVirtualDeviceContext{Name: name, Identifier: id, Description: description})
+	}
+	for _, c := range contexts {
+		name := strings.TrimSpace(c.Name)
+		if name == "" || len(name) > maxContextName {
+			dropped = append(dropped, fmt.Sprintf("virtual device context %q: no name the table can hold", c.Name))
+			continue
+		}
+		var id *int
+		if c.Identifier != nil && *c.Identifier >= 0 && *c.Identifier <= maxContextIdentifier {
+			v := *c.Identifier
+			id = &v
+		}
+		add(name, id, boundContextDescription(c.Description))
+	}
+	var outI []ObservedInterface
+	for i, ifc := range ifaces {
+		name := strings.TrimSpace(ifc.VirtualDeviceContext)
+		if len(name) > maxContextName {
+			dropped = append(dropped, fmt.Sprintf("interface %q: virtual device context %q: no name the table can hold", ifc.Name, ifc.VirtualDeviceContext))
+			name = ""
+		}
+		if name != ifc.VirtualDeviceContext {
+			if outI == nil {
+				outI = slices.Clone(ifaces)
+			}
+			outI[i].VirtualDeviceContext = name
+		}
+		if name != "" {
+			add(name, nil, "")
+		}
+	}
+	if outI == nil {
+		outI = ifaces
+	}
+	return out, outI, dropped
 }

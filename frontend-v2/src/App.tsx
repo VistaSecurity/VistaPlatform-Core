@@ -19,6 +19,11 @@ import { AssetPage } from './sections/inventory/asset-page';
 import { ClusterPage } from './sections/inventory/virtualization/cluster-page';
 import { SitePage } from './sections/inventory/sites/site-page';
 import { RackPage } from './sections/inventory/racks/rack-page';
+import { PrefixPage } from './sections/inventory/object-pages/prefix-page';
+import { VlanPage } from './sections/inventory/object-pages/vlan-page';
+import { CircuitPage } from './sections/inventory/object-pages/circuit-page';
+import { CablePage } from './sections/inventory/object-pages/cable-page';
+import { InterfacePage } from './sections/inventory/object-pages/interface-page';
 import { InfrastructureCatalogPage, InfrastructureOrganizationPage } from './sections/inventory/workspace-hubs';
 import { SensorsPage } from './sections/discovery/sensors-page';
 import { PlansPage } from './sections/remediation/plans-page';
@@ -40,6 +45,7 @@ import { DashboardPage } from './sections/dashboard/dashboard-page';
 import { AssetsDashboardPage } from './sections/dashboard/assets-dashboard';
 import { ComplianceDashboardPage } from './sections/dashboard/compliance-dashboard';
 import { PqcDashboardPage } from './sections/dashboard/pqc-dashboard';
+import { FacilitiesDashboardPage } from './sections/dashboard/facilities-dashboard';
 import { SettingsPage, WorkspacePage, ProfilePage } from './sections/settings/settings-page';
 import { FindingsPage } from './sections/findings/findings-page';
 import { PosturePage } from './sections/posture/posture-page';
@@ -108,7 +114,7 @@ export default function App() {
         />
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/dashboard" replace />} />
-          {/* Four dashboards (DASHBOARDS in sections/dashboard/dashboards.ts).
+          {/* Five dashboards (DASHBOARDS in sections/dashboard/dashboards.ts).
               Overview keeps the bare path — it is the index redirect target and
               every existing bookmark. `dashboard-nav.test.ts` joins the registry
               against these routes and the rail, so a dashboard cannot be added
@@ -117,6 +123,7 @@ export default function App() {
           <Route path="/dashboard/assets" element={<AssetsDashboardPage />} />
           <Route path="/dashboard/compliance" element={<ComplianceDashboardPage />} />
           <Route path="/dashboard/pqc" element={<PqcDashboardPage />} />
+          <Route path="/dashboard/facilities" element={<FacilitiesDashboardPage />} />
           <Route path="/dashboard/overview-next" element={<Navigate to="/dashboard" replace />} />
           <Route path="/about" element={<AboutPage />} />
 
@@ -152,6 +159,11 @@ export default function App() {
           <Route path="/inventory/sites/:id" element={<SitePage />} />
           {/* The rack page (DCIM row 2.5); its nav home is the Racks lens. */}
           <Route path="/inventory/racks/:id" element={<RackPage />} />
+          <Route path="/inventory/prefixes/:id" element={<PrefixPage />} />
+          <Route path="/inventory/vlans/:id" element={<VlanPage />} />
+          <Route path="/inventory/circuits/:id" element={<CircuitPage />} />
+          <Route path="/inventory/cables/:id" element={<CablePage />} />
+          <Route path="/inventory/interfaces/:id" element={<InterfacePage />} />
           {/* Operational DCIM records belong to the tenant workspace, not the
               Settings drawer.  The old /settings/:page URLs redirect here. */}
           <Route path="/inventory/manage/organization" element={<InfrastructureOrganizationPage />} />

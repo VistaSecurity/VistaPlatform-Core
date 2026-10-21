@@ -37,6 +37,9 @@ func mountDcimCableRoutes(v2 gin.IRouter, rawDB *sql.DB, h *handlers.CableHandle
 	d.GET("/console-ports/:id/trace", read, h.Trace("console-ports"))
 	d.GET("/console-server-ports/:id/trace", read, h.Trace("console-server-ports"))
 	d.GET("/circuit-terminations/:id/trace", read, h.Trace("circuit-terminations"))
+	d.GET("/power-ports/:id/trace", read, h.Trace("power-ports"))
+	d.GET("/power-outlets/:id/trace", read, h.Trace("power-outlets"))
+	d.GET("/power-feeds/:id/trace", read, h.Trace("power-feeds"))
 	// The faceplate's crypto overlay (row 3.4).
 	d.GET("/assets/:id/interface-posture", read, h.InterfacePosture)
 }

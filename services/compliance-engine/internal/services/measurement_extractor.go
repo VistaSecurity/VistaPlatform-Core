@@ -83,14 +83,20 @@ type MeasurementExtractor struct {
 
 // measurementPlan is one registry row, ready to run.
 type measurementPlan struct {
-	def       MeasurementTypeDef
-	shape     measurementShape
-	sql       string
-	extraArgs []any // the shape's own bind parameters beyond tenant and asset
-	predArgs  []any // the compiled predicates' bind parameters
-	columns   []string
-	transform measurementTransform
-	rowFilter measurementRowFilter
+	def   MeasurementTypeDef
+	shape measurementShape
+	sql   string
+	// populationSQL answers "does this tenant have ANY subject in this
+	// measurement's population with a value to judge?" — tenant-wide, with the
+	// same bind parameters as sql ($2 = NULL). It is built from the SAME
+	// measurementPopulation as sql, which is what makes the stored score's
+	// "nothing in scope" agree with the live evaluator's (scope_probe.go).
+	populationSQL string
+	extraArgs     []any // the shape's own bind parameters beyond tenant and asset
+	predArgs      []any // the compiled predicates' bind parameters
+	columns       []string
+	transform     measurementTransform
+	rowFilter     measurementRowFilter
 }
 
 // compileMeasurementRegistry turns every row of a registry into a runnable
@@ -251,29 +257,75 @@ func buildMeasurementPlan(def MeasurementTypeDef, cat *registrycatalog.Catalog, 
 		selectList = append(selectList, fmt.Sprintf("%s AS col_%d", expr, i))
 	}
 
-	// The finding shape folds its predicate into the count subquery, so it must
-	// not also appear in the outer WHERE — there is nothing in the outer row to
-	// apply a finding predicate to.
+	// THE population: the one FROM + WHERE both statements below are built
+	// from. The extraction selects its columns over it; the population probe
+	// asks whether it holds anything at all.
+	population := measurementPopulation(shape, where, subjectWhere)
+	stmt := "SELECT\n\t\t\t" + strings.Join(selectList, ",\n\t\t\t") +
+		population +
+		"\n\t\tORDER BY " + orderBy
+
+	// The value expression, for the probe's IS NOT NULL.
+	valueExpr, err := selectableSQL(shape, def.Source.Value, def, where.clause)
+	if err != nil {
+		return nil, fmt.Errorf("measurement %q: %w", def.Code, err)
+	}
+
+	return &measurementPlan{
+		def:           def,
+		shape:         shape,
+		sql:           stmt,
+		populationSQL: populationProbeSQL(population, valueExpr),
+		extraArgs:     extraArgs,
+		predArgs:      predArgs,
+		columns:       columns,
+		transform:     transform,
+		rowFilter:     rowFilter,
+	}, nil
+}
+
+// measurementPopulation is THE population rule for one measurement type: the
+// subjects a control over it is ABOUT. It is the shape's FROM and base
+// predicates (tenant, soft deletes, the optional single-subject `$2` filter,
+// the shape's own parameter), the row's `subject_where`, and — except on the
+// finding shape — its `where`.
+//
+// The finding shape folds `where` into the count subquery instead: `where`
+// there narrows which FINDINGS are counted, not which assets are in scope, so
+// an asset with no matching finding is in the population with a count of 0 —
+// assessed clean — rather than out of it.
+//
+// Both the live extraction (measurementPlan.sql) and the stored score's
+// population probe (measurementPlan.populationSQL, read by
+// loadControlAssessments through scope_probe.go) are built from the string this
+// returns, so the two cannot disagree about who is in scope. Before they shared
+// it, the stored score asked a per-SHAPE question ("did the hygiene producer
+// assess any asset?") while the live evaluator asked the row's own ("is any
+// assessed asset in a rack?"), and an asset outside a control's population
+// counted as a pass in tenant_framework_scores.
+func measurementPopulation(shape measurementShape, where, subjectWhere compiled) string {
 	outerWhere := append(append([]string{}, shape.Base...), "("+where.clause+")", "("+subjectWhere.clause+")")
 	if shape.Name == "finding" {
 		outerWhere = append(append([]string{}, shape.Base...), "("+subjectWhere.clause+")")
 	}
+	return "\n\t\tFROM " + shape.From +
+		"\n\t\tWHERE " + strings.Join(outerWhere, "\n\t\t\tAND ")
+}
 
-	stmt := "SELECT\n\t\t\t" + strings.Join(selectList, ",\n\t\t\t") +
-		"\n\t\tFROM " + shape.From +
-		"\n\t\tWHERE " + strings.Join(outerWhere, "\n\t\t\tAND ") +
-		"\n\t\tORDER BY " + orderBy
-
-	return &measurementPlan{
-		def:       def,
-		shape:     shape,
-		sql:       stmt,
-		extraArgs: extraArgs,
-		predArgs:  predArgs,
-		columns:   columns,
-		transform: transform,
-		rowFilter: rowFilter,
-	}, nil
+// populationProbeSQL is the EXISTS over a population, narrowed to rows whose
+// value is not NULL: a NULL value publishes no measurement (scannedValue.publish),
+// so a population whose every value is NULL is a population with nothing to
+// judge. Referencing the value expression also keeps every bind parameter the
+// extraction declares in use — the finding shape's `where` arguments live only
+// inside its count subquery, and Postgres refuses a statement whose parameter
+// types it cannot infer.
+//
+// What the probe cannot see is the Go side of extraction: a row filter, and a
+// transform that rejects a non-NULL value (an unparseable date, an unknown trust
+// status). Over those it is a SUPERSET — it can say "in scope" where the live
+// evaluator finds nothing — never a subset.
+func populationProbeSQL(population, valueExpr string) string {
+	return "SELECT EXISTS (SELECT 1" + population + "\n\t\t\tAND (" + valueExpr + ") IS NOT NULL)"
 }
 
 func transformName(def MeasurementTypeDef) string {

@@ -95,6 +95,18 @@ var kinds = []KindSpec{
 		},
 	},
 	{
+		Kind: dcim.ObjectKind("asn_range"), NetBox: "ipam/asn-ranges", Order: 40,
+		Identity: []string{"slug"},
+		Fields: []FieldSpec{
+			{Field: "name", Authority: Newest},
+			{Field: "rir_id", Authority: DeclaredHere},
+			{Field: "start", Authority: DeclaredHere},
+			{Field: "end", Authority: DeclaredHere},
+			{Field: "business_unit_id", Authority: DeclaredHere},
+			{Field: "description", Authority: Newest},
+		},
+	},
+	{
 		Kind: dcim.ObjectKind("vlan_group"), NetBox: "ipam/vlan-groups", Order: 50,
 		Identity: []string{"slug"},
 		Fields: []FieldSpec{
@@ -103,6 +115,21 @@ var kinds = []KindSpec{
 			{Field: "business_unit_id", Authority: DeclaredHere},
 			{Field: "description", Authority: Newest},
 			{Field: "comments", Authority: Newest},
+		},
+	},
+	{
+		Kind: dcim.ObjectKind("vlan_translation_policy"), NetBox: "ipam/vlan-translation-policies", Order: 50,
+		Identity: []string{"name"},
+		Fields: []FieldSpec{
+			{Field: "description", Authority: Newest},
+		},
+	},
+	{
+		Kind: dcim.ObjectKind("vlan_translation_rule"), NetBox: "ipam/vlan-translation-rules", Order: 55,
+		Identity: []string{"policy_id", "local_vid"},
+		Fields: []FieldSpec{
+			{Field: "remote_vid", Authority: DeclaredHere},
+			{Field: "description", Authority: Newest},
 		},
 	},
 	{
@@ -170,6 +197,8 @@ var kinds = []KindSpec{
 			{Field: "mark_connected", Authority: DeclaredHere},
 			{Field: "untagged_vlan_id", Authority: DeclaredHere},
 			{Field: "vrf_id", Authority: DeclaredHere},
+			{Field: "virtual_device_context_ids", Authority: DeclaredHere},
+			{Field: "vlan_translation_policy_id", Authority: DeclaredHere},
 			{Field: "description", Authority: Newest},
 		},
 	},
@@ -191,6 +220,19 @@ var kinds = []KindSpec{
 		Identity: []string{"interface_id", "mac"},
 		Fields: []FieldSpec{
 			{Field: "description", Authority: Newest},
+		},
+	},
+	{
+		Kind: dcim.ObjectKind("virtual_device_context"), NetBox: "dcim/virtual-device-contexts", Order: 95,
+		Identity: []string{"asset_id", "name"},
+		Fields: []FieldSpec{
+			{Field: "identifier", Authority: Peer},
+			{Field: "operational_status", Authority: DeclaredHere},
+			{Field: "business_unit_id", Authority: DeclaredHere},
+			{Field: "primary_ip4_id", Authority: Peer},
+			{Field: "primary_ip6_id", Authority: Peer},
+			{Field: "description", Authority: Newest},
+			{Field: "comments", Authority: Newest},
 		},
 	},
 	{
@@ -326,6 +368,15 @@ var kinds = []KindSpec{
 		Identity: []string{"slug"},
 		Fields: []FieldSpec{
 			{Field: "name", Authority: Newest},
+			{Field: "description", Authority: Newest},
+		},
+	},
+	{
+		Kind: dcim.ObjectKind("virtual_circuit_type"), NetBox: "circuits/virtual-circuit-types", Order: 100,
+		Identity: []string{"slug"},
+		Fields: []FieldSpec{
+			{Field: "name", Authority: Peer},
+			{Field: "color", Authority: Peer},
 			{Field: "description", Authority: Newest},
 		},
 	},
@@ -523,6 +574,18 @@ var kinds = []KindSpec{
 		},
 	},
 	{
+		Kind: dcim.ObjectKind("virtual_circuit"), NetBox: "circuits/virtual-circuits", Order: 120,
+		Identity: []string{"provider_network_id", "cid"},
+		Fields: []FieldSpec{
+			{Field: "provider_account_id", Authority: DeclaredHere},
+			{Field: "type_id", Authority: DeclaredHere},
+			{Field: "operational_status", Authority: DeclaredHere},
+			{Field: "business_unit_id", Authority: DeclaredHere},
+			{Field: "description", Authority: Newest},
+			{Field: "comments", Authority: Newest},
+		},
+	},
+	{
 		Kind: dcim.ObjectKind("wireless_link"), NetBox: "wireless/wireless-links", Order: 120,
 		Identity: []string{"interface_a_id", "interface_b_id"},
 		Fields: []FieldSpec{
@@ -548,6 +611,15 @@ var kinds = []KindSpec{
 			{Field: "pp_info", Authority: DeclaredHere},
 			{Field: "mark_connected", Authority: DeclaredHere},
 			{Field: "description", Authority: Newest},
+		},
+	},
+	{
+		Kind: dcim.ObjectKind("power_panel"), NetBox: "dcim/power-panels", Order: 130,
+		Identity: []string{"site_id", "name"},
+		Fields: []FieldSpec{
+			{Field: "location_id", Authority: Newest},
+			{Field: "description", Authority: Newest},
+			{Field: "comments", Authority: Newest},
 		},
 	},
 	{
@@ -594,10 +666,37 @@ var kinds = []KindSpec{
 		},
 	},
 	{
+		Kind: dcim.ObjectKind("virtual_circuit_termination"), NetBox: "circuits/virtual-circuit-terminations", Order: 130,
+		Identity: []string{"interface_id"},
+		Fields: []FieldSpec{
+			{Field: "virtual_circuit_id", Authority: DeclaredHere},
+			{Field: "role", Authority: DeclaredHere},
+			{Field: "description", Authority: Newest},
+		},
+	},
+	{
 		Kind: dcim.ObjectKind("l2vpn_termination"), NetBox: "vpn/l2vpn-terminations", Order: 140,
 		Identity: []string{"assigned_id"},
 		Fields: []FieldSpec{
 			{Field: "l2vpn_id", Authority: DeclaredHere},
+		},
+	},
+	{
+		Kind: dcim.ObjectKind("power_feed"), NetBox: "dcim/power-feeds", Order: 140,
+		Identity: []string{"power_panel_id", "name"},
+		Fields: []FieldSpec{
+			{Field: "rack_id", Authority: Newest},
+			{Field: "operational_status", Authority: DeclaredHere},
+			{Field: "type", Authority: Newest},
+			{Field: "supply", Authority: Newest},
+			{Field: "phase", Authority: Newest},
+			{Field: "voltage", Authority: Newest},
+			{Field: "amperage", Authority: Newest},
+			{Field: "max_utilization", Authority: Newest},
+			{Field: "mark_connected", Authority: Newest},
+			{Field: "business_unit_id", Authority: DeclaredHere},
+			{Field: "description", Authority: Newest},
+			{Field: "comments", Authority: Newest},
 		},
 	},
 	{
@@ -626,6 +725,40 @@ var kinds = []KindSpec{
 			{Field: "master_asset_id", Authority: Peer},
 			{Field: "description", Authority: Newest},
 			{Field: "comments", Authority: Newest},
+		},
+	},
+	{
+		Kind: dcim.ObjectKind("virtual_machine"), NetBox: "virtualization/virtual-machines", Order: 150, Object: dcim.ObjectKind("asset"),
+		Identity: []string{"cluster_id", "display_name"},
+		Fields: []FieldSpec{
+			{Field: "site_id", Authority: Peer},
+			{Field: "device_role_id", Authority: Peer},
+			{Field: "platform_id", Authority: Observed},
+			{Field: "serial", Authority: Observed},
+			{Field: "vcpus", Authority: Observed},
+			{Field: "memory_mb", Authority: Observed},
+			{Field: "disk_mb", Authority: Observed},
+		},
+	},
+	{
+		Kind: dcim.ObjectKind("virtual_disk"), NetBox: "virtualization/virtual-disks", Order: 155,
+		Identity: []string{"asset_id", "name"},
+		Fields: []FieldSpec{
+			{Field: "size_mb", Authority: Observed},
+			{Field: "description", Authority: Newest},
+		},
+	},
+	{
+		Kind: dcim.ObjectKind("vm_interface"), NetBox: "virtualization/interfaces", Order: 155, Object: dcim.ObjectKind("interface"),
+		Identity: []string{"asset_id", "name"},
+		Fields: []FieldSpec{
+			{Field: "enabled", Authority: Observed},
+			{Field: "mtu", Authority: Observed},
+			{Field: "mac_address", Authority: Observed},
+			{Field: "mode", Authority: DeclaredHere},
+			{Field: "untagged_vlan_id", Authority: DeclaredHere},
+			{Field: "vrf_id", Authority: DeclaredHere},
+			{Field: "description", Authority: Newest},
 		},
 	},
 	{
@@ -680,6 +813,9 @@ var kinds = []KindSpec{
 			{Field: "asset_tag", Authority: Peer},
 			{Field: "discovered", Authority: Observed},
 			{Field: "description", Authority: Newest},
+			{Field: "stock_state", Authority: DeclaredHere},
+			{Field: "quantity", Authority: DeclaredHere},
+			{Field: "location_id", Authority: DeclaredHere},
 		},
 	},
 	{

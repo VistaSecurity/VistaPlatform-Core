@@ -1,133 +1,125 @@
 package services
 
-// "Could this control's measurements have read anything?", per measurement
-// SHAPE — fact 3 of loadControlAssessments.
+// "Could this control's measurements have read anything?" — fact 3 of
+// loadControlAssessments, asked per MEASUREMENT TYPE against that row's own
+// population.
 //
 // The materialized scoring path never runs an extraction (that is the whole
-// point of it), so it cannot know that a particular measurement found nothing.
-// What it CAN know cheaply is whether the tables that measurement's shape reads
-// hold anything for this tenant at all, and that is a sound superset: if the
-// shape's own FROM/WHERE can yield no row, the extraction certainly found
-// nothing and the control was not assessed.
+// point of it), so it cannot know which values a measurement found. What it CAN
+// know cheaply is whether the measurement's POPULATION — the subjects a control
+// over it is about — holds anything for this tenant at all. If it does not, the
+// live evaluator finds no value to judge and reports the control NOT ASSESSED,
+// and the stored score must say the same.
 //
-// Each probe here mirrors one entry of `measurementShapes` in
-// measurement_shapes.go — its `From` and its `Base` predicates, minus the
-// per-subject `$2` filter, which narrows a tenant-wide question to one subject
-// and has no place in it. Keeping them in step is the whole contract:
+// # One population rule, shared with the live evaluator
 //
-//   - a probe LOOSER than its shape reports PASS over data no extractor can
-// read — the bug, and the Lifecycle-scores-100 bug the Gate 3 proof
-//     found;
-//   - a probe TIGHTER than its shape reports NOT ASSESSED over data an
-//     extractor reads perfectly well, which is the same dishonesty pointed the
-//     other way and is why `TestScopeProbe_MirrorsItsShape` exists.
+// The probe is not written here. It is measurementPlan.populationSQL, built in
+// buildMeasurementPlan from the SAME measurementPopulation string as the
+// extraction statement the live evaluator runs: the shape's FROM and base
+// predicates, the row's `subject_where`, and (outside the finding shape) its
+// `where`. A change to who is in scope therefore moves both paths at once.
 //
-// The parameterised shapes (`fact`, `finding`) get one probe per distinct fact
-// key / producer, because "does this tenant have ANY fact" is not the question
-// — `eol.os.date` and `os.name` are different answers and LC-001 depends on the
-// first.
+// It used to be a hand-written probe per SHAPE, which asked a coarser question
+// than the extractor: "did the hygiene producer assess ANY asset" for every
+// `finding`-shape row, "does the tenant have ANY live asset" for every `asset`
+// row. A rack-position control therefore passed in tenant_framework_scores on an
+// estate with no racks, a warranty control on an estate with no warranty dates,
+// and Inventory Hygiene scored 73 on the Gate 3 estate while the live evaluator
+// read eight of its controls NOT ASSESSED (the honest rollup is 25). An empty
+// inventory scored higher than a populated one.
+//
+// The probe is a SUPERSET of the extraction only where extraction runs Go code
+// the database cannot: a row filter, or a transform that rejects a non-NULL
+// value (see populationProbeSQL). Everything SQL decides, it decides the same.
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 )
 
-// scopeProbeKey identifies one probe: a shape, plus the shape's own parameter
-// where it has one (the fact key, the producer). The zero value is the
-// fail-open probe — see [scopeProbeFor].
+// scopeProbeKey identifies one probe: the measurement type code whose
+// population it asks about. The zero value is the fail-open probe — see
+// [scopeProbeFor].
 type scopeProbeKey struct {
-	Shape string
-	Arg   string
+	Code string
 }
 
 // alwaysInScope is the key a measurement gets when nothing here can place it:
 // a `measurement_types` row with no registry definition (hand-seeded, or added
-// to the catalogue ahead of the generator), or a registry shape with no probe.
+// to the catalogue ahead of the generator), or a registry row that does not
+// compile.
 //
 // It resolves to TRUE, deliberately. An unplaceable measurement is a gap in
 // this file's knowledge, not evidence about the tenant, and the honest
 // direction for a gap in OUR knowledge is to leave the control's status where
 // it was rather than to assert NOT ASSESSED about a measurement that may well
-// be reading real rows. The tightening direction is guarded instead by
-// TestScopeProbeCoversEveryShape, which fails when a registry shape has no
-// probe — so a real shape can never silently fall through to here.
-var alwaysInScope = scopeProbeKey{Shape: ""}
+// be reading real rows. The shipped registry has no such row —
+// TestMeasurementRegistryCompiles and TestScopeProbeForEveryRegistryMeasurement
+// fail otherwise — so in production only hand-seeded types reach here.
+var alwaysInScope = scopeProbeKey{}
 
-// scopeProbes is the SQL per shape. `$1` is the tenant; a probe whose key
-// carries an Arg gets it as `$2`.
-//
-// Mirrors measurementShapes: see the file comment.
-var scopeProbes = map[string]string{
-	// certificate: `certificates c` with `c.tenant_id = $1`.
-	"certificate": `SELECT EXISTS (SELECT 1 FROM certificates c WHERE c.tenant_id = $1)`,
+// populationPlans is the shipped registry, compiled once for the probes. The
+// registry is generated code and never changes at run time, so unlike the
+// catalogue endpoint there is nothing a cache could serve stale.
+var populationPlans = sync.OnceValue(func() map[string]*measurementPlan {
+	plans, _ := compileMeasurementRegistry(measurementTypeRegistry)
+	return plans
+})
 
-	// crypto_configuration: `crypto_implementations ci JOIN assets na ...`,
-	// both deleted_at IS NULL. The endpoint LEFT JOIN is outer, so it cannot
-	// remove a row and the probe need not carry it.
-	"crypto_configuration": `SELECT EXISTS (
-		SELECT 1 FROM crypto_implementations ci
-		JOIN assets na ON na.tenant_id = ci.tenant_id AND na.id = ci.asset_id
-		WHERE ci.tenant_id = $1 AND na.tenant_id = $1
-		  AND ci.deleted_at IS NULL AND na.deleted_at IS NULL)`,
-
-	// asset: `assets a` with `a.deleted_at IS NULL`.
-	"asset": `SELECT EXISTS (SELECT 1 FROM assets a WHERE a.tenant_id = $1 AND a.deleted_at IS NULL)`,
-
-	// fact: `asset_facts af JOIN assets a ...` for ONE key, excluding facts
-	// past their expires_at — an expired fact has stopped being an answer, and
-	// a probe that counted it would report a control assessable that the
-	// extractor finds nothing for.
-	"fact": `SELECT EXISTS (
-		SELECT 1 FROM asset_facts af
-		JOIN assets a ON a.tenant_id = af.tenant_id AND a.id = af.asset_id
-		WHERE af.tenant_id = $1 AND a.deleted_at IS NULL AND af.key = $2
-		  AND (af.expires_at IS NULL OR af.expires_at > now()))`,
-
-	// finding: `assets a` gated on a completed pass by ONE producer. This is
-	// the coverage RECORD (`producer_assessments`), not `assets.risk_assessed_by`
-	// — the array is its risk-feeding subset, so gating on it would make every
-	// `assessed_by: hygiene` control permanently unassessable.
-	"finding": `SELECT EXISTS (
-		SELECT 1 FROM assets a
-		WHERE a.tenant_id = $1 AND a.deleted_at IS NULL
-		  AND EXISTS (SELECT 1 FROM producer_assessments pa
-		              WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $2))`,
+// scopeProbeFor maps a measurement type code onto its population probe.
+func scopeProbeFor(code string) scopeProbeKey {
+	if _, ok := populationPlans()[code]; !ok {
+		return alwaysInScope
+	}
+	return scopeProbeKey{Code: code}
 }
 
-// scopeProbeFor maps a measurement type code onto the probe its shape needs.
-func scopeProbeFor(code string) scopeProbeKey {
-	def, ok := MeasurementTypeByCode(code)
-	if !ok {
-		return alwaysInScope
+// placeholder matches a bind parameter. Every `$` in a plan's SQL is one: the
+// shapes' text carries no other, and the query compiler emits values as
+// parameters, never as literals.
+var placeholder = regexp.MustCompile(`\$(\d+)`)
+
+// rebaseParams renumbers every `$n` in a statement to `$n+offset`, so several
+// plans — each numbered from $1 — can share one round trip.
+func rebaseParams(stmt string, offset int) string {
+	if offset == 0 {
+		return stmt
 	}
-	if _, ok := scopeProbes[def.Source.Shape]; !ok {
-		return alwaysInScope
-	}
-	switch def.Source.Shape {
-	case "fact":
-		return scopeProbeKey{Shape: "fact", Arg: def.Source.FactKey}
-	case "finding":
-		return scopeProbeKey{Shape: "finding", Arg: def.Source.AssessedBy}
-	default:
-		return scopeProbeKey{Shape: def.Source.Shape}
-	}
+	return placeholder.ReplaceAllStringFunc(stmt, func(m string) string {
+		n, err := strconv.Atoi(m[1:])
+		if err != nil {
+			return m // unreachable: the pattern only matches digits
+		}
+		return "$" + strconv.Itoa(n+offset)
+	})
+}
+
+// populationArgs are a plan's bind parameters for a TENANT-WIDE run: tenant,
+// a NULL single-subject filter, then the shape's and the predicates' own.
+// The same order extract() binds them in.
+func populationArgs(plan *measurementPlan, tenantID uuid.UUID) []any {
+	args := append([]any{tenantID, nil}, plan.extraArgs...)
+	return append(args, plan.predArgs...)
 }
 
 // loadScopeProbes evaluates every distinct probe the given controls need, in
 // ONE round trip, and records the answers in `satisfied`.
 //
 // One query rather than one per probe because this runs inside the reconcile's
-// hot path: the distinct probe count is bounded by the registry (five shapes,
-// one entry per distinct fact key and producer), so the UNION is small and
-// every branch is an EXISTS that stops at the first row.
+// hot path. Each branch is an EXISTS that stops at the first row; the distinct
+// probe count is bounded by the registry.
 func loadScopeProbes(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID,
 	needs map[uuid.UUID][]scopeProbeKey, satisfied map[scopeProbeKey]bool) error {
 
+	plans := populationPlans()
 	distinct := map[scopeProbeKey]bool{}
 	for _, keys := range needs {
 		for _, k := range keys {
@@ -148,35 +140,28 @@ func loadScopeProbes(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID,
 	}
 	// Sorted so the emitted SQL is stable — a query text that changes per call
 	// defeats Postgres's plan cache and makes the statement unreadable in a log.
-	sort.Slice(ordered, func(i, j int) bool {
-		if ordered[i].Shape != ordered[j].Shape {
-			return ordered[i].Shape < ordered[j].Shape
-		}
-		return ordered[i].Arg < ordered[j].Arg
-	})
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Code < ordered[j].Code })
 
-	args := []any{tenantID}
+	var args []any
 	var branches []string
 	for i, k := range ordered {
-		probe := scopeProbes[k.Shape]
-		if k.Arg != "" {
-			args = append(args, k.Arg)
-			probe = strings.ReplaceAll(probe, "$2", fmt.Sprintf("$%d", len(args)))
-		}
-		// The ordinal identifies the row; the key itself never reaches the SQL.
+		plan := plans[k.Code]
+		probe := rebaseParams(plan.populationSQL, len(args))
+		args = append(args, populationArgs(plan, tenantID)...)
+		// The ordinal identifies the row; the code itself never reaches the SQL.
 		branches = append(branches, fmt.Sprintf("SELECT %d AS n, (%s) AS ok", i, probe))
 	}
 
 	rows, err := tx.QueryContext(ctx, strings.Join(branches, "\nUNION ALL\n"), args...)
 	if err != nil {
-		return fmt.Errorf("probe measurement scope: %w", err)
+		return fmt.Errorf("probe measurement population: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var n int
 		var ok bool
 		if err := rows.Scan(&n, &ok); err != nil {
-			return fmt.Errorf("scan measurement scope probe: %w", err)
+			return fmt.Errorf("scan measurement population probe: %w", err)
 		}
 		if n >= 0 && n < len(ordered) {
 			satisfied[ordered[n]] = ok
@@ -186,11 +171,11 @@ func loadScopeProbes(ctx context.Context, tx *sql.Tx, tenantID uuid.UUID,
 }
 
 // anySatisfied reports whether at least one of a control's measurements has
-// something to read.
+// something in its population to judge.
 //
-// A control with no probes at all (its measurements were all unplaceable, or it
-// has none) returns false and is handled by the earlier `!measured` arm; the
-// distinction matters because the two carry different reasons.
+// A control with no probes at all (it has no measurements) returns false and
+// is handled by the earlier `!measured` arm; the distinction matters because
+// the two carry different reasons.
 func anySatisfied(keys []scopeProbeKey, satisfied map[scopeProbeKey]bool) bool {
 	for _, k := range keys {
 		if satisfied[k] {

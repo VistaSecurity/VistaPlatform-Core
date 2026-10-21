@@ -938,7 +938,8 @@ func (s *SiteService) DeleteSite(ctx context.Context, tenantID, actor, id uuid.U
 const locationColumns = `l.id, l.tenant_id, l.site_id, l.parent_id, l.name, l.slug, l.operational_status, l.facility, l.business_unit_id,
 	l.description, l.comments, l.source_kind, l.source_ref, l.custom_fields::text, l.created_by, l.created_at, l.updated_at,
 	COALESCE(public.location_path(l.id), l.name),
-	(SELECT COUNT(*) FROM assets a WHERE a.tenant_id = l.tenant_id AND a.location_id = l.id AND a.deleted_at IS NULL)`
+	(SELECT COUNT(*) FROM assets a WHERE a.tenant_id = l.tenant_id AND a.location_id = l.id AND a.deleted_at IS NULL),
+	l.floor_plan_width, l.floor_plan_depth, l.floor_plan_unit`
 
 func scanLocation(r rowScanner) (*models.Location, error) {
 	var (
@@ -947,7 +948,8 @@ func scanLocation(r rowScanner) (*models.Location, error) {
 		parent, bu, crtdBy uuid.NullUUID
 	)
 	if err := r.Scan(&l.ID, &l.TenantID, &l.SiteID, &parent, &l.Name, &l.Slug, &l.OperationalStatus, &l.Facility, &bu,
-		&l.Description, &l.Comments, &l.SourceKind, &l.SourceRef, &custom, &crtdBy, &l.CreatedAt, &l.UpdatedAt, &l.Path, &l.AssetCount); err != nil {
+		&l.Description, &l.Comments, &l.SourceKind, &l.SourceRef, &custom, &crtdBy, &l.CreatedAt, &l.UpdatedAt, &l.Path, &l.AssetCount,
+		&l.FloorPlanWidth, &l.FloorPlanDepth, &l.FloorPlanUnit); err != nil {
 		return nil, err
 	}
 	if parent.Valid {
@@ -972,6 +974,7 @@ func locationSnapshot(l *models.Location) map[string]any {
 		"site_id": l.SiteID.String(), "parent_id": uuidStr(l.ParentID), "name": l.Name, "slug": l.Slug,
 		"operational_status": l.OperationalStatus, "facility": l.Facility, "business_unit_id": uuidStr(l.BusinessUnitID),
 		"description": l.Description, "comments": l.Comments,
+		"floor_plan_width": l.FloorPlanWidth, "floor_plan_depth": l.FloorPlanDepth, "floor_plan_unit": l.FloorPlanUnit,
 	}
 }
 
@@ -1058,8 +1061,17 @@ func (s *SiteService) CreateLocation(ctx context.Context, tenantID, actor uuid.U
 			return nil, siteInvalid("operational_status must be one of planned, staged, active, decommissioning, retired")
 		}
 	}
+	plan, err := ValidateFloorPlanSize(in.FloorPlanWidth, in.FloorPlanDepth, in.FloorPlanUnit)
+	if err != nil {
+		return nil, err
+	}
+	var pw, pd *float64
+	var pu *string
+	if plan != nil {
+		pw, pd, pu = &plan.Width, &plan.Depth, &plan.Unit
+	}
 	var out *models.Location
-	err := database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
+	err = database.WithTenantTx(ctx, s.db, tenantID, func(tx *sqlx.Tx) error {
 		if err := visibleIn(ctx, tx, "sites", "site", in.SiteID); err != nil {
 			return err
 		}
@@ -1075,9 +1087,10 @@ func (s *SiteService) CreateLocation(ctx context.Context, tenantID, actor uuid.U
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO locations (id, tenant_id, site_id, parent_id, name, slug, operational_status, facility,
-			business_unit_id, description, comments, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			business_unit_id, description, comments, created_by, floor_plan_width, floor_plan_depth, floor_plan_unit)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 			id, tenantID, *in.SiteID, in.ParentID, *name, slug, status, trimmedPtr(in.Facility), in.BusinessUnitID,
-			in.Description, in.Comments, nullActor(actor)); err != nil {
+			in.Description, in.Comments, nullActor(actor), pw, pd, pu); err != nil {
 			return mapUnique(err)
 		}
 		if out, err = s.getLocationTx(ctx, tx, tenantID, id); err != nil {
@@ -1141,9 +1154,35 @@ func (s *SiteService) UpdateLocation(ctx context.Context, tenantID, actor, id uu
 		if in.Has("comments") {
 			l.Comments = in.Comments
 		}
+		// The floor plan: a patch names the keys it changes; the result must
+		// still be all three or none, and must still hold the placed racks.
+		if in.Has("floor_plan_width") || in.Has("floor_plan_depth") || in.Has("floor_plan_unit") {
+			if in.Has("floor_plan_width") {
+				l.FloorPlanWidth = in.FloorPlanWidth
+			}
+			if in.Has("floor_plan_depth") {
+				l.FloorPlanDepth = in.FloorPlanDepth
+			}
+			if in.Has("floor_plan_unit") {
+				l.FloorPlanUnit = in.FloorPlanUnit
+			}
+			plan, err := ValidateFloorPlanSize(l.FloorPlanWidth, l.FloorPlanDepth, l.FloorPlanUnit)
+			if err != nil {
+				return err
+			}
+			if err := checkLocationPlanHolds(ctx, tx, tenantID, id, planOf(before), plan); err != nil {
+				return err
+			}
+			l.FloorPlanWidth, l.FloorPlanDepth, l.FloorPlanUnit = nil, nil, nil
+			if plan != nil {
+				l.FloorPlanWidth, l.FloorPlanDepth, l.FloorPlanUnit = &plan.Width, &plan.Depth, &plan.Unit
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE locations SET parent_id=$3, name=$4, slug=$5, operational_status=$6, facility=$7,
-			business_unit_id=$8, description=$9, comments=$10, updated_at=now() WHERE tenant_id=$1 AND id=$2`,
-			tenantID, id, l.ParentID, l.Name, l.Slug, l.OperationalStatus, l.Facility, l.BusinessUnitID, l.Description, l.Comments); err != nil {
+			business_unit_id=$8, description=$9, comments=$10, floor_plan_width=$11, floor_plan_depth=$12, floor_plan_unit=$13,
+			updated_at=now() WHERE tenant_id=$1 AND id=$2`,
+			tenantID, id, l.ParentID, l.Name, l.Slug, l.OperationalStatus, l.Facility, l.BusinessUnitID, l.Description, l.Comments,
+			l.FloorPlanWidth, l.FloorPlanDepth, l.FloorPlanUnit); err != nil {
 			return mapUnique(err)
 		}
 		if out, err = s.getLocationTx(ctx, tx, tenantID, id); err != nil {
@@ -1174,6 +1213,11 @@ func (s *SiteService) DeleteLocation(ctx context.Context, tenantID, actor, id uu
 		}
 		site := before.SiteID
 		if err := clearScopes(ctx, tx, tenantID, string(dcim.ObjectKindLocation), subtree, &site); err != nil {
+			return err
+		}
+		// Racks leave the deleted locations (FK SET NULL) and with them
+		// their floor plans.
+		if err := s.clearFloorPlacementsTx(ctx, tx, tenantID, actor, subtree); err != nil {
 			return err
 		}
 		for _, sub := range subtree {

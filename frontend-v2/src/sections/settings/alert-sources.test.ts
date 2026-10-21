@@ -211,3 +211,24 @@ describe('M26: every Go-published alert source is offered by the routing-rule dr
     for (const s of PLATFORM_SCOPED_SOURCES) expect(offered.has(s)).toBe(false);
   });
 });
+
+describe('Inventory changes (object_changed) as a rule source', () => {
+  it('stores as alert_source inventory-service + alert_type object_changed', () => {
+    expect(mod.ruleSelection(mod.INVENTORY_CHANGES_OPTION)).toEqual({ alert_source: 'inventory-service', alert_type: 'object_changed' });
+    expect(mod.ruleSelection('inventory-service')).toEqual({ alert_source: 'inventory-service' });
+  });
+
+  it('a stored object_changed rule shows as Inventory changes, any other as its source', () => {
+    expect(mod.ruleSourceOption({ alert_source: 'inventory-service', alert_type: 'object_changed' })).toBe(mod.INVENTORY_CHANGES_OPTION);
+    expect(mod.ruleSourceOption({ alert_source: 'inventory-service', alert_type: 'certificate_expiring' })).toBe('inventory-service');
+    expect(mod.ruleSourceOption(null)).toBe('all');
+    expect(mod.ruleSourceLabel(mod.INVENTORY_CHANGES_OPTION)).toBe('Inventory changes');
+  });
+
+  it('summarises an Inventory-changes rule by what it routes; "all" when nothing is chosen', () => {
+    expect(mod.ruleSummary({ alert_source: 'inventory-service', alert_type: 'object_changed', change_filter: { object_kinds: ['cable'], actions: ['delete'], include_intake: true, include_sync: false } }))
+      .toBe('Inventory changes · cable · delete · incl. discovery');
+    expect(mod.ruleSummary({ alert_source: 'inventory-service', alert_type: 'object_changed' })).toBe('Inventory changes · all kinds · all actions');
+    expect(mod.ruleSummary({ alert_source: 'sensor-manager', severity_filter: ['high'] })).toBe('sensor-manager · high');
+  });
+});

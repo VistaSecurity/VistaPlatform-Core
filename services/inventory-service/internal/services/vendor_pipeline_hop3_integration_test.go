@@ -185,7 +185,7 @@ func ingestVendorHop2(t *testing.T, db *database.DB, s pipelinetest.Scenario, ho
 		}
 		// The pipeline import: classification and the tenant's auto-approval
 		// rules run here, over the segments seeded above ( WP3).
-		report, err := svc.IngestPipelineFindingsReport(tenant, findings)
+		report, err := svc.IngestPipelineFindingsReport(context.Background(), tenant, findings)
 		if err != nil {
 			t.Fatalf("IngestPipelineFindingsReport: %v", err)
 		}

@@ -36,6 +36,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
+	"github.com/vistasecurity/vistaplatform/shared/dcim/changenotify"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identifiersql"
 	"github.com/vistasecurity/vistaplatform/shared/identity/identitysettings"
@@ -161,7 +162,15 @@ func (x *RuleMergeExecutor) RunOnce(ctx context.Context) (int, error) {
 			continue
 		}
 		limit := min(ruleMergeTenantBatch, budget)
-		n, seen, err := x.ExecuteTenant(ctx, tenant, limit)
+		// One change-notification unit per tenant: a merge moves interfaces
+		// and addresses through the identity repository, and those changes
+		// raise object_changed once committed (shared/dcim/changenotify).
+		var n, seen int
+		err := changenotify.Unit(ctx, func(ctx context.Context) error {
+			var err error
+			n, seen, err = x.ExecuteTenant(ctx, tenant, limit)
+			return err
+		})
 		merged += n
 		budget -= seen
 		if err != nil {

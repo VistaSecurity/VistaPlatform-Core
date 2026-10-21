@@ -31,12 +31,30 @@ func NewRuleEngine(db *sqlx.DB, cfg *config.Config) *RuleEngine {
 	}
 }
 
+// logRuleScanError makes a rule row that cannot be read visible. The row is
+// still skipped — one bad row must not stop every other rule from routing —
+// but silently skipping it is how a schema drift (a NULL where the model has
+// no nullable type, a column of a new type) turns into notifications that
+// simply stop, with nothing anywhere to say why. The id is the column scanned
+// first, so it is set unless the id itself was unreadable (then it is the zero
+// uuid and the error names the column).
+func (re *RuleEngine) logRuleScanError(table string, id uuid.UUID, err error) {
+	logf := log.Printf
+	if re.logger != nil {
+		logf = re.logger.Printf
+	}
+	logf("skipping %s row %s: it could not be read (schema drift?): %v", table, id, err)
+}
+
 // GetTenantRulesForAlert gets all enabled tenant rules that match the alert
-func (re *RuleEngine) GetTenantRulesForAlert(ctx context.Context, tenantID uuid.UUID, alertSource, alertType, severity string) ([]models.TenantNotificationRule, error) {
+//
+// metadata is the notification's metadata; a rule's object_changed condition
+// (ruleRoutesAlert) is evaluated against it.
+func (re *RuleEngine) GetTenantRulesForAlert(ctx context.Context, tenantID uuid.UUID, alertSource, alertType, severity string, metadata map[string]interface{}) ([]models.TenantNotificationRule, error) {
 	query := `
 		SELECT id, tenant_id, rule_name, alert_source, alert_type, channel_ids,
 		       severity_filter, category_filter, frequency, digest_window,
-		       enabled, priority, created_at, updated_at
+		       enabled, priority, created_at, updated_at, change_filter
 		FROM tenant_notification_rules
 		WHERE tenant_id = $1
 		  AND enabled = true
@@ -44,6 +62,10 @@ func (re *RuleEngine) GetTenantRulesForAlert(ctx context.Context, tenantID uuid.
 		  AND (alert_type IS NULL OR alert_type = '' OR alert_type = $3)
 		ORDER BY priority DESC, created_at ASC
 	`
+
+	// The loop below scans each rule's own alert_type into a local of the same
+	// name; keep the event's.
+	eventAlertType := alertType
 
 	// RLS-scoped: tenant_notification_rules carries a tenant_isolation policy.
 	var rules []models.TenantNotificationRule
@@ -60,16 +82,19 @@ func (re *RuleEngine) GetTenantRulesForAlert(ctx context.Context, tenantID uuid.
 			var alertType sql.NullString
 			var severityFilterArr, categoryFilterArr []string
 			var digestWindow sql.NullInt64
+			var changeFilter []byte
 
 			err := rows.Scan(
 				&rule.ID, &rule.TenantID, &rule.RuleName, &rule.AlertSource,
 				&alertType, pq.Array(&channelIDStrings), pq.Array(&severityFilterArr), pq.Array(&categoryFilterArr),
 				&rule.Frequency, &digestWindow, &rule.Enabled, &rule.Priority,
-				&rule.CreatedAt, &rule.UpdatedAt,
+				&rule.CreatedAt, &rule.UpdatedAt, &changeFilter,
 			)
 			if err != nil {
+				re.logRuleScanError("tenant_notification_rules", rule.ID, err)
 				continue
 			}
+			rule.ChangeFilter = scanChangeFilter(changeFilter)
 
 			if alertType.Valid {
 				rule.AlertType = &alertType.String
@@ -82,6 +107,12 @@ func (re *RuleEngine) GetTenantRulesForAlert(ctx context.Context, tenantID uuid.
 			if digestWindow.Valid {
 				window := int(digestWindow.Int64)
 				rule.DigestWindow = &window
+			}
+
+			// The object_changed condition: only a rule naming the type, and
+			// its change_filter (change_filter.go).
+			if !ruleRoutesAlert(rule, eventAlertType, metadata) {
+				continue
 			}
 
 			// Check severity filter
@@ -143,6 +174,7 @@ func (re *RuleEngine) GetPlatformRulesForAlert(alertSource, alertType, severity 
 			&rule.CreatedAt, &rule.UpdatedAt,
 		)
 		if err != nil {
+			re.logRuleScanError("platform_notification_rules", rule.ID, err)
 			continue
 		}
 
@@ -183,7 +215,7 @@ func (re *RuleEngine) GetTenantRules(ctx context.Context, tenantID uuid.UUID) ([
 	query := `
 		SELECT id, tenant_id, rule_name, alert_source, alert_type, channel_ids,
 		       severity_filter, category_filter, frequency, digest_window,
-		       enabled, priority, created_at, updated_at
+		       enabled, priority, created_at, updated_at, change_filter
 		FROM tenant_notification_rules
 		WHERE tenant_id = $1
 		ORDER BY priority DESC, rule_name ASC
@@ -204,16 +236,19 @@ func (re *RuleEngine) GetTenantRules(ctx context.Context, tenantID uuid.UUID) ([
 			var alertType sql.NullString
 			var severityFilterArr, categoryFilterArr []string
 			var digestWindow sql.NullInt64
+			var changeFilter []byte
 
 			err := rows.Scan(
 				&rule.ID, &rule.TenantID, &rule.RuleName, &rule.AlertSource,
 				&alertType, pq.Array(&channelIDStrings), pq.Array(&severityFilterArr), pq.Array(&categoryFilterArr),
 				&rule.Frequency, &digestWindow, &rule.Enabled, &rule.Priority,
-				&rule.CreatedAt, &rule.UpdatedAt,
+				&rule.CreatedAt, &rule.UpdatedAt, &changeFilter,
 			)
 			if err != nil {
+				re.logRuleScanError("tenant_notification_rules", rule.ID, err)
 				continue
 			}
+			rule.ChangeFilter = scanChangeFilter(changeFilter)
 
 			if alertType.Valid {
 				rule.AlertType = &alertType.String
@@ -267,11 +302,13 @@ func (re *RuleEngine) CreateTenantRule(ctx context.Context, tenantID uuid.UUID, 
 		INSERT INTO tenant_notification_rules (
 			id, tenant_id, rule_name, alert_source, alert_type, channel_ids,
 			severity_filter, category_filter, frequency, digest_window,
-			enabled, priority, created_at, updated_at
+			enabled, priority, created_at, updated_at, change_filter
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW()
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW(), $13::jsonb
 		)
 	`
+	changeFilterVal, storedFilter := changeFilterValue(req.AlertType, req.ChangeFilter)
+	rule.ChangeFilter = storedFilter
 
 	// Use pq.Array for PostgreSQL array columns (uuid[], varchar[])
 	var severityFilterVal, categoryFilterVal interface{}
@@ -288,7 +325,7 @@ func (re *RuleEngine) CreateTenantRule(ctx context.Context, tenantID uuid.UUID, 
 		_, e := tx.ExecContext(ctx, query,
 			rule.ID, rule.TenantID, rule.RuleName, rule.AlertSource, rule.AlertType,
 			pq.Array(uuidSliceToStrings(req.ChannelIDs)), severityFilterVal, categoryFilterVal,
-			rule.Frequency, rule.DigestWindow, rule.Enabled, rule.Priority,
+			rule.Frequency, rule.DigestWindow, rule.Enabled, rule.Priority, changeFilterVal,
 		)
 		return e
 	})
@@ -305,7 +342,7 @@ func (re *RuleEngine) UpdateTenantRule(ctx context.Context, tenantID, ruleID uui
 	query := `
 		SELECT id, tenant_id, rule_name, alert_source, alert_type, channel_ids,
 		       severity_filter, category_filter, frequency, digest_window,
-		       enabled, priority, created_at, updated_at
+		       enabled, priority, created_at, updated_at, change_filter
 		FROM tenant_notification_rules
 		WHERE id = $1 AND tenant_id = $2
 	`
@@ -320,12 +357,13 @@ func (re *RuleEngine) UpdateTenantRule(ctx context.Context, tenantID, ruleID uui
 		var alertType sql.NullString
 		var severityFilterArr, categoryFilterArr []string
 		var digestWindow sql.NullInt64
+		var changeFilter []byte
 
 		scanErr := tx.QueryRowContext(ctx, query, ruleID, tenantID).Scan(
 			&rule.ID, &rule.TenantID, &rule.RuleName, &rule.AlertSource,
 			&alertType, pq.Array(&channelIDStrings), pq.Array(&severityFilterArr), pq.Array(&categoryFilterArr),
 			&rule.Frequency, &digestWindow, &rule.Enabled, &rule.Priority,
-			&rule.CreatedAt, &rule.UpdatedAt,
+			&rule.CreatedAt, &rule.UpdatedAt, &changeFilter,
 		)
 		if scanErr == sql.ErrNoRows {
 			return fmt.Errorf("rule not found")
@@ -373,6 +411,12 @@ func (re *RuleEngine) UpdateTenantRule(ctx context.Context, tenantID, ruleID uui
 		if req.Priority != nil {
 			rule.Priority = *req.Priority
 		}
+		filter := scanChangeFilter(changeFilter)
+		if req.ChangeFilter != nil {
+			filter = req.ChangeFilter
+		}
+		changeFilterVal, storedFilter := changeFilterValue(rule.AlertType, filter)
+		rule.ChangeFilter = storedFilter
 		rule.UpdatedAt = time.Now()
 
 		// Build update query
@@ -380,7 +424,8 @@ func (re *RuleEngine) UpdateTenantRule(ctx context.Context, tenantID, ruleID uui
 			UPDATE tenant_notification_rules
 			SET rule_name = $1, alert_type = $2, channel_ids = $3,
 			    severity_filter = $4, category_filter = $5, frequency = $6,
-			    digest_window = $7, enabled = $8, priority = $9, updated_at = NOW()
+			    digest_window = $7, enabled = $8, priority = $9, updated_at = NOW(),
+			    change_filter = $12::jsonb
 			WHERE id = $10 AND tenant_id = $11
 		`
 
@@ -397,7 +442,7 @@ func (re *RuleEngine) UpdateTenantRule(ctx context.Context, tenantID, ruleID uui
 			rule.RuleName, rule.AlertType, pq.Array(uuidSliceToStrings(rule.ChannelIDs)),
 			severityFilterVal, categoryFilterVal, rule.Frequency,
 			rule.DigestWindow, rule.Enabled, rule.Priority,
-			ruleID, tenantID,
+			ruleID, tenantID, changeFilterVal,
 		)
 		if e != nil {
 			return fmt.Errorf("failed to update rule: %w", e)
@@ -458,6 +503,7 @@ func (re *RuleEngine) GetPlatformRules() ([]models.PlatformNotificationRule, err
 			&rule.CreatedAt, &rule.UpdatedAt,
 		)
 		if err != nil {
+			re.logRuleScanError("platform_notification_rules", rule.ID, err)
 			continue
 		}
 

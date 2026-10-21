@@ -100,6 +100,11 @@ func (s *stubCatalogue) ImportDeviceTypes(ctx context.Context, _ uuid.UUID, _ []
 	return []services.ImportedDeviceType{}, nil
 }
 
+func (s *stubCatalogue) EOLCatalogueEntries(ctx context.Context, _ uuid.UUID, _, _ string, _ int) ([]services.EOLCatalogueRef, error) {
+	s.note(ctx)
+	return []services.EOLCatalogueRef{}, nil
+}
+
 func catalogueRouter(t *testing.T, store *stubCatalogue, perms ...string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -149,6 +154,7 @@ func catalogueRoutes() []catalogueRoute {
 		catalogueRoute{http.MethodPatch, asset + "/hardware", `{"serial":"FOC1"}`, true, http.StatusOK},
 		catalogueRoute{http.MethodPost, asset + "/device-type", `{"device_type_id":"` + uuid.NewString() + `"}`, true, http.StatusOK},
 		catalogueRoute{http.MethodPost, base + "/device-types/import", `{"yaml":"manufacturer: A\nmodel: B\n"}`, true, http.StatusOK},
+		catalogueRoute{http.MethodGet, base + "/eol-catalogue?product_kind=hardware", "", false, http.StatusOK},
 	)
 	return out
 }
@@ -165,7 +171,7 @@ func serveCatalogue(r http.Handler, rt catalogueRoute) *httptest.ResponseRecorde
 
 func TestDcimCatalogueRoutes_Gates(t *testing.T) {
 	routes := catalogueRoutes()
-	if want := 5*5 + 9*5 + 8*5 + 4; len(routes) != want {
+	if want := 5*5 + 9*5 + 8*5 + 5; len(routes) != want {
 		t.Fatalf("expected %d catalogue routes, got %d", want, len(routes))
 	}
 	for _, rt := range routes {

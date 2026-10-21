@@ -29,6 +29,9 @@ func TestDCIMSync_EverySyncedKindHasAWriter(t *testing.T) {
 	own[dcim.ObjectKindAsset] = true
 	// Row 3.5: a cable is written by CableService (dcim_sync_cabling_test.go).
 	own[dcim.ObjectKindCable] = true
+	// NetBox VM sync: the two sync kinds are written by their objects'
+	// services (dcim_sync_virtual_machines.go; TestDCIMSync_VMKindsHaveWriters).
+	own[syncKindVirtualMachine], own[syncKindVMInterface] = true, true
 	for _, k := range syncauthority.Kinds() {
 		if own[k.Kind] {
 			continue

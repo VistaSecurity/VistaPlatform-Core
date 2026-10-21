@@ -22,6 +22,7 @@ import { ContactsSettingsPage } from './pages-contacts';
 import { ConfigContextsSettingsPage } from './pages-config-contexts';
 import { ExportTemplatesSettingsPage } from './pages-export-templates';
 import { BulkImportPage } from './bulk-import-page';
+import { SparesPage } from '../inventory/spares/spares-page';
 import { CircuitProvidersPage } from './pages-circuit-providers';
 import { CustomFieldsSettingsPage } from './pages-custom-fields';
 import { DeviceTypesPage } from './device-types-page';
@@ -164,6 +165,7 @@ function GuardedPage({ page, meta }: { page: string; meta: SettingsNavItem & { s
     case 'config-contexts': return <ConfigContextsSettingsPage meta={meta} />;
     case 'export-templates': return <ExportTemplatesSettingsPage meta={meta} />;
     case 'import': return <BulkImportPage meta={meta} />;
+    case 'spares': return <SparesPage meta={meta} />;
     case 'circuit-providers': return <CircuitProvidersPage meta={meta} />;
     case 'custom-fields': return <CustomFieldsSettingsPage meta={meta} />;
     case 'device-types': return <DeviceTypesPage meta={meta} />;

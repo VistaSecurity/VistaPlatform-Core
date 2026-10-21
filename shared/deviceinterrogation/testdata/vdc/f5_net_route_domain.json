@@ -1,0 +1,8 @@
+{
+  "kind": "tm:net:route-domain:route-domaincollectionstate",
+  "items": [
+    {"name": "0", "fullPath": "/Common/0", "id": 0, "strict": "enabled", "vlans": ["/Common/external", "/Common/http-tunnel"]},
+    {"name": "tenant-a", "fullPath": "/Common/tenant-a", "id": 2, "strict": "enabled", "description": "PlantedVdcSecret-4410", "vlans": ["/Common/internal"]},
+    {"name": "spare", "fullPath": "/Common/spare", "id": 7, "strict": "enabled"}
+  ]
+}

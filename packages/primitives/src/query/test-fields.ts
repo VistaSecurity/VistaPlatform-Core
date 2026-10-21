@@ -105,6 +105,15 @@ const ASSET_FIELDS: FieldInfo[] = [
   colAs('platform.id', 'platform_id', 'uuid'),
   col('serial', 'keyword'),
   col('asset_tag', 'keyword'),
+  // Commercial lifecycle (DCIM gap 4): declared dates, the seller, and the
+  // effective end of support (device type or platform, declared or catalogue).
+  col('purchase_date', 'timestamp'),
+  col('warranty_end', 'timestamp'),
+  col('support_contract_end', 'timestamp'),
+  col('installed_at', 'timestamp'),
+  col('decommissioned_at', 'timestamp'),
+  col('vendor', 'keyword'),
+  derived('end_of_support', 'asset.end_of_support', 'timestamp'),
   // Virtualisation (DCIM 4.2): the asset's cluster (a VM's or a host's).
   derived('cluster', 'asset.cluster', 'keyword'),
   colAs('cluster.id', 'cluster_id', 'uuid'),
@@ -122,6 +131,8 @@ const ASSET_FIELDS: FieldInfo[] = [
   // Hardware (DCIM 2.4): modules, inventory items, virtual chassis.
   derived('module_type', 'asset.module_type', 'keyword'),
   derived('inventory_item.serial', 'asset.inventory_item_serial', 'keyword'),
+  // DCIM gap 8: the stock state of one of the asset's inventory items.
+  { ...derived('inventory_item.stock_state', 'asset.inventory_item_stock_state', 'keyword'), enum: ['installed', 'in_stock', 'reserved', 'rma', 'retired'] },
   derived('virtual_chassis', 'asset.virtual_chassis', 'keyword'),
   col('position', 'number'),
   enumAs('face', 'face', 'front', 'rear'),
@@ -165,10 +176,26 @@ const ASSET_FIELDS: FieldInfo[] = [
   derived('tunnel.pfs_group', 'asset.tunnel.pfs_group', 'number'),
   derived('wireless_lan.ssid', 'asset.wireless_lan.ssid', 'keyword'),
   { ...derived('wireless_lan.auth_type', 'asset.wireless_lan.auth_type', 'keyword'), enum: ['open', 'wep', 'wpa-personal', 'wpa-enterprise'] },
+  // Virtual circuits (DCIM gap 10): a virtual circuit the asset's interfaces terminate.
+  derived('virtual_circuit', 'asset.virtual_circuit', 'keyword'),
+  derived('virtual_circuit.cid', 'asset.virtual_circuit.cid', 'keyword'),
+  derived('virtual_circuit.provider', 'asset.virtual_circuit.provider', 'keyword'),
+  { ...derived('virtual_circuit.role', 'asset.virtual_circuit.role', 'keyword'), enum: ['peer', 'hub', 'spoke'] },
   // Cabling (DCIM 3.2): the cables on the asset's components.
   { ...derived('cable.type', 'asset.cable.type', 'keyword'), enum: ['cat3', 'cat5', 'cat5e', 'cat6', 'cat6a', 'cat7', 'cat7a', 'cat8', 'dac-active', 'dac-passive', 'mrj21-trunk', 'coaxial', 'mmf', 'mmf-om1', 'mmf-om2', 'mmf-om3', 'mmf-om4', 'mmf-om5', 'smf', 'smf-os1', 'smf-os2', 'aoc', 'usb', 'power'] },
   { ...derived('cable.status', 'asset.cable.status', 'keyword'), enum: ['connected', 'planned', 'decommissioning'] },
   derived('cabled_to', 'asset.cabled_to', 'keyword'),
+  // Power (DCIM 6.1): the power feeds the asset's power ports reach.
+  { ...derived('power_feed.status', 'asset.power_feed.status', 'keyword'), enum: ['offline', 'active', 'planned', 'failed'] },
+  { ...derived('power_feed.type', 'asset.power_feed.type', 'keyword'), enum: ['primary', 'redundant'] },
+  { ...derived('power_feed.supply', 'asset.power_feed.supply', 'keyword'), enum: ['ac', 'dc'] },
+  { ...derived('power_feed.phase', 'asset.power_feed.phase', 'keyword'), enum: ['single-phase', 'three-phase'] },
+  derived('power_feed.voltage', 'asset.power_feed.voltage', 'number'),
+  derived('power_feed.amperage', 'asset.power_feed.amperage', 'number'),
+  derived('power_feed.available_power', 'asset.power_feed.available_power', 'number'),
+  derived('power_feed.panel', 'asset.power_feed.panel', 'keyword'),
+  derived('power_feed.rack', 'asset.power_feed.rack', 'keyword'),
+  derived('power_feed.site', 'asset.power_feed.site', 'keyword'),
   {
     name: 'risk',
     type: 'band',
@@ -286,6 +313,8 @@ const FINDING_FIELDS: FieldInfo[] = [
     'os_end_of_life', 'software_end_of_life', 'hardware_end_of_support', 'known_vulnerability',
     'plaintext_management', 'default_credentials_exposed', 'insecure_service_exposed',
     'no_owner', 'no_class', 'no_location', 'duplicate_suspected', 'stale', 'orphan_relationship',
+    'not_racked', 'no_rack_position', 'planned_cable_stale', 'cable_unconfirmed', 'interface_no_type',
+    'duplicate_address', 'warranty_expired', 'past_end_of_support', 'end_of_support_soon',
     'new_class_in_segment', 'unexpected_protocol', 'port_profile_changed', 'new_issuer',
     'host_key_changed', 'cable_drift',
   ),
@@ -408,6 +437,7 @@ const INTERFACE_FIELDS: FieldInfo[] = [
   enumAs('mode', 'mode', 'access', 'tagged', 'tagged-all', 'q-in-q'),
   enumAs('status', 'status', 'pending', 'active', 'rejected', 'stale', 'archived'),
   enumAs('operational_status', 'operational_status', 'up', 'down', 'testing', 'unknown'),
+  derived('virtual_device_context', 'interface.virtual_device_context', 'keyword'),
   col('description', 'text'),
   col('id', 'uuid'),
 ];

@@ -1,8 +1,9 @@
 // Inventory → VLANs (DCIM BUILD_PLAN row 1.3): VLAN groups, and the VLANs in
 // them with the prefixes each one carries. Picking a VLAN shows its change log
-// and journal. Writes are behind `ipam.manage`.
-import { useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router';
+// and journal. Writes are behind `ipam.manage`. A second view lists the VLAN
+// translation policies (DCIM gap 10, vlan-translation-view.tsx).
+import { useMemo, useState, type ReactNode } from 'react';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { Icon } from '../../../components/ui';
 import { ObjectChanges } from '../dcim/object-changes';
@@ -12,6 +13,8 @@ import { PanelEmpty, PanelError, PanelLoading } from '../dcim/substrate-states';
 import { LIFECYCLE_LABEL, useIpamList, useIpamWrite, type Vlan, type VlanGroup } from './ipam-queries';
 import { Chip, IpamDeleteModal, IpamFormModal, type IpamField } from './ipam-ui';
 import { CustomFieldsPanel } from '../dcim/custom-fields-panel';
+import { fromState, vlanHref } from '../object-pages/object-links';
+import { VlanTranslationView } from './vlan-translation-view';
 
 const VLAN_STATUS = [
   { value: 'active', label: 'Active' }, { value: 'reserved', label: 'Reserved' }, { value: 'deprecated', label: 'Deprecated' },
@@ -36,10 +39,13 @@ const GROUP_FIELDS: IpamField[] = [
 function VlanDetail({ vlan, onClose }: { vlan: Vlan; onClose: () => void }) {
   const [tab, setTab] = useState<'changes' | 'journal'>('changes');
   const { update } = useIpamWrite('vlans');
+  const loc = useLocation();
   return (
     <aside data-testid="vlan-panel" style={{ border: '1px solid var(--app-border)', borderRadius: 12, background: 'var(--app-panel)', padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span className="mono" style={{ fontWeight: 700 }}>{vlan.vid}</span><span style={{ fontWeight: 600 }}>{vlan.name}</span>
+        <Link to={vlanHref(vlan.id)} state={fromState(loc)} data-testid="vlan-open-page" title="Open the VLAN page" style={{ color: 'inherit', textDecoration: 'none', display: 'inline-flex', gap: 8 }}>
+          <span className="mono" style={{ fontWeight: 700 }}>{vlan.vid}</span><span style={{ fontWeight: 600 }}>{vlan.name}</span>
+        </Link>
         <button type="button" className="ui-btn sm ghost" aria-label="Close" style={{ marginLeft: 'auto' }} onClick={onClose}><Icon name="x" size={13} /></button>
       </div>
       <div style={{ fontSize: 12.5, marginTop: 8 }}>
@@ -65,8 +71,44 @@ function VlanDetail({ vlan, onClose }: { vlan: Vlan; onClose: () => void }) {
   );
 }
 
+/** The VLANs lens: VLANs by group, or (`view=translation`, DCIM gap 10) the
+ *  VLAN translation policies interfaces apply. One lens with two views — the
+ *  lens count is audited. */
 export function VlansLens() {
   const [params, setParams] = useSearchParams();
+  const translation = params.get('view') === 'translation';
+  const show = (v: 'vlans' | 'translation') => {
+    const n = new URLSearchParams(params);
+    for (const k of ['view', 'vlan', 'group', 'policy']) n.delete(k);
+    if (v === 'translation') n.set('view', 'translation');
+    setParams(n, { replace: true });
+  };
+  const tabs = (
+    <div role="tablist" aria-label="VLAN view" style={{ display: 'flex', gap: 6 }}>
+      <button type="button" role="tab" aria-selected={!translation} data-testid="vlans-view-vlans" className={`ui-btn sm${!translation ? ' accent' : ''}`} onClick={() => show('vlans')}>VLANs</button>
+      <button type="button" role="tab" aria-selected={translation} data-testid="vlans-view-translation" className={`ui-btn sm${translation ? ' accent' : ''}`} onClick={() => show('translation')}>Translation policies</button>
+    </div>
+  );
+  if (translation) {
+    return (
+      <div data-testid="vlans-lens" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon name="layers" size={17} style={{ color: 'var(--accent)' }} />VLANs
+          </h1>
+          {tabs}
+        </div>
+        <VlanTranslationView />
+      </div>
+    );
+  }
+  return <VlanList tabs={tabs} />;
+}
+
+function VlanList({ tabs }: { tabs: ReactNode }) {
+  const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
+  const loc = useLocation();
   const group = params.get('group') ?? '';
   const selected = params.get('vlan');
   const set = (k: string, v: string | null) => {
@@ -90,6 +132,7 @@ export function VlansLens() {
         <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
           <Icon name="layers" size={17} style={{ color: 'var(--accent)' }} />VLANs
         </h1>
+        {tabs}
         <span style={{ fontSize: 12, color: 'var(--app-t3)' }}>{vlans.data ? `${vlans.data.total} ${vlans.data.total === 1 ? 'VLAN' : 'VLANs'}` : ''}</span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
           <ExportButton kind="vlan" filters={{ group_id: group }} />
@@ -119,7 +162,7 @@ export function VlansLens() {
               message="Add the VLANs you run; a prefix carried on a VLAN shows here. Discovered VLANs arrive pending approval." />
           )}
           {rows.map((v) => (
-            <div key={v.id} data-testid="vlan-row" onClick={() => set('vlan', v.id)}
+            <div key={v.id} data-testid="vlan-row" onClick={() => navigate(vlanHref(v.id), { state: fromState(loc) })}
               style={{ display: 'grid', gridTemplateColumns: '70px 1.2fr 1fr 100px 1.6fr 70px', gap: 10, alignItems: 'center', padding: '7px 12px', borderBottom: '1px solid var(--app-border)', fontSize: 12.5, cursor: 'pointer', background: selected === v.id ? 'var(--app-panel2)' : undefined }}>
               <span className="mono" style={{ fontWeight: 600 }}>{v.vid}</span>
               <span>{v.name}{v.status !== 'active' && <> <Chip tone="var(--warn)">{LIFECYCLE_LABEL[v.status]}</Chip></>}</span>

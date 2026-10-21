@@ -1650,10 +1650,68 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/internal/alerts/raise": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Raise one alert over HTTP (internal; the fallback for alerts.raise)
+         * @description The HTTP rail for the `alerts.raise` NATS subject: a producer whose
+         *     publish failed posts the same event here, and it is raised exactly as
+         *     the subscriber would raise it (`AlertEngineService.Raise` — never the
+         *     policy-rung path). An event-lifecycle type such as `object_changed` is
+         *     routed once to the notification rails and leaves no alerts row.
+         *
+         *     HMAC-signed service calls only, naming the tenant in the signed
+         *     `X-Tenant-ID` header; the event's `tenant_id` must be that tenant (an
+         *     omitted one is taken from the header). Denied at the edge.
+         */
+        post: operations["raiseAlertInternal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description One `alerts.raise` event (shared/events.AlertRaiseEvent), the same JSON the NATS subject carries. */
+        AlertRaiseEvent: {
+            /** Format: uuid */
+            event_id?: string;
+            /** Format: uuid */
+            tenant_id?: string;
+            /** @description A standards/alert-registry.yaml id. */
+            alert_type: string;
+            source?: string;
+            subject_type?: string;
+            /** Format: uuid */
+            subject_id?: string | null;
+            subject_label?: string;
+            /** @enum {string} */
+            severity: "info" | "low" | "medium" | "high" | "critical";
+            title?: string;
+            message?: string;
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
+            /** Format: date-time */
+            timestamp?: string;
+        };
+        AlertIntakeResponse: {
+            /**
+             * @description What the engine did with the event.
+             * @enum {string}
+             */
+            outcome: "opened" | "escalated" | "touched" | "suppressed" | "notified";
+        };
         /** @description ADR-0008 D4.1 provenance, carried by every seam output. All four as FIELDS rather than as something a reader infers: a value that crosses a service boundary or lands in a jsonb column must say what produced it, or it arrives indistinguishable from a measured fact. */
         SeamProvenance: {
             /**
@@ -3096,6 +3154,11 @@ export interface components {
             kind: string;
             /** @description live / planned. */
             status: string;
+            /**
+             * @description stateful — one row in the alerts table per subject that opens, escalates and resolves; event — a one-shot notification routed once per raise with no alerts row (object_changed).
+             * @enum {string}
+             */
+            lifecycle: "stateful" | "event";
             /** @description Which service raises this alert type. */
             source: string;
             subject_type: string;
@@ -3507,6 +3570,8 @@ export interface components {
         };
     };
     parameters: {
+        /** @description The one tenant this internal call is for. Covered by the HMAC signature, so it cannot be changed after signing. */
+        ServiceTenantHeader: string;
         /** @description Alert UUID. */
         AlertId: string;
         /** @description Filter by lifecycle status (active, acknowledged, snoozed, resolved). */
@@ -6358,6 +6423,36 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AlertCatalogUpdateResponse"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            401: components["responses"]["LegacyUnauthorized"];
+            500: components["responses"]["LegacyServerError"];
+        };
+    };
+    raiseAlertInternal: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description The one tenant this internal call is for. Covered by the HMAC signature, so it cannot be changed after signing. */
+                "X-Tenant-ID": components["parameters"]["ServiceTenantHeader"];
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AlertRaiseEvent"];
+            };
+        };
+        responses: {
+            /** @description The event was raised; `outcome` says what the engine did with it. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertIntakeResponse"];
                 };
             };
             400: components["responses"]["LegacyBadRequest"];

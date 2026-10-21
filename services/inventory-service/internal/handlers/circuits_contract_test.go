@@ -28,8 +28,8 @@ func TestCircuitsContract_SchemasMatchTablesAndEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	objs := services.CircuitObjects()
-	if len(objs) != 8 {
-		t.Fatalf("engine serves %d circuit objects, want 8", len(objs))
+	if len(objs) != 11 {
+		t.Fatalf("engine serves %d circuit objects, want 11", len(objs))
 	}
 	keys := func(m map[string]interface{}) []string {
 		var out []string
@@ -42,6 +42,9 @@ func TestCircuitsContract_SchemasMatchTablesAndEngine(t *testing.T) {
 	listOnly := map[string][]string{
 		"circuits":             {"provider_name", "type_name", "terminations"},
 		"circuit_terminations": {"termination_name"},
+		// DCIM gap 10.
+		"virtual_circuits":             {"provider_network_name", "provider_id", "provider_name", "type_name", "terminations"},
+		"virtual_circuit_terminations": {"virtual_circuit_cid", "interface_name", "asset_id", "asset_name"},
 	}
 	for _, o := range objs {
 		name := pascalKey(o.Kind)

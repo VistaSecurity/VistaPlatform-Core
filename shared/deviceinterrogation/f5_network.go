@@ -23,6 +23,14 @@ import (
 //     route domain; route domain 0 is the global table, any other is the VRF
 //     named by `net/route-domain`.
 //   - `net/arp` — the ARP table, as evidence about other hosts.
+//
+// Route domain → virtual device context (DCIM gap 1): every route domain
+// `net/route-domain` lists is a context, named as BIG-IP names it (the default
+// route domain is named "0") with its id as the identifier. A VLAN's own
+// interface belongs to the route domain whose `vlans` list names the VLAN; a
+// VLAN no list names belongs to the route domain of its self IPs' `%N`, and
+// with no self IP it is not said. Physical ports and trunks are layer 2 and
+// belong to no route domain.
 
 // f5NetTrunk is the `net/trunk` projection.
 type f5NetTrunk struct {
@@ -49,10 +57,21 @@ type f5NetVLANExpanded struct {
 	} `json:"interfacesReference"`
 }
 
-// f5RouteDomain is the `net/route-domain` projection.
+// f5RouteDomain is the `net/route-domain` projection: the name, the id and
+// the VLANs (full paths) in it.
 type f5RouteDomain struct {
-	Name string `json:"name"`
-	ID   int    `json:"id"`
+	Name  string   `json:"name"`
+	ID    int      `json:"id"`
+	VLANs []string `json:"vlans"`
+}
+
+// f5ContextName names a route domain's context: its BIG-IP name, else the id
+// (BIG-IP's own default name for a route domain).
+func f5ContextName(rd int, names map[int]string) string {
+	if name := strings.TrimSpace(names[rd]); name != "" {
+		return name
+	}
+	return strconv.Itoa(rd)
 }
 
 // f5ARP is the `net/arp` projection.
@@ -100,8 +119,20 @@ func f5Network(ifaces []f5NetInterface, trunks []f5NetTrunk, vlans []f5NetVLANEx
 	selfIPs []f5SelfIP, domains []f5RouteDomain, arp []f5ARP) *vendorNetwork {
 	n := &vendorNetwork{Producer: f5Collector}
 	rdNames := map[int]string{}
+	rdOfVLAN := map[string]int{}
 	for _, d := range domains {
 		rdNames[d.ID] = f5ObjectName(d.Name)
+	}
+	for _, d := range domains {
+		if d.ID < 0 || d.ID > maxContextIdentifier {
+			continue
+		}
+		n.addContext(f5ContextName(d.ID, rdNames), d.ID, true)
+		for _, v := range d.VLANs {
+			if v := f5ObjectName(v); v != "" {
+				rdOfVLAN[v] = d.ID
+			}
+		}
 	}
 	byName := map[string]int{}
 	add := func(ifc netIface) *netIface {
@@ -213,6 +244,15 @@ func f5Network(ifaces []f5NetInterface, trunks []f5NetTrunk, vlans []f5NetVLANEx
 		}
 		p := &n.Interfaces[byName[name]]
 		p.Addresses = append(p.Addresses, netAddr{Address: a, VRF: f5VRF(rd, rdNames)})
+		if _, listed := rdOfVLAN[vlan]; !listed && p.Context == "" && rd <= maxContextIdentifier {
+			p.Context = f5ContextName(rd, rdNames)
+			n.addContext(p.Context, rd, true)
+		}
+	}
+	for vlan, rd := range rdOfVLAN {
+		if name, ok := vlanIfc[vlan]; ok {
+			n.Interfaces[byName[name]].Context = f5ContextName(rd, rdNames)
+		}
 	}
 	n.Prefixes = connectedPrefixes(n.Interfaces)
 

@@ -13,6 +13,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/services"
 	"github.com/vistasecurity/vistaplatform/shared/dcim"
 	"github.com/vistasecurity/vistaplatform/shared/dcim/unresolved"
+	"github.com/vistasecurity/vistaplatform/shared/syncauthority"
 )
 
 // The internal DCIM sync surface (ADR-0010 D7; SYNC_MODEL §1.5): what a sync
@@ -72,6 +73,13 @@ func (h *DCIMSyncHandler) ready(c *gin.Context) (uuid.UUID, bool) {
 
 func syncKindParam(c *gin.Context) (dcim.ObjectKind, bool) {
 	k, ok := dcim.ParseObjectKind(c.Param("kind"))
+	if !ok {
+		// A sync kind over another object's table (a NetBox virtual machine
+		// or VM interface, standards/sync-authority.yaml `object:`).
+		if spec, isSync := syncauthority.Kind(dcim.ObjectKind(c.Param("kind"))); isSync && spec.Object != "" {
+			k, ok = spec.Kind, true
+		}
+	}
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown object kind"})
 		return "", false

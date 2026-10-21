@@ -285,6 +285,27 @@ SELECT
 		ORDER BY ci.last_verified_at DESC
 
 -- ============================================================
+-- duplicate_address_count  [shape: finding, subject: asset]
+-- $3 = [hygiene]
+-- predicate args: [hygiene duplicate_address monitoring interface rejected]
+SELECT
+			a.id AS subject_id,
+			a.tenant_id AS tenant_id,
+			now() AS measured_at,
+			(SELECT count(*) FROM findings f WHERE f.tenant_id = a.tenant_id AND f.subject_type = 'asset' AND f.subject_id = a.id AND (f.detection_state = 'ACTIVE' AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL OR (f.suppressed_until IS NOT NULL AND f.suppressed_until <= NOW()))) AND (((lower((f.producer)::text) = $4) AND (lower((f.kind)::text) = $5)))) AS col_0,
+			a.hostname AS col_1,
+			host(a.primary_address) AS col_2,
+			a.display_name AS col_3,
+			a.class_key AS col_4
+		FROM assets a
+		WHERE a.tenant_id = $1
+			AND a.deleted_at IS NULL
+			AND ($2::uuid IS NULL OR a.id = $2)
+			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
+			AND (((lower((a.asset_status)::text) = $6) AND EXISTS (SELECT 1 FROM ip_addresses sip1 WHERE (sip1.id IN (a.primary_ip4_id, a.primary_ip6_id, a.oob_ip_id) OR (sip1.assigned_kind = $7 AND sip1.assigned_id IN (SELECT sifc2.id FROM interfaces sifc2 WHERE sifc2.asset_id = a.id))) AND sip1.status <> $8 AND (sip1.host IS NOT NULL))))
+		ORDER BY a.updated_at DESC
+
+-- ============================================================
 -- duplicate_suspected_count  [shape: finding, subject: asset]
 -- $3 = [hygiene]
 -- predicate args: [hygiene duplicate_suspected monitoring]
@@ -303,6 +324,27 @@ SELECT
 			AND ($2::uuid IS NULL OR a.id = $2)
 			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
 			AND ((lower((a.asset_status)::text) = $6))
+		ORDER BY a.updated_at DESC
+
+-- ============================================================
+-- end_of_support_soon_count  [shape: finding, subject: asset]
+-- $3 = [hygiene]
+-- predicate args: [hygiene end_of_support_soon monitoring]
+SELECT
+			a.id AS subject_id,
+			a.tenant_id AS tenant_id,
+			now() AS measured_at,
+			(SELECT count(*) FROM findings f WHERE f.tenant_id = a.tenant_id AND f.subject_type = 'asset' AND f.subject_id = a.id AND (f.detection_state = 'ACTIVE' AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL OR (f.suppressed_until IS NOT NULL AND f.suppressed_until <= NOW()))) AND (((lower((f.producer)::text) = $4) AND (lower((f.kind)::text) = $5)))) AS col_0,
+			a.hostname AS col_1,
+			host(a.primary_address) AS col_2,
+			a.display_name AS col_3,
+			a.class_key AS col_4
+		FROM assets a
+		WHERE a.tenant_id = $1
+			AND a.deleted_at IS NULL
+			AND ($2::uuid IS NULL OR a.id = $2)
+			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
+			AND (((lower((a.asset_status)::text) = $6) AND (LEAST((SELECT COALESCE(seosdt1.end_of_support, seosdte2.eol_date) FROM device_types seosdt1 LEFT JOIN eol_catalogue seosdte2 ON seosdte2.id = seosdt1.eol_catalogue_id WHERE seosdt1.id = a.device_type_id), (SELECT COALESCE(seospl3.end_of_support, seosple4.eol_date) FROM platforms seospl3 LEFT JOIN eol_catalogue seosple4 ON seosple4.id = seospl3.eol_catalogue_id WHERE seospl3.id = a.platform_id)) IS NOT NULL)))
 		ORDER BY a.updated_at DESC
 
 -- ============================================================
@@ -527,6 +569,27 @@ SELECT
 		ORDER BY ci.last_verified_at DESC
 
 -- ============================================================
+-- past_end_of_support_count  [shape: finding, subject: asset]
+-- $3 = [hygiene]
+-- predicate args: [hygiene past_end_of_support monitoring]
+SELECT
+			a.id AS subject_id,
+			a.tenant_id AS tenant_id,
+			now() AS measured_at,
+			(SELECT count(*) FROM findings f WHERE f.tenant_id = a.tenant_id AND f.subject_type = 'asset' AND f.subject_id = a.id AND (f.detection_state = 'ACTIVE' AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL OR (f.suppressed_until IS NOT NULL AND f.suppressed_until <= NOW()))) AND (((lower((f.producer)::text) = $4) AND (lower((f.kind)::text) = $5)))) AS col_0,
+			a.hostname AS col_1,
+			host(a.primary_address) AS col_2,
+			a.display_name AS col_3,
+			a.class_key AS col_4
+		FROM assets a
+		WHERE a.tenant_id = $1
+			AND a.deleted_at IS NULL
+			AND ($2::uuid IS NULL OR a.id = $2)
+			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
+			AND (((lower((a.asset_status)::text) = $6) AND (LEAST((SELECT COALESCE(seosdt1.end_of_support, seosdte2.eol_date) FROM device_types seosdt1 LEFT JOIN eol_catalogue seosdte2 ON seosdte2.id = seosdt1.eol_catalogue_id WHERE seosdt1.id = a.device_type_id), (SELECT COALESCE(seospl3.end_of_support, seosple4.eol_date) FROM platforms seospl3 LEFT JOIN eol_catalogue seosple4 ON seosple4.id = seospl3.eol_catalogue_id WHERE seospl3.id = a.platform_id)) IS NOT NULL)))
+		ORDER BY a.updated_at DESC
+
+-- ============================================================
 -- pfs_support  [shape: crypto_configuration, subject: asset]
 SELECT
 			na.id AS subject_id,
@@ -548,6 +611,27 @@ SELECT
 			AND ((ci.key_exchange_algorithm IS NOT NULL))
 			AND (TRUE)
 		ORDER BY ci.last_verified_at DESC
+
+-- ============================================================
+-- rack_position_missing_count  [shape: finding, subject: asset]
+-- $3 = [hygiene]
+-- predicate args: [hygiene no_rack_position monitoring]
+SELECT
+			a.id AS subject_id,
+			a.tenant_id AS tenant_id,
+			now() AS measured_at,
+			(SELECT count(*) FROM findings f WHERE f.tenant_id = a.tenant_id AND f.subject_type = 'asset' AND f.subject_id = a.id AND (f.detection_state = 'ACTIVE' AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL OR (f.suppressed_until IS NOT NULL AND f.suppressed_until <= NOW()))) AND (((lower((f.producer)::text) = $4) AND (lower((f.kind)::text) = $5)))) AS col_0,
+			a.hostname AS col_1,
+			host(a.primary_address) AS col_2,
+			a.display_name AS col_3,
+			a.class_key AS col_4
+		FROM assets a
+		WHERE a.tenant_id = $1
+			AND a.deleted_at IS NULL
+			AND ($2::uuid IS NULL OR a.id = $2)
+			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
+			AND (((lower((a.asset_status)::text) = $6) AND (a.rack_id IS NOT NULL)))
+		ORDER BY a.updated_at DESC
 
 -- ============================================================
 -- software_eol_days  [shape: fact, subject: asset]
@@ -573,6 +657,27 @@ SELECT
 			AND ((lower((a.asset_status)::text) = $4))
 			AND (TRUE)
 		ORDER BY af.observed_at DESC
+
+-- ============================================================
+-- stale_planned_cable_count  [shape: finding, subject: asset]
+-- $3 = [hygiene]
+-- predicate args: [hygiene planned_cable_stale monitoring rejected planned]
+SELECT
+			a.id AS subject_id,
+			a.tenant_id AS tenant_id,
+			now() AS measured_at,
+			(SELECT count(*) FROM findings f WHERE f.tenant_id = a.tenant_id AND f.subject_type = 'asset' AND f.subject_id = a.id AND (f.detection_state = 'ACTIVE' AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL OR (f.suppressed_until IS NOT NULL AND f.suppressed_until <= NOW()))) AND (((lower((f.producer)::text) = $4) AND (lower((f.kind)::text) = $5)))) AS col_0,
+			a.hostname AS col_1,
+			host(a.primary_address) AS col_2,
+			a.display_name AS col_3,
+			a.class_key AS col_4
+		FROM assets a
+		WHERE a.tenant_id = $1
+			AND a.deleted_at IS NULL
+			AND ($2::uuid IS NULL OR a.id = $2)
+			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
+			AND (((lower((a.asset_status)::text) = $6) AND EXISTS (SELECT 1 FROM cable_terminations sctn1 JOIN cables scb2 ON scb2.id = sctn1.cable_id WHERE sctn1.asset_id = a.id AND scb2.status <> $7 AND (lower(scb2.operational_status) = $8))))
+		ORDER BY a.updated_at DESC
 
 -- ============================================================
 -- symmetric_encryption  [shape: crypto_configuration, subject: asset]
@@ -645,3 +750,87 @@ SELECT
 			AND (((lower((ci.protocol)::text) = $3) AND (ci.protocol_version IS NOT NULL)))
 			AND (TRUE)
 		ORDER BY ci.last_verified_at DESC
+
+-- ============================================================
+-- unconfirmed_cable_count  [shape: finding, subject: asset]
+-- $3 = [hygiene]
+-- predicate args: [hygiene cable_unconfirmed monitoring rejected connected]
+SELECT
+			a.id AS subject_id,
+			a.tenant_id AS tenant_id,
+			now() AS measured_at,
+			(SELECT count(*) FROM findings f WHERE f.tenant_id = a.tenant_id AND f.subject_type = 'asset' AND f.subject_id = a.id AND (f.detection_state = 'ACTIVE' AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL OR (f.suppressed_until IS NOT NULL AND f.suppressed_until <= NOW()))) AND (((lower((f.producer)::text) = $4) AND (lower((f.kind)::text) = $5)))) AS col_0,
+			a.hostname AS col_1,
+			host(a.primary_address) AS col_2,
+			a.display_name AS col_3,
+			a.class_key AS col_4
+		FROM assets a
+		WHERE a.tenant_id = $1
+			AND a.deleted_at IS NULL
+			AND ($2::uuid IS NULL OR a.id = $2)
+			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
+			AND (((lower((a.asset_status)::text) = $6) AND EXISTS (SELECT 1 FROM cable_terminations sctn1 JOIN cables scb2 ON scb2.id = sctn1.cable_id WHERE sctn1.asset_id = a.id AND scb2.status <> $7 AND (lower(scb2.operational_status) = $8))))
+		ORDER BY a.updated_at DESC
+
+-- ============================================================
+-- unracked_count  [shape: finding, subject: asset]
+-- $3 = [hygiene]
+-- predicate args: [hygiene not_racked monitoring hardware hardware.%]
+SELECT
+			a.id AS subject_id,
+			a.tenant_id AS tenant_id,
+			now() AS measured_at,
+			(SELECT count(*) FROM findings f WHERE f.tenant_id = a.tenant_id AND f.subject_type = 'asset' AND f.subject_id = a.id AND (f.detection_state = 'ACTIVE' AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL OR (f.suppressed_until IS NOT NULL AND f.suppressed_until <= NOW()))) AND (((lower((f.producer)::text) = $4) AND (lower((f.kind)::text) = $5)))) AS col_0,
+			a.hostname AS col_1,
+			host(a.primary_address) AS col_2,
+			a.display_name AS col_3,
+			a.class_key AS col_4
+		FROM assets a
+		WHERE a.tenant_id = $1
+			AND a.deleted_at IS NULL
+			AND ($2::uuid IS NULL OR a.id = $2)
+			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
+			AND (((lower((a.asset_status)::text) = $6) AND (a.class_path = $7 OR a.class_path LIKE $8) AND (a.device_type_id IS NOT NULL)))
+		ORDER BY a.updated_at DESC
+
+-- ============================================================
+-- untyped_interface_count  [shape: finding, subject: asset]
+-- $3 = [hygiene]
+-- predicate args: [hygiene interface_no_type monitoring]
+SELECT
+			a.id AS subject_id,
+			a.tenant_id AS tenant_id,
+			now() AS measured_at,
+			(SELECT count(*) FROM findings f WHERE f.tenant_id = a.tenant_id AND f.subject_type = 'asset' AND f.subject_id = a.id AND (f.detection_state = 'ACTIVE' AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL OR (f.suppressed_until IS NOT NULL AND f.suppressed_until <= NOW()))) AND (((lower((f.producer)::text) = $4) AND (lower((f.kind)::text) = $5)))) AS col_0,
+			a.hostname AS col_1,
+			host(a.primary_address) AS col_2,
+			a.display_name AS col_3,
+			a.class_key AS col_4
+		FROM assets a
+		WHERE a.tenant_id = $1
+			AND a.deleted_at IS NULL
+			AND ($2::uuid IS NULL OR a.id = $2)
+			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
+			AND ((lower((a.asset_status)::text) = $6))
+		ORDER BY a.updated_at DESC
+
+-- ============================================================
+-- warranty_expired_count  [shape: finding, subject: asset]
+-- $3 = [hygiene]
+-- predicate args: [hygiene warranty_expired monitoring]
+SELECT
+			a.id AS subject_id,
+			a.tenant_id AS tenant_id,
+			now() AS measured_at,
+			(SELECT count(*) FROM findings f WHERE f.tenant_id = a.tenant_id AND f.subject_type = 'asset' AND f.subject_id = a.id AND (f.detection_state = 'ACTIVE' AND (f.workflow_status <> 'SUPPRESSED' OR f.workflow_status IS NULL OR (f.suppressed_until IS NOT NULL AND f.suppressed_until <= NOW()))) AND (((lower((f.producer)::text) = $4) AND (lower((f.kind)::text) = $5)))) AS col_0,
+			a.hostname AS col_1,
+			host(a.primary_address) AS col_2,
+			a.display_name AS col_3,
+			a.class_key AS col_4
+		FROM assets a
+		WHERE a.tenant_id = $1
+			AND a.deleted_at IS NULL
+			AND ($2::uuid IS NULL OR a.id = $2)
+			AND EXISTS (SELECT 1 FROM producer_assessments pa WHERE pa.tenant_id = a.tenant_id AND pa.asset_id = a.id AND pa.producer = $3)
+			AND (((lower((a.asset_status)::text) = $6) AND (a.warranty_end IS NOT NULL)))
+		ORDER BY a.updated_at DESC

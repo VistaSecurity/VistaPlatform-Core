@@ -3,7 +3,7 @@
 // path is in the inventory-service spec (`/circuits/...`) and goes through the
 // generated client.
 //
-// Eight objects share one CRUD shape on the server (the IPAM object engine), so
+// Eleven objects share one CRUD shape on the server (the IPAM object engine), so
 // the hooks are generic over the route segment, as IPAM's are. The route is a
 // closed union, and each one's row type comes from the contract.
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -20,6 +20,11 @@ export type Circuit = S['Circuit'];
 export type CircuitTermination = S['CircuitTermination'];
 export type CircuitTerminationSummary = S['CircuitTerminationSummary'];
 export type CircuitGroup = S['CircuitGroup'];
+// DCIM gap 10: virtual circuits (NetBox 4.2).
+export type VirtualCircuitType = S['VirtualCircuitType'];
+export type VirtualCircuit = S['VirtualCircuit'];
+export type VirtualCircuitTermination = S['VirtualCircuitTermination'];
+export type VirtualCircuitTerminationSummary = S['VirtualCircuitTerminationSummary'];
 
 /** Row type per route segment. */
 export interface CircuitRows {
@@ -31,6 +36,9 @@ export interface CircuitRows {
   'circuit-terminations': CircuitTermination;
   'circuit-groups': CircuitGroup;
   'circuit-group-assignments': S['CircuitGroupAssignment'];
+  'virtual-circuit-types': VirtualCircuitType;
+  'virtual-circuits': VirtualCircuit;
+  'virtual-circuit-terminations': VirtualCircuitTermination;
 }
 export type CircuitRoute = keyof CircuitRows;
 
@@ -108,6 +116,11 @@ export const CIRCUIT_STATUS_LABEL: Record<Circuit['operational_status'], string>
 
 export const CIRCUIT_STATUS_OPTIONS = (Object.keys(CIRCUIT_STATUS_LABEL) as Circuit['operational_status'][])
   .map((value) => ({ value, label: CIRCUIT_STATUS_LABEL[value] }));
+
+/** A virtual circuit termination's role (NetBox VirtualCircuitTerminationRoleChoices). */
+export const VC_ROLE_LABEL: Record<VirtualCircuitTermination['role'], string> = { peer: 'Peer', hub: 'Hub', spoke: 'Spoke' };
+export const VC_ROLE_OPTIONS = (Object.keys(VC_ROLE_LABEL) as VirtualCircuitTermination['role'][])
+  .map((value) => ({ value, label: VC_ROLE_LABEL[value] }));
 
 /** What a termination may land on, with the label the editor shows. Sites,
  *  regions and site groups arrive with the sites row; the server refuses a

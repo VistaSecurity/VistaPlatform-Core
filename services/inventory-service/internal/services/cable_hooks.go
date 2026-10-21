@@ -76,6 +76,14 @@ func componentCableAfterWrite(ctx context.Context, tx *sql.Tx, tenant uuid.UUID,
 		}
 		id, _ := cableRowUUID(post, "id")
 		nodes = append(nodes, cablepath.N(dcim.ObjectKindRearPort, id))
+	case dcim.ObjectKindPowerOutlet:
+		// The power port an outlet draws from is the next hop of every path
+		// through the outlet (row 6.1): a change moves those paths.
+		if pre == nil || fmt.Sprint(pre["power_port_id"]) == fmt.Sprint(post["power_port_id"]) {
+			return nil
+		}
+		id, _ := cableRowUUID(post, "id")
+		nodes = append(nodes, cablepath.N(dcim.ObjectKindPowerOutlet, id))
 	default:
 		return nil
 	}

@@ -13,7 +13,8 @@ import (
 
 // mountDcimHardwareRoutes mounts DCIM BUILD_PLAN row 2.4's hardware objects —
 // module bays, modules, inventory item roles, inventory items and virtual
-// chassis, with the chassis membership and the asset's chassis — under
+// chassis, with the chassis membership and the asset's chassis, and DCIM gap
+// 1's virtual device contexts (also listed and declared per asset) — under
 // /inventory-service/dcim on the JWT-authenticated v2 group: reads behind
 // dcim.read, writes behind dcim.manage, with changes.Middleware putting the
 // actor and request id on the context for the change record. POST /modules
@@ -64,4 +65,11 @@ func mountDcimHardwareRoutes(v2 gin.IRouter, rawDB *sql.DB, h *handlers.Componen
 	d.POST("/virtual-chassis/:id/members", manage, vc.AddMember)
 	d.DELETE("/virtual-chassis/:id/members/:asset_id", manage, vc.RemoveMember)
 	d.GET("/assets/:id/virtual-chassis", read, vc.ForAsset)
+	d.GET("/virtual-device-contexts", read, h.List("virtual-device-contexts"))
+	d.POST("/virtual-device-contexts", manage, h.Create("virtual-device-contexts"))
+	d.GET("/virtual-device-contexts/:id", read, h.Get("virtual-device-contexts"))
+	d.PATCH("/virtual-device-contexts/:id", manage, h.Update("virtual-device-contexts"))
+	d.DELETE("/virtual-device-contexts/:id", manage, h.Delete("virtual-device-contexts"))
+	d.GET("/assets/:id/virtual-device-contexts", read, h.ListForAsset("virtual-device-contexts"))
+	d.POST("/assets/:id/virtual-device-contexts", manage, h.CreateForAsset("virtual-device-contexts"))
 }

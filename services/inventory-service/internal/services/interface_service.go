@@ -126,7 +126,11 @@ const interfaceColumns = `i.id, i.asset_id, i.module_id, i.name, i.label, i.type
 	i.mtu, i.mac_address::text, i.speed_kbps, i.duplex, i.mode, i.untagged_vlan_id, i.vrf_id,
 	i.parent_id, i.bridge_id, i.lag_id, i.rf_role, i.rf_channel, i.rf_channel_frequency::float8,
 	i.rf_channel_width::float8, i.tx_power, i.poe_mode, i.poe_type, i.wwn, i.operational_status,
-	i.admin_status, i.vdcs, i.mark_connected, i.cable_id, i.cable_end::text, i.source_kind,
+	i.admin_status,
+	COALESCE((SELECT array_agg(c.name ORDER BY c.name) FROM interface_virtual_device_contexts j
+	           JOIN virtual_device_contexts c ON c.id = j.virtual_device_context_id
+	          WHERE j.interface_id = i.id), '{}'),
+	i.mark_connected, i.cable_id, i.cable_end::text, i.source_kind,
 	i.source_ref, i.custom_fields, i.description, i.comments, i.status, i.first_seen_at,
 	i.last_seen_at, i.observation_count, i.approved_by, i.approved_at, i.created_at,
 	i.updated_at, i.created_by,
@@ -134,7 +138,11 @@ const interfaceColumns = `i.id, i.asset_id, i.module_id, i.name, i.label, i.type
 	           WHERE t.interface_id = i.id), '{}'),
 	COALESCE((SELECT json_agg(json_build_object('id', m.id, 'mac', m.mac::text, 'is_primary', m.is_primary,
 	                 'source_kind', m.source_kind) ORDER BY m.is_primary DESC, m.mac)
-	            FROM mac_addresses m WHERE m.interface_id = i.id), '[]')`
+	            FROM mac_addresses m WHERE m.interface_id = i.id), '[]'),
+	COALESCE((SELECT json_agg(json_build_object('id', c.id, 'name', c.name) ORDER BY c.name, c.id)
+	            FROM interface_virtual_device_contexts j JOIN virtual_device_contexts c ON c.id = j.virtual_device_context_id
+	           WHERE j.interface_id = i.id), '[]'),
+	i.vlan_translation_policy_id`
 
 // interfaceNaturalOrder sorts `Gi1/0/2` before `Gi1/0/10`, as NetBox's
 // naturalised name does: the name with its numbers blanked, then the numbers
@@ -151,7 +159,7 @@ func ifaceScanInterface(r ifaceRowScanner) (Interface, error) {
 		mtu, tx                            sql.NullInt64
 		vdcs                               pq.StringArray
 		tagged                             pq.StringArray
-		custom, macs                       []byte
+		custom, macs, contexts             []byte
 		speed                              sql.NullInt64
 		freq, width                        sql.NullFloat64
 		label, duplex, mode, rfRole, rfCh  sql.NullString
@@ -159,6 +167,7 @@ func ifaceScanInterface(r ifaceRowScanner) (Interface, error) {
 		srcRef, desc, comments             sql.NullString
 		module, uvlan, vrf, parent, bridge uuid.NullUUID
 		lag, cable, approvedBy, createdBy  uuid.NullUUID
+		vtPolicy                           uuid.NullUUID
 		approvedAt                         sql.NullTime
 	)
 	if err := r.Scan(&i.ID, &i.AssetID, &module, &i.Name, &label, &i.Type, &i.Enabled, &i.MgmtOnly,
@@ -168,12 +177,13 @@ func ifaceScanInterface(r ifaceRowScanner) (Interface, error) {
 		&admin, &vdcs, &i.MarkConnected, &cable, &cableEnd, &i.SourceKind,
 		&srcRef, &custom, &desc, &comments, &i.Status, &i.FirstSeenAt,
 		&i.LastSeenAt, &i.ObservationCount, &approvedBy, &approvedAt, &i.CreatedAt,
-		&i.UpdatedAt, &createdBy, &tagged, &macs); err != nil {
+		&i.UpdatedAt, &createdBy, &tagged, &macs, &contexts, &vtPolicy); err != nil {
 		return Interface{}, err
 	}
 	i.ModuleID, i.UntaggedVLANID, i.VRFID = ifaceUuidPtr(module), ifaceUuidPtr(uvlan), ifaceUuidPtr(vrf)
 	i.ParentID, i.BridgeID, i.LagID, i.CableID = ifaceUuidPtr(parent), ifaceUuidPtr(bridge), ifaceUuidPtr(lag), ifaceUuidPtr(cable)
 	i.ApprovedBy, i.CreatedBy = ifaceUuidPtr(approvedBy), ifaceUuidPtr(createdBy)
+	i.VLANTranslationPolicyID = ifaceUuidPtr(vtPolicy)
 	i.Label, i.Duplex, i.Mode, i.RFRole, i.RFChannel = ifaceStrPtr(label), ifaceStrPtr(duplex), ifaceStrPtr(mode), ifaceStrPtr(rfRole), ifaceStrPtr(rfCh)
 	i.PoEMode, i.PoEType, i.WWN = ifaceStrPtr(poeMode), ifaceStrPtr(poeType), ifaceStrPtr(wwn)
 	i.OperationalStatus, i.AdminStatus, i.CableEnd = ifaceStrPtr(oper), ifaceStrPtr(admin), ifaceStrPtr(cableEnd)
@@ -209,6 +219,16 @@ func ifaceScanInterface(r ifaceRowScanner) (Interface, error) {
 	i.VDCs = []string(vdcs)
 	if i.VDCs == nil {
 		i.VDCs = []string{}
+	}
+	i.VirtualDeviceContexts = []VirtualDeviceContextRef{}
+	if len(contexts) > 0 {
+		if err := json.Unmarshal(contexts, &i.VirtualDeviceContexts); err != nil {
+			return Interface{}, err
+		}
+	}
+	i.VirtualDeviceContextIDs = make([]uuid.UUID, 0, len(i.VirtualDeviceContexts))
+	for _, c := range i.VirtualDeviceContexts {
+		i.VirtualDeviceContextIDs = append(i.VirtualDeviceContextIDs, c.ID)
 	}
 	i.TaggedVLANIDs = []uuid.UUID{}
 	for _, v := range tagged {
@@ -430,7 +450,24 @@ func ifaceCheckIPAMRefs(ctx context.Context, tx *sql.Tx, tenant uuid.UUID, in In
 			return ifaceInvalid("vrf_id", "no such VRF")
 		}
 	}
+	if in.VLANTranslationPolicyID != nil {
+		if ok, err := exists("vlan_translation_policies", *in.VLANTranslationPolicyID); err != nil || !ok {
+			if err != nil {
+				return err
+			}
+			return ifaceInvalid("vlan_translation_policy_id", "no such VLAN translation policy")
+		}
+	}
 	return nil
+}
+
+// ifaceSetTranslationPolicy writes the interface's VLAN translation policy
+// (DCIM gap 10). Its own statement, so the column stays out of the row 1.2
+// INSERT / UPDATE lists.
+func ifaceSetTranslationPolicy(ctx context.Context, tx *sql.Tx, tenant, id uuid.UUID, policy *uuid.UUID) error {
+	_, err := tx.ExecContext(ctx, `UPDATE interfaces SET vlan_translation_policy_id = $3
+		 WHERE tenant_id = $1 AND id = $2 AND vlan_translation_policy_id IS DISTINCT FROM $3`, tenant, id, ifaceNullUUID(policy))
+	return err
 }
 
 func ifaceRefsNamed(in InterfaceInput) []uuid.UUID {
@@ -516,6 +553,12 @@ func (s *InterfaceService) BulkCreate(ctx context.Context, tenant, actor uuid.UU
 			if err := ifaceCheckIPAMRefs(ctx, tx, tenant, in); err != nil {
 				return err
 			}
+			vdcs, err := ifaceResolveContexts(ctx, tx, tenant, in.AssetID, in.VirtualDeviceContextIDs, in.VDCs,
+				len(in.VirtualDeviceContextIDs) > 0, len(in.VDCs) > 0)
+			if err != nil {
+				return err
+			}
+			ins[k].VirtualDeviceContextIDs = vdcs
 		}
 		// Members reference their LAG / parent: insert referenced rows first.
 		for _, k := range ifaceInsertOrder(ins, ids) {
@@ -598,13 +641,6 @@ func ifaceCustomJSON(m map[string]any) []byte {
 	return b
 }
 
-func ifaceVdcsOf(v []string) pq.StringArray {
-	if v == nil {
-		return pq.StringArray{}
-	}
-	return pq.StringArray(v)
-}
-
 func ifaceMacOf(p *string) any {
 	if p == nil {
 		return nil
@@ -626,19 +662,25 @@ func ifaceInsertInterface(ctx context.Context, tx *sql.Tx, tenant, id, actor uui
 		INSERT INTO interfaces (id, tenant_id, asset_id, name, label, type, enabled, mgmt_only, mtu,
 			mac_address, speed_kbps, duplex, mode, untagged_vlan_id, vrf_id, parent_id, bridge_id, lag_id,
 			rf_role, rf_channel, rf_channel_frequency, rf_channel_width, tx_power, poe_mode, poe_type, wwn,
-			vdcs, mark_connected, description, comments, custom_fields, source_kind, status, created_by)
+			mark_connected, description, comments, custom_fields, source_kind, status, created_by)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::macaddr8,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
-			$24,$25,$26,$27,$28,$29,$30,$31,'declared','active',$32)`,
+			$24,$25,$26,$27,$28,$29,$30,'declared','active',$31)`,
 		id, tenant, in.AssetID, in.Name, ifaceNullStr(in.Label), in.Type, enabled, in.MgmtOnly, in.MTU,
 		ifaceMacOf(in.MACAddress), in.SpeedKbps, ifaceNullStr(in.Duplex), ifaceNullStr(in.Mode), ifaceNullUUID(in.UntaggedVLANID),
 		ifaceNullUUID(in.VRFID), ifaceNullUUID(in.ParentID), ifaceNullUUID(in.BridgeID), ifaceNullUUID(in.LagID),
 		ifaceNullStr(in.RFRole), ifaceNullStr(in.RFChannel), in.RFChannelFrequency, in.RFChannelWidth, in.TxPower,
-		ifaceNullStr(in.PoEMode), ifaceNullStr(in.PoEType), ifaceNullStr(in.WWN), ifaceVdcsOf(in.VDCs), in.MarkConnected,
+		ifaceNullStr(in.PoEMode), ifaceNullStr(in.PoEType), ifaceNullStr(in.WWN), in.MarkConnected,
 		ifaceNullStr(in.Description), ifaceNullStr(in.Comments), ifaceCustomJSON(in.CustomFields), createdBy)
 	if err != nil {
 		return err
 	}
 	if err := ifaceReplaceMACs(ctx, tx, tenant, id, in.MACAddress, in.MACAddresses); err != nil {
+		return err
+	}
+	if err := ifaceReplaceContexts(ctx, tx, tenant, id, in.VirtualDeviceContextIDs); err != nil {
+		return err
+	}
+	if err := ifaceSetTranslationPolicy(ctx, tx, tenant, id, in.VLANTranslationPolicyID); err != nil {
 		return err
 	}
 	return ifaceReplaceTaggedVLANs(ctx, tx, tenant, id, in.TaggedVLANIDs)
@@ -739,6 +781,15 @@ func (s *InterfaceService) Patch(ctx context.Context, tenant, id uuid.UUID, patc
 		if err := ifaceCheckIPAMRefs(ctx, tx, tenant, in); err != nil {
 			return err
 		}
+		_, idsSent := patch["virtual_device_context_ids"]
+		_, namesSent := patch["vdcs"]
+		if idsSent || namesSent {
+			vdcs, err := ifaceResolveContexts(ctx, tx, tenant, pre.AssetID, in.VirtualDeviceContextIDs, in.VDCs, idsSent, namesSent)
+			if err != nil {
+				return err
+			}
+			in.VirtualDeviceContextIDs = vdcs
+		}
 		// A cabled interface (row 3.2) cannot also be marked connected, nor
 		// become a kind no cable can attach to (NetBox Interface.clean).
 		if pre.CableID != nil {
@@ -765,14 +816,14 @@ func (s *InterfaceService) Patch(ctx context.Context, tenant, id uuid.UUID, patc
 				mac_address = $9::macaddr8, speed_kbps = $10, duplex = $11, mode = $12, untagged_vlan_id = $13,
 				vrf_id = $14, parent_id = $15, bridge_id = $16, lag_id = $17, rf_role = $18, rf_channel = $19,
 				rf_channel_frequency = $20, rf_channel_width = $21, tx_power = $22, poe_mode = $23,
-				poe_type = $24, wwn = $25, vdcs = $26, mark_connected = $27, description = $28,
-				comments = $29, custom_fields = $30
+				poe_type = $24, wwn = $25, mark_connected = $26, description = $27,
+				comments = $28, custom_fields = $29
 			 WHERE tenant_id = $1 AND id = $2`,
 			tenant, id, in.Name, ifaceNullStr(in.Label), in.Type, enabled, in.MgmtOnly, in.MTU,
 			ifaceMacOf(in.MACAddress), in.SpeedKbps, ifaceNullStr(in.Duplex), ifaceNullStr(in.Mode), ifaceNullUUID(in.UntaggedVLANID),
 			ifaceNullUUID(in.VRFID), ifaceNullUUID(in.ParentID), ifaceNullUUID(in.BridgeID), ifaceNullUUID(in.LagID),
 			ifaceNullStr(in.RFRole), ifaceNullStr(in.RFChannel), in.RFChannelFrequency, in.RFChannelWidth, in.TxPower,
-			ifaceNullStr(in.PoEMode), ifaceNullStr(in.PoEType), ifaceNullStr(in.WWN), ifaceVdcsOf(in.VDCs), in.MarkConnected,
+			ifaceNullStr(in.PoEMode), ifaceNullStr(in.PoEType), ifaceNullStr(in.WWN), in.MarkConnected,
 			ifaceNullStr(in.Description), ifaceNullStr(in.Comments), ifaceCustomJSON(in.CustomFields)); err != nil {
 			return err
 		}
@@ -780,6 +831,12 @@ func (s *InterfaceService) Patch(ctx context.Context, tenant, id uuid.UUID, patc
 			return err
 		}
 		if err := ifaceReplaceTaggedVLANs(ctx, tx, tenant, id, in.TaggedVLANIDs); err != nil {
+			return err
+		}
+		if err := ifaceReplaceContexts(ctx, tx, tenant, id, in.VirtualDeviceContextIDs); err != nil {
+			return err
+		}
+		if err := ifaceSetTranslationPolicy(ctx, tx, tenant, id, in.VLANTranslationPolicyID); err != nil {
 			return err
 		}
 		out, err = ifaceGetInterfaceTx(ctx, tx, tenant, id)

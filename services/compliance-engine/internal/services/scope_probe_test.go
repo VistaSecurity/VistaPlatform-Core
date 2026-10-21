@@ -1,111 +1,87 @@
 package services
 
-// Structural guards for the per-shape scope probes.
+// Structural guards for the population probes behind fact 3 of
+// loadControlAssessments.
 //
-// `loadControlAssessments` can only be as honest as these probes are, and the
-// two failure directions are both real and both silent:
+// The stored score can only be as honest as these probes, and both failure
+// directions are real and silent:
 //
-//   - a MISSING probe falls through to `alwaysInScope`, which means a control
-//     over that shape reports PASS on a tenant with nothing for it to read.
-//     That is the bug the Gate 3 end-to-end proof found: every Lifecycle control
-//     measures the `fact` shape, no probe distinguished it from "this tenant has
-//     some crypto somewhere", and the framework scored 100 over an estate the
-//     end-of-life catalogue had never resolved a date for.
-//   - a probe that stops MIRRORING its shape reports NOT ASSESSED over data the
-//     extractor reads perfectly well, which is the same dishonesty pointed the
-//     other way.
+//   - a probe LOOSER than the extraction reports PASS over a population the
+//     live evaluator finds empty. That is the bug these replace: one probe per
+//     SHAPE asked "did the hygiene producer assess any asset" for IH-008 and
+//     IH-013 alike, so a rack-position control passed on an estate with no
+//     racks and Inventory Hygiene scored 73 where the live evaluator's answer
+//     was 25.
+//   - a probe TIGHTER than the extraction reports NOT ASSESSED over values the
+//     live evaluator judges perfectly well.
 //
-// Neither is visible from any test of the scoring arithmetic, which is why
-// these are structural. They run without a database.
+// The cure for both is that there is one population, measurementPopulation,
+// and the probe and the extraction are each built from it. These tests pin
+// that, without a database; the integration test
+// score_population_consistency_integration_test.go runs both paths.
 
 import (
 	"strings"
 	"testing"
 )
 
-// Every shape a measurement can name must have a probe. Delete an entry from
-// `scopeProbes` and this fails; that is the point.
-func TestScopeProbeCoversEveryShape(t *testing.T) {
-	for name := range measurementShapes {
-		if _, ok := scopeProbes[name]; !ok {
-			t.Errorf("measurement shape %q has no scope probe, so every control measuring it falls through "+
-				"to alwaysInScope and reports PASS on a tenant with nothing for it to read", name)
-		}
+// Every registry row compiles to a probe built from the very population its
+// extraction statement reads. Rebuild the probe from anything else — the shape
+// alone, the shape plus `where` but not `subject_where` — and this fails.
+func TestPopulationProbe_IsTheExtractionsPopulation(t *testing.T) {
+	plans, errs := compileMeasurementRegistry(measurementTypeRegistry)
+	for code, err := range errs {
+		t.Errorf("measurement %q does not compile: %v", code, err)
 	}
-	// And the other direction: a probe for a shape that no longer exists is
-	// dead weight that reads as coverage.
-	for name := range scopeProbes {
-		if _, ok := measurementShapes[name]; !ok {
-			t.Errorf("scope probe %q names a shape that is not in measurementShapes", name)
+	for code, plan := range plans {
+		if plan.populationSQL == "" {
+			t.Errorf("measurement %q has no population probe", code)
+			continue
+		}
+		// The extraction is SELECT <columns> <population> ORDER BY …; cut the
+		// population back out of it.
+		from := strings.Index(plan.sql, "\n\t\tFROM ")
+		order := strings.LastIndex(plan.sql, "\n\t\tORDER BY ")
+		if from < 0 || order < from {
+			t.Fatalf("measurement %q: extraction statement has no FROM…ORDER BY to compare against:\n%s", code, plan.sql)
+		}
+		population := plan.sql[from:order]
+		if !strings.HasPrefix(plan.populationSQL, "SELECT EXISTS (SELECT 1"+population+"\n") {
+			t.Errorf("measurement %q: the population probe does not read the extraction's population.\n"+
+				"extraction population:%s\nprobe:\n%s", code, population, plan.populationSQL)
 		}
 	}
 }
 
-// Each probe reads the tables its shape reads, carries its shape's tenant and
-// soft-delete predicates, and takes the shape's extra parameter exactly when
-// the shape declares one.
-func TestScopeProbe_MirrorsItsShape(t *testing.T) {
-	for name, shape := range measurementShapes {
-		probe, ok := scopeProbes[name]
+// A row whose `subject_where` narrows its population must yield a probe that is
+// narrower than its shape's bare FROM + base — the specific regression: the
+// DCIM hygiene rows (IH-007..IH-015) were probed as "any assessed asset".
+func TestPopulationProbe_CarriesSubjectWhere(t *testing.T) {
+	plans, _ := compileMeasurementRegistry(measurementTypeRegistry)
+	for _, code := range []string{"rack_position_missing_count", "warranty_expired_count", "unracked_count"} {
+		plan, ok := plans[code]
 		if !ok {
-			continue // reported by the test above
+			t.Fatalf("registry lost %q", code)
 		}
-
-		// Tables. The shape's From is a FROM plus its JOINs; every table named
-		// in it has to appear in the probe, or the probe is asking a different
-		// question from the extractor.
-		for _, table := range tablesIn(shape.From) {
-			if !strings.Contains(probe, table) {
-				t.Errorf("the %q probe does not read %s, which its shape's FROM joins — a probe that reads "+
-					"fewer tables than its shape is looser than the extractor and reports PASS over rows "+
-					"the extractor cannot see", name, table)
-			}
-		}
-
-		// Soft deletes. Every shape that excludes deleted rows must have a probe
-		// that does too; is exactly this predicate going missing.
-		for _, base := range shape.Base {
-			if strings.Contains(base, "deleted_at IS NULL") && !strings.Contains(probe, "deleted_at IS NULL") {
-				t.Errorf("the %q probe does not exclude soft-deleted rows, which its shape does", name)
-			}
-		}
-
-		// The shape's own parameter.
-		parameterised := shape.NeedsFactKey || shape.NeedsAssessedBy
-		if parameterised && !strings.Contains(probe, "$2") {
-			t.Errorf("the %q shape takes a fact key or a producer, but its probe binds no second parameter — "+
-				"so it asks 'has this tenant ANY fact' where the control asks about ONE", name)
-		}
-		if !parameterised && strings.Contains(probe, "$2") {
-			t.Errorf("the %q probe binds a second parameter its shape does not declare", name)
+		bare := measurementPopulation(plan.shape, compiled{clause: "TRUE"}, compiled{clause: "TRUE"})
+		if strings.Contains(plan.populationSQL, bare) {
+			t.Errorf("%q: population probe is the shape's bare population (subject_where %q dropped):\n%s",
+				code, plan.def.Source.SubjectWhere, plan.populationSQL)
 		}
 	}
 }
 
-// Every measurement type in the registry resolves to a real probe, with an
-// argument exactly when its shape is parameterised.
-//
-// A registry row whose shape has no probe would be indistinguishable from an
-// unplaceable hand-seeded measurement type, which fails OPEN — and the whole
-// value of the probe is in the rows the registry DOES describe.
+// Every measurement type in the shipped registry resolves to a real probe. A
+// registry row that fell through to alwaysInScope would fail OPEN.
 func TestScopeProbeForEveryRegistryMeasurement(t *testing.T) {
 	for _, def := range measurementTypeRegistry {
 		key := scopeProbeFor(def.Code)
 		if key == alwaysInScope {
-			t.Errorf("measurement %q (shape %q) has no scope probe and fails open", def.Code, def.Source.Shape)
+			t.Errorf("measurement %q (shape %q) has no population probe and fails open", def.Code, def.Source.Shape)
 			continue
 		}
-		if key.Shape != def.Source.Shape {
-			t.Errorf("measurement %q probes shape %q, want %q", def.Code, key.Shape, def.Source.Shape)
-		}
-		shape := measurementShapes[def.Source.Shape]
-		switch {
-		case shape.NeedsFactKey && key.Arg != def.Source.FactKey:
-			t.Errorf("measurement %q probes fact key %q, want %q", def.Code, key.Arg, def.Source.FactKey)
-		case shape.NeedsAssessedBy && key.Arg != def.Source.AssessedBy:
-			t.Errorf("measurement %q probes producer %q, want %q", def.Code, key.Arg, def.Source.AssessedBy)
-		case !shape.NeedsFactKey && !shape.NeedsAssessedBy && key.Arg != "":
-			t.Errorf("measurement %q carries probe argument %q for a shape that takes none", def.Code, key.Arg)
+		if key.Code != def.Code {
+			t.Errorf("measurement %q probes %q", def.Code, key.Code)
 		}
 	}
 }
@@ -126,8 +102,8 @@ func TestScopeProbeForUnknownMeasurementFailsOpen(t *testing.T) {
 // anySatisfied is an OR over the control's measurements: one readable
 // measurement means the control was assessed.
 func TestAnySatisfiedIsAnOr(t *testing.T) {
-	readable := scopeProbeKey{Shape: "asset"}
-	absent := scopeProbeKey{Shape: "fact", Arg: "eol.os.date"}
+	readable := scopeProbeKey{Code: "asset_has_owner"}
+	absent := scopeProbeKey{Code: "os_eol_days"}
 	satisfied := map[scopeProbeKey]bool{readable: true, absent: false}
 
 	if !anySatisfied([]scopeProbeKey{absent, readable}, satisfied) {
@@ -141,33 +117,15 @@ func TestAnySatisfiedIsAnOr(t *testing.T) {
 	}
 }
 
-// tablesIn pulls the NARROWING table names out of a shape's FROM clause: the
-// first word of the FROM, plus the first word after each INNER JOIN.
-//
-// Outer joins are skipped on purpose. A LEFT JOIN cannot remove a row, so a
-// shape's outer-joined table says nothing about whether the shape can yield
-// anything and a probe is not looser for omitting it — the crypto_configuration
-// shape's `LEFT JOIN asset_endpoints` is the live example.
-func tablesIn(from string) []string {
-	var out []string
-	parts := strings.Split(from, "JOIN")
-	for i, part := range parts {
-		trimmed := strings.TrimSpace(part)
-		fields := strings.Fields(trimmed)
-		if len(fields) == 0 {
-			continue
-		}
-		if i == 0 {
-			out = append(out, fields[0])
-			continue
-		}
-		// The join TYPE is the tail of the preceding fragment.
-		prev := strings.ToUpper(strings.TrimSpace(parts[i-1]))
-		if strings.HasSuffix(prev, "LEFT") || strings.HasSuffix(prev, "RIGHT") ||
-			strings.HasSuffix(prev, "FULL") || strings.HasSuffix(prev, "OUTER") {
-			continue
-		}
-		out = append(out, fields[0])
+// rebaseParams renumbers in one pass: $1 → $11 must not then become $21, and a
+// two-digit parameter is one parameter.
+func TestRebaseParams(t *testing.T) {
+	got := rebaseParams("a = $1 AND b = $2 AND c = $10 AND d = $1", 10)
+	want := "a = $11 AND b = $12 AND c = $20 AND d = $11"
+	if got != want {
+		t.Errorf("rebaseParams = %q, want %q", got, want)
 	}
-	return out
+	if got := rebaseParams("x = $3", 0); got != "x = $3" {
+		t.Errorf("a zero offset rewrote the statement: %q", got)
+	}
 }

@@ -67,6 +67,7 @@ type siteService interface {
 	CreateLocation(ctx context.Context, tenantID, actor uuid.UUID, in models.LocationInput) (*models.Location, error)
 	UpdateLocation(ctx context.Context, tenantID, actor, id uuid.UUID, in models.LocationInput) (*models.Location, error)
 	DeleteLocation(ctx context.Context, tenantID, actor, id uuid.UUID) error
+	LocationFloorPlan(ctx context.Context, tenantID, id uuid.UUID) (*services.LocationFloorPlan, error)
 }
 
 // SiteHandler serves /api/v2/inventory-service/dcim/{regions,site-groups,sites,locations}.

@@ -17,6 +17,7 @@ const VALID = {
   kind: ['policy', 'operational'],
   status: ['live', 'planned'],
   severity_model: ['ladder', 'fixed'],
+  lifecycle: ['stateful', 'event'],
   severity: ['critical', 'high', 'medium', 'low', 'info', 'from-control', 'from-threshold'],
 };
 
@@ -48,6 +49,16 @@ async function main() {
       if (!VALID[f].includes(t[f])) fail(`${t.id}: invalid ${f}: ${t[f]}`);
     }
     if (!t.source) fail(`${t.id}: source required`);
+    // lifecycle: `stateful` (the default) opens, dedupes, escalates and
+    // resolves a row in the alerts table; `event` is a one-shot notification
+    // with no row — each raise is routed once and nothing stays open (an
+    // inventory change has no condition that could later clear). An event type
+    // has one severity and nothing to escalate, so it must be fixed.
+    const lifecycle = t.lifecycle ?? 'stateful';
+    if (!VALID.lifecycle.includes(lifecycle)) fail(`${t.id}: invalid lifecycle: ${t.lifecycle}`);
+    if (lifecycle === 'event' && t.severity_model !== 'fixed') {
+      fail(`${t.id}: an event-lifecycle type has nothing to escalate, so it needs severity_model: fixed`);
+    }
     if (t.severity_model === 'ladder') {
       // Two ladder shapes, mutually exclusive.
       //
@@ -119,6 +130,7 @@ async function main() {
 		Track:            ${goStr(t.track)},
 		Kind:             ${goStr(t.kind)},
 		Status:           ${goStr(t.status)},
+		Lifecycle:        ${goStr(t.lifecycle ?? 'stateful')},
 		Source:           ${goStr(t.source)},
 		SubjectType:      ${goStr(t.subject_type)},
 		SeverityModel:    ${goStr(t.severity_model)},
@@ -157,11 +169,16 @@ type LadderRung struct {
 }
 
 // Entry is one registry alert type (the catalog row).
+//
+// Lifecycle is "stateful" (a row in the alerts table that opens, dedupes per
+// subject, escalates and resolves) or "event" (a one-shot notification routed
+// once per raise, with no alerts row).
 type Entry struct {
 	ID               string \`json:"id"\`
 	Track            string \`json:"track"\`
 	Kind             string \`json:"kind"\`
 	Status           string \`json:"status"\`
+	Lifecycle        string \`json:"lifecycle"\`
 	Source           string \`json:"source"\`
 	SubjectType      string \`json:"subject_type"\`
 	SeverityModel    string \`json:"severity_model"\`

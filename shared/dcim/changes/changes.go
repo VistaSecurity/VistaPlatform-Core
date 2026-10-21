@@ -274,6 +274,10 @@ func (r txRecorder) Record(ctx context.Context, c Change) error {
 	if err != nil {
 		return fmt.Errorf("changes: insert object_changes: %w", err)
 	}
+	// Tell the request's collector (if any) which object changed. Only the key:
+	// the notifier re-reads the committed row, which is also how it knows the
+	// transaction committed.
+	collectorFrom(ctx).note(row)
 	return nil
 }
 

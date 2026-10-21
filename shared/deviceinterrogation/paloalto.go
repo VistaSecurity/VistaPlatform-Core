@@ -251,6 +251,17 @@ func (c *panClient) interrogate(ctx context.Context) (*InterrogateResult, error)
 	if network, err := panNetwork(interfacesBody, systemInfo, arpBody); err != nil {
 		result.warnAs(WarningParseError, "show interface all", "Interfaces not collected", err.Error())
 	} else {
+		// The operator's display names for the vsys the interfaces are in
+		// (non-fatal: a context without one keeps its vsysN name alone).
+		if len(network.Contexts) > 0 {
+			if body, err := c.panConfigGet(ctx, panVsysXPath, "virtual systems"); err != nil {
+				result.warn(panVsysXPath, err, "Virtual system display names not collected")
+			} else if names, err := panVsysDisplayNames(body); err != nil {
+				result.warnAs(WarningParseError, panVsysXPath, "Virtual system display names not collected", err.Error())
+			} else {
+				panApplyVsysNames(network, names)
+			}
+		}
 		result.setNetwork(network, "show interface all")
 	}
 

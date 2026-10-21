@@ -536,6 +536,15 @@ INSERT INTO measurement_types (code, name, description, data_type, units, valid_
 ('last_seen_days', 'Days Since Last Seen', 'Days since any collector last observed the asset. The hygiene producer''s `stale` ladder starts at 30 days; a record nothing has confirmed for longer is the main way an inventory silently becomes wrong.', 'integer', 'days', '{"min":0,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
 ('duplicate_suspected_count', 'Suspected Duplicate Count', 'How many open `duplicate_suspected` findings the hygiene producer holds against this asset — two records sharing an identifier that the identification engine would not merge on its own. Zero is the compliant value. An asset the hygiene producer has never evaluated yields NO measurement and is reported as not assessed, never as clean.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
 ('orphan_relationship_count', 'Orphan Relationship Count', 'How many open `orphan_relationship` findings the hygiene producer holds against relationships this asset takes part in — edges pointing at an asset that has been archived or deleted. Zero is the compliant value; an asset the producer has never evaluated is not assessed.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('unracked_count', 'Rack-Mountable Assets Not Racked', 'How many open `not_racked` findings the hygiene producer holds against this asset: a monitored hardware asset whose device type is taller than 0 U, that is not in a parent''s bay, and records no rack. Scoped to monitored hardware assets with a device type; one with no device type is not assessed. Zero is the compliant value.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('rack_position_missing_count', 'Racked Assets Without a Position', 'How many open `no_rack_position` findings the hygiene producer holds against this asset: it records a rack but no unit position. Scoped to monitored assets in a rack; an unracked asset is not assessed. Zero is the compliant value.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('stale_planned_cable_count', 'Planned Cables Older Than 90 Days', 'How many open `planned_cable_stale` findings the hygiene producer holds against this asset: cables at its A end still planned more than 90 days after they were created. Scoped to monitored assets with a planned cable. Zero is the compliant value.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('unconfirmed_cable_count', 'Cables Not Confirmed by Neighbours', 'How many open `cable_unconfirmed` findings the hygiene producer holds against this asset: declared, connected cables on its interfaces that no LLDP or CDP observation has confirmed in 30 days, while the asset reported neighbour data in that time. Scoped to monitored assets with a connected cable. An asset that reports no neighbours raises nothing, because absent data is not a contradiction. Zero is the compliant value.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('untyped_interface_count', 'Interfaces With No Type', 'How many open `interface_no_type` findings the hygiene producer holds against this asset: active interfaces whose type is `other` or empty. One finding per asset, whatever the number of interfaces; the evidence lists them. Zero is the compliant value.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('duplicate_address_count', 'Duplicate Addresses Within a VRF', 'How many open `duplicate_address` findings the hygiene producer holds against this asset: an active address it holds is also assigned to another monitored asset in the same VRF, with no role that allows sharing. Scoped to monitored assets with an address. Zero is the compliant value.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'hygiene'),
+('warranty_expired_count', 'Expired Warranty', 'Whether the hygiene producer holds an open `warranty_expired` finding against this asset (0 or 1): its recorded warranty end date has passed. Scoped to monitored assets with a warranty end recorded, so an asset with no warranty date is NOT ASSESSED — unknown is never expired, and never covered.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'lifecycle'),
+('past_end_of_support_count', 'Past End of Support', 'Whether the hygiene producer holds an open `past_end_of_support` finding against this asset (0 or 1): its effective end of support — the earlier of the device type''s and the platform''s, declared or from the end-of-life catalogue — has passed. Scoped to monitored assets with an effective end of support, so an asset with no date on either is NOT ASSESSED.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'lifecycle'),
+('end_of_support_soon_count', 'End of Support Within 12 Months', 'Whether the hygiene producer holds an open `end_of_support_soon` finding against this asset (0 or 1): its effective end of support falls within the next 12 months. Exclusive of past_end_of_support_count — an asset already past end of support is counted there, not here. Scoped to monitored assets with an effective end of support.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'lifecycle'),
 ('mgmt_plaintext', 'Plaintext Management Findings', 'How many open `plaintext_management` findings this asset carries — a management plane reached over Telnet, FTP, SNMP v1/v2c or another protocol with no transport confidentiality. Zero is the compliant value. An asset the configuration producer has never evaluated yields NO measurement and is reported as not assessed, never as clean. Counts findings on the asset itself and on its endpoints, so a device with a live Telnet listener cannot read as compliant because the finding was recorded against the socket rather than the host.', 'integer', 'findings', '{"min":0,"max":1000}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'configuration'),
 ('os_eol_days', 'Days Until OS End of Life', 'Days until the end-of-life date the EOL catalogue resolved for this asset''s operating system (`eol.os.date`). Negative once the date has passed. An asset with no resolved date yields NO measurement — an OS the catalogue does not cover is not assessed, not supported.', 'integer', 'days', '{"min":-36500,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'lifecycle'),
 ('software_eol_days', 'Days Until Software End of Life', 'Days until the end-of-life date the EOL catalogue resolved for an installed software product on this asset (`eol.sw.date`). Negative once the date has passed. One measurement per resolved date; an asset with none is not assessed.', 'integer', 'days', '{"min":-36500,"max":36500}'::jsonb, '["threshold","range"]'::jsonb, NULL, '["<=",">=","<",">","==","!="]'::jsonb, 'lifecycle'),
@@ -2465,6 +2474,16 @@ DECLARE
     last_seen_days_mt_id UUID;
     duplicate_suspected_mt_id UUID;
     orphan_relationship_mt_id UUID;
+    -- DCIM record quality (DCIM gap 6): IH-007 to IH-015.
+    unracked_mt_id UUID;
+    rack_position_mt_id UUID;
+    stale_planned_cable_mt_id UUID;
+    unconfirmed_cable_mt_id UUID;
+    untyped_interface_mt_id UUID;
+    duplicate_address_mt_id UUID;
+    warranty_expired_mt_id UUID;
+    past_eos_mt_id UUID;
+    eos_soon_mt_id UUID;
     os_eol_days_mt_id UUID;
     software_eol_days_mt_id UUID;
     hardware_eos_days_mt_id UUID;
@@ -2488,6 +2507,15 @@ BEGIN
     SELECT id INTO last_seen_days_mt_id      FROM measurement_types WHERE code = 'last_seen_days';
     SELECT id INTO duplicate_suspected_mt_id FROM measurement_types WHERE code = 'duplicate_suspected_count';
     SELECT id INTO orphan_relationship_mt_id FROM measurement_types WHERE code = 'orphan_relationship_count';
+    SELECT id INTO unracked_mt_id              FROM measurement_types WHERE code = 'unracked_count';
+    SELECT id INTO rack_position_mt_id         FROM measurement_types WHERE code = 'rack_position_missing_count';
+    SELECT id INTO stale_planned_cable_mt_id   FROM measurement_types WHERE code = 'stale_planned_cable_count';
+    SELECT id INTO unconfirmed_cable_mt_id     FROM measurement_types WHERE code = 'unconfirmed_cable_count';
+    SELECT id INTO untyped_interface_mt_id     FROM measurement_types WHERE code = 'untyped_interface_count';
+    SELECT id INTO duplicate_address_mt_id     FROM measurement_types WHERE code = 'duplicate_address_count';
+    SELECT id INTO warranty_expired_mt_id      FROM measurement_types WHERE code = 'warranty_expired_count';
+    SELECT id INTO past_eos_mt_id              FROM measurement_types WHERE code = 'past_end_of_support_count';
+    SELECT id INTO eos_soon_mt_id              FROM measurement_types WHERE code = 'end_of_support_soon_count';
     SELECT id INTO os_eol_days_mt_id         FROM measurement_types WHERE code = 'os_eol_days';
     SELECT id INTO software_eol_days_mt_id   FROM measurement_types WHERE code = 'software_eol_days';
     SELECT id INTO hardware_eos_days_mt_id   FROM measurement_types WHERE code = 'hardware_eos_days';
@@ -2724,7 +2752,7 @@ BEGIN
     -- clean bill of health.
     INSERT INTO platform_frameworks (id, code, name, version, description, organization, status, is_platform_default, published_at, published_by, created_by, created_at, updated_at)
     VALUES (gen_random_uuid(), 'inventory-hygiene', 'Inventory Hygiene', '1.0',
-        'Measures the quality of the inventory record itself: is every asset owned, classified, located and recently seen, and are there duplicates or dangling relationships? Data quality, not security — nothing here contributes to an asset''s risk score. Activate to get a hygiene score and a worklist.',
+        'Measures the quality of the inventory record itself: is every asset owned, classified, located and recently seen, are there duplicates or dangling relationships, and is its DCIM record sound — racked and positioned, cables confirmed and not left planned, interfaces typed, addresses unique within a VRF, warranty and end of support current? Data quality, not security — nothing here contributes to an asset''s risk score. Activate to get a hygiene score and a worklist.',
         'Vista Platform', 'published', false, NOW(),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid),
         COALESCE(platform_admin_id, '00000000-0000-0000-0000-000000000001'::uuid), NOW(), NOW())
@@ -2801,6 +2829,124 @@ BEGIN
        AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=orphan_relationship_mt_id AND framework_type='platform') THEN
         INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
         VALUES (gen_random_uuid(), ctl_id, 'platform', orphan_relationship_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'low', 3, NOW(), NOW());
+    END IF;
+
+    -- ----- DCIM record quality (DCIM gap 6) -----
+    -- IH-007 to IH-015 count the hygiene producer's DCIM kinds per asset
+    -- (standards/findings-registry.yaml; services/inventory-service/internal/
+    -- producers/hygiene_dcim.go). Same three-valued rule as IH-005/IH-006:
+    -- no measurement until the producer has evaluated the asset, and each
+    -- measurement's subject_where scopes it to the assets the question is
+    -- about, so an asset with no warranty date, no rack or no end of support
+    -- recorded reads NOT ASSESSED rather than compliant. Each description
+    -- names the page where the fix is made.
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-007', 'Rack-mountable assets are racked',
+        'A monitored hardware asset has a device type taller than 0 U, is not in a parent devices bay, and records no rack. Place it from Infrastructure → Racks (open the rack, drag the device onto its unit), or correct the device type on the assets Hardware tab if it is not rack-mounted. Assets with no device type are not assessed. Not assessed until the hygiene producer has evaluated the asset.', 'low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF unracked_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=unracked_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', unracked_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'low', 3, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-008', 'Racked assets have a position',
+        'The asset records a rack but no unit position, so the racks utilisation and free space cannot count it. Open the rack from Infrastructure → Racks and drag the device onto its unit on the front or rear elevation. 0 U devices and children in a bay have no position by design and are not reported. Not assessed until the hygiene producer has evaluated the asset.', 'low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF rack_position_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=rack_position_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', rack_position_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'low', 3, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-009', 'No planned cables older than 90 days',
+        'A cable at this assets A end has been planned for more than 90 days. Open the assets Ports tab: mark the cable connected once it is installed, or delete it if the work was cancelled. Not assessed until the hygiene producer has evaluated the asset.', 'low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF stale_planned_cable_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=stale_planned_cable_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', stale_planned_cable_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'low', 3, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-010', 'Declared cables are confirmed by neighbours',
+        'The asset reports LLDP or CDP neighbours, yet a declared, connected cable on one of its interfaces has gone 30 days without a neighbour confirming it — it is on the wrong port, or leads to a device that does not advertise itself. Check it on the assets Ports tab; where the far device genuinely does not speak LLDP or CDP, record an override with that rationale. An asset that reports no neighbours is never failed by this control. Not assessed until the hygiene producer has evaluated the asset.', 'medium', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF unconfirmed_cable_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=unconfirmed_cable_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', unconfirmed_cable_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'medium', 5, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-011', 'Every interface has a type',
+        'An active interface on the asset has the type "other" or none, which is what a collector records when it cannot say what the port is. Set the types on the assets Interfaces tab, or apply the device type on the Hardware tab so its templates set them. Not assessed until the hygiene producer has evaluated the asset.', 'low', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF untyped_interface_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=untyped_interface_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', untyped_interface_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'low', 3, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-012', 'No duplicate addresses within a VRF',
+        'An active address on this asset is also assigned to another monitored asset in the same VRF, and its role (anycast, VIP, VRRP, HSRP, GLBP, CARP) does not allow sharing. Open Infrastructure → Networks, find the address in its prefix and remove the stale assignment or correct the VRF. Not assessed until the hygiene producer has evaluated the asset.', 'high', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF duplicate_address_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=duplicate_address_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', duplicate_address_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'high', 7, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-013', 'No expired warranties',
+        'The assets recorded warranty end date has passed. Renew the warranty or plan the replacement, and record the new dates in the Lifecycle card on the assets Hardware tab. An asset with no warranty end recorded is not assessed: unknown is neither expired nor covered. Not assessed until the hygiene producer has evaluated the asset.', 'medium', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF warranty_expired_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=warranty_expired_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', warranty_expired_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'medium', 5, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-014', 'No assets past end of support',
+        'The assets effective end of support — the earlier of its device types and its platforms, declared or from the end-of-life catalogue — has passed, so its vendor ships no further fixes. The Lifecycle card on the assets Hardware tab shows the date and its source. An asset with no end of support recorded on either is not assessed. Not assessed until the hygiene producer has evaluated the asset.', 'high', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF past_eos_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=past_eos_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', past_eos_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'high', 8, NOW(), NOW());
+    END IF;
+
+    INSERT INTO platform_framework_controls (id, framework_id, control_id, title, description, baseline_severity, crypto_relevant, created_at, updated_at)
+    VALUES (gen_random_uuid(), fw_id, 'IH-015', 'No assets reaching end of support within 12 months',
+        'The assets effective end of support falls within the next 12 months: the planning window in which an upgrade is maintenance rather than an incident. The Lifecycle card on the assets Hardware tab shows the date and its source. An asset already past end of support fails IH-014 instead, not both. Not assessed until the hygiene producer has evaluated the asset.', 'medium', false, NOW(), NOW())
+    ON CONFLICT (framework_id, control_id) DO UPDATE SET title=EXCLUDED.title, description=EXCLUDED.description, baseline_severity=EXCLUDED.baseline_severity, updated_at=NOW()
+    RETURNING id INTO ctl_id;
+
+    IF eos_soon_mt_id IS NOT NULL AND ctl_id IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM control_measurements WHERE control_id=ctl_id AND measurement_type_id=eos_soon_mt_id AND framework_type='platform') THEN
+        INSERT INTO control_measurements (id, control_id, framework_type, measurement_type_id, rule_type, predicate, severity_override, weight, created_at, updated_at)
+        VALUES (gen_random_uuid(), ctl_id, 'platform', eos_soon_mt_id, 'threshold', '{"operator": "==", "value": 0}'::jsonb, 'medium', 5, NOW(), NOW());
     END IF;
 
     -- ===================== Lifecycle =====================

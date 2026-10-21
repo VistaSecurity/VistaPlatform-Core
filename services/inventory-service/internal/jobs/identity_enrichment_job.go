@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/identityenrichment"
+	"github.com/vistasecurity/vistaplatform/shared/dcim/changenotify"
 )
 
 func identityEnrichmentTenants(ctx context.Context, bypass *sql.DB) ([]uuid.UUID, error) {
@@ -51,7 +52,10 @@ func StartIdentityEnrichmentWorker(ctx context.Context, bypass *sql.DB, coordina
 				if ctx.Err() != nil {
 					return
 				}
-				if err := coordinator.Sweep(ctx, tenant); err != nil {
+				// One change-notification unit per tenant: enrichment resolves
+				// through the identity engine, whose writes raise
+				// object_changed once committed.
+				if err := changenotify.Unit(ctx, func(ctx context.Context) error { return coordinator.Sweep(ctx, tenant) }); err != nil {
 					log.Printf("[IdentityEnrichment] tenant %s: %v", tenant, err)
 				}
 			}

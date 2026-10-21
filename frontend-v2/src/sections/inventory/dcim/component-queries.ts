@@ -1,9 +1,9 @@
 // Query hooks for an asset's port components (DCIM BUILD_PLAN row 3.1;
 // asset-inventory ADR-0010 D3): console ports, console server ports, front
-// ports, rear ports and device bays. Power ports and outlets have an API and no
-// UI (D9).
+// ports, rear ports, device bays and (row 6.1, D9) power ports and power
+// outlets, plus the asset's power summary.
 //
-// The five kinds share one request shape, so the calls go through one loosely
+// The seven kinds share one request shape, so the calls go through one loosely
 // typed facade keyed by the route segment; PORT_PATHS is `satisfies` the
 // generated client's path keys, so a path that leaves the spec fails typecheck.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -17,10 +17,13 @@ export type ConsoleServerPort = components['schemas']['ConsoleServerPort'];
 export type FrontPort = components['schemas']['FrontPort'];
 export type RearPort = components['schemas']['RearPort'];
 export type DeviceBay = components['schemas']['DeviceBay'];
+export type PowerPort = components['schemas']['PowerPort'];
+export type PowerOutlet = components['schemas']['PowerOutlet'];
+export type AssetPowerSummary = components['schemas']['AssetPowerSummary'];
 export type ApplyDeviceTypeResult = components['schemas']['ApplyDeviceTypeResult'];
 export type AssetHardware = components['schemas']['AssetHardware'];
 
-export const PORT_KINDS = ['console-ports', 'console-server-ports', 'front-ports', 'rear-ports', 'device-bays'] as const;
+export const PORT_KINDS = ['console-ports', 'console-server-ports', 'front-ports', 'rear-ports', 'device-bays', 'power-ports', 'power-outlets'] as const;
 export type PortKind = (typeof PORT_KINDS)[number];
 
 /** Row type per kind. */
@@ -30,6 +33,8 @@ export interface PortRows {
   'front-ports': FrontPort;
   'rear-ports': RearPort;
   'device-bays': DeviceBay;
+  'power-ports': PowerPort;
+  'power-outlets': PowerOutlet;
 }
 export type PortRow = PortRows[PortKind];
 
@@ -40,6 +45,8 @@ export const PORT_OBJECT_KIND = {
   'front-ports': 'front_port',
   'rear-ports': 'rear_port',
   'device-bays': 'device_bay',
+  'power-ports': 'power_port',
+  'power-outlets': 'power_outlet',
 } as const satisfies Record<PortKind, string>;
 
 // Compile-time guard: every path used below is a path of the generated client.
@@ -48,6 +55,8 @@ export const PORT_PATHS = [
   '/dcim/assets/{id}/rear-ports', '/dcim/assets/{id}/device-bays',
   '/dcim/console-ports/{id}', '/dcim/console-server-ports/{id}', '/dcim/front-ports/{id}',
   '/dcim/rear-ports/{id}', '/dcim/device-bays/{id}',
+  '/dcim/assets/{id}/power-ports', '/dcim/assets/{id}/power-outlets', '/dcim/power-ports/{id}', '/dcim/power-outlets/{id}',
+  '/dcim/assets/{id}/power',
   '/dcim/assets/{id}/hardware', '/dcim/assets/{id}/device-type',
 ] as const satisfies readonly (keyof inventoryPaths)[];
 
@@ -67,6 +76,8 @@ export const portKeys = {
   list: (assetId: string, kind: PortKind) => ['dcim-ports', assetId, kind] as const,
   asset: (assetId: string) => ['dcim-ports', assetId] as const,
   hardware: (assetId: string) => ['dcim-hardware', assetId] as const,
+  // Under the asset's port key: a port, outlet or cable write refreshes it.
+  power: (assetId: string) => ['dcim-ports', assetId, 'power'] as const,
 };
 
 export class PortWriteError extends Error {}
@@ -146,6 +157,20 @@ export function useDeletePort(assetId: string, kind: PortKind) {
       invalidate();
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Failed to delete'),
+  });
+}
+
+/** The asset's power ports with their draws and where their paths end, its
+ *  outlets, and the feeds it reaches (row 6.1). */
+export function useAssetPower(assetId: string | undefined) {
+  return useQuery({
+    queryKey: portKeys.power(assetId ?? ''),
+    enabled: !!assetId,
+    queryFn: async (): Promise<AssetPowerSummary> => {
+      const { data, error } = await clients.inventory.GET('/dcim/assets/{id}/power', { params: { path: { id: assetId! } } });
+      if (error || !data?.data) throw new Error(substrateError(error, 'Failed to load the asset\'s power'));
+      return data.data;
+    },
   });
 }
 

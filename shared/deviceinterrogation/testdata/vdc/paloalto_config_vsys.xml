@@ -1,0 +1,39 @@
+<!--
+  PAN-OS `type=config&action=get&xpath=/config/devices/entry/vsys` on a
+  multi-vsys firewall. Each entry carries the operator's display-name beside
+  settings the collector never reads (the <import> lists and a planted value in
+  <visible-vsys>-style free text). vsys1 has no display-name; vsys3 owns no
+  interface in the show-interface fixture. SYNTHESISED; see README.md.
+-->
+<response status="success" code="19">
+  <result total-count="1" count="1">
+    <vsys>
+      <entry name="vsys1">
+        <import>
+          <network>
+            <interface>
+              <member>ethernet1/1</member>
+            </interface>
+          </network>
+        </import>
+      </entry>
+      <entry name="vsys2">
+        <display-name>Tenant B Edge</display-name>
+        <import>
+          <network>
+            <interface>
+              <member>ethernet1/2</member>
+              <member>ethernet1/2.20</member>
+            </interface>
+          </network>
+        </import>
+        <setting>
+          <password-expiry>PlantedVdcSecret-4410</password-expiry>
+        </setting>
+      </entry>
+      <entry name="vsys3">
+        <display-name>Unused lab</display-name>
+      </entry>
+    </vsys>
+  </result>
+</response>

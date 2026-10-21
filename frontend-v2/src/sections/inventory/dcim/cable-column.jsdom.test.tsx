@@ -41,10 +41,10 @@ function iface(over: Partial<Interface>): Interface {
     mac_addresses: [], speed_kbps: null, duplex: null, mode: null, untagged_vlan_id: null, tagged_vlan_ids: [],
     vrf_id: null, parent_id: null, bridge_id: null, lag_id: null, rf_role: null, rf_channel: null,
     rf_channel_frequency: null, rf_channel_width: null, tx_power: null, poe_mode: null, poe_type: null, wwn: null,
-    operational_status: null, admin_status: null, vdcs: [], mark_connected: false, cable_id: null, cable_end: null,
+    operational_status: null, admin_status: null, vdcs: [], virtual_device_contexts: [], virtual_device_context_ids: [], mark_connected: false, cable_id: null, cable_end: null,
     source_kind: 'declared', source_ref: null, custom_fields: {}, description: null, comments: null, status: 'active',
     first_seen_at: NOW, last_seen_at: NOW, observation_count: 0, approved_by: null, approved_at: null,
-    created_at: NOW, updated_at: NOW, created_by: null,
+    created_at: NOW, updated_at: NOW, created_by: null, vlan_translation_policy_id: null,
     ...over,
   };
 }

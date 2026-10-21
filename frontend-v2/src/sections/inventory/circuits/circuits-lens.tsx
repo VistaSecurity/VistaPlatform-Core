@@ -1,28 +1,31 @@
 // Inventory → Circuits (DCIM BUILD_PLAN row 4.1; ADR-0010 D8): the tenant's
 // circuits with their provider, type, status, both ends and commit rate.
 // Picking a circuit opens its drawer: the details, the A and Z terminations
-// (editable), and the change log and journal. Writes are behind
+// (editable), and the change log and journal. A second view lists the virtual
+// circuits (DCIM gap 10, virtual-circuits-view.tsx). Writes are behind
 // `circuits.manage`; providers, accounts, networks and types are kept in
 // Settings → Circuit Providers.
 import { useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { DrawerCloseBtn, DrawerShell, Icon, MetaRow, Modal, ModalField, ModalInput, ModalSelect, SectionLabel } from '../../../components/ui';
 import { ObjectChanges } from '../dcim/object-changes';
 import { ObjectJournal } from '../dcim/object-journal';
 import { CustomFieldsPanel } from '../dcim/custom-fields-panel';
 import { PanelEmpty, PanelError, PanelLoading } from '../dcim/substrate-states';
+import { circuitHref, fromState } from '../object-pages/object-links';
 import { Chip, ObjectDeleteModal, ObjectFormModal, type IpamField } from '../ipam/ipam-ui';
 import {
   CIRCUIT_STATUS_LABEL, CIRCUIT_STATUS_OPTIONS, rateText, terminationText, useCircuitList, useCircuitWrite,
   type Circuit, type CircuitTermination, type CircuitTerminationSummary, type CircuitType, type Provider, type ProviderAccount, type ProviderNetwork,
 } from './circuits-queries';
+import { VirtualCircuitsView } from './virtual-circuits-view';
 
 /** Settings → Circuit Providers, where the circuit catalogues are kept. */
 export const CIRCUIT_PROVIDERS_HREF = '/inventory/manage/circuit-providers';
 
 /** A circuit list row: the table's columns plus the list-only extras. */
-type CircuitRow = Circuit & { provider_name?: string; type_name?: string; terminations?: CircuitTerminationSummary[] };
+export type CircuitRow = Circuit & { provider_name?: string; type_name?: string; terminations?: CircuitTerminationSummary[] };
 
 const STATUS_TONE: Record<Circuit['operational_status'], string> = {
   planned: 'var(--app-t3)', provisioning: 'var(--warn)', active: 'var(--ok, var(--accent))', offline: 'var(--danger-text)',
@@ -46,7 +49,7 @@ export function circuitFields(providers: Provider[], accounts: ProviderAccount[]
   ];
 }
 
-const circuitInitial = (c: Circuit) => ({
+export const circuitInitial = (c: Circuit) => ({
   cid: c.cid, provider_id: c.provider_id, provider_account_id: c.provider_account_id ?? '', type_id: c.type_id,
   operational_status: c.operational_status, commit_rate_kbps: c.commit_rate_kbps ?? '', install_date: c.install_date ?? '',
   termination_date: c.termination_date ?? '', description: c.description ?? '',
@@ -153,9 +156,10 @@ function CircuitGroupsSection({ circuit }: { circuit: CircuitRow }) {
   );
 }
 
-function CircuitDrawer({ circuit, onClose, onEdit, onDelete }: {
-  circuit: CircuitRow; onClose: () => void; onEdit: () => void; onDelete: () => void;
-}) {
+/** The circuit's body — details, A/Z terminations (editable), groups — shared
+ *  by the drawer and the circuit page. `substrate` adds the custom fields,
+ *  changes and journal the page supplies itself. */
+export function CircuitDetails({ circuit, substrate = true }: { circuit: CircuitRow; substrate?: boolean }) {
   const terms = useCircuitList('circuit-terminations', { circuit_id: circuit.id });
   const networks = useCircuitList('provider-networks', { provider_id: circuit.provider_id, limit: 1000 });
   const [editing, setEditing] = useState<'A' | 'Z' | null>(null);
@@ -165,20 +169,7 @@ function CircuitDrawer({ circuit, onClose, onEdit, onDelete }: {
   const nameOf = (t: CircuitTermination | undefined) =>
     (t ? terminationText({ ...t, termination_name: t.termination_name ?? null }) : 'Not set');
   return (
-    <DrawerShell onClose={onClose} width={520}>
-      <div data-testid="circuit-drawer" style={{ padding: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <Icon name="cable" size={18} style={{ color: 'var(--accent)' }} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="mono" style={{ fontWeight: 700, fontSize: 15 }}>{circuit.cid}</div>
-            <div style={{ fontSize: 12, color: 'var(--app-t3)' }}>{circuit.provider_name ?? '—'} · {circuit.type_name ?? '—'}</div>
-          </div>
-          <PermissionGate permission={TENANT_PERMISSIONS.circuits.manage}>
-            <button type="button" className="ui-btn sm ghost" title="Edit" data-testid="circuit-edit" onClick={onEdit}><Icon name="sliders-horizontal" size={13} /></button>
-            <button type="button" className="ui-btn sm ghost" title="Delete" style={{ color: 'var(--danger-text)' }} onClick={onDelete}><Icon name="trash-2" size={13} /></button>
-          </PermissionGate>
-          <DrawerCloseBtn onClose={onClose} />
-        </div>
+    <>
         <SectionLabel icon="file-text">Details</SectionLabel>
         <MetaRow k="Status" v={<Chip tone={STATUS_TONE[circuit.operational_status]}>{CIRCUIT_STATUS_LABEL[circuit.operational_status]}</Chip>} />
         <MetaRow k="Commit rate" v={rateText(circuit.commit_rate_kbps)} />
@@ -210,34 +201,93 @@ function CircuitDrawer({ circuit, onClose, onEdit, onDelete }: {
         <SectionLabel icon="layers">Circuit Groups</SectionLabel>
         <CircuitGroupsSection circuit={circuit} />
 
-        {/* Custom fields (DCIM row 5.1): edited through the circuit's PATCH. */}
-        <SectionLabel icon="list-checks">Custom fields</SectionLabel>
-        <CustomFieldsPanel kind="circuit" id={circuit.id} values={circuit.custom_fields} permission={TENANT_PERMISSIONS.circuits.manage}
-          onChange={(custom_fields) => updateCircuit.mutateAsync({ id: circuit.id, body: { custom_fields } })} />
+        {substrate && (
+          <>
+            {/* Custom fields (DCIM row 5.1): edited through the circuit's PATCH. */}
+            <SectionLabel icon="list-checks">Custom fields</SectionLabel>
+            <CustomFieldsPanel kind="circuit" id={circuit.id} values={circuit.custom_fields} permission={TENANT_PERMISSIONS.circuits.manage}
+              onChange={(custom_fields) => updateCircuit.mutateAsync({ id: circuit.id, body: { custom_fields } })} />
 
-        <div role="tablist" style={{ display: 'flex', gap: 4, marginTop: 18, borderBottom: '1px solid var(--app-border)' }}>
-          {(['changes', 'journal'] as const).map((tb) => (
-            <button key={tb} type="button" role="tab" aria-selected={tab === tb} className="ui-btn ghost sm"
-              style={{ borderBottom: tab === tb ? '2px solid var(--accent)' : '2px solid transparent', borderRadius: 0 }} onClick={() => setTab(tb)}>
-              {tb === 'changes' ? 'Changes' : 'Journal'}
-            </button>
-          ))}
-        </div>
-        <div style={{ marginTop: 8 }}>
-          {tab === 'changes' ? <ObjectChanges kind="circuit" id={circuit.id} /> : <ObjectJournal kind="circuit" id={circuit.id} />}
-        </div>
-      </div>
+            <div role="tablist" style={{ display: 'flex', gap: 4, marginTop: 18, borderBottom: '1px solid var(--app-border)' }}>
+              {(['changes', 'journal'] as const).map((tb) => (
+                <button key={tb} type="button" role="tab" aria-selected={tab === tb} className="ui-btn ghost sm"
+                  style={{ borderBottom: tab === tb ? '2px solid var(--accent)' : '2px solid transparent', borderRadius: 0 }} onClick={() => setTab(tb)}>
+                  {tb === 'changes' ? 'Changes' : 'Journal'}
+                </button>
+              ))}
+            </div>
+            <div style={{ marginTop: 8 }}>
+              {tab === 'changes' ? <ObjectChanges kind="circuit" id={circuit.id} /> : <ObjectJournal kind="circuit" id={circuit.id} />}
+            </div>
+          </>
+        )}
       {editing && (
         <TerminationEditor circuit={circuit} side={editing} current={bySide(editing)} networks={networks.data?.rows ?? []} onClose={() => setEditing(null)} />
       )}
+    </>
+  );
+}
+
+function CircuitDrawer({ circuit, onClose, onEdit, onDelete }: {
+  circuit: CircuitRow; onClose: () => void; onEdit: () => void; onDelete: () => void;
+}) {
+  const loc = useLocation();
+  return (
+    <DrawerShell onClose={onClose} width={520}>
+      <div data-testid="circuit-drawer" style={{ padding: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <Icon name="cable" size={18} style={{ color: 'var(--accent)' }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <Link to={circuitHref(circuit.id)} state={fromState(loc)} data-testid="circuit-open-page" title="Open the circuit page" className="mono" style={{ fontWeight: 700, fontSize: 15, color: 'inherit' }}>{circuit.cid}</Link>
+            <div style={{ fontSize: 12, color: 'var(--app-t3)' }}>{circuit.provider_name ?? '—'} · {circuit.type_name ?? '—'}</div>
+          </div>
+          <PermissionGate permission={TENANT_PERMISSIONS.circuits.manage}>
+            <button type="button" className="ui-btn sm ghost" title="Edit" data-testid="circuit-edit" onClick={onEdit}><Icon name="sliders-horizontal" size={13} /></button>
+            <button type="button" className="ui-btn sm ghost" title="Delete" style={{ color: 'var(--danger-text)' }} onClick={onDelete}><Icon name="trash-2" size={13} /></button>
+          </PermissionGate>
+          <DrawerCloseBtn onClose={onClose} />
+        </div>
+        <CircuitDetails circuit={circuit} />
+      </div>
     </DrawerShell>
   );
 }
 
 const COLS = '1.1fr 1fr 0.9fr 110px 1.2fr 1.2fr 110px';
 
+/** The Circuits lens: physical circuits, or (`view=virtual`, DCIM gap 10)
+ *  the virtual circuits that run over provider networks. One lens with two
+ *  views — the lens count is audited. */
 export function CircuitsLens() {
   const [params, setParams] = useSearchParams();
+  const virtual = params.get('view') === 'virtual';
+  const show = (v: 'physical' | 'virtual') => {
+    const n = new URLSearchParams(params);
+    for (const k of ['view', 'circuit', 'vc', 'status']) n.delete(k);
+    if (v === 'virtual') n.set('view', 'virtual');
+    setParams(n, { replace: true });
+  };
+  return (
+    <div data-testid="circuits-lens" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Icon name="cable" size={17} style={{ color: 'var(--accent)' }} />Circuits
+        </h1>
+        <div role="tablist" aria-label="Circuit view" style={{ display: 'flex', gap: 6 }}>
+          <button type="button" role="tab" aria-selected={!virtual} data-testid="circuits-view-physical" className={`ui-btn sm${!virtual ? ' accent' : ''}`} onClick={() => show('physical')}>Circuits</button>
+          <button type="button" role="tab" aria-selected={virtual} data-testid="circuits-view-virtual" className={`ui-btn sm${virtual ? ' accent' : ''}`} onClick={() => show('virtual')}>Virtual circuits</button>
+        </div>
+        <Link to={CIRCUIT_PROVIDERS_HREF} className="ui-btn sm ghost" style={{ marginLeft: 'auto' }}><Icon name="globe" size={14} />Circuit Providers</Link>
+      </div>
+      {virtual ? <VirtualCircuitsView /> : <PhysicalCircuits />}
+    </div>
+  );
+}
+
+function PhysicalCircuits() {
+  const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
+  const loc = useLocation();
   const selected = params.get('circuit');
   const status = params.get('status') ?? '';
   const [q, setQ] = useState('');
@@ -261,11 +311,8 @@ export function CircuitsLens() {
   const filtered = status !== '' || q.trim() !== '';
 
   return (
-    <div data-testid="circuits-lens" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div data-testid="physical-circuits-view" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
-          <Icon name="cable" size={17} style={{ color: 'var(--accent)' }} />Circuits
-        </h1>
         <span style={{ fontSize: 12, color: 'var(--app-t3)' }}>{circuits.data ? `${circuits.data.total} ${circuits.data.total === 1 ? 'circuit' : 'circuits'}` : ''}</span>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
           <input aria-label="Search circuits" placeholder="Search circuit ID…" value={q} onChange={(e) => setQ(e.target.value)} className="ui-input" style={{ width: 180 }} />
@@ -273,7 +320,6 @@ export function CircuitsLens() {
             <option value="">Any status</option>
             {CIRCUIT_STATUS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
           </select>
-          <Link to={CIRCUIT_PROVIDERS_HREF} className="ui-btn sm ghost"><Icon name="globe" size={14} />Circuit Providers</Link>
           <PermissionGate permission={TENANT_PERMISSIONS.circuits.manage}>
             <button type="button" className="ui-btn sm accent" data-testid="add-circuit" onClick={() => setAdding(true)}><Icon name="plus" size={14} />Add circuit</button>
           </PermissionGate>
@@ -291,8 +337,8 @@ export function CircuitsLens() {
             message={filtered ? 'Nothing matches this search or status.' : 'Add the circuits your sites run on — internet, MPLS, dark fibre — with their provider and both ends. Providers and circuit types are managed from Infrastructure → Circuits.'} />
         )}
         {rows.map((c) => (
-          <div key={c.id} data-testid="circuit-row" role="button" tabIndex={0} onClick={() => set('circuit', c.id)}
-            onKeyDown={(e) => { if (e.key === 'Enter') set('circuit', c.id); }}
+          <div key={c.id} data-testid="circuit-row" role="button" tabIndex={0} onClick={() => navigate(circuitHref(c.id), { state: fromState(loc) })}
+            onKeyDown={(e) => { if (e.key === 'Enter') navigate(circuitHref(c.id), { state: fromState(loc) }); }}
             style={{ display: 'grid', gridTemplateColumns: COLS, gap: 10, alignItems: 'center', padding: '7px 12px', borderBottom: '1px solid var(--app-border)', fontSize: 12.5, cursor: 'pointer', background: selected === c.id ? 'var(--app-panel2)' : undefined }}>
             <span className="mono" style={{ fontWeight: 600 }}>{c.cid}</span>
             <span>{c.provider_name ?? '—'}</span>

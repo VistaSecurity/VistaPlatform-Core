@@ -124,6 +124,7 @@ func ciscoManifest() CollectorManifest {
 			ciscoExec("show vlan brief", "VLAN ids and names, and each VLAN's access ports"),
 			ciscoExec("show interfaces status", "each switch port's access VLAN or trunk, and its media type (read by column; the Name column is never read)"),
 			ciscoExec("show interfaces trunk", "each trunk's native VLAN and allowed VLAN list"),
+			ciscoExec("show vdc membership", "NX-OS only: each virtual device context's id and name, and the interfaces allocated to it"),
 			ciscoExec("show cdp neighbors detail", "CDP neighbours and edges"),
 			ciscoExec("show lldp neighbors detail", "LLDP neighbours and edges"),
 			ciscoExec("show ip arp", "ARP neighbours (IOS, IOS-XE, NX-OS)"),
@@ -220,7 +221,7 @@ func fortinetManifest() CollectorManifest {
 		Endpoints: []Endpoint{
 			fortinetGet("/api/v2/monitor/system/status", "model, serial, FortiOS version"),
 			fortinetGet("/api/v2/cmdb/system/status", "legacy compatibility fallback for model, serial and FortiOS version"),
-			fortinetGet("/api/v2/cmdb/system/interface", "configured interfaces, addresses and VLAN tags"),
+			fortinetGet("/api/v2/cmdb/system/interface", "configured interfaces, addresses, VLAN tags and the VDOM that owns each interface"),
 			fortinetGet("/api/v2/monitor/system/interface", "link state and negotiated speed"),
 			fortinetGet("/api/v2/monitor/router/ipv4", "distinct next hops, counted; nothing else is kept"),
 			fortinetGet("/api/v2/monitor/network/arp", "ARP table: evidence about other hosts, never an asset of its own"),
@@ -285,13 +286,14 @@ func paloAltoManifest() CollectorManifest {
 				Purpose: "exchange the username and password for an API key"},
 			panOp("<show><system><info></info></system></show>", "show system info",
 				"hostname, model, serial, PAN-OS version, uptime, management address"),
-			panOp("<show><interface>all</interface></show>", "show interface all", "interfaces, addresses, VLAN tags, link state"),
+			panOp("<show><interface>all</interface></show>", "show interface all", "interfaces, addresses, VLAN tags, link state, the vsys that owns each interface"),
 			panOp("<show><arp><entry name='all'/></arp></show>", "show arp all", "layer-3 neighbours"),
 			panOp("<show><lldp><neighbors>all</neighbors></lldp></show>", "show lldp neighbors all", "layer-2 neighbours and edges"),
 			panConfigGet(panSSLDecryptXPath, "SSL decryption profiles"),
 			panConfigGet(panIKEXPath, "IKE gateways and IKE / IPsec crypto profiles (the gateway's pre-shared key is decoded as presence only)"),
 			panConfigGet(panIPsecTunnelXPath, "IPsec tunnels: gateway, crypto profile and tunnel interface"),
 			panConfigGet(panSecurityRulesXPath, "security rules carrying an SSL-decrypt action"),
+			panConfigGet(panVsysXPath, "the operator's display name for each virtual system (only the name and display-name are read)"),
 		},
 	}
 }
@@ -352,7 +354,7 @@ func f5Manifest() CollectorManifest {
 			f5Get("/mgmt/tm/net/interface", "interfaces"),
 			f5Get("/mgmt/tm/net/vlan?expandSubcollections=true", "VLANs with their tag and member interfaces/trunks, tagged or untagged"),
 			f5Get("/mgmt/tm/net/trunk", "trunks (link aggregates) and their member interfaces"),
-			f5Get("/mgmt/tm/net/route-domain", "route-domain names, for the VRF of an address outside route domain 0"),
+			f5Get("/mgmt/tm/net/route-domain", "route-domain names, ids and VLANs: the VRF of an address outside route domain 0, and each route domain as a virtual device context"),
 			f5Get("/mgmt/tm/net/arp", "ARP table: evidence about other hosts, never an asset of its own"),
 			f5Get("/mgmt/tm/net/self", "self IPs: the device's addresses on each VLAN, with their route domain"),
 			f5Get("/mgmt/tm/ltm/pool?expandSubcollections=true", "pool members, for the dependency edges"),
@@ -474,7 +476,7 @@ func snmpManifest() CollectorManifest {
 			FactCapability(facts.KeyMgmtProtocol):         Supplies(),
 			FactCapability(facts.KeyMgmtPlaintext):        Supplies(),
 		},
-		Endpoints: []Endpoint{
+		Endpoints: append([]Endpoint{
 			snmpGet(snmpOIDSysDescr, "SNMPv2-MIB::sysDescr.0", "system description"),
 			snmpGet(snmpOIDSysObjectID, "SNMPv2-MIB::sysObjectID.0", "vendor and product line"),
 			snmpGet(snmpOIDSysName, "SNMPv2-MIB::sysName.0", "system name"),
@@ -527,7 +529,7 @@ func snmpManifest() CollectorManifest {
 			snmpWalkEndpoint(snmpOIDDot1qVlanStaticUntagged, "VLAN untagged ports"),
 			snmpWalkEndpoint(snmpOIDDot1qPvid, "native VLAN"),
 			snmpWalkEndpoint(snmpOIDDot1dBasePortIfIndex, "bridge port to interface"),
-		},
+		}, snmpPowerEndpoints()...),
 	}
 }
 

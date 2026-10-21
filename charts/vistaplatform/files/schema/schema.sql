@@ -3569,6 +3569,18 @@ CREATE TABLE IF NOT EXISTS public.platforms (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid,
+    -- Commercial lifecycle (DCIM gap 4): the vendor's end-of-sale,
+    -- end-of-support and end-of-life dates, as declared by a person or a file.
+    -- eol_catalogue_id links the row to an end-of-life catalogue entry; a NULL
+    -- declared date falls back to that entry (end_of_support <- eol_date,
+    -- end_of_life <- extended_support_date). The FK is added after
+    -- eol_catalogue exists, in the POST-MIGRATIONS block at the end of the file.
+    -- Appended last so a fresh install and an upgraded one (ADD COLUMN in
+    -- POST-MIGRATIONS) have the same column order.
+    end_of_sale date,
+    end_of_support date,
+    end_of_life date,
+    eol_catalogue_id uuid,
     CONSTRAINT platforms_pkey PRIMARY KEY (id),
     CONSTRAINT platforms_slug_check CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
     CONSTRAINT platforms_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred'))
@@ -3639,6 +3651,18 @@ CREATE TABLE IF NOT EXISTS public.device_types (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid,
+    -- Commercial lifecycle (DCIM gap 4): the vendor's end-of-sale,
+    -- end-of-support and end-of-life dates, as declared by a person or a file.
+    -- eol_catalogue_id links the row to an end-of-life catalogue entry; a NULL
+    -- declared date falls back to that entry (end_of_support <- eol_date,
+    -- end_of_life <- extended_support_date). The FK is added after
+    -- eol_catalogue exists, in the POST-MIGRATIONS block at the end of the file.
+    -- Appended last so a fresh install and an upgraded one (ADD COLUMN in
+    -- POST-MIGRATIONS) have the same column order.
+    end_of_sale date,
+    end_of_support date,
+    end_of_life date,
+    eol_catalogue_id uuid,
     CONSTRAINT device_types_pkey PRIMARY KEY (id),
     CONSTRAINT device_types_slug_check CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
     CONSTRAINT device_types_u_height_check CHECK (u_height >= 0 AND u_height * 2 = trunc(u_height * 2)),
@@ -4036,10 +4060,20 @@ CREATE TABLE IF NOT EXISTS public.locations (
     created_by uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- The floor plan (DCIM gap 9; DATA_MODEL section 1): a rectangular grid,
+    -- width (x) by depth (y), in metres or feet, that the location's racks are
+    -- placed on (racks.floor_x / floor_y). All three or none. Appended last,
+    -- and added to an upgraded database by POST-MIGRATIONS.
+    floor_plan_width numeric(8,2),
+    floor_plan_depth numeric(8,2),
+    floor_plan_unit text,
     CONSTRAINT locations_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 100),
     CONSTRAINT locations_slug_check CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
     CONSTRAINT locations_operational_status_check CHECK (operational_status IN ('planned', 'staged', 'active', 'decommissioning', 'retired')),
-    CONSTRAINT locations_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred'))
+    CONSTRAINT locations_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT locations_floor_plan_unit_check CHECK (floor_plan_unit IS NULL OR floor_plan_unit IN ('m', 'ft')),
+    CONSTRAINT locations_floor_plan_check CHECK ((floor_plan_width IS NULL AND floor_plan_depth IS NULL AND floor_plan_unit IS NULL)
+        OR (floor_plan_width > 0 AND floor_plan_depth > 0 AND floor_plan_unit IS NOT NULL))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS locations_identity_key
     ON public.locations USING btree (tenant_id, site_id, (COALESCE(parent_id, '00000000-0000-0000-0000-000000000000'::uuid)), name);
@@ -4207,6 +4241,15 @@ CREATE TABLE IF NOT EXISTS public.racks (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid,
+    -- The rack on its location's floor plan (DCIM gap 9; DATA_MODEL section
+    -- 3): the centre of its footprint, in the plan's unit from the plan's
+    -- top-left corner, and the way its front faces (0 = towards the bottom of
+    -- the plan, then clockwise). All three or none. The service checks the footprint stays inside
+    -- the plan and that the location has one. Appended last, and added to an
+    -- upgraded database by POST-MIGRATIONS.
+    floor_x numeric(8,2),
+    floor_y numeric(8,2),
+    floor_rotation smallint,
     CONSTRAINT racks_pkey PRIMARY KEY (id),
     CONSTRAINT racks_tenant_id_id_key UNIQUE (tenant_id, id),
     CONSTRAINT racks_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 100),
@@ -4222,7 +4265,10 @@ CREATE TABLE IF NOT EXISTS public.racks (
     CONSTRAINT racks_weight_unit_check CHECK (weight_unit IS NULL OR weight_unit IN ('kg', 'g', 'lb', 'oz')),
     CONSTRAINT racks_weight_pair_check CHECK ((weight IS NULL AND max_weight IS NULL) OR weight_unit IS NOT NULL),
     CONSTRAINT racks_airflow_check CHECK (airflow IS NULL OR airflow IN ('front-to-rear', 'rear-to-front')),
-    CONSTRAINT racks_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred'))
+    CONSTRAINT racks_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT racks_floor_rotation_check CHECK (floor_rotation IS NULL OR floor_rotation IN (0, 90, 180, 270)),
+    CONSTRAINT racks_floor_position_check CHECK ((floor_x IS NULL AND floor_y IS NULL AND floor_rotation IS NULL)
+        OR (floor_x IS NOT NULL AND floor_y IS NOT NULL AND floor_rotation IS NOT NULL AND floor_x >= 0 AND floor_y >= 0))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS racks_identity_key
     ON public.racks USING btree (tenant_id, site_id, (COALESCE(location_id, '00000000-0000-0000-0000-000000000000'::uuid)), name);
@@ -4491,6 +4537,22 @@ CREATE TABLE IF NOT EXISTS public.assets (
     vc_priority smallint,
     latitude numeric(8,6),
     longitude numeric(9,6),
+    -- Commercial lifecycle (DCIM gap 4; DATA_MODEL section 2): declared by a
+    -- person or an import, never measured. vendor is the SELLER, which is not
+    -- the manufacturer (that is the device type's). purchase_currency is an
+    -- ISO 4217 code. All nullable: NULL is "not recorded", never "none".
+    -- Appended last, and added to an upgraded database by POST-MIGRATIONS.
+    purchase_date date,
+    warranty_start date,
+    warranty_end date,
+    purchase_cost numeric(14,2),
+    purchase_currency character(3),
+    purchase_order text,
+    vendor text,
+    support_contract text,
+    support_contract_end date,
+    installed_at date,
+    decommissioned_at date,
     CONSTRAINT assets_pkey PRIMARY KEY (tenant_id, id),
     CONSTRAINT assets_face_check CHECK (face IS NULL OR face IN ('front', 'rear')),
     CONSTRAINT assets_position_face_check CHECK ((position IS NULL) = (face IS NULL)),
@@ -4509,7 +4571,8 @@ CREATE TABLE IF NOT EXISTS public.assets (
     CONSTRAINT assets_class_confidence_range_check CHECK (class_confidence IS NULL OR (class_confidence >= 0 AND class_confidence <= 1)),
     CONSTRAINT assets_identity_status_check CHECK (identity_status = ANY (ARRAY['legacy'::text, 'established'::text, 'provisional'::text, 'operator_confirmed'::text])),
     CONSTRAINT assets_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object'),
-    CONSTRAINT assets_vm_resources_check CHECK ((vcpus IS NULL OR vcpus >= 0) AND (memory_mb IS NULL OR memory_mb >= 0) AND (disk_mb IS NULL OR disk_mb >= 0))
+    CONSTRAINT assets_vm_resources_check CHECK ((vcpus IS NULL OR vcpus >= 0) AND (memory_mb IS NULL OR memory_mb >= 0) AND (disk_mb IS NULL OR disk_mb >= 0)),
+    CONSTRAINT assets_purchase_currency_check CHECK (purchase_currency IS NULL OR purchase_currency ~ '^[A-Z]{3}$')
 )
 PARTITION BY HASH (tenant_id);
 
@@ -6688,6 +6751,14 @@ CREATE TABLE IF NOT EXISTS public.tenant_notification_rules (
     priority integer DEFAULT 0,
     created_at timestamp with time zone DEFAULT now(),
     updated_at timestamp with time zone DEFAULT now(),
+    -- The object_changed condition (Inventory change notifications): which
+    -- object kinds and actions the rule routes, and whether changes made by
+    -- discovery intake / a sync connection are included. NULL for every other
+    -- alert type. Shape: {"object_kinds": [..], "actions": [..],
+    -- "include_intake": bool, "include_sync": bool}; empty lists mean "all".
+    -- Evaluated by notification-service (rule_engine.go). Also added for
+    -- installed databases in POST-MIGRATIONS.
+    change_filter jsonb,
     CONSTRAINT valid_frequency CHECK (((frequency)::text = ANY ((ARRAY['immediate'::character varying, 'digest_hourly'::character varying, 'digest_daily'::character varying, 'digest_weekly'::character varying])::text[])))
 );
 
@@ -19205,7 +19276,6 @@ CREATE TABLE IF NOT EXISTS public.interfaces (
     wwn text,
     operational_status text,
     admin_status text,
-    vdcs text[] DEFAULT '{}'::text[] NOT NULL,
     mark_connected boolean DEFAULT false NOT NULL,
     cable_id uuid,
     cable_end character(1),
@@ -19224,6 +19294,10 @@ CREATE TABLE IF NOT EXISTS public.interfaces (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid,
+    -- VLAN translation (DCIM gap 10): the interface's policy. Appended last so
+    -- a fresh install and an upgraded one (ADD COLUMN in POST-MIGRATIONS)
+    -- have the same column order; its FK and index are in POST-MIGRATIONS.
+    vlan_translation_policy_id uuid,
     CONSTRAINT interfaces_pkey PRIMARY KEY (id),
     CONSTRAINT interfaces_tenant_id_id_key UNIQUE (tenant_id, id),
     CONSTRAINT interfaces_name_check CHECK (length(name) BETWEEN 1 AND 64),
@@ -19624,6 +19698,15 @@ CREATE TABLE IF NOT EXISTS public.power_ports (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid,
+    -- Measured by a PDU collector (BUILD_PLAN row 6.2): never written by a
+    -- person or a sync. allocated_draw stays the declared figure (NetBox is
+    -- authoritative for it, standards/sync-authority.yaml); a reading is kept
+    -- beside it. measured_legs is a three-phase inlet's per-leg reading.
+    -- Appended last, and added to an upgraded database by POST-MIGRATIONS.
+    measured_draw integer CONSTRAINT power_ports_measured_draw_check CHECK (measured_draw >= 0),
+    measured_current numeric(8,2) CONSTRAINT power_ports_measured_current_check CHECK (measured_current >= 0),
+    measured_legs jsonb CONSTRAINT power_ports_measured_legs_check CHECK (measured_legs IS NULL OR jsonb_typeof(measured_legs) = 'array'),
+    measured_at timestamp with time zone,
     CONSTRAINT power_ports_pkey PRIMARY KEY (id),
     CONSTRAINT power_ports_tenant_id_id_key UNIQUE (tenant_id, id),
     CONSTRAINT power_ports_name_check CHECK (length(name) BETWEEN 1 AND 64),
@@ -19666,6 +19749,13 @@ CREATE TABLE IF NOT EXISTS public.power_outlets (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid,
+    -- Measured by a PDU collector (BUILD_PLAN row 6.2): the outlet's draw,
+    -- current and switched state (on / off) at measured_at. Appended last, and
+    -- added to an upgraded database by POST-MIGRATIONS.
+    measured_draw integer CONSTRAINT power_outlets_measured_draw_check CHECK (measured_draw >= 0),
+    measured_current numeric(8,2) CONSTRAINT power_outlets_measured_current_check CHECK (measured_current >= 0),
+    measured_state text CONSTRAINT power_outlets_measured_state_check CHECK (measured_state = ANY (ARRAY['on'::text, 'off'::text])),
+    measured_at timestamp with time zone,
     CONSTRAINT power_outlets_pkey PRIMARY KEY (id),
     CONSTRAINT power_outlets_tenant_id_id_key UNIQUE (tenant_id, id),
     CONSTRAINT power_outlets_name_check CHECK (length(name) BETWEEN 1 AND 64),
@@ -19863,10 +19953,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS inventory_item_roles_scope_slug_uniq ON public
 CREATE UNIQUE INDEX IF NOT EXISTS inventory_item_roles_scope_name_uniq ON public.inventory_item_roles USING btree ((COALESCE(tenant_id, '00000000-0000-0000-0000-000000000000'::uuid)), lower(name));
 CREATE INDEX IF NOT EXISTS idx_inventory_item_roles_tenant ON public.inventory_item_roles USING btree (tenant_id);
 
+-- DCIM gap 8 (spares, stock and RMA): an item need not be on an asset. A spare
+-- on a shelf has a stock location (location_id) instead, a quantity (a box of
+-- optics is one row) and a stock_state; asset_id became nullable. The three
+-- columns are appended last and added to an upgraded database by
+-- POST-MIGRATIONS, which also carries their index, foreign key and the
+-- placement CHECKs (a fresh install gets them from there too). The rules a
+-- CHECK cannot say are the service's (spares_service.go): installed = on an
+-- asset; in_stock / reserved = at a location; rma = either, or neither while
+-- the unit is with the vendor; retired = neither required.
 CREATE TABLE IF NOT EXISTS public.inventory_items (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     tenant_id uuid NOT NULL,
-    asset_id uuid NOT NULL,
+    asset_id uuid,
     parent_id uuid,
     name text NOT NULL,
     label text,
@@ -19893,6 +19992,9 @@ CREATE TABLE IF NOT EXISTS public.inventory_items (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     created_by uuid,
+    location_id uuid,
+    quantity integer DEFAULT 1 NOT NULL,
+    stock_state text DEFAULT 'installed'::text NOT NULL,
     CONSTRAINT inventory_items_pkey PRIMARY KEY (id),
     CONSTRAINT inventory_items_tenant_id_id_key UNIQUE (tenant_id, id),
     CONSTRAINT inventory_items_name_check CHECK (length(name) BETWEEN 1 AND 64),
@@ -19905,6 +20007,8 @@ CREATE TABLE IF NOT EXISTS public.inventory_items (
     CONSTRAINT inventory_items_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
     CONSTRAINT inventory_items_status_check CHECK (status = ANY (ARRAY['pending'::text, 'active'::text, 'rejected'::text, 'stale'::text, 'archived'::text])),
     CONSTRAINT inventory_items_observation_count_check CHECK (observation_count >= 0),
+    CONSTRAINT inventory_items_quantity_check CHECK (quantity >= 1),
+    CONSTRAINT inventory_items_stock_state_check CHECK (stock_state = ANY (ARRAY['installed'::text, 'in_stock'::text, 'reserved'::text, 'rma'::text, 'retired'::text])),
     CONSTRAINT inventory_items_parent_fkey FOREIGN KEY (tenant_id, parent_id) REFERENCES public.inventory_items(tenant_id, id) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX IF NOT EXISTS inventory_items_identity_uniq
@@ -20842,7 +20946,7 @@ CREATE TABLE IF NOT EXISTS public.cable_terminations (
     CONSTRAINT cable_terminations_cable_fkey FOREIGN KEY (tenant_id, cable_id) REFERENCES public.cables(tenant_id, id) ON DELETE CASCADE,
     CONSTRAINT cable_terminations_cable_end_check CHECK (cable_end IN ('A', 'B')),
     CONSTRAINT cable_terminations_kind_check CHECK (termination_kind IN ('interface', 'front_port', 'rear_port', 'console_port',
-        'console_server_port', 'circuit_termination', 'power_port', 'power_outlet'))
+        'console_server_port', 'circuit_termination', 'power_port', 'power_outlet', 'power_feed'))
 );
 -- A port is on at most one cable (DATA_MODEL §4; NetBox CableTermination
 -- unique (termination_type, termination_id)). Global, not per tenant: the id
@@ -20874,7 +20978,7 @@ CREATE TABLE IF NOT EXISTS public.cable_paths (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT cable_paths_pkey PRIMARY KEY (id),
     CONSTRAINT cable_paths_origin_kind_check CHECK (origin_kind IN ('interface', 'console_port', 'console_server_port',
-        'circuit_termination', 'power_port', 'power_outlet')),
+        'circuit_termination', 'power_port', 'power_outlet', 'power_feed')),
     CONSTRAINT cable_paths_destination_pair_check CHECK ((destination_kind IS NULL) = (destination_id IS NULL)),
     CONSTRAINT cable_paths_path_array_check CHECK (jsonb_typeof(path) = 'array')
 );
@@ -22574,17 +22678,19 @@ CREATE OR REPLACE FUNCTION public.dcim_object_kinds() RETURNS text[]
         'rack_role', 'rack_type', 'rack', 'rack_reservation', 'manufacturer',
         'device_type', 'module_type', 'module_bay', 'module', 'device_role',
         'platform', 'inventory_item', 'inventory_item_role', 'virtual_chassis',
-        'device_bay', 'interface_template', 'console_port_template',
+        'device_bay', 'virtual_device_context', 'rma_case', 'interface_template', 'console_port_template',
         'console_server_port_template', 'front_port_template', 'rear_port_template',
         'module_bay_template', 'device_bay_template', 'power_port_template',
         'power_outlet_template', 'interface', 'mac_address', 'console_port',
         'console_server_port', 'front_port', 'rear_port', 'power_port',
-        'power_outlet', 'cable', 'cable_termination',
+        'power_outlet', 'power_panel', 'power_feed', 'cable', 'cable_termination',
         'cable_path', 'unresolved_termination', 'rir', 'aggregate', 'vrf',
         'route_target', 'prefix_role', 'prefix', 'ip_range', 'ip_address',
-        'vlan_group', 'vlan', 'fhrp_group', 'fhrp_group_assignment', 'asn',
+        'vlan_group', 'vlan', 'vlan_translation_policy', 'vlan_translation_rule',
+        'fhrp_group', 'fhrp_group_assignment', 'asn', 'asn_range',
         'provider', 'provider_account', 'provider_network', 'circuit_type',
         'circuit', 'circuit_termination', 'circuit_group', 'circuit_group_assignment',
+        'virtual_circuit_type', 'virtual_circuit', 'virtual_circuit_termination',
         'cluster_type',
         'cluster_group', 'cluster', 'virtual_disk', 'tunnel_group', 'tunnel',
         'tunnel_termination', 'ike_proposal', 'ike_policy', 'ipsec_proposal',
@@ -23584,7 +23690,13 @@ CREATE TABLE IF NOT EXISTS public.sync_conflicts (
     resolution text,
     resolved_by uuid,
     CONSTRAINT sync_conflicts_pkey PRIMARY KEY (id),
-    CONSTRAINT sync_conflicts_object_kind_check CHECK (object_kind = ANY (public.dcim_object_kinds())),
+    -- object_kind is a DCIM object kind or one of the sync-only kinds of
+    -- standards/sync-authority.yaml (`object:`): a NetBox virtual machine is an
+    -- asset, a VM interface an interface, but their conflicts name the sync
+    -- kind so the planner and the resolution find them (NetBox VM sync).
+    -- The list is checked by scripts/generate-sync-authority.mjs; an upgraded
+    -- database gets it from POST-MIGRATIONS.
+    CONSTRAINT sync_conflicts_object_kind_check CHECK (object_kind = ANY (public.dcim_object_kinds() || ARRAY['virtual_machine'::text, 'vm_interface'::text])),
     CONSTRAINT sync_conflicts_kind_check CHECK (conflict_kind IN ('field', 'deleted_in_peer', 'deleted_here')),
     CONSTRAINT sync_conflicts_resolution_check CHECK (
         (resolved_at IS NULL AND resolution IS NULL)
@@ -25796,6 +25908,557 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE OR REPLACE TRIGGER update_export_templates_updated_at BEFORE UPDATE ON public.export_templates FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
+-- DCIM: gap1 virtual device contexts (DCIM gap 1; ADR-0010 D3/D5; DATA_MODEL §2.4)
+-- ============================================================================
+-- NetBox dcim/virtual-device-context: a logical partition of one physical
+-- device that owns interfaces and addresses — a Cisco Nexus VDC, a Palo Alto
+-- vsys, a Fortinet VDOM, an F5 route domain. A context belongs to one asset
+-- (asset_id, tenant-paired FK ON DELETE CASCADE) and carries NetBox's name,
+-- identifier (a small non-negative integer, unique per asset when set),
+-- operational_status (NetBox VirtualDeviceContextStatusChoices: active,
+-- planned, offline), a business unit (NetBox tenant) and primary IPv4 / IPv6
+-- addresses (tenant-paired FKs onto ip_addresses, ON DELETE SET NULL; the
+-- service checks the family and that the address is on one of the asset's
+-- interfaces, as NetBox's clean() does). `status` is the discovery lifecycle
+-- (DATA_MODEL §0), so a collector can propose a context through
+-- shared/approval later. Identity (tenant_id, asset_id, name) over rows that
+-- are not rejected.
+--
+-- interface_virtual_device_contexts is NetBox's Interface.vdcs many-to-many.
+-- Both references are tenant-paired and CASCADE; the service refuses a context
+-- of another asset. It supersedes interfaces.vdcs (the row 1.2 text[] of
+-- names), which a fresh install no longer has: the interface API reads its
+-- `vdcs` names from this junction. POST-MIGRATIONS carries any names a 5.0
+-- database holds in interfaces.vdcs into contexts and links, then drops the
+-- column.
+CREATE TABLE IF NOT EXISTS public.virtual_device_contexts (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL,
+    asset_id uuid NOT NULL,
+    name text NOT NULL,
+    identifier smallint,
+    operational_status text DEFAULT 'active'::text NOT NULL,
+    business_unit_id uuid REFERENCES public.business_units(id) ON DELETE SET NULL,
+    primary_ip4_id uuid,
+    primary_ip6_id uuid,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    external_ids jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    comments text,
+    status text DEFAULT 'active'::text NOT NULL,
+    first_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    observation_count integer DEFAULT 0 NOT NULL,
+    approved_by uuid,
+    approved_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT virtual_device_contexts_pkey PRIMARY KEY (id),
+    CONSTRAINT virtual_device_contexts_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT virtual_device_contexts_name_check CHECK (length(name) BETWEEN 1 AND 64),
+    CONSTRAINT virtual_device_contexts_identifier_check CHECK (identifier IS NULL OR identifier >= 0),
+    CONSTRAINT virtual_device_contexts_operational_status_check CHECK (operational_status = ANY (ARRAY['active'::text, 'planned'::text, 'offline'::text])),
+    CONSTRAINT virtual_device_contexts_source_kind_check CHECK (source_kind = ANY (ARRAY['measured'::text, 'declared'::text, 'imported'::text, 'inferred'::text])),
+    CONSTRAINT virtual_device_contexts_status_check CHECK (status = ANY (ARRAY['pending'::text, 'active'::text, 'rejected'::text, 'stale'::text, 'archived'::text])),
+    CONSTRAINT virtual_device_contexts_observation_count_check CHECK (observation_count >= 0),
+    CONSTRAINT virtual_device_contexts_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object'),
+    CONSTRAINT virtual_device_contexts_primary_ip4_fkey FOREIGN KEY (tenant_id, primary_ip4_id) REFERENCES public.ip_addresses(tenant_id, id) ON DELETE SET NULL (primary_ip4_id),
+    CONSTRAINT virtual_device_contexts_primary_ip6_fkey FOREIGN KEY (tenant_id, primary_ip6_id) REFERENCES public.ip_addresses(tenant_id, id) ON DELETE SET NULL (primary_ip6_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS virtual_device_contexts_identity_uniq
+    ON public.virtual_device_contexts USING btree (tenant_id, asset_id, name) WHERE status <> 'rejected';
+CREATE UNIQUE INDEX IF NOT EXISTS virtual_device_contexts_identifier_uniq
+    ON public.virtual_device_contexts USING btree (tenant_id, asset_id, identifier) WHERE identifier IS NOT NULL AND status <> 'rejected';
+CREATE INDEX IF NOT EXISTS idx_virtual_device_contexts_asset ON public.virtual_device_contexts USING btree (tenant_id, asset_id);
+CREATE INDEX IF NOT EXISTS idx_virtual_device_contexts_business_unit
+    ON public.virtual_device_contexts USING btree (business_unit_id) WHERE business_unit_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_virtual_device_contexts_primary_ip4
+    ON public.virtual_device_contexts USING btree (tenant_id, primary_ip4_id) WHERE primary_ip4_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_virtual_device_contexts_primary_ip6
+    ON public.virtual_device_contexts USING btree (tenant_id, primary_ip6_id) WHERE primary_ip6_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.interface_virtual_device_contexts (
+    tenant_id uuid NOT NULL,
+    interface_id uuid NOT NULL,
+    virtual_device_context_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT interface_virtual_device_contexts_pkey PRIMARY KEY (interface_id, virtual_device_context_id),
+    CONSTRAINT interface_virtual_device_contexts_interface_fkey FOREIGN KEY (tenant_id, interface_id) REFERENCES public.interfaces(tenant_id, id) ON DELETE CASCADE,
+    CONSTRAINT interface_virtual_device_contexts_context_fkey FOREIGN KEY (tenant_id, virtual_device_context_id) REFERENCES public.virtual_device_contexts(tenant_id, id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_interface_virtual_device_contexts_context
+    ON public.interface_virtual_device_contexts USING btree (tenant_id, virtual_device_context_id);
+
+-- The reference to assets in its own statement, so the merge guard
+-- (merge_fk_coverage_test.go) sees it: an asset merge moves the contexts
+-- (hardware_merge.go).
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'virtual_device_contexts_asset_fkey' AND conrelid = to_regclass('public.virtual_device_contexts')) THEN
+    ALTER TABLE ONLY public.virtual_device_contexts ADD CONSTRAINT virtual_device_contexts_asset_fkey FOREIGN KEY (tenant_id, asset_id)
+        REFERENCES public.assets(tenant_id, id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'virtual_device_contexts_tenant_id_fkey' AND conrelid = to_regclass('public.virtual_device_contexts')) THEN
+    ALTER TABLE ONLY public.virtual_device_contexts ADD CONSTRAINT virtual_device_contexts_tenant_id_fkey FOREIGN KEY (tenant_id)
+        REFERENCES public.tenants(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
+ALTER TABLE public.virtual_device_contexts ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  CREATE POLICY virtual_device_contexts_tenant_isolation ON public.virtual_device_contexts
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE public.interface_virtual_device_contexts ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  CREATE POLICY interface_virtual_device_contexts_tenant_isolation ON public.interface_virtual_device_contexts
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE OR REPLACE TRIGGER update_virtual_device_contexts_updated_at BEFORE UPDATE ON public.virtual_device_contexts FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+-- END DCIM: gap1 virtual device contexts
+
+-- ============================================================================
+-- DCIM: gap3 power panels and feeds (BUILD_PLAN row 6.1; ADR-0010 D9; DATA_MODEL §3a)
+-- ============================================================================
+-- NetBox dcim/power-panel and dcim/power-feed.
+--
+--   power_panels  an electrical panel at a site (optionally in one of the
+--                 site's locations — the service checks the location is in the
+--                 site): identity (tenant, site, name).
+--   power_feeds   one circuit from a panel, optionally serving a rack: status
+--                 (NetBox PowerFeedStatusChoices), type (primary / redundant),
+--                 supply (ac / dc), phase (single-phase / three-phase),
+--                 voltage, amperage and max_utilization (%). available_power
+--                 (VA) is computed as NetBox PowerFeed.save computes it:
+--                 |voltage| x amperage x max_utilization / 100, x 1.732 for
+--                 three-phase. A feed is a cable end (a power port's far end)
+--                 and a path origin, so it carries cable_id / cable_end and
+--                 mark_connected like the other terminable components.
+--                 Identity (tenant, panel, name).
+--
+-- The choice sets are not in standards/netbox-choices.v4.3.5.json (the
+-- snapshot carries only the port and outlet types); the values are NetBox
+-- 4.3's PowerFeed*Choices.
+CREATE TABLE IF NOT EXISTS public.power_panels (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    site_id uuid NOT NULL REFERENCES public.sites(id) ON DELETE CASCADE,
+    location_id uuid REFERENCES public.locations(id) ON DELETE SET NULL,
+    name text NOT NULL,
+    external_ids jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    comments text,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT power_panels_pkey PRIMARY KEY (id),
+    CONSTRAINT power_panels_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT power_panels_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 100),
+    CONSTRAINT power_panels_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT power_panels_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS power_panels_identity_uniq ON public.power_panels USING btree (tenant_id, site_id, name);
+CREATE INDEX IF NOT EXISTS idx_power_panels_site ON public.power_panels USING btree (site_id);
+CREATE INDEX IF NOT EXISTS idx_power_panels_location ON public.power_panels USING btree (location_id) WHERE location_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.power_feeds (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    power_panel_id uuid NOT NULL,
+    rack_id uuid,
+    name text NOT NULL,
+    operational_status text DEFAULT 'active'::text NOT NULL,
+    type text DEFAULT 'primary'::text NOT NULL,
+    supply text DEFAULT 'ac'::text NOT NULL,
+    phase text DEFAULT 'single-phase'::text NOT NULL,
+    voltage integer DEFAULT 120 NOT NULL,
+    amperage integer DEFAULT 20 NOT NULL,
+    max_utilization smallint DEFAULT 80 NOT NULL,
+    available_power integer GENERATED ALWAYS AS (round(abs(voltage)::numeric * amperage * max_utilization / 100 * CASE WHEN phase = 'three-phase' THEN 1.732 ELSE 1 END)::integer) STORED,
+    mark_connected boolean DEFAULT false NOT NULL,
+    cable_id uuid,
+    cable_end character(1),
+    business_unit_id uuid REFERENCES public.business_units(id) ON DELETE SET NULL,
+    external_ids jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    comments text,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT power_feeds_pkey PRIMARY KEY (id),
+    CONSTRAINT power_feeds_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT power_feeds_panel_fkey FOREIGN KEY (tenant_id, power_panel_id) REFERENCES public.power_panels(tenant_id, id) ON DELETE CASCADE,
+    CONSTRAINT power_feeds_rack_fkey FOREIGN KEY (tenant_id, rack_id) REFERENCES public.racks(tenant_id, id) ON DELETE SET NULL (rack_id),
+    CONSTRAINT power_feeds_cable_fkey FOREIGN KEY (tenant_id, cable_id) REFERENCES public.cables(tenant_id, id) ON DELETE SET NULL (cable_id),
+    CONSTRAINT power_feeds_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 100),
+    CONSTRAINT power_feeds_operational_status_check CHECK (operational_status IN ('offline', 'active', 'planned', 'failed')),
+    CONSTRAINT power_feeds_type_check CHECK (type IN ('primary', 'redundant')),
+    CONSTRAINT power_feeds_supply_check CHECK (supply IN ('ac', 'dc')),
+    CONSTRAINT power_feeds_phase_check CHECK (phase IN ('single-phase', 'three-phase')),
+    -- NetBox: voltage may be negative (a -48 V DC plant) but not zero;
+    -- amperage at least 1; max_utilization a percentage, 1-100.
+    CONSTRAINT power_feeds_voltage_check CHECK (voltage <> 0 AND voltage BETWEEN -32767 AND 32767),
+    CONSTRAINT power_feeds_amperage_check CHECK (amperage BETWEEN 1 AND 32767),
+    CONSTRAINT power_feeds_max_utilization_check CHECK (max_utilization BETWEEN 1 AND 100),
+    CONSTRAINT power_feeds_cable_end_check CHECK (cable_end IS NULL OR cable_end IN ('A', 'B')),
+    CONSTRAINT power_feeds_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT power_feeds_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS power_feeds_identity_uniq ON public.power_feeds USING btree (tenant_id, power_panel_id, name);
+CREATE INDEX IF NOT EXISTS idx_power_feeds_rack ON public.power_feeds USING btree (tenant_id, rack_id) WHERE rack_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_power_feeds_cable ON public.power_feeds USING btree (tenant_id, cable_id) WHERE cable_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_power_feeds_status ON public.power_feeds USING btree (tenant_id, operational_status);
+CREATE INDEX IF NOT EXISTS idx_power_feeds_business_unit ON public.power_feeds USING btree (tenant_id, business_unit_id) WHERE business_unit_id IS NOT NULL;
+
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['power_panels', 'power_feeds'] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    BEGIN
+      EXECUTE format($p$CREATE POLICY %I ON public.%I
+          USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+          WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)$p$, t || '_tenant_isolation', t);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    EXECUTE format('CREATE OR REPLACE TRIGGER %I BEFORE UPDATE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column()',
+                   'update_' || t || '_updated_at', t);
+  END LOOP;
+END $$;
+-- ============================================================================
+-- END DCIM: gap3 power panels and feeds
+-- ============================================================================
+
+-- ============================================================================
+-- DCIM: gap8 spares and rma (DCIM gap 8; ADR-0010 D4/D5; DATA_MODEL §2)
+-- ============================================================================
+-- rma_cases — a return-merchandise case for one inventory item: the vendor,
+-- the vendor's case number, when it was opened, shipped and received, the
+-- stock location the replacement is to land at (replacement_location_id: set
+-- when the case opens from where the unit was, so it survives the unit
+-- shipping) and the replacement unit that came back. state is open -> shipped -> received ->
+-- closed (a replacement may arrive before the failed unit ships, so shipped and
+-- received may come in either order; closed is final). Deleting the item
+-- deletes its cases; deleting the replacement leaves the case without one.
+-- Device42 tracks RMAs; NetBox has no counterpart (vocabulary netbox: null),
+-- so a case is never synced. The inventory_items columns this gap adds
+-- (location_id, quantity, stock_state) are in the CREATE TABLE above and in
+-- POST-MIGRATIONS.
+CREATE TABLE IF NOT EXISTS public.rma_cases (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    inventory_item_id uuid NOT NULL,
+    vendor text,
+    case_number text,
+    opened_at date DEFAULT CURRENT_DATE NOT NULL,
+    shipped_at date,
+    received_at date,
+    replacement_item_id uuid,
+    replacement_location_id uuid REFERENCES public.locations(id) ON DELETE SET NULL,
+    state text DEFAULT 'open'::text NOT NULL,
+    notes text,
+    description text,
+    comments text,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT rma_cases_pkey PRIMARY KEY (id),
+    CONSTRAINT rma_cases_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT rma_cases_item_fkey FOREIGN KEY (tenant_id, inventory_item_id) REFERENCES public.inventory_items(tenant_id, id) ON DELETE CASCADE,
+    CONSTRAINT rma_cases_replacement_fkey FOREIGN KEY (tenant_id, replacement_item_id) REFERENCES public.inventory_items(tenant_id, id) ON DELETE SET NULL (replacement_item_id),
+    CONSTRAINT rma_cases_replacement_check CHECK (replacement_item_id IS NULL OR replacement_item_id <> inventory_item_id),
+    CONSTRAINT rma_cases_state_check CHECK (state IN ('open', 'shipped', 'received', 'closed')),
+    CONSTRAINT rma_cases_vendor_check CHECK (vendor IS NULL OR length(vendor) BETWEEN 1 AND 100),
+    CONSTRAINT rma_cases_case_number_check CHECK (case_number IS NULL OR length(case_number) BETWEEN 1 AND 100),
+    CONSTRAINT rma_cases_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT rma_cases_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object')
+);
+-- One case that is not closed per item: a unit is out for one RMA at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS rma_cases_open_item_uniq ON public.rma_cases USING btree (tenant_id, inventory_item_id) WHERE state <> 'closed';
+CREATE INDEX IF NOT EXISTS idx_rma_cases_item ON public.rma_cases USING btree (tenant_id, inventory_item_id);
+CREATE INDEX IF NOT EXISTS idx_rma_cases_replacement ON public.rma_cases USING btree (tenant_id, replacement_item_id) WHERE replacement_item_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_rma_cases_state ON public.rma_cases USING btree (tenant_id, state);
+
+DO $$ BEGIN
+  ALTER TABLE public.rma_cases ENABLE ROW LEVEL SECURITY;
+  BEGIN
+    CREATE POLICY rma_cases_tenant_isolation ON public.rma_cases
+        USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+        WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+  EXCEPTION WHEN duplicate_object THEN NULL;
+  END;
+END $$;
+CREATE OR REPLACE TRIGGER update_rma_cases_updated_at BEFORE UPDATE ON public.rma_cases FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+-- ============================================================================
+-- END DCIM: gap8 spares and rma
+-- ============================================================================
+
+-- ============================================================================
+-- DCIM: gap10 virtual circuits (DCIM gap 10; ADR-0010 D8/D5; DATA_MODEL §6)
+-- ============================================================================
+-- NetBox 4.2 circuits/virtual-circuit-type, virtual-circuit and
+-- virtual-circuit-termination: a circuit delivered over a provider network (an
+-- MPLS L3VPN, an SD-WAN overlay, a Metro Ethernet EVC) rather than a
+-- physical one. A termination is an interface — the interface the overlay
+-- lands on — not a cable end, so it carries no cable_id; an interface is in
+-- at most one virtual circuit (NetBox: a one-to-one onto dcim.Interface).
+-- Identity (plain unique indexes: none of these is discoverable):
+--   virtual_circuit_types        (tenant_id, slug)
+--   virtual_circuits             (tenant_id, provider_network_id, cid)
+--   virtual_circuit_terminations (tenant_id, interface_id)
+-- Tenant-scoped references are composite (tenant_id, id) FKs.
+CREATE TABLE IF NOT EXISTS public.virtual_circuit_types (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    name text NOT NULL,
+    slug text NOT NULL,
+    color text,
+    external_ids jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    comments text,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT virtual_circuit_types_pkey PRIMARY KEY (id),
+    CONSTRAINT virtual_circuit_types_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT virtual_circuit_types_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 100),
+    CONSTRAINT virtual_circuit_types_slug_check CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+    CONSTRAINT virtual_circuit_types_color_check CHECK (color IS NULL OR color ~ '^[0-9a-f]{6}$'),
+    CONSTRAINT virtual_circuit_types_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT virtual_circuit_types_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS virtual_circuit_types_tenant_slug_key ON public.virtual_circuit_types USING btree (tenant_id, slug);
+CREATE UNIQUE INDEX IF NOT EXISTS virtual_circuit_types_tenant_name_key ON public.virtual_circuit_types USING btree (tenant_id, lower(name));
+
+CREATE TABLE IF NOT EXISTS public.virtual_circuits (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    cid text NOT NULL,
+    provider_network_id uuid NOT NULL,
+    provider_account_id uuid,
+    type_id uuid NOT NULL,
+    operational_status text DEFAULT 'active'::text NOT NULL,
+    business_unit_id uuid REFERENCES public.business_units(id) ON DELETE SET NULL,
+    external_ids jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    comments text,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT virtual_circuits_pkey PRIMARY KEY (id),
+    CONSTRAINT virtual_circuits_tenant_id_id_key UNIQUE (tenant_id, id),
+    -- NetBox PROTECTs a virtual circuit's provider network and type; an
+    -- account it names is cleared when the account goes, as a circuit's is.
+    CONSTRAINT virtual_circuits_provider_network_fkey FOREIGN KEY (tenant_id, provider_network_id) REFERENCES public.provider_networks(tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT virtual_circuits_provider_account_fkey FOREIGN KEY (tenant_id, provider_account_id) REFERENCES public.provider_accounts(tenant_id, id) ON DELETE SET NULL (provider_account_id),
+    CONSTRAINT virtual_circuits_type_fkey FOREIGN KEY (tenant_id, type_id) REFERENCES public.virtual_circuit_types(tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT virtual_circuits_cid_check CHECK (length(btrim(cid)) BETWEEN 1 AND 100),
+    CONSTRAINT virtual_circuits_operational_status_check CHECK (operational_status IN ('planned', 'provisioning', 'active', 'offline', 'deprovisioning', 'decommissioned')),
+    CONSTRAINT virtual_circuits_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT virtual_circuits_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS virtual_circuits_identity_key ON public.virtual_circuits USING btree (tenant_id, provider_network_id, cid);
+CREATE INDEX IF NOT EXISTS idx_virtual_circuits_tenant_type ON public.virtual_circuits USING btree (tenant_id, type_id);
+CREATE INDEX IF NOT EXISTS idx_virtual_circuits_tenant_account ON public.virtual_circuits USING btree (tenant_id, provider_account_id) WHERE provider_account_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_virtual_circuits_business_unit ON public.virtual_circuits USING btree (business_unit_id) WHERE business_unit_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.virtual_circuit_terminations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    virtual_circuit_id uuid NOT NULL,
+    role text DEFAULT 'peer'::text NOT NULL,
+    interface_id uuid NOT NULL,
+    external_ids jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    comments text,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT virtual_circuit_terminations_pkey PRIMARY KEY (id),
+    CONSTRAINT virtual_circuit_terminations_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT virtual_circuit_terminations_circuit_fkey FOREIGN KEY (tenant_id, virtual_circuit_id) REFERENCES public.virtual_circuits(tenant_id, id) ON DELETE CASCADE,
+    -- NetBox: the termination goes with its interface (CASCADE).
+    CONSTRAINT virtual_circuit_terminations_interface_fkey FOREIGN KEY (tenant_id, interface_id) REFERENCES public.interfaces(tenant_id, id) ON DELETE CASCADE,
+    -- NetBox VirtualCircuitTerminationRoleChoices.
+    CONSTRAINT virtual_circuit_terminations_role_check CHECK (role IN ('peer', 'hub', 'spoke')),
+    CONSTRAINT virtual_circuit_terminations_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT virtual_circuit_terminations_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS virtual_circuit_terminations_interface_key ON public.virtual_circuit_terminations USING btree (tenant_id, interface_id);
+CREATE INDEX IF NOT EXISTS idx_virtual_circuit_terminations_circuit ON public.virtual_circuit_terminations USING btree (tenant_id, virtual_circuit_id);
+
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['virtual_circuit_types', 'virtual_circuits', 'virtual_circuit_terminations'] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    BEGIN
+      EXECUTE format($p$CREATE POLICY %I ON public.%I
+          USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+          WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)$p$, t || '_tenant_isolation', t);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    EXECUTE format('CREATE OR REPLACE TRIGGER %I BEFORE UPDATE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column()',
+                   'update_' || t || '_updated_at', t);
+  END LOOP;
+END $$;
+-- ============================================================================
+-- END DCIM: gap10 virtual circuits
+-- ============================================================================
+
+-- ============================================================================
+-- DCIM: gap10 asn ranges (DCIM gap 10; ADR-0010 D3/D5; DATA_MODEL §5)
+-- ============================================================================
+-- NetBox ipam/asn-range: a block of AS numbers a RIR delegated (start..end,
+-- inclusive). The ASNs inside it are the tenant's `asns` rows whose number
+-- falls in the block; the free ones are computed (GET
+-- /ipam/asn-ranges/{id}/available-asns), never stored. Column names are
+-- NetBox's (`end` is a reserved word, so it is quoted). Identity
+-- (tenant_id, slug); the name is unique per tenant too.
+CREATE TABLE IF NOT EXISTS public.asn_ranges (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    name text NOT NULL,
+    slug text NOT NULL,
+    rir_id uuid NOT NULL REFERENCES public.rirs(id) ON DELETE RESTRICT,
+    start bigint NOT NULL,
+    "end" bigint NOT NULL,
+    business_unit_id uuid REFERENCES public.business_units(id) ON DELETE SET NULL,
+    external_ids jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    comments text,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT asn_ranges_pkey PRIMARY KEY (id),
+    CONSTRAINT asn_ranges_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT asn_ranges_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 100),
+    CONSTRAINT asn_ranges_slug_check CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+    CONSTRAINT asn_ranges_bounds_check CHECK (start BETWEEN 1 AND 4294967295 AND "end" BETWEEN 1 AND 4294967295),
+    CONSTRAINT asn_ranges_order_check CHECK (start <= "end"),
+    CONSTRAINT asn_ranges_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT asn_ranges_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS asn_ranges_tenant_slug_key ON public.asn_ranges USING btree (tenant_id, slug);
+CREATE UNIQUE INDEX IF NOT EXISTS asn_ranges_tenant_name_key ON public.asn_ranges USING btree (tenant_id, lower(name));
+CREATE INDEX IF NOT EXISTS idx_asn_ranges_rir ON public.asn_ranges USING btree (rir_id);
+CREATE INDEX IF NOT EXISTS idx_asn_ranges_business_unit ON public.asn_ranges USING btree (business_unit_id) WHERE business_unit_id IS NOT NULL;
+
+DO $$ BEGIN
+  ALTER TABLE public.asn_ranges ENABLE ROW LEVEL SECURITY;
+  BEGIN
+    CREATE POLICY asn_ranges_tenant_isolation ON public.asn_ranges
+        USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+        WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+  EXCEPTION WHEN duplicate_object THEN NULL;
+  END;
+  CREATE OR REPLACE TRIGGER update_asn_ranges_updated_at BEFORE UPDATE ON public.asn_ranges
+      FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+END $$;
+-- ============================================================================
+-- END DCIM: gap10 asn ranges
+-- ============================================================================
+
+-- ============================================================================
+-- DCIM: gap10 vlan translation (DCIM gap 10; ADR-0010 D3/D5; DATA_MODEL §5)
+-- ============================================================================
+-- NetBox 4.2 ipam/vlan-translation-policy and vlan-translation-rule: a named
+-- set of local VID -> remote VID mappings an interface applies (a provider
+-- edge port rewriting a customer's C-VLAN). A policy's local VIDs are unique,
+-- and so are its remote VIDs (NetBox's two unique constraints). An interface
+-- names its policy in interfaces.vlan_translation_policy_id; that column, its
+-- FK (ON DELETE SET NULL, as NetBox) and its index are added in
+-- POST-MIGRATIONS, because an upgraded database gets the column there.
+CREATE TABLE IF NOT EXISTS public.vlan_translation_policies (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    name text NOT NULL,
+    external_ids jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    comments text,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT vlan_translation_policies_pkey PRIMARY KEY (id),
+    CONSTRAINT vlan_translation_policies_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT vlan_translation_policies_name_check CHECK (length(btrim(name)) BETWEEN 1 AND 100),
+    CONSTRAINT vlan_translation_policies_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT vlan_translation_policies_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS vlan_translation_policies_tenant_name_key ON public.vlan_translation_policies USING btree (tenant_id, name);
+
+CREATE TABLE IF NOT EXISTS public.vlan_translation_rules (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tenant_id uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+    policy_id uuid NOT NULL,
+    local_vid integer NOT NULL,
+    remote_vid integer NOT NULL,
+    external_ids jsonb DEFAULT '{}'::jsonb NOT NULL,
+    description text,
+    comments text,
+    source_kind text DEFAULT 'declared'::text NOT NULL,
+    source_ref text,
+    custom_fields jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_by uuid,
+    CONSTRAINT vlan_translation_rules_pkey PRIMARY KEY (id),
+    CONSTRAINT vlan_translation_rules_tenant_id_id_key UNIQUE (tenant_id, id),
+    CONSTRAINT vlan_translation_rules_policy_fkey FOREIGN KEY (tenant_id, policy_id) REFERENCES public.vlan_translation_policies(tenant_id, id) ON DELETE CASCADE,
+    CONSTRAINT vlan_translation_rules_vid_check CHECK (local_vid BETWEEN 1 AND 4094 AND remote_vid BETWEEN 1 AND 4094),
+    CONSTRAINT vlan_translation_rules_source_kind_check CHECK (source_kind IN ('measured', 'declared', 'imported', 'inferred')),
+    CONSTRAINT vlan_translation_rules_custom_fields_check CHECK (jsonb_typeof(custom_fields) = 'object')
+);
+CREATE UNIQUE INDEX IF NOT EXISTS vlan_translation_rules_local_vid_key ON public.vlan_translation_rules USING btree (tenant_id, policy_id, local_vid);
+CREATE UNIQUE INDEX IF NOT EXISTS vlan_translation_rules_remote_vid_key ON public.vlan_translation_rules USING btree (tenant_id, policy_id, remote_vid);
+
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['vlan_translation_policies', 'vlan_translation_rules'] LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);
+    BEGIN
+      EXECUTE format($p$CREATE POLICY %I ON public.%I
+          USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+          WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)$p$, t || '_tenant_isolation', t);
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END;
+    EXECUTE format('CREATE OR REPLACE TRIGGER %I BEFORE UPDATE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column()',
+                   'update_' || t || '_updated_at', t);
+  END LOOP;
+END $$;
+-- ============================================================================
+-- END DCIM: gap10 vlan translation
+-- ============================================================================
+
 -- ROLE GRANTS — THIS BLOCK MUST BE THE LAST THING IN THIS FILE
 -- ============================================================================
 -- `GRANT ... ON ALL TABLES IN SCHEMA x` is not a standing rule: Postgres
@@ -26958,3 +27621,275 @@ $$;
 -- the index is there and 100x faster. Soft-deleted rows are a small fraction.
 CREATE INDEX IF NOT EXISTS idx_assets_tenant_primary_host
     ON public.assets USING btree (tenant_id, host(primary_address));
+
+
+-- =================================================================
+-- POST-MIGRATIONS
+-- =================================================================
+-- Statements that carry a database installed from an earlier release forward
+-- to the shape above (CLAUDE.md "Database"). Each is idempotent and re-runs on
+-- every helm upgrade. The pg_dump body above is what a fresh install builds;
+-- every column added there for an existing table needs its ADD COLUMN here.
+-- Nothing above this block may reference a column added here (an index, a
+-- view, a FK): on an upgrade the column does not exist until this block runs,
+-- so such a statement belongs here too. TestIntegration_Schema_UpgradesFromPriorReleases
+-- compares an upgraded database's tables with a fresh install's.
+
+-- Inventory change notifications (DCIM gap 5): the object_changed routing
+-- condition on a tenant notification rule.
+ALTER TABLE public.tenant_notification_rules ADD COLUMN IF NOT EXISTS change_filter jsonb;
+
+-- DCIM gap 4 — asset commercial lifecycle (DATA_MODEL section 2). The parent
+-- only: a partition inherits the column and the CHECK.
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS purchase_date date;
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS warranty_start date;
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS warranty_end date;
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS purchase_cost numeric(14,2);
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS purchase_currency character(3)
+    CONSTRAINT assets_purchase_currency_check CHECK (purchase_currency IS NULL OR purchase_currency ~ '^[A-Z]{3}$');
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS purchase_order text;
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS vendor text;
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS support_contract text;
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS support_contract_end date;
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS installed_at date;
+ALTER TABLE public.assets ADD COLUMN IF NOT EXISTS decommissioned_at date;
+
+-- DCIM gap 4 — end-of-sale / end-of-support / end-of-life on the device
+-- catalogue, and the end-of-life catalogue entry each falls back to.
+ALTER TABLE public.device_types ADD COLUMN IF NOT EXISTS end_of_sale date;
+ALTER TABLE public.device_types ADD COLUMN IF NOT EXISTS end_of_support date;
+ALTER TABLE public.device_types ADD COLUMN IF NOT EXISTS end_of_life date;
+ALTER TABLE public.device_types ADD COLUMN IF NOT EXISTS eol_catalogue_id uuid;
+ALTER TABLE public.platforms ADD COLUMN IF NOT EXISTS end_of_sale date;
+ALTER TABLE public.platforms ADD COLUMN IF NOT EXISTS end_of_support date;
+ALTER TABLE public.platforms ADD COLUMN IF NOT EXISTS end_of_life date;
+ALTER TABLE public.platforms ADD COLUMN IF NOT EXISTS eol_catalogue_id uuid;
+
+-- The catalogue links (fresh and upgraded alike: device_types and platforms are
+-- created before eol_catalogue, so the FK cannot be inline). ON DELETE SET NULL:
+-- an entry an admin removes leaves the declared dates and drops the fallback.
+DO $$ BEGIN
+  IF to_regclass('public.device_types') IS NOT NULL AND to_regclass('public.eol_catalogue') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'device_types_eol_catalogue_id_fkey'
+                       AND conrelid = to_regclass('public.device_types')) THEN
+    ALTER TABLE ONLY public.device_types
+        ADD CONSTRAINT device_types_eol_catalogue_id_fkey
+        FOREIGN KEY (eol_catalogue_id) REFERENCES public.eol_catalogue(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+DO $$ BEGIN
+  IF to_regclass('public.platforms') IS NOT NULL AND to_regclass('public.eol_catalogue') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'platforms_eol_catalogue_id_fkey'
+                       AND conrelid = to_regclass('public.platforms')) THEN
+    ALTER TABLE ONLY public.platforms
+        ADD CONSTRAINT platforms_eol_catalogue_id_fkey
+        FOREIGN KEY (eol_catalogue_id) REFERENCES public.eol_catalogue(id) ON DELETE SET NULL;
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_device_types_eol_catalogue
+    ON public.device_types USING btree (eol_catalogue_id) WHERE eol_catalogue_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_platforms_eol_catalogue
+    ON public.platforms USING btree (eol_catalogue_id) WHERE eol_catalogue_id IS NOT NULL;
+
+-- Virtual device contexts (DCIM gap 1): interfaces.vdcs (row 1.2's text[] of
+-- context names) is superseded by virtual_device_contexts and its junction.
+-- Carry any names a database holds there into a context on the interface's
+-- asset and a link, then empty the column so a context a person later deletes
+-- is not re-created by the next upgrade. Names outside NetBox's 1-64
+-- characters are dropped. Idempotent: a second run finds no names.
+--
+-- A fresh install (and any database this block already ran on) has no vdcs
+-- column, so the column's presence is tested on its own first: PL/pgSQL parses
+-- a statement only when it reaches it, so nothing below that test names the
+-- missing column unless it exists.
+DO $$ BEGIN
+  IF to_regclass('public.virtual_device_contexts') IS NOT NULL
+     AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.interfaces')
+                   AND attname = 'vdcs' AND NOT attisdropped) THEN
+    IF EXISTS (SELECT 1 FROM public.interfaces WHERE vdcs <> '{}'::text[]) THEN
+      INSERT INTO public.virtual_device_contexts (tenant_id, asset_id, name, source_kind)
+      SELECT DISTINCT i.tenant_id, i.asset_id, btrim(v.name), 'declared'
+        FROM public.interfaces i, unnest(i.vdcs) AS v(name)
+       WHERE length(btrim(v.name)) BETWEEN 1 AND 64
+      ON CONFLICT (tenant_id, asset_id, name) WHERE status <> 'rejected' DO NOTHING;
+      INSERT INTO public.interface_virtual_device_contexts (tenant_id, interface_id, virtual_device_context_id)
+      SELECT i.tenant_id, i.id, c.id
+        FROM public.interfaces i, unnest(i.vdcs) AS v(name)
+        JOIN public.virtual_device_contexts c ON c.name = btrim(v.name) AND c.status <> 'rejected'
+       WHERE c.tenant_id = i.tenant_id AND c.asset_id = i.asset_id
+      ON CONFLICT DO NOTHING;
+      UPDATE public.interfaces SET vdcs = '{}'::text[] WHERE vdcs <> '{}'::text[];
+    END IF;
+  END IF;
+END $$;
+-- Drop interfaces.vdcs (nothing reads or writes it since the junction). ORDER
+-- MATTERS: this must stay AFTER the carry-over block above, so a database
+-- upgraded from 5.0.0 has its names moved into contexts before the column goes.
+ALTER TABLE public.interfaces DROP COLUMN IF EXISTS vdcs;
+
+-- Power panels and feeds (DCIM gap 3, BUILD_PLAN row 6.1): a power feed is a
+-- cable termination kind and a cable path origin. The CHECKs are widened in
+-- the CREATE TABLE above for a fresh install; an installed database gets the
+-- wider CHECK here, once (the DO re-adds it only while its definition still
+-- lacks power_feed, so a re-apply is a no-op). Widening a list cannot fail on
+-- existing rows.
+DO $$
+BEGIN
+  IF to_regclass('public.cable_terminations') IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint WHERE conname = 'cable_terminations_kind_check'
+          AND conrelid = to_regclass('public.cable_terminations')
+          AND pg_get_constraintdef(oid) LIKE '%power_feed%') THEN
+    ALTER TABLE public.cable_terminations DROP CONSTRAINT IF EXISTS cable_terminations_kind_check;
+    ALTER TABLE public.cable_terminations ADD CONSTRAINT cable_terminations_kind_check CHECK (termination_kind IN ('interface', 'front_port', 'rear_port', 'console_port',
+        'console_server_port', 'circuit_termination', 'power_port', 'power_outlet', 'power_feed'));
+  END IF;
+  IF to_regclass('public.cable_paths') IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint WHERE conname = 'cable_paths_origin_kind_check'
+          AND conrelid = to_regclass('public.cable_paths')
+          AND pg_get_constraintdef(oid) LIKE '%power_feed%') THEN
+    ALTER TABLE public.cable_paths DROP CONSTRAINT IF EXISTS cable_paths_origin_kind_check;
+    ALTER TABLE public.cable_paths ADD CONSTRAINT cable_paths_origin_kind_check CHECK (origin_kind IN ('interface', 'console_port', 'console_server_port',
+        'circuit_termination', 'power_port', 'power_outlet', 'power_feed'));
+  END IF;
+END $$;
+
+-- PDU measurements (DCIM gap 3 part 2, BUILD_PLAN row 6.2): what a PDU
+-- collector measured on a power port (an inlet's total and per-leg load) and a
+-- power outlet (its draw, current and on / off state), beside the declared
+-- draws. The parent tables only; the inline CHECKs carry the same names as the
+-- CREATE TABLE's.
+ALTER TABLE public.power_ports ADD COLUMN IF NOT EXISTS measured_draw integer
+    CONSTRAINT power_ports_measured_draw_check CHECK (measured_draw >= 0);
+ALTER TABLE public.power_ports ADD COLUMN IF NOT EXISTS measured_current numeric(8,2)
+    CONSTRAINT power_ports_measured_current_check CHECK (measured_current >= 0);
+ALTER TABLE public.power_ports ADD COLUMN IF NOT EXISTS measured_legs jsonb
+    CONSTRAINT power_ports_measured_legs_check CHECK (measured_legs IS NULL OR jsonb_typeof(measured_legs) = 'array');
+ALTER TABLE public.power_ports ADD COLUMN IF NOT EXISTS measured_at timestamp with time zone;
+ALTER TABLE public.power_outlets ADD COLUMN IF NOT EXISTS measured_draw integer
+    CONSTRAINT power_outlets_measured_draw_check CHECK (measured_draw >= 0);
+ALTER TABLE public.power_outlets ADD COLUMN IF NOT EXISTS measured_current numeric(8,2)
+    CONSTRAINT power_outlets_measured_current_check CHECK (measured_current >= 0);
+ALTER TABLE public.power_outlets ADD COLUMN IF NOT EXISTS measured_state text
+    CONSTRAINT power_outlets_measured_state_check CHECK (measured_state = ANY (ARRAY['on'::text, 'off'::text]));
+ALTER TABLE public.power_outlets ADD COLUMN IF NOT EXISTS measured_at timestamp with time zone;
+
+-- Spares, stock and RMA (DCIM gap 8): an inventory item need not be on an
+-- asset. asset_id becomes nullable; a spare has a stock location, a quantity
+-- and a stock_state (the CREATE TABLE above carries all three for a fresh
+-- install, appended last). The inline CHECKs carry the CREATE TABLE's names.
+-- The index, the location foreign key and the two placement CHECKs reference
+-- location_id / stock_state, so they live here for fresh and upgraded installs
+-- alike. Existing rows are all on an asset: they take quantity 1 and
+-- installed, which satisfies both CHECKs.
+ALTER TABLE public.inventory_items ALTER COLUMN asset_id DROP NOT NULL;
+ALTER TABLE public.inventory_items ADD COLUMN IF NOT EXISTS location_id uuid;
+ALTER TABLE public.inventory_items ADD COLUMN IF NOT EXISTS quantity integer DEFAULT 1 NOT NULL
+    CONSTRAINT inventory_items_quantity_check CHECK (quantity >= 1);
+ALTER TABLE public.inventory_items ADD COLUMN IF NOT EXISTS stock_state text DEFAULT 'installed'::text NOT NULL
+    CONSTRAINT inventory_items_stock_state_check CHECK (stock_state = ANY (ARRAY['installed'::text, 'in_stock'::text, 'reserved'::text, 'rma'::text, 'retired'::text]));
+DO $$ BEGIN
+  -- A plain key, like every other reference to a location (locations has no
+  -- (tenant_id, id) key to pair with); the service checks the location is the
+  -- tenant's under RLS. NO ACTION, not SET NULL: emptying the location would leave a
+  -- spare with no home, which the home CHECK refuses; deleting a location that
+  -- (or its site) that still holds spares answers "in use" (move them first).
+  -- A tenant delete, which removes the location and its spares in one
+  -- statement, passes: NO ACTION is checked at the end of the statement.
+  IF to_regclass('public.inventory_items') IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint WHERE conname = 'inventory_items_location_fkey' AND conrelid = to_regclass('public.inventory_items')) THEN
+    ALTER TABLE ONLY public.inventory_items ADD CONSTRAINT inventory_items_location_fkey FOREIGN KEY (location_id)
+        REFERENCES public.locations(id);
+  END IF;
+  -- Never on an asset and at a stock location at once.
+  IF to_regclass('public.inventory_items') IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint WHERE conname = 'inventory_items_placement_check' AND conrelid = to_regclass('public.inventory_items')) THEN
+    ALTER TABLE public.inventory_items ADD CONSTRAINT inventory_items_placement_check CHECK (asset_id IS NULL OR location_id IS NULL);
+  END IF;
+  -- Somewhere, unless it is with the vendor (rma) or gone (retired).
+  IF to_regclass('public.inventory_items') IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint WHERE conname = 'inventory_items_home_check' AND conrelid = to_regclass('public.inventory_items')) THEN
+    ALTER TABLE public.inventory_items ADD CONSTRAINT inventory_items_home_check
+        CHECK (asset_id IS NOT NULL OR location_id IS NOT NULL OR stock_state IN ('rma', 'retired'));
+  END IF;
+END $$;
+-- The stock side of the identity (the asset side is inventory_items_identity_uniq):
+-- one row per (location, name, serial, state) among the spares on a shelf, so
+-- a box of unserialised optics is one row with a quantity, two serialised
+-- spares of one model sit side by side, and a reserved unit does not collide
+-- with the rest of the box. A unit out for RMA or retired is tracked by its
+-- case, not by its name, so it is outside the index.
+CREATE UNIQUE INDEX IF NOT EXISTS inventory_items_stock_identity_uniq
+    ON public.inventory_items USING btree (tenant_id, location_id, name, (COALESCE(serial, '')), stock_state)
+    WHERE asset_id IS NULL AND location_id IS NOT NULL AND stock_state IN ('in_stock', 'reserved') AND status <> 'rejected';
+CREATE INDEX IF NOT EXISTS idx_inventory_items_location
+    ON public.inventory_items USING btree (tenant_id, location_id) WHERE location_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_inventory_items_stock_state
+    ON public.inventory_items USING btree (tenant_id, stock_state) WHERE stock_state <> 'installed';
+-- Floor plans (DCIM gap 9; DATA_MODEL sections 1 and 3): a location's plan
+-- size and a rack's place on it. The parents' table CHECKs are added once, in
+-- guarded DO blocks (a table constraint has no ADD ... IF NOT EXISTS); every
+-- row of an upgraded database is NULL in the new columns, so neither can fail.
+ALTER TABLE public.locations ADD COLUMN IF NOT EXISTS floor_plan_width numeric(8,2);
+ALTER TABLE public.locations ADD COLUMN IF NOT EXISTS floor_plan_depth numeric(8,2);
+ALTER TABLE public.locations ADD COLUMN IF NOT EXISTS floor_plan_unit text;
+ALTER TABLE public.racks ADD COLUMN IF NOT EXISTS floor_x numeric(8,2);
+ALTER TABLE public.racks ADD COLUMN IF NOT EXISTS floor_y numeric(8,2);
+ALTER TABLE public.racks ADD COLUMN IF NOT EXISTS floor_rotation smallint;
+DO $$ BEGIN
+  IF to_regclass('public.locations') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'locations_floor_plan_unit_check' AND conrelid = to_regclass('public.locations')) THEN
+    ALTER TABLE public.locations ADD CONSTRAINT locations_floor_plan_unit_check
+        CHECK (floor_plan_unit IS NULL OR floor_plan_unit IN ('m', 'ft'));
+  END IF;
+  IF to_regclass('public.locations') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'locations_floor_plan_check' AND conrelid = to_regclass('public.locations')) THEN
+    ALTER TABLE public.locations ADD CONSTRAINT locations_floor_plan_check
+        CHECK ((floor_plan_width IS NULL AND floor_plan_depth IS NULL AND floor_plan_unit IS NULL)
+            OR (floor_plan_width > 0 AND floor_plan_depth > 0 AND floor_plan_unit IS NOT NULL));
+  END IF;
+  IF to_regclass('public.racks') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'racks_floor_rotation_check' AND conrelid = to_regclass('public.racks')) THEN
+    ALTER TABLE public.racks ADD CONSTRAINT racks_floor_rotation_check
+        CHECK (floor_rotation IS NULL OR floor_rotation IN (0, 90, 180, 270));
+  END IF;
+  IF to_regclass('public.racks') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint
+       WHERE conname = 'racks_floor_position_check' AND conrelid = to_regclass('public.racks')) THEN
+    ALTER TABLE public.racks ADD CONSTRAINT racks_floor_position_check
+        CHECK ((floor_x IS NULL AND floor_y IS NULL AND floor_rotation IS NULL)
+            OR (floor_x IS NOT NULL AND floor_y IS NOT NULL AND floor_rotation IS NOT NULL AND floor_x >= 0 AND floor_y >= 0));
+  END IF;
+END $$;
+
+-- NetBox VM sync (DCIM gap: virtual machines, VM interfaces, virtual disks):
+-- a sync conflict may name the sync-only kinds virtual_machine and
+-- vm_interface (standards/sync-authority.yaml `object:` kinds). Re-defined
+-- only while the CHECK does not name them yet, so a second apply is a no-op.
+DO $$
+BEGIN
+  IF to_regclass('public.sync_conflicts') IS NOT NULL AND NOT EXISTS (
+       SELECT 1 FROM pg_constraint WHERE conname = 'sync_conflicts_object_kind_check'
+          AND conrelid = to_regclass('public.sync_conflicts')
+          AND pg_get_constraintdef(oid) LIKE '%vm_interface%') THEN
+    ALTER TABLE public.sync_conflicts DROP CONSTRAINT IF EXISTS sync_conflicts_object_kind_check;
+    ALTER TABLE public.sync_conflicts ADD CONSTRAINT sync_conflicts_object_kind_check CHECK (object_kind = ANY (public.dcim_object_kinds() || ARRAY['virtual_machine'::text, 'vm_interface'::text]));
+  END IF;
+END $$;
+
+-- VLAN translation (DCIM gap 10): an interface's VLAN translation policy
+-- (NetBox Interface.vlan_translation_policy). The column is appended last in
+-- the CREATE TABLE above for a fresh install; the FK and index are here for
+-- both, since vlan_translation_policies is created after interfaces.
+-- ON DELETE SET NULL: deleting a policy detaches its interfaces (NetBox).
+ALTER TABLE public.interfaces ADD COLUMN IF NOT EXISTS vlan_translation_policy_id uuid;
+DO $$ BEGIN
+  IF to_regclass('public.interfaces') IS NOT NULL AND to_regclass('public.vlan_translation_policies') IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'interfaces_vlan_translation_policy_fkey'
+                       AND conrelid = to_regclass('public.interfaces')) THEN
+    ALTER TABLE ONLY public.interfaces
+        ADD CONSTRAINT interfaces_vlan_translation_policy_fkey
+        FOREIGN KEY (tenant_id, vlan_translation_policy_id) REFERENCES public.vlan_translation_policies(tenant_id, id)
+        ON DELETE SET NULL (vlan_translation_policy_id);
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_interfaces_vlan_translation_policy
+    ON public.interfaces USING btree (tenant_id, vlan_translation_policy_id) WHERE vlan_translation_policy_id IS NOT NULL;

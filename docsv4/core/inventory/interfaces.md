@@ -18,6 +18,16 @@ You need the **DCIM read** permission to see the tab and **DCIM manage** to add,
 
 An asset is recognised by a MAC on any of its interfaces, including one you add by hand, and its primary IPv4 and IPv6 addresses are chosen from its interface addresses (a management interface's first, never a link-local one) unless you have set them.
 
+## The interface page
+
+Click an interface's name in its drawer (Asset → Interfaces) to **open the interface's own page**
+(`/inventory/interfaces/<id>`), which you can bookmark and share. It shows the asset it belongs to, its type,
+speed, duplex, MTU, MAC and mode, its untagged and tagged VLANs and its IP addresses (each linking
+onward; VLAN names and addresses need the IPAM read permission), the cable on it with the far end, and the
+trace, followed by custom fields, tags, contacts, images, changes and journal. **Edit on the asset** takes you
+back to the Interfaces tab, where interfaces are edited. An interface that nothing has reported on shows
+"State not reported" rather than a status.
+
 ## Adding and editing an interface
 
 Click **Add interface** (or the edit button on a row). The drawer asks for:
@@ -43,6 +53,66 @@ Some fields are **measured** — what a device reports about itself — and some
 
 When discovery reports an interface under a short name (`Gi1/0/24`, `Et1`, `Po10`), the platform folds it onto the long name (`GigabitEthernet1/0/24`, `Ethernet1`, `Port-channel10`) so the same interface is never listed twice. An interface that stops being reported is marked **Stale** after the asset's stale window, not removed. An interface found on an asset still waiting in Approvals is **Pending** and follows the asset once it is approved.
 
+## Virtual device contexts
+
+Many devices partition themselves into logical devices that each own some of the
+interfaces: a Fortinet **VDOM**, a Palo Alto **vsys**, a Cisco Nexus **VDC**, an
+F5 **route domain**. Vista Platform records them as **virtual device
+contexts** (NetBox's VirtualDeviceContext).
+
+- **Where they live.** On the asset page, **Hardware** tab, the **Virtual device
+  contexts** card lists the device's contexts: name, identifier (the device's
+  number for the context, if it has one), status (*Active*, *Planned* or
+  *Offline*), business unit, primary IPv4 and IPv6 addresses, and how many of
+  the asset's interfaces belong to each. With the DCIM manage permission you can
+  add, edit and delete them there. An empty card means none has been recorded,
+  not that the device has none.
+- **Which interfaces belong to which.** On the **Interfaces** tab, the
+  **Context** column names each interface's contexts. Open an interface and tick
+  its contexts under **Virtual device contexts**; only the asset's own contexts
+  are offered, and the server refuses a context of another asset.
+- **Primary addresses.** A context's primary IPv4 must be an IPv4 address (and
+  its primary IPv6 an IPv6 address) assigned to one of the asset's interfaces.
+  Deleting the address clears it from the context.
+- **Rules.** A name is 1–64 characters and unique on the asset; an identifier is
+  a whole number from 0 to 32767 and unique on the asset when set. Deleting a
+  context takes its interfaces out of it; the interfaces and their addresses stay.
+
+Every change is in the context's change record.
+
+### Discovered contexts
+
+Interrogating a device records its contexts and which interfaces each owns:
+
+| Device | Context | Identifier |
+|---|---|---|
+| Fortinet FortiGate | each VDOM an interface is in, `root` included | none (a VDOM has no number) |
+| Palo Alto | the virtual system that owns the interface (`vsys1`, `vsys2`, …) | the vsys number |
+| F5 BIG-IP | the route domain of each VLAN, named as BIG-IP names it (the default route domain is `0`) | the route-domain id |
+| Cisco Nexus (NX-OS) | the VDC each port is allocated to (`show vdc membership`) | the VDC id |
+
+Only the context's name and number are collected, plus, on a Palo Alto firewall,
+the display name its administrator gave the virtual system: it becomes the
+context's **description** (for example *Tenant B Edge* on `vsys2`). The
+description of a discovered context follows the device, so a rename on the
+firewall is picked up; a firewall that states no display name, or that refuses
+the read, leaves the description as it was. Other devices, and SNMP, do not
+report contexts.
+
+- **New contexts** are *Pending* while the asset waits in Discovery →
+  Approvals, and become *Active* at the first interrogation after the asset is
+  approved.
+- **What you declared wins.** A context you created, or one NetBox synced, with
+  the same name is matched, never overwritten: its identifier, status, business
+  unit, primary addresses and description stay as you set them. An interface you
+  put in a context yourself stays in it.
+- **Moves.** When the device reports an interface in a different context, the
+  interface leaves the discovered context it was in and joins the new one.
+- **Contexts that disappear** are marked **Stale** after the asset's stale
+  window (the tenant's asset lifecycle policy, 30 days by default), and only by
+  a device that still reports contexts. A discovered context is never deleted
+  by discovery; delete it on the Hardware tab if it is gone for good.
+
 ## Finding assets by interface
 
 The inventory query language reaches interfaces with `interface:( … )`:
@@ -52,10 +122,13 @@ interface:(mac_address:"00:11:22:33:44:55")
 interface:(name = "GigabitEthernet1/0/24" and mode:tagged)
 interface:(speed_kbps >= 10000000)
 exists(interface) and not interface:(enabled = true)
+interface:(virtual_device_context:"vsys2")
 ```
 
-Fields: `name`, `type`, `mac_address`, `enabled`, `mgmt_only`, `mtu`, `speed_kbps`, `mode`, `status`, `operational_status`, `description`. See [Query](../features/query.md).
+Fields: `name`, `type`, `mac_address`, `enabled`, `mgmt_only`, `mtu`, `speed_kbps`, `mode`, `status`, `operational_status`, `description`, `virtual_device_context` (the name of a context the interface belongs to). See [Query](../features/query.md).
 
 ## API
 
 `/api/v2/inventory-service/dcim/interfaces` lists, creates, reads, changes (JSON merge-patch) and deletes interfaces, and `POST /dcim/interfaces/bulk` creates several at once (all or none, so a LAG and its members can arrive together). `GET /dcim/assets/{id}/interfaces` lists one asset's. Filters: `asset_id`, `name`, `type`, `enabled`, `mgmt_only`, `mac_address` (any of an interface's MAC addresses), `lag_id`, `vlan`, `status`, `q`.
+
+An interface carries its contexts as `virtual_device_contexts` (id and name), `virtual_device_context_ids` and `vdcs` (the names). A create or PATCH sets them with `virtual_device_context_ids` — or, by name, `vdcs` — and replaces the interface's memberships. Contexts are at `/api/v2/inventory-service/dcim/virtual-device-contexts` (list, create, read, change, delete; filters `asset_id`, `name`, `identifier`, `status`, `operational_status`, `business_unit_id`, `q`) and `/dcim/assets/{id}/virtual-device-contexts` (one asset's; create on it). Reads need DCIM read, writes DCIM manage.

@@ -6,7 +6,8 @@
 // is not the same as "this asset has no interfaces"), no search match, and the
 // table. Reads need dcim.read; add, edit and delete need dcim.manage.
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useLocation } from 'react-router';
+import { fromState, interfaceHref } from '../object-pages/object-links';
 import type { Asset } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
 import {
@@ -26,6 +27,8 @@ import { WirelessLansPanel } from './wireless-panel';
 import { PanelEmpty, PanelError, PanelLoading } from './substrate-states';
 import { CableCell } from './cable-column';
 import { useAssetCables } from './cable-queries';
+import { useAssetVirtualDeviceContexts, type VirtualDeviceContext } from './vdc-queries';
+import { useIpamList } from '../ipam/ipam-queries';
 
 const OPER_TONE: Record<string, string> = { up: 'var(--ok)', down: 'var(--danger-text)', testing: 'var(--warn)', unknown: 'var(--app-t3)' };
 
@@ -111,7 +114,7 @@ function InterfacesBody({ asset }: { asset: Asset }) {
         <table data-testid="interfaces-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
           <thead>
             <tr style={{ textAlign: 'left', color: 'var(--app-t3)', fontSize: 11.5 }}>
-              {['Name', 'Type', 'Enabled', 'MAC address', 'Speed', 'MTU', '802.1Q', 'State', 'Cable', 'Description', ''].map((h) => (
+              {['Name', 'Type', 'Enabled', 'MAC address', 'Speed', 'MTU', '802.1Q', 'Context', 'State', 'Cable', 'Description', ''].map((h) => (
                 <th key={h} style={{ padding: '8px 11px', fontWeight: 600 }}>{h}</th>
               ))}
             </tr>
@@ -137,6 +140,9 @@ function InterfacesBody({ asset }: { asset: Asset }) {
                 <td style={{ padding: '8px 11px', color: 'var(--app-t2)' }}>{speedText(i.speed_kbps) || '—'}</td>
                 <td style={{ padding: '8px 11px', color: 'var(--app-t2)' }}>{i.mtu ?? '—'}</td>
                 <td style={{ padding: '8px 11px', color: 'var(--app-t2)' }}>{modeText(i) || '—'}</td>
+                <td style={{ padding: '8px 11px', color: 'var(--app-t2)' }} data-testid="interface-contexts">
+                  {(i.virtual_device_contexts ?? []).length > 0 ? i.virtual_device_contexts.map((c) => c.name).join(', ') : '—'}
+                </td>
                 <td style={{ padding: '8px 11px' }}><OperBadge i={i} /></td>
                 <td style={{ padding: '8px 11px' }} data-testid="interface-cable">
                   {/* A virtual or wireless interface never takes a cable (NetBox). */}
@@ -223,6 +229,10 @@ export interface Draft {
   lag_id: string;
   parent_id: string;
   bridge_id: string;
+  /** The virtual device contexts (of this asset) the interface belongs to. */
+  virtual_device_context_ids: string[];
+  /** The interface's VLAN translation policy (DCIM gap 10); '' is none. */
+  vlan_translation_policy_id: string;
   description: string;
 }
 
@@ -243,6 +253,8 @@ function draftOf(i: Interface | null): Draft {
     lag_id: i?.lag_id ?? '',
     parent_id: i?.parent_id ?? '',
     bridge_id: i?.bridge_id ?? '',
+    virtual_device_context_ids: [...(i?.virtual_device_context_ids ?? [])],
+    vlan_translation_policy_id: i?.vlan_translation_policy_id ?? '',
     description: i?.description ?? '',
   };
 }
@@ -270,6 +282,8 @@ export function bodyOf(d: Draft): InterfacePatch & { name: string; type: Interfa
     lag_id: nullIfEmpty(d.lag_id),
     parent_id: nullIfEmpty(d.parent_id),
     bridge_id: nullIfEmpty(d.bridge_id),
+    virtual_device_context_ids: d.virtual_device_context_ids,
+    vlan_translation_policy_id: nullIfEmpty(d.vlan_translation_policy_id),
     description: nullIfEmpty(d.description),
   };
 }
@@ -289,6 +303,7 @@ export function draftProblem(d: Draft): string | null {
 function InterfaceDrawer({ asset, iface, siblings, readOnly, onClose }: {
   asset: Asset; iface: Interface | null; siblings: readonly Interface[]; readOnly: boolean; onClose: () => void;
 }) {
+  const loc = useLocation();
   const [d, setD] = useState<Draft>(() => draftOf(iface));
   const [serverError, setServerError] = useState<{ message: string; field?: string } | null>(null);
   const create = useCreateInterface(asset.id);
@@ -306,6 +321,9 @@ function InterfaceDrawer({ asset, iface, siblings, readOnly, onClose }: {
   const canReadIpam = perms.hasPermission(TENANT_PERMISSIONS.ipam.read);
   const vlans = useVlanChoices(canReadIpam && !readOnly);
   const picker = canReadIpam && vlans.isSuccess ? vlans.data : null;
+  const contexts = useAssetVirtualDeviceContexts(asset.id);
+  const policies = useIpamList('vlan-translation-policies', { limit: 1000 }, { enabled: canReadIpam && !readOnly });
+  const policyPicker = canReadIpam && policies.isSuccess ? policies.data.rows : null;
 
   const save = () => {
     if (problem) return;
@@ -324,7 +342,9 @@ function InterfaceDrawer({ asset, iface, siblings, readOnly, onClose }: {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
           <Icon name="ethernet-port" size={16} style={{ color: 'var(--accent)' }} />
           <div style={{ flex: 1, fontSize: 15, fontWeight: 700, color: 'var(--app-t1)' }}>
-            {iface ? iface.name : 'Add interface'}
+            {iface
+              ? <Link to={interfaceHref(iface.id)} state={fromState(loc)} data-testid="interface-open-page" title="Open the interface page" style={{ color: 'inherit', textDecoration: 'none' }}>{iface.name}</Link>
+              : 'Add interface'}
           </div>
           <DrawerCloseBtn onClose={onClose} />
         </div>
@@ -418,9 +438,30 @@ function InterfaceDrawer({ asset, iface, siblings, readOnly, onClose }: {
             />
             )}
           </ModalField>
+          <ModalField label="VLAN translation policy" hint={policyPicker ? 'Kept in Infrastructure → VLANs → Translation policies.' : "The policy's id."}>
+            {policyPicker ? (
+              <ModalSelect aria-label="VLAN translation policy" value={d.vlan_translation_policy_id} style={field('vlan_translation_policy_id')} onChange={(e) => set('vlan_translation_policy_id', e.target.value)}>
+                <option value="">None</option>
+                {d.vlan_translation_policy_id && !policyPicker.some((p) => p.id === d.vlan_translation_policy_id) && (
+                  <option value={d.vlan_translation_policy_id}>A policy not in the list</option>
+                )}
+                {policyPicker.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </ModalSelect>
+            ) : (
+              <ModalInput aria-label="VLAN translation policy" value={d.vlan_translation_policy_id} style={field('vlan_translation_policy_id')} onChange={(e) => set('vlan_translation_policy_id', e.target.value)} />
+            )}
+          </ModalField>
           {isWireless(d.type) && (
             <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginBottom: 10 }}>Radio settings for wireless interfaces arrive with the wireless pages.</div>
           )}
+          <SectionLabel icon="split">Virtual device contexts</SectionLabel>
+          <ContextPicker
+            contexts={contexts.isSuccess ? contexts.data : null}
+            loading={contexts.isLoading}
+            failed={contexts.isError}
+            value={d.virtual_device_context_ids}
+            onChange={(v) => set('virtual_device_context_ids', v)}
+          />
           <ModalField label="Description">
             <ModalInput aria-label="Description" value={d.description} onChange={(e) => set('description', e.target.value)} />
           </ModalField>
@@ -450,6 +491,40 @@ function InterfaceDrawer({ asset, iface, siblings, readOnly, onClose }: {
         )}
       </div>
     </DrawerShell>
+  );
+}
+
+/** The asset's virtual device contexts as a checkbox list (DCIM gap 1). A
+ *  membership the list does not hold (it failed to load, or the context is
+ *  gone) is kept, so an edit never silently drops it. */
+function ContextPicker({ contexts, loading, failed, value, onChange }: {
+  contexts: readonly VirtualDeviceContext[] | null; loading: boolean; failed: boolean;
+  value: readonly string[]; onChange: (v: string[]) => void;
+}) {
+  if (loading) return <div style={{ fontSize: 12, color: 'var(--app-t3)', marginBottom: 10 }}>Loading the asset's contexts…</div>;
+  if (failed || !contexts) {
+    return <div style={{ fontSize: 12, color: 'var(--app-t3)', marginBottom: 10 }}>The asset's contexts could not be loaded; this interface's memberships are kept as they are.</div>;
+  }
+  if (contexts.length === 0) {
+    return <div data-testid="context-picker-empty" style={{ fontSize: 12, color: 'var(--app-t3)', marginBottom: 10 }}>This asset has no virtual device contexts. Add them on the Hardware tab.</div>;
+  }
+  const chosen = new Set(value);
+  const toggle = (id: string) => {
+    const next = new Set(chosen);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange([...next]);
+  };
+  return (
+    <div data-testid="context-picker" role="group" aria-label="Virtual device contexts" style={{ border: '1px solid var(--app-border2)', borderRadius: 9, padding: '6px 10px', marginBottom: 10 }}>
+      {contexts.map((c) => (
+        <label key={c.id} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12.5, padding: '2px 0' }}>
+          <input type="checkbox" aria-label={`Context ${c.name}`} checked={chosen.has(c.id)} onChange={() => toggle(c.id)} />
+          <span className="mono">{c.name}</span>
+          {c.identifier != null && <span style={{ color: 'var(--app-t3)', fontSize: 11.5 }}>#{c.identifier}</span>}
+        </label>
+      ))}
+    </div>
   );
 }
 

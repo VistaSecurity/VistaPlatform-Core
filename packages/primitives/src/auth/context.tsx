@@ -27,6 +27,13 @@ export function useAuth(): AuthState {
   return ctx;
 }
 
+/** The session when an AuthProvider is mounted, else null — for a component
+ *  that only wants to key a per-user convenience (a remembered column choice)
+ *  and must still render without a provider (an isolated test, a story). */
+export function useOptionalAuth(): AuthState | null {
+  return useContext(AuthContext) ?? null;
+}
+
 export interface AuthProviderProps {
   children: React.ReactNode;
   /** Optional user-facing notifier (e.g. react-hot-toast wrapper). */

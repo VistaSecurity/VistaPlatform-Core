@@ -201,6 +201,13 @@ func registerInventoryTools(s *mcp.Server, d *Deps) {
 			"all of its identifiers (serial number, MAC, cloud resource id, …), all of its endpoints " +
 			"(address, port, transport, protocol, service), its class attributes and tags, its risk, " +
 			"and its crypto configurations and linked certificates. " +
+			"It also carries the commercial lifecycle a person declared (`purchase_date`, `warranty_start`, `warranty_end`, " +
+			"`purchase_cost` + `purchase_currency`, `purchase_order`, `vendor` = the seller, not the manufacturer, " +
+			"`support_contract`, `support_contract_end`, `installed_at`, `decommissioned_at`; null = not recorded) and a " +
+			"computed `lifecycle` block: `warranty_state` (active, expiring_90, expired) and `eos_state` (supported, " +
+			"eos_within_12m, past_eos) from `effective_end_of_support`, the earlier of the device type's and the platform's " +
+			"end of support, with its `source` (declared or catalogue). `unknown` means nothing is recorded — never report it " +
+			"as covered or supported. " +
 			"An empty `endpoints` array is a real answer, not a gap — an at-rest cloud resource has no endpoint at all. " +
 			"If the result carries `merged_into`, this id is a TOMBSTONE: the asset was merged into the one that field " +
 			"names, and it answers 200 with `asset_status: archived` rather than 404 so a stale id still resolves. " +

@@ -935,17 +935,21 @@ func (s *AssetService) IngestFindingsReport(tenantID uuid.UUID, findings []Inges
 	if len(assetStatus) > 0 && assetStatus[0] != "" {
 		status = assetStatus[0]
 	}
-	return s.ingestFindings(tenantID, findings, fixedApproval(status), status)
+	return s.ingestFindings(context.Background(), tenantID, findings, fixedApproval(status), status)
 }
 
 // IngestPipelineFindingsReport is the discovery pipeline's import ( WP3):
+// ctx is the request's — its values (the change notifier's collector and
+// request id) reach the identity engine's writes, so an interface or address
+// the pipeline files raises `object_changed` like any other change; its
+// cancellation does not (ingestFindings detaches it).
 // the status each finding's new asset lands as is decided HERE, per finding,
 // by the tenant's auto-approval rules over this service's own classification
 // (pipelineApproval). The rule that matched is reported per finding in
 // IngestResult.AutoApprovalRuleID so the caller can credit it on the
 // discovery row.
-func (s *AssetService) IngestPipelineFindingsReport(tenantID uuid.UUID, findings []IngestFinding) (IngestReport, error) {
-	return s.ingestFindings(tenantID, findings, s.pipelineApproval(tenantID), "per finding")
+func (s *AssetService) IngestPipelineFindingsReport(ctx context.Context, tenantID uuid.UUID, findings []IngestFinding) (IngestReport, error) {
+	return s.ingestFindings(ctx, tenantID, findings, s.pipelineApproval(tenantID), "per finding")
 }
 
 // Outcomes inventory-service stamps itself, beside the identity.Outcome set.
@@ -972,7 +976,12 @@ const (
 
 // ingestFindings is the one ingest loop; decide says what each finding's new
 // asset lands as, and statusLabel names that decision in the summary log.
-func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFinding, decide approvalDecider, statusLabel string) (IngestReport, error) {
+//
+// parent carries the caller's values — the change notifier's collector and
+// request id (shared/dcim/changenotify) — into every write below; its
+// cancellation is dropped, because a batch half-ingested when the caller hung
+// up is worse than one finished.
+func (s *AssetService) ingestFindings(parent context.Context, tenantID uuid.UUID, findings []IngestFinding, decide approvalDecider, statusLabel string) (IngestReport, error) {
 	if len(findings) == 0 {
 		return IngestReport{}, nil
 	}
@@ -1030,7 +1039,7 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 	var lifecycleRiskChanged []*events.AssetRiskChangedPayload
 	var lifecycleCryptoAdded []*events.CryptoConfigurationAddedPayload
 	var lifecycleCertExpiring []*events.CertificateExpiringPayload
-	ctx := context.Background()
+	ctx := context.WithoutCancel(parent)
 	// A position in asset_history's append order taken before any finding is
 	// resolved: rows this call writes are above it (assetChangeTracker).
 	historyMark, historyMarkErr := s.historyWatermark(ctx, tenantID)
@@ -1374,7 +1383,7 @@ func (s *AssetService) ingestFindings(tenantID uuid.UUID, findings []IngestFindi
 			return true, nil
 		}
 
-		res, existing, resolved, durableMaterialization, resErr := s.resolveDiscoveryObservation(segs, cloudAccounts, tenantID, f, obs, effectiveIP, ownership, status, gate)
+		res, existing, resolved, durableMaterialization, resErr := s.resolveDiscoveryObservation(ctx, segs, cloudAccounts, tenantID, f, obs, effectiveIP, ownership, status, gate)
 		if resErr != nil {
 			return result(), fmt.Errorf("failed to upsert asset: %w", resErr)
 		}
@@ -3686,8 +3695,10 @@ const (
 // discovery. It is applied here rather than re-derived, so the two cannot
 // disagree — EXCEPT over a conflict, where the observation waits for the human
 // who has to settle the merge whatever the rule said.
-func (s *AssetService) resolveDiscoveryObservation(segs *importPrefixes, cloudAccounts *cloudAccountResolver, tenantID uuid.UUID, f IngestFinding, obs identity.Observation, effectiveIP *string, ownership, assetStatus string, gate func(ctx context.Context, tx *sqlx.Tx, existing existingAsset) (bool, error)) (identity.Resolution, existingAsset, bool, bool, error) {
-	ctxBG := context.Background()
+func (s *AssetService) resolveDiscoveryObservation(ctx context.Context, segs *importPrefixes, cloudAccounts *cloudAccountResolver, tenantID uuid.UUID, f IngestFinding, obs identity.Observation, effectiveIP *string, ownership, assetStatus string, gate func(ctx context.Context, tx *sqlx.Tx, existing existingAsset) (bool, error)) (identity.Resolution, existingAsset, bool, bool, error) {
+	// The caller's (already uncancellable) context: the engine's interface and
+	// address writes are recorded under it, so they reach the change notifier.
+	ctxBG := ctx
 
 	// The discovery-source attribution the Approvals filter buttons read. It
 	// is not identity, so it does not belong in the observation — but it is

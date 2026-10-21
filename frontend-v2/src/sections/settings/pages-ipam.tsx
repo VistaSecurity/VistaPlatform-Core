@@ -1,5 +1,6 @@
 // Settings → Infrastructure → IPAM (DCIM BUILD_PLAN row 1.3): the catalogues
-// the Networks lens builds on — VRFs, RIRs, aggregates, prefix roles and ASNs.
+// the Networks lens builds on — VRFs, RIRs, aggregates, prefix roles, ASNs and
+// ASN ranges (DCIM gap 10).
 // Simple tables with add / edit / delete; RIRs and prefix roles the platform
 // ships are listed read-only. Reading needs `ipam.read` (the nav entry);
 // every write control sits behind `ipam.manage`.
@@ -7,7 +8,7 @@ import { useState, type ReactNode } from 'react';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { Icon } from '../../components/ui';
 import { PanelEmpty, PanelError, PanelLoading } from '../inventory/dcim/substrate-states';
-import { useIpamList, type IpamRoute, type IpamRows, type Rir } from '../inventory/ipam/ipam-queries';
+import { useAvailableAsns, useIpamList, type AsnRange, type IpamRoute, type IpamRows, type Rir } from '../inventory/ipam/ipam-queries';
 import { IpamDeleteModal, IpamFormModal, type IpamField } from '../inventory/ipam/ipam-ui';
 import { SPage, SSection, STable, STableRow, STag, type STableCol } from './kit';
 import type { SettingsNavItem } from './nav';
@@ -154,6 +155,47 @@ const ASNS: Catalog<'asns'> = {
   name: (a) => `AS${a.asn}`,
 };
 
+/** An ASN range's free numbers: how many, and — on request — the first few
+ *  (the server walks the gaps between the ASNs in it; DCIM gap 10). */
+function FreeAsns({ range }: { range: AsnRange & { asn_count?: number; available_count?: number } }) {
+  const [open, setOpen] = useState(false);
+  const free = useAvailableAsns(open ? range.id : null, 10);
+  return (
+    <span data-testid="asn-range-free" style={{ display: 'inline-flex', flexDirection: 'column', gap: 2 }}>
+      <span>
+        {range.asn_count ?? 0} in use · {(range.available_count ?? 0).toLocaleString()} free
+        {(range.available_count ?? 0) > 0 && (
+          <button type="button" className="ui-btn sm ghost" data-testid="asn-range-show-free" style={{ marginLeft: 6 }} onClick={() => setOpen((o) => !o)}>
+            {open ? 'Hide' : 'Show free'}
+          </button>
+        )}
+      </span>
+      {open && (
+        free.isLoading ? <PanelLoading label="Finding free AS numbers…" />
+          : free.isError ? <PanelError message={free.error instanceof Error ? free.error.message : 'Request failed'} onRetry={() => { void free.refetch(); }} />
+            : <span className="mono" data-testid="asn-range-free-list" style={{ fontSize: 12 }}>{(free.data?.asns ?? []).map((a) => `AS${a}`).join(', ')}{(free.data?.available ?? 0) > (free.data?.asns ?? []).length ? ', …' : ''}</span>
+      )}
+    </span>
+  );
+}
+
+const ASN_RANGES: Catalog<'asn-ranges'> = {
+  route: 'asn-ranges', title: 'ASN ranges', noun: 'ASN range',
+  desc: 'Blocks of AS numbers a registry delegated to you, and which numbers in each are still free.',
+  cols: [{ label: 'Name', w: '1.1fr' }, { label: 'Range', w: '1fr' }, { label: 'RIR', w: '0.8fr' }, { label: 'ASNs', w: '1.5fr' }],
+  cells: (r, rirName) => [r.name, <span key="r" className="mono">AS{r.start}–AS{r.end}</span>, rirName(r.rir_id), <FreeAsns key="f" range={r} />],
+  fields: (rirs) => [
+    { name: 'name', label: 'Name', required: true },
+    { name: 'slug', label: 'Slug', hint: 'Left blank, it is made from the name.' },
+    { name: 'rir_id', label: 'RIR', kind: 'select', required: true, options: rirOptions(rirs) },
+    { name: 'start', label: 'First ASN', kind: 'number', required: true, placeholder: '64512' },
+    { name: 'end', label: 'Last ASN', kind: 'number', required: true, placeholder: '65534' },
+    { name: 'description', label: 'Description' },
+  ],
+  initial: (r) => ({ name: r.name, slug: r.slug, rir_id: r.rir_id, start: r.start, end: r.end, description: r.description ?? '' }),
+  name: (r) => r.name,
+};
+
 export function IpamSettingsPage({ meta }: { meta: SettingsNavItem & { section?: string } }) {
   return (
     <SPage eyebrow={meta.section ?? 'Settings'} title={meta.label} job={meta.job}>
@@ -163,6 +205,7 @@ export function IpamSettingsPage({ meta }: { meta: SettingsNavItem & { section?:
         <CatalogSection c={RIRS} />
         <CatalogSection c={ROLES} />
         <CatalogSection c={ASNS} />
+        <CatalogSection c={ASN_RANGES} />
       </div>
     </SPage>
   );

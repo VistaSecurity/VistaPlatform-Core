@@ -70,6 +70,11 @@ type decodedNetwork struct {
 	InventoryItems []identity.ObservedInventoryItem `json:"inventory_items"`
 	Modules        []identity.ObservedModule        `json:"modules"`
 	VirtualChassis *identity.ObservedVirtualChassis `json:"virtual_chassis"`
+	// The virtual device contexts (DCIM gap 1).
+	VirtualDeviceContexts []identity.ObservedVirtualDeviceContext `json:"virtual_device_contexts"`
+	// The power half (DCIM row 6.2): a PDU's measured inlets and outlets.
+	PowerPorts   []identity.ObservedPowerPort   `json:"power_ports"`
+	PowerOutlets []identity.ObservedPowerOutlet `json:"power_outlets"`
 }
 
 // decodeNetwork converts the collector's wire form to identity's observed
@@ -77,15 +82,19 @@ type decodedNetwork struct {
 func decodeNetwork(n *di.NetworkObservation) (decodedNetwork, error) {
 	var out decodedNetwork
 	blob, err := json.Marshal(struct {
-		Interfaces []di.ObservedInterface     `json:"interfaces"`
-		VLANs      []di.ObservedVLAN          `json:"vlans"`
-		Prefixes   []di.ObservedPrefix        `json:"prefixes"`
-		Tunnels    []di.ObservedTunnel        `json:"tunnels"`
-		Neighbors  []di.ObservedNeighbor      `json:"neighbors"`
-		Items      []di.ObservedInventoryItem `json:"inventory_items"`
-		Modules    []di.ObservedModule        `json:"modules"`
-		Chassis    *di.ObservedVirtualChassis `json:"virtual_chassis"`
-	}{n.Interfaces, n.VLANs, n.Prefixes, n.Tunnels, n.Neighbors, n.InventoryItems, n.Modules, n.VirtualChassis})
+		Interfaces []di.ObservedInterface            `json:"interfaces"`
+		VLANs      []di.ObservedVLAN                 `json:"vlans"`
+		Prefixes   []di.ObservedPrefix               `json:"prefixes"`
+		Tunnels    []di.ObservedTunnel               `json:"tunnels"`
+		Neighbors  []di.ObservedNeighbor             `json:"neighbors"`
+		Items      []di.ObservedInventoryItem        `json:"inventory_items"`
+		Modules    []di.ObservedModule               `json:"modules"`
+		Chassis    *di.ObservedVirtualChassis        `json:"virtual_chassis"`
+		Contexts   []di.ObservedVirtualDeviceContext `json:"virtual_device_contexts"`
+		PowerPorts []di.ObservedPowerPort            `json:"power_ports"`
+		Outlets    []di.ObservedPowerOutlet          `json:"power_outlets"`
+	}{n.Interfaces, n.VLANs, n.Prefixes, n.Tunnels, n.Neighbors, n.InventoryItems, n.Modules, n.VirtualChassis, n.VirtualDeviceContexts,
+		n.PowerPorts, n.PowerOutlets})
 	if err != nil {
 		return out, err
 	}
@@ -127,6 +136,11 @@ func snmpNetworkSighting(tenantID uuid.UUID, source identity.Source, at time.Tim
 		InventoryItems: dn.InventoryItems,
 		Modules:        dn.Modules,
 		VirtualChassis: dn.VirtualChassis,
+
+		VirtualDeviceContexts: dn.VirtualDeviceContexts,
+
+		PowerPorts:   dn.PowerPorts,
+		PowerOutlets: dn.PowerOutlets,
 	}
 	if m, err := netip.ParseAddr(strings.TrimSpace(n.ManagementAddress)); err == nil {
 		sg.ManagementAddress = m.Unmap().String()
@@ -144,6 +158,15 @@ func snmpNetworkSighting(tenantID uuid.UUID, source identity.Source, at time.Tim
 		}
 	}
 	return sg, nil
+}
+
+// networkNeedsSighting reports whether the observation carries anything the
+// identity engine files (everything but the ARP cache, which is evidence
+// recorded on its own): interfaces, VLANs, prefixes, tunnels, neighbours, the
+// hardware, or a PDU's power sockets (row 6.2) — a PDU may report sockets and
+// no interface at all.
+func networkNeedsSighting(n *di.NetworkObservation) bool {
+	return len(n.Interfaces)+len(n.VLANs)+len(n.Prefixes)+len(n.Tunnels)+len(n.Neighbors) > 0 || n.HasHardware() || n.HasPower()
 }
 
 // persistNetwork files an interrogation's network posture for assetID: the
@@ -166,7 +189,7 @@ func (s *ObservationSink) persistNetwork(ctx context.Context, tenantID, assetID 
 		log.Printf("[ObservationSink] network posture of asset %s not sent: the asset holds no identifier to bind it to", assetID)
 		return nil
 	}
-	if len(n.Interfaces)+len(n.VLANs)+len(n.Prefixes)+len(n.Tunnels)+len(n.Neighbors) > 0 || n.HasHardware() {
+	if networkNeedsSighting(n) {
 		sg, err := snmpNetworkSighting(tenantID, source, at, known, n)
 		if err != nil {
 			return err

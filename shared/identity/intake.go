@@ -316,6 +316,10 @@ type Sighting struct {
 	// interfaces once the sighting resolved to an asset.
 	WirelessLANs  []ObservedWirelessLAN  `json:"wireless_lans,omitempty"`
 	WirelessLinks []ObservedWirelessLink `json:"wireless_links,omitempty"`
+	// VirtualDeviceContexts are the device's virtual device contexts (DCIM
+	// gap 1, observed_network.go); each interface names its own. Recorded
+	// with the interfaces once the sighting resolved to an asset.
+	VirtualDeviceContexts []ObservedVirtualDeviceContext `json:"virtual_device_contexts,omitempty"`
 
 	// Cluster is the cluster the sighted asset belongs to, as a host or a
 	// virtual machine (DCIM row 4.2, observed_cluster.go). The engine records
@@ -341,6 +345,13 @@ type Sighting struct {
 	InventoryItems []ObservedInventoryItem `json:"inventory_items,omitempty"`
 	Modules        []ObservedModule        `json:"modules,omitempty"`
 	VirtualChassis *ObservedVirtualChassis `json:"virtual_chassis,omitempty"`
+
+	// PowerPorts and PowerOutlets are what a PDU collector measured of the
+	// device's power sockets (DCIM row 6.2, observed_power.go). Not identity:
+	// inventory-service writes their measured readings on the engine's
+	// transaction once the sighting resolved to an asset.
+	PowerPorts   []ObservedPowerPort   `json:"power_ports,omitempty"`
+	PowerOutlets []ObservedPowerOutlet `json:"power_outlets,omitempty"`
 
 	// ManagementAddress is the address the collector reached the device at,
 	// or the address the device's agent reported as its own — the address an
@@ -688,6 +699,9 @@ func (in *Intake) assess(ctx context.Context, s Sighting, admission AdmissionEvi
 	var droppedWireless []string
 	s.WirelessLANs, s.WirelessLinks, droppedWireless = NormalizeObservedWireless(s.WirelessLANs, s.WirelessLinks)
 	dropped = append(dropped, droppedWireless...)
+	var droppedContexts []string
+	s.VirtualDeviceContexts, s.Interfaces, droppedContexts = NormalizeObservedVirtualDeviceContexts(s.VirtualDeviceContexts, s.Interfaces)
+	dropped = append(dropped, droppedContexts...)
 	// The sighting's own prefixes scope its own addresses (DCIM row 1.6): a
 	// prefix this sighting is the first to report is recorded before any
 	// address is scoped, and the snapshot re-read, so the device that taught
@@ -714,23 +728,24 @@ func (in *Intake) assess(ctx context.Context, s Sighting, admission AdmissionEvi
 		in: in, s: s, snap: snap,
 		res: IntakeResult{Snapshot: snap},
 		obs: Observation{
-			TenantID:            s.TenantID,
-			Admission:           admission,
-			ClassHint:           s.ClassHint,
-			ClassProvenance:     s.ClassProvenance,
-			Source:              s.Source,
-			ObservedAt:          s.ObservedAt,
-			Confidence:          s.Confidence,
-			Network:             Network{Ownership: s.Ownership, Type: s.NetworkType},
-			Attributes:          maps.Clone(s.Attributes),
-			TLSCertFingerprints: append([]string(nil), s.TLSCertFingerprints...),
-			Interfaces:          s.Interfaces,
-			Prefixes:            s.Prefixes,
-			VLANs:               s.VLANs,
-			Cluster:             cluster,
-			WirelessLANs:        s.WirelessLANs,
-			WirelessLinks:       s.WirelessLinks,
-			ManagementAddress:   managementAddress(s),
+			TenantID:              s.TenantID,
+			Admission:             admission,
+			ClassHint:             s.ClassHint,
+			ClassProvenance:       s.ClassProvenance,
+			Source:                s.Source,
+			ObservedAt:            s.ObservedAt,
+			Confidence:            s.Confidence,
+			Network:               Network{Ownership: s.Ownership, Type: s.NetworkType},
+			Attributes:            maps.Clone(s.Attributes),
+			TLSCertFingerprints:   append([]string(nil), s.TLSCertFingerprints...),
+			Interfaces:            s.Interfaces,
+			Prefixes:              s.Prefixes,
+			VLANs:                 s.VLANs,
+			Cluster:               cluster,
+			WirelessLANs:          s.WirelessLANs,
+			WirelessLinks:         s.WirelessLinks,
+			VirtualDeviceContexts: s.VirtualDeviceContexts,
+			ManagementAddress:     managementAddress(s),
 		},
 		seen: map[string]int{},
 	}

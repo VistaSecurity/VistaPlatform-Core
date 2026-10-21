@@ -15,7 +15,8 @@ import type { Asset, inventoryComponents } from '@vistasecurity/api-contract';
 import { clients } from '../../lib/clients';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
 import { downloadCsv } from '../findings/export-csv';
-import { ASSET_CSV_HEADER, assetCsvRow } from './asset-csv';
+import { assetCsv } from './asset-csv';
+import type { AssetColumn } from './columns';
 import { ActiveScanJobsPanel, type SkippedAsset, type StartedScan } from '../discovery/active-scan-jobs-panel';
 import type { ActiveScanResponse } from '../discovery/active-scan-run-from';
 import { assetIdentity } from './asset-shape';
@@ -169,12 +170,14 @@ function useBulkAction() {
   });
 }
 
-export function BulkActionBar({ selection, onChange, seen, onScanStarted }: {
+export function BulkActionBar({ selection, onChange, seen, onScanStarted, columns }: {
   selection: AssetSelection;
   onChange: (s: AssetSelection) => void;
   /** Rows the lens has shown, for exporting ticked rows. */
   seen: ReadonlyMap<string, Asset>;
   onScanStarted: (r: ActiveScanResponse) => void;
+  /** The columns the lens shows; the export carries every one of them. */
+  columns?: readonly AssetColumn[];
 }) {
   const n = selectedCount(selection);
   const [scanOpen, setScanOpen] = useState(false);
@@ -196,7 +199,8 @@ export function BulkActionBar({ selection, onChange, seen, onScanStarted }: {
     setExporting(true);
     try {
       const rows = await selectionRows(selection, seen);
-      downloadCsv(`vista-inventory-selection-${new Date().toISOString().slice(0, 10)}.csv`, ASSET_CSV_HEADER, rows.map(assetCsvRow));
+      const csv = assetCsv(rows, columns);
+      downloadCsv(`vista-inventory-selection-${new Date().toISOString().slice(0, 10)}.csv`, csv.header, csv.rows);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Export failed');
     } finally {

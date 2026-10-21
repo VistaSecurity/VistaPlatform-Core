@@ -167,39 +167,31 @@ func statusForFindings(hasFindings bool) string {
 //     score divergence: an explicitly accepted risk still dragged the rollup down
 //     while the summary page showed the control clean.
 //  2. Does the control have any measurements configured? (→ reasonNoMeasurements.)
-//  3. Does the tenant have anything THIS CONTROL'S MEASUREMENTS could read? (→
-//     reasonNothingInScope.)
+//  3. Does any of THIS CONTROL'S MEASUREMENTS have a non-empty population for
+//     this tenant? (→ reasonNothingInScope.)
 //
 // Fact 3 deserves its own note, because it is an implication rather than a
 // measurement: it asks what the extractors COULD see, not what they did.
 //
-// It is per SHAPE, and it has to be. Until workstream 3.6 every measurement read
-// `crypto_implementations` or `certificates`, so one tenant-wide "does this
-// tenant have any crypto at all" probe was a sound superset of every extractor's
-// FROM clause. The registry now has five shapes — `asset`, `fact` and `finding`
-// alongside those two — and a tenant with one TLS endpoint satisfied the old
-// probe for ALL of them. That is how the Lifecycle framework came to score 100
-// on an estate the end-of-life catalogue had never resolved a single date for:
-// every LC control has measurements of the `fact` shape, no `eol.*` fact
-// existed, the live evaluator correctly reported NOT ASSESSED, and the stored
-// rollup — which is what the Posture page, the framework card and the dashboard
-// hero read — reported four passing controls out of four. Inventory Hygiene had
-// the same shape of wrong answer through the `finding` shape: IH-005 and IH-006
-// read PASS on a deployment where the hygiene producer had never run, and the
-// score went UP for not looking. (Found by the Gate 3 end-to-end proof,
-// `gate3_frameworks_integration_test.go`.)
+// It is per MEASUREMENT TYPE, and it is the live evaluator's own population
+// rule. Each probe is measurementPlan.populationSQL, built from the same
+// measurementPopulation as the extraction statement — the shape's FROM and
+// soft-delete predicates, the row's `subject_where`, and (outside the finding
+// shape) its `where` — so the stored rollup and the live evaluation agree on
+// who is in a control's population by construction (scope_probe.go).
 //
-// Each probe MIRRORS its shape's own `From` + `Base` in measurement_shapes.go,
-// minus the per-subject filter, so it stays a superset of what that shape can
-// see. Keep the two in step; a probe looser than its shape reports a posture
-// nothing measured, and a probe tighter than its shape reports NOT ASSESSED over
-// data an extractor can read. [scopeProbes] is where they live, and
-// TestScopeProbeCoversEveryShape fails if a shape is added without one.
-//
-// The crypto_configuration probe did not always mirror its shape either: it was
-// a bare `EXISTS (SELECT 1 FROM crypto_implementations)` until, which meant
-// soft-deleting a tenant's last asset left every control reporting PASS over
-// inventory no extractor could still read.
+// It has been coarser twice, and both times the stored score claimed a posture
+// nothing measured. First it was ONE tenant-wide "does this tenant have any
+// crypto" probe, which the Lifecycle framework passed on an estate the
+// end-of-life catalogue had never resolved a date for. Then it was one probe
+// per SHAPE: "did the hygiene producer assess any asset" stood in for every
+// `finding`-shape row, so IH-008 (racked assets have a position) passed on an
+// estate with no racks and IH-013 (no expired warranties) on one with no
+// warranty dates, while the live evaluator read both NOT ASSESSED. Inventory
+// Hygiene scored 73 on the Gate 3 estate for that reason; the honest number is
+// 25 (`gate3_frameworks_integration_test.go`). An empty inventory scored HIGHER
+// than a populated one, which is the one direction a hygiene score must never
+// move.
 //
 // A control is in scope if ANY of its measurements is — the fold is over all of
 // them, so one readable measurement means the control was assessed. That is also
@@ -256,11 +248,13 @@ func statusForFindings(hasFindings bool) string {
 // only move a would-be PASS to NOT_ASSESSED — never to FAIL, and never the other
 // way.
 //
-// The remaining gap — per-control emptiness and extraction errors — is only
-// observable where extraction actually runs, i.e. the rule evaluator, which
-// reports both (see evaluateControlCached). Closing it in the materialized path
-// would mean persisting per-control assessment state; that is a schema-shaped
-// follow-up, not something to fake here.
+// What remains observable only where extraction actually runs — the rule
+// evaluator (evaluateControlCached) — is extraction ERRORS, and values Go
+// rejects after SQL returned them (a row filter, a transform that refuses an
+// unparseable date). The probe is a superset of the extraction over those, so
+// the stored path can report PASS where the live one reports NOT ASSESSED for
+// them; closing that would mean persisting per-control assessment state, a
+// schema-shaped change.
 func loadControlAssessments(ctx context.Context, db *sql.DB, tenantID uuid.UUID, controlIDs []uuid.UUID, frameworkType string) (map[uuid.UUID]controlAssessment, error) {
 	return loadControlAssessmentsAt(ctx, db, tenantID, controlIDs, frameworkType, time.Time{})
 }
@@ -323,8 +317,7 @@ func loadControlAssessmentsAt(ctx context.Context, db *sql.DB, tenantID uuid.UUI
 		}
 
 		// The configured measurements, WITH the measurement type each one
-		// names, because fact 3 below is per shape and the shape is a property
-		// of the type.
+		// names, because fact 3 below probes each type's own population.
 		mrows, err := tx.QueryContext(ctx, `
 			SELECT cm.control_id, mt.code
 			FROM control_measurements cm

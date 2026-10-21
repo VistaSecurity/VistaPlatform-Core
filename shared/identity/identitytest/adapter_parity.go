@@ -11,7 +11,8 @@ package identitytest
 //     operational/admin status, mode, parent, LAG, untagged and tagged VLANs),
 //     the expected addresses on each (with the configured length, and the VRF
 //     when not global), the expected prefixes (with their VLAN, DHCP posture
-//     and cloud network) and VLANs, and the asset's
+//     and cloud network) and VLANs, the virtual device contexts (with their
+//     identifier and member interfaces, DCIM gap 1), and the asset's
 //     primary IPv4/IPv6 address. Nothing more: an interface or a prefix the
 //     fixture does not list is a failure, so a projection that starts
 //     inventing rows goes red as surely as one that drops a field.
@@ -93,6 +94,9 @@ type ParityWant struct {
 	// WirelessLANs are the wireless LANs the observation must have recorded
 	// (row 4.4), and nothing else: an adapter with none expects none.
 	WirelessLANs []WantWirelessLAN
+	// VirtualDeviceContexts are the observed asset's virtual device contexts
+	// (DCIM gap 1), and nothing else: an adapter with none expects none.
+	VirtualDeviceContexts []WantVirtualDeviceContext
 	// PrimaryIP4 / PrimaryIP6 are the host part of the asset's primary
 	// address of each family, "" for none.
 	PrimaryIP4, PrimaryIP6 string
@@ -389,6 +393,38 @@ func readWirelessLANs(t *testing.T, db *sql.DB, tenant, asset string) []WantWire
 	return out
 }
 
+// WantVirtualDeviceContext is one expected virtual device context of the
+// observed asset. Identifier is "" for none; Interfaces are the names of its
+// member interfaces.
+type WantVirtualDeviceContext struct {
+	Name, Identifier string
+	Interfaces       []string
+}
+
+func readVirtualDeviceContexts(t *testing.T, db *sql.DB, tenant, asset string) []WantVirtualDeviceContext {
+	t.Helper()
+	rows := q(t, db, `
+		SELECT c.name, coalesce(c.identifier::text, ''),
+		       ARRAY(SELECT i.name FROM public.interface_virtual_device_contexts j
+		              JOIN public.interfaces i ON i.tenant_id = j.tenant_id AND i.id = j.interface_id
+		             WHERE j.tenant_id = c.tenant_id AND j.virtual_device_context_id = c.id ORDER BY i.name)
+		  FROM public.virtual_device_contexts c
+		 WHERE c.tenant_id = $1 AND c.asset_id = $2::uuid AND c.status <> 'rejected' ORDER BY c.name`, tenant, asset)
+	defer func() { _ = rows.Close() }()
+	var out []WantVirtualDeviceContext
+	for rows.Next() {
+		var w WantVirtualDeviceContext
+		if err := rows.Scan(&w.Name, &w.Identifier, pq.Array(&w.Interfaces)); err != nil {
+			t.Fatal(err)
+		}
+		if len(w.Interfaces) == 0 {
+			w.Interfaces = nil
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
 // ------------------------------------------------------------- comparing ----
 
 func normWantInterface(w WantInterface) WantInterface {
@@ -476,6 +512,25 @@ func checkParity(t *testing.T, db *sql.DB, tenant, asset string, want ParityWant
 		t.Errorf("%s: wireless LANs %+v, want %+v", when, gotW, wantW)
 	}
 
+	gotC := readVirtualDeviceContexts(t, db, tenant, asset)
+	wantC := make([]WantVirtualDeviceContext, 0, len(want.VirtualDeviceContexts))
+	for _, w := range want.VirtualDeviceContexts {
+		w.Interfaces = append([]string(nil), w.Interfaces...)
+		sort.Strings(w.Interfaces)
+		if len(w.Interfaces) == 0 {
+			w.Interfaces = nil
+		}
+		wantC = append(wantC, w)
+	}
+	sort.Slice(wantC, func(i, j int) bool { return wantC[i].Name < wantC[j].Name })
+	for i := range gotC {
+		sort.Strings(gotC[i].Interfaces)
+	}
+	sort.Slice(gotC, func(i, j int) bool { return gotC[i].Name < gotC[j].Name })
+	if fmt.Sprintf("%+v", gotC) != fmt.Sprintf("%+v", wantC) {
+		t.Errorf("%s: virtual device contexts %+v, want %+v", when, gotC, wantC)
+	}
+
 	var p4, p6 string
 	if err := db.QueryRow(`
 		SELECT coalesce(host(ip4.address), ''), coalesce(host(ip6.address), '')
@@ -502,7 +557,7 @@ type counts struct {
 func parityCounts(t *testing.T, db *sql.DB, tenant string) counts {
 	t.Helper()
 	c := counts{rows: map[string]int{}, observed: map[string]int{}}
-	for _, table := range []string{"assets", "interfaces", "mac_addresses", "ip_addresses", "prefixes", "vlans", "interface_tagged_vlans", "wireless_lan_groups", "wireless_lans", "wireless_links"} {
+	for _, table := range []string{"assets", "interfaces", "mac_addresses", "ip_addresses", "prefixes", "vlans", "interface_tagged_vlans", "wireless_lan_groups", "wireless_lans", "wireless_links", "virtual_device_contexts", "interface_virtual_device_contexts"} {
 		var n int
 		if err := db.QueryRow(`SELECT count(*) FROM public.`+table+` WHERE tenant_id = $1`, tenant).Scan(&n); err != nil {
 			t.Fatal(err)
@@ -514,6 +569,7 @@ func parityCounts(t *testing.T, db *sql.DB, tenant string) counts {
 		{"ip_addresses", "host(address)"},
 		{"prefixes", "prefix::text"},
 		{"vlans", "vid::text"},
+		{"virtual_device_contexts", "name"},
 	} {
 		rows := q(t, db, `SELECT `+sel.key+`, observation_count FROM public.`+sel.table+` WHERE tenant_id = $1`, tenant)
 		for rows.Next() {

@@ -62,7 +62,9 @@ export function useCable(id: string | null) {
     queryKey: cablingKeys.one(id ?? ''),
     enabled: !!id,
     queryFn: async (): Promise<Cable> => {
-      const { data, error } = await clients.inventory.GET('/dcim/cables/{id}', { params: { path: { id: id! } } });
+      const { data, error, response } = await clients.inventory.GET('/dcim/cables/{id}', { params: { path: { id: id! } } });
+      // 'not-found' is the object pages' "no longer exists" signal.
+      if (response?.status === 404) throw new Error('not-found');
       if (error || !data?.data) throw new Error(substrateError(error, 'Failed to load the cable'));
       return data.data;
     },
@@ -108,7 +110,7 @@ export function useRefreshCabling() {
   return useInvalidateCabling();
 }
 
-/** The six trace routes, by termination kind. */
+/** The trace routes, by termination kind (power since row 6.1). */
 export const TRACE_ROUTES = {
   interface: 'interfaces',
   front_port: 'front-ports',
@@ -116,6 +118,9 @@ export const TRACE_ROUTES = {
   console_port: 'console-ports',
   console_server_port: 'console-server-ports',
   circuit_termination: 'circuit-terminations',
+  power_port: 'power-ports',
+  power_outlet: 'power-outlets',
+  power_feed: 'power-feeds',
 } as const;
 export type TraceKind = keyof typeof TRACE_ROUTES;
 export type TraceRoute = (typeof TRACE_ROUTES)[TraceKind];

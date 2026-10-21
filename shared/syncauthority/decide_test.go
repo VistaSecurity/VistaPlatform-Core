@@ -110,8 +110,16 @@ func TestKindsAreOrderedAndValid(t *testing.T) {
 		t.Fatal("no synced kinds")
 	}
 	for i, k := range ks {
-		if _, ok := dcim.ParseObjectKind(string(k.Kind)); !ok {
+		// A sync kind (Object set) is not a vocabulary kind; its rows are.
+		if _, isKind := dcim.ParseObjectKind(string(k.Kind)); k.Object == "" && !isKind {
 			t.Errorf("%s is not an ObjectKind", k.Kind)
+		} else if k.Object != "" {
+			if isKind {
+				t.Errorf("%s is a vocabulary ObjectKind and a sync kind over %s", k.Kind, k.Object)
+			}
+			if _, ok := dcim.ParseObjectKind(string(k.Object)); !ok || k.Object.Table() == "" {
+				t.Errorf("%s: object %s is not an ObjectKind with a table", k.Kind, k.Object)
+			}
 		}
 		if i > 0 && ks[i-1].Order > k.Order {
 			t.Errorf("%s (order %d) listed after %s (order %d)", k.Kind, k.Order, ks[i-1].Kind, ks[i-1].Order)

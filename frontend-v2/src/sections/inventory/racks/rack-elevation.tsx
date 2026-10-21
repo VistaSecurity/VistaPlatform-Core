@@ -6,7 +6,9 @@
 // to the other face; the page calls PUT placement and snaps the block back on
 // a 409. With the crypto overlay on, each block is tinted by its worst open
 // finding through the ratings bands (rack-overlay.ts), badged for an expiring
-// certificate and marked with a lock for a weak protocol.
+// certificate and marked with a lock for a weak protocol. With the power
+// overlay on instead (row 6.2), each block is tinted by its share of the
+// rack's available power (power-overlay.ts).
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from 'react';
 import { ASSET_CLASSES, type AssetClassKey } from '@vistasecurity/primitives/assets';
 import { classGroupOf, classGroupStyle } from '../map-model';
@@ -15,6 +17,7 @@ import {
   UNIT_PX, devicesOnFace, emptyUnits, positionAtY, reservationBands, snapPosition, spanY, unitY, unitsTopDown, type RackGeom,
 } from './rack-geometry';
 import { certBadgeText, certDaysLeft, overlayState, overlayTooltip, type DevicePosture } from './rack-overlay';
+import type { PowerOverlayState } from './power-overlay';
 import { unitLabel, type ElevationDevice, type ElevationReservation, type RackFace } from './racks-queries';
 
 export const FACES: readonly RackFace[] = ['front', 'rear'];
@@ -47,7 +50,7 @@ export function rackClassColor(classKey: string | null | undefined): string {
   return classGroupStyle(classGroupOf(classKey)).color;
 }
 
-export type DeviceWithPosture = ElevationDevice & { posture?: DevicePosture | null };
+export type DeviceWithPosture = ElevationDevice & { posture?: DevicePosture | null; power?: PowerOverlayState | null };
 
 export interface PendingMove { assetId: string; position: number; face: RackFace }
 
@@ -65,6 +68,8 @@ export interface RackElevationProps {
   devices: readonly DeviceWithPosture[];
   reservations: readonly ElevationReservation[];
   overlay: boolean;
+  /** The power overlay (row 6.2); it replaces the crypto overlay while on. */
+  powerOverlay?: boolean;
   highlight?: string | null;
   canManage: boolean;
   /** storage_ref → image attachment URL. */
@@ -83,7 +88,9 @@ function truncate(text: string, maxChars: number): string {
 }
 
 export function RackElevationSvg(props: RackElevationProps) {
-  const { rack, reservations, overlay, highlight, canManage, imageUrl, pending, onMove, onOpen, onEmptyUnit, svgRef, now } = props;
+  const { rack, reservations, highlight, canManage, imageUrl, pending, onMove, onOpen, onEmptyUnit, svgRef, now } = props;
+  const powerOverlay = !!props.powerOverlay;
+  const overlay = props.overlay && !powerOverlay;
   const uid = useId().replace(/[^A-Za-z0-9_-]/g, '');
   const hatchId = `rack-hatch-${uid}`;
   const ownRef = useRef<SVGSVGElement | null>(null);
@@ -211,7 +218,7 @@ export function RackElevationSvg(props: RackElevationProps) {
               );
             })}
             {blocks.map(({ device: d, mirrored }) => (
-              <DeviceBlock key={`${d.asset_id}-${face}`} rack={rack} device={d} face={face} mirrored={mirrored} overlay={overlay}
+              <DeviceBlock key={`${d.asset_id}-${face}`} rack={rack} device={d} face={face} mirrored={mirrored} overlay={overlay} powerOverlay={powerOverlay}
                 highlighted={highlight === d.asset_id} dragging={canManage && drag?.device.asset_id === d.asset_id && drag.moved}
                 canManage={canManage} imageUrl={imageUrl} now={now}
                 onPointerDown={(e) => startDrag(e, d)} onKeyDown={(e) => onBlockKey(e, d)} />
@@ -244,8 +251,8 @@ function LockGlyph({ x, y, color }: { x: number; y: number; color: string }) {
   );
 }
 
-function DeviceBlock({ rack, device: d, face, mirrored, overlay, highlighted, dragging, canManage, imageUrl, now, onPointerDown, onKeyDown }: {
-  rack: RackGeom; device: DeviceWithPosture; face: RackFace; mirrored: boolean; overlay: boolean; highlighted: boolean; dragging: boolean;
+function DeviceBlock({ rack, device: d, face, mirrored, overlay, powerOverlay, highlighted, dragging, canManage, imageUrl, now, onPointerDown, onKeyDown }: {
+  rack: RackGeom; device: DeviceWithPosture; face: RackFace; mirrored: boolean; overlay: boolean; powerOverlay: boolean; highlighted: boolean; dragging: boolean;
   canManage: boolean; imageUrl?: RackElevationProps['imageUrl']; now?: Date;
   onPointerDown: (e: ReactPointerEvent) => void; onKeyDown: (e: KeyboardEvent) => void;
 }) {
@@ -256,6 +263,8 @@ function DeviceBlock({ rack, device: d, face, mirrored, overlay, highlighted, dr
   const hh = Math.max(h - 2, 3);
   const classColor = rackClassColor(d.class_key);
   const state = overlay ? overlayState(d.posture) : null;
+  const power: PowerOverlayState | null = powerOverlay ? (d.power ?? { kind: 'unknown', color: 'var(--app-t3)', label: 'Power not loaded' }) : null;
+  const powerTint = power && (power.kind === 'share' || power.kind === 'no-budget') ? power : null;
   const finding = state?.kind === 'finding';
   const ref = face === 'front' ? d.device_type?.front_image_ref : d.device_type?.rear_image_ref;
   const img = imageUrl?.(ref) ?? null;
@@ -264,19 +273,25 @@ function DeviceBlock({ rack, device: d, face, mirrored, overlay, highlighted, dr
   const badges = (overlay && d.posture?.weak_protocol ? 16 : 0) + (certDays != null ? 34 : 0);
   const maxChars = Math.floor((w - 18 - badges) / 6.3);
   const twoLines = hh >= 30;
-  const tooltip = overlay ? overlayTooltip(d.name, d.posture, now) : `${d.name}\n${model} · ${unitLabel(d.position)} · ${d.u_height}U${d.is_full_depth ? ' · full depth' : ''}`;
-  const stroke = state && state.kind !== 'unknown' ? state.color : classColor;
+  const tooltip = power ? `${d.name}\n${power.label}`
+    : overlay ? overlayTooltip(d.name, d.posture, now) : `${d.name}\n${model} · ${unitLabel(d.position)} · ${d.u_height}U${d.is_full_depth ? ' · full depth' : ''}`;
+  const stroke = powerTint ? powerTint.color : state && state.kind !== 'unknown' ? state.color : classColor;
+  const dashed = mirrored || state?.kind === 'unassessed' || power?.kind === 'unrecorded' || power?.kind === 'unknown';
   return (
     <g data-testid="rack-block" data-asset={d.asset_id} data-face={face} data-mirrored={mirrored ? 'true' : 'false'}
       data-y={y} data-h={h} data-overlay-color={state?.color ?? ''} data-overlay-kind={state?.kind ?? ''}
+      data-power-kind={power?.kind ?? ''} data-power-color={powerTint?.color ?? ''}
       role="button" tabIndex={mirrored ? -1 : 0}
-      aria-label={`${d.name}, ${unitLabel(d.position)}, ${d.u_height}U, ${d.face}${mirrored ? ' (seen from the other face)' : ''}${state ? `, ${state.label}` : ''}`}
+      aria-label={`${d.name}, ${unitLabel(d.position)}, ${d.u_height}U, ${d.face}${mirrored ? ' (seen from the other face)' : ''}${state ? `, ${state.label}` : ''}${power ? `, ${power.label}` : ''}`}
       style={{ cursor: canManage ? (dragging ? 'grabbing' : 'grab') : 'pointer', opacity: dragging ? 0.45 : 1, outline: 'none' }}
       onPointerDown={onPointerDown} onKeyDown={onKeyDown}>
       <title>{tooltip}</title>
       <rect x={x} y={top} width={w} height={hh} rx="3" fill={classColor} fillOpacity={mirrored ? 0.07 : 0.17}
-        stroke={stroke} strokeWidth={finding ? 2 : 1} strokeDasharray={mirrored || state?.kind === 'unassessed' ? '4 3' : undefined} />
+        stroke={stroke} strokeWidth={finding || powerTint ? 2 : 1} strokeDasharray={dashed ? '4 3' : undefined} />
       {img && !mirrored && <image href={img} x={x + 1} y={top + 1} width={w - 2} height={hh - 2} preserveAspectRatio="none" opacity="0.92" />}
+      {powerTint && (
+        <rect data-testid="rack-power-tint" x={x} y={top} width={w} height={hh} rx="3" fill={powerTint.color} fillOpacity={mirrored ? powerTint.opacity / 3 : powerTint.opacity} pointerEvents="none" />
+      )}
       {finding && state && (
         <>
           <rect data-testid="rack-overlay-tint" x={x} y={top} width={w} height={hh} rx="3" fill={state.color} fillOpacity={mirrored ? 0.08 : 0.2} pointerEvents="none" />

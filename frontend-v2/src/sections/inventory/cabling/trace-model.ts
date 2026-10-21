@@ -20,6 +20,7 @@ const KIND_WORD: Record<string, string> = {
   provider_network: 'provider network',
   power_port: 'power port',
   power_outlet: 'power outlet',
+  power_feed: 'power feed',
 };
 
 export const kindWord = (kind: string): string => KIND_WORD[kind] ?? kind.replace(/_/g, ' ');
@@ -28,6 +29,7 @@ export const kindWord = (kind: string): string => KIND_WORD[kind] ?? kind.replac
 export function nodeText(n: CablePathNode): string {
   if (n.kind === 'cable') return n.name;
   if (n.asset_name) return `${n.asset_name}:${n.name}`;
+  if (n.power_panel_name) return `${n.power_panel_name}:${n.name}`;
   return n.name;
 }
 
@@ -40,6 +42,8 @@ function throughLabel(prev: CablePathNode[], next: CablePathNode[]): string {
   if (a.kind === 'rear_port' && b.kind === 'front_port') return 'rear → front';
   if (a.kind === 'circuit_termination' && b.kind === 'circuit_termination') return 'circuit';
   if (b.kind === 'provider_network') return 'provider network';
+  // Row 6.1: a PDU's outlet draws from the PDU's own inlet.
+  if (a.kind === 'power_outlet' && b.kind === 'power_port') return 'outlet → inlet';
   return 'through';
 }
 

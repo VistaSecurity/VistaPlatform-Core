@@ -3,7 +3,7 @@
 // in the inventory-service spec (`/ipam/...`) and goes through the generated
 // client.
 //
-// Thirteen objects share one CRUD shape on the server, so the list / create /
+// Sixteen objects share one CRUD shape on the server, so the list / create /
 // update / delete hooks here are generic over the route segment. The route is
 // a closed union, and each one's row type comes from the contract.
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -28,6 +28,11 @@ export type IpamFindResult = S['IpamFindResult'];
 export type WirelessLanGroup = S['WirelessLanGroup'];
 export type WirelessLan = S['WirelessLan'];
 export type WirelessLink = S['WirelessLink'];
+// DCIM gap 10: ASN ranges and VLAN translation (NetBox 4.2 parity).
+export type AsnRange = S['AsnRange'];
+export type AvailableAsns = S['AvailableAsns'];
+export type VlanTranslationPolicy = S['VlanTranslationPolicy'];
+export type VlanTranslationRule = S['VlanTranslationRule'];
 
 /** Row type per route segment. */
 export interface IpamRows {
@@ -44,6 +49,9 @@ export interface IpamRows {
   'fhrp-groups': S['FhrpGroup'];
   'fhrp-group-assignments': S['FhrpGroupAssignment'];
   asns: Asn;
+  'asn-ranges': AsnRange;
+  'vlan-translation-policies': VlanTranslationPolicy;
+  'vlan-translation-rules': VlanTranslationRule;
   // Wireless (DCIM row 4.4) is served by the same object engine under
   // /wireless/..., so the same hooks and dialogs edit it.
   'wireless-lan-groups': WirelessLanGroup;
@@ -134,9 +142,11 @@ export function usePrefixDetail(id: string | null, length = 0) {
     queryKey: ipamKeys.prefix(id ?? '', length),
     enabled: !!id,
     queryFn: async ({ signal }): Promise<PrefixDetail> => {
-      const { data, error } = await clients.inventory.GET('/ipam/prefixes/{id}', {
+      const { data, error, response } = await clients.inventory.GET('/ipam/prefixes/{id}', {
         signal, params: { path: { id: id! }, query: { limit: 20, ...(length ? { length } : {}) } },
       });
+      // 'not-found' is the object pages' "no longer exists" signal.
+      if (response?.status === 404) throw new Error('not-found');
       if (error || !data) throw new Error(ipamError(error, 'Failed to load the prefix'));
       return data.data;
     },
@@ -155,6 +165,22 @@ export function useIpamFind(address: string, vrf: string) {
       });
       if (error || !data) throw new Error(ipamError(error, 'Failed to look the address up'));
       return data.data ?? [];
+    },
+  });
+}
+
+/** An ASN range's free AS numbers (DCIM gap 10): the first `limit` of them,
+ *  how many are free and how many of the tenant's ASNs are in it. */
+export function useAvailableAsns(rangeId: string | null, limit = 10) {
+  return useQuery({
+    queryKey: ['ipam', 'available-asns', rangeId ?? '', limit] as const,
+    enabled: !!rangeId,
+    queryFn: async ({ signal }): Promise<AvailableAsns> => {
+      const { data, error } = await clients.inventory.GET('/ipam/asn-ranges/{id}/available-asns', {
+        signal, params: { path: { id: rangeId! }, query: { limit } },
+      });
+      if (error || !data) throw new Error(ipamError(error, 'Failed to load the free AS numbers'));
+      return data.data;
     },
   });
 }

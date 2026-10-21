@@ -1,7 +1,7 @@
 // Settings → Infrastructure → Circuit Providers (DCIM BUILD_PLAN row 4.1;
 // ADR-0010 D8): the catalogues the Inventory → Circuits lens builds on —
-// circuit providers, their accounts and networks, circuit types and circuit
-// groups. Simple tables with add / edit / delete; the circuit types the
+// circuit providers, their accounts and networks, circuit types, virtual
+// circuit types (DCIM gap 10) and circuit groups. Simple tables with add / edit / delete; the circuit types the
 // platform ships are listed read-only. Reading needs `circuits.read` (the nav
 // entry); every write control sits behind `circuits.manage`.
 import { useState, type ReactNode } from 'react';
@@ -148,6 +148,24 @@ const TYPES: Catalog<'circuit-types'> = {
   name: (t) => t.name,
 };
 
+// DCIM gap 10: the kinds of virtual circuit (NetBox 4.2
+// circuits/virtual-circuit-type) the Circuits lens's Virtual circuits view
+// picks from. A tenant's own; none are built in.
+const VC_TYPES: Catalog<'virtual-circuit-types'> = {
+  route: 'virtual-circuit-types', title: 'Virtual Circuit Types', noun: 'virtual circuit type',
+  desc: 'What kind of overlay a virtual circuit is — SD-WAN, MPLS L3VPN, Metro Ethernet.',
+  cols: [{ label: 'Name', w: '1.4fr' }, { label: 'Slug', w: '1fr' }, { label: 'Colour', w: '0.8fr' }],
+  cells: (t) => [t.name, <span key="s" className="mono">{t.slug}</span>, t.color ? <span key="c" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><span style={{ width: 10, height: 10, borderRadius: 3, background: `#${t.color}` }} /><span className="mono">#{t.color}</span></span> : '—'],
+  fields: () => [
+    { name: 'name', label: 'Name', required: true },
+    { name: 'slug', label: 'Slug', hint: 'Left blank, it is made from the name.' },
+    { name: 'color', label: 'Colour', mono: true, placeholder: '2196f3' },
+    { name: 'description', label: 'Description' },
+  ],
+  initial: (t) => ({ name: t.name, slug: t.slug, color: t.color ?? '', description: t.description ?? '' }),
+  name: (t) => t.name,
+};
+
 const GROUPS: Catalog<'circuit-groups'> = {
   route: 'circuit-groups', title: 'Circuit Groups', noun: 'circuit group',
   desc: 'Name a set of circuits that belong together, such as the primary and backup links to one office.',
@@ -170,6 +188,7 @@ export function CircuitProvidersPage({ meta }: { meta: SettingsNavItem & { secti
         <CatalogSection c={ACCOUNTS} />
         <CatalogSection c={NETWORKS} />
         <CatalogSection c={TYPES} />
+        <CatalogSection c={VC_TYPES} />
         <CatalogSection c={GROUPS} />
       </div>
     </SPage>

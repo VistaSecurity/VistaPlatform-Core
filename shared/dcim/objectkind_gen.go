@@ -35,6 +35,8 @@ const (
 	ObjectKindInventoryItemRole         ObjectKind = "inventory_item_role"
 	ObjectKindVirtualChassis            ObjectKind = "virtual_chassis"
 	ObjectKindDeviceBay                 ObjectKind = "device_bay"
+	ObjectKindVirtualDeviceContext      ObjectKind = "virtual_device_context"
+	ObjectKindRmaCase                   ObjectKind = "rma_case"
 	ObjectKindInterfaceTemplate         ObjectKind = "interface_template"
 	ObjectKindConsolePortTemplate       ObjectKind = "console_port_template"
 	ObjectKindConsoleServerPortTemplate ObjectKind = "console_server_port_template"
@@ -52,6 +54,8 @@ const (
 	ObjectKindRearPort                  ObjectKind = "rear_port"
 	ObjectKindPowerPort                 ObjectKind = "power_port"
 	ObjectKindPowerOutlet               ObjectKind = "power_outlet"
+	ObjectKindPowerPanel                ObjectKind = "power_panel"
+	ObjectKindPowerFeed                 ObjectKind = "power_feed"
 	ObjectKindCable                     ObjectKind = "cable"
 	ObjectKindCableTermination          ObjectKind = "cable_termination"
 	ObjectKindCablePath                 ObjectKind = "cable_path"
@@ -66,9 +70,12 @@ const (
 	ObjectKindIpAddress                 ObjectKind = "ip_address"
 	ObjectKindVlanGroup                 ObjectKind = "vlan_group"
 	ObjectKindVlan                      ObjectKind = "vlan"
+	ObjectKindVlanTranslationPolicy     ObjectKind = "vlan_translation_policy"
+	ObjectKindVlanTranslationRule       ObjectKind = "vlan_translation_rule"
 	ObjectKindFhrpGroup                 ObjectKind = "fhrp_group"
 	ObjectKindFhrpGroupAssignment       ObjectKind = "fhrp_group_assignment"
 	ObjectKindAsn                       ObjectKind = "asn"
+	ObjectKindAsnRange                  ObjectKind = "asn_range"
 	ObjectKindProvider                  ObjectKind = "provider"
 	ObjectKindProviderAccount           ObjectKind = "provider_account"
 	ObjectKindProviderNetwork           ObjectKind = "provider_network"
@@ -77,6 +84,9 @@ const (
 	ObjectKindCircuitTermination        ObjectKind = "circuit_termination"
 	ObjectKindCircuitGroup              ObjectKind = "circuit_group"
 	ObjectKindCircuitGroupAssignment    ObjectKind = "circuit_group_assignment"
+	ObjectKindVirtualCircuitType        ObjectKind = "virtual_circuit_type"
+	ObjectKindVirtualCircuit            ObjectKind = "virtual_circuit"
+	ObjectKindVirtualCircuitTermination ObjectKind = "virtual_circuit_termination"
 	ObjectKindClusterType               ObjectKind = "cluster_type"
 	ObjectKindClusterGroup              ObjectKind = "cluster_group"
 	ObjectKindCluster                   ObjectKind = "cluster"
@@ -132,6 +142,8 @@ var AllObjectKinds = []ObjectKind{
 	ObjectKindInventoryItemRole,
 	ObjectKindVirtualChassis,
 	ObjectKindDeviceBay,
+	ObjectKindVirtualDeviceContext,
+	ObjectKindRmaCase,
 	ObjectKindInterfaceTemplate,
 	ObjectKindConsolePortTemplate,
 	ObjectKindConsoleServerPortTemplate,
@@ -149,6 +161,8 @@ var AllObjectKinds = []ObjectKind{
 	ObjectKindRearPort,
 	ObjectKindPowerPort,
 	ObjectKindPowerOutlet,
+	ObjectKindPowerPanel,
+	ObjectKindPowerFeed,
 	ObjectKindCable,
 	ObjectKindCableTermination,
 	ObjectKindCablePath,
@@ -163,9 +177,12 @@ var AllObjectKinds = []ObjectKind{
 	ObjectKindIpAddress,
 	ObjectKindVlanGroup,
 	ObjectKindVlan,
+	ObjectKindVlanTranslationPolicy,
+	ObjectKindVlanTranslationRule,
 	ObjectKindFhrpGroup,
 	ObjectKindFhrpGroupAssignment,
 	ObjectKindAsn,
+	ObjectKindAsnRange,
 	ObjectKindProvider,
 	ObjectKindProviderAccount,
 	ObjectKindProviderNetwork,
@@ -174,6 +191,9 @@ var AllObjectKinds = []ObjectKind{
 	ObjectKindCircuitTermination,
 	ObjectKindCircuitGroup,
 	ObjectKindCircuitGroupAssignment,
+	ObjectKindVirtualCircuitType,
+	ObjectKindVirtualCircuit,
+	ObjectKindVirtualCircuitTermination,
 	ObjectKindClusterType,
 	ObjectKindClusterGroup,
 	ObjectKindCluster,
@@ -232,6 +252,8 @@ var objectKindInfos = map[ObjectKind]objectKindInfo{
 	ObjectKindInventoryItemRole:         {label: "Inventory Item Role", plural: "Inventory Item Roles", table: "inventory_item_roles", phase: "2", netbox: "dcim/inventory-item-role"},
 	ObjectKindVirtualChassis:            {label: "Virtual Chassis", plural: "Virtual Chassis", table: "virtual_chassis", phase: "2", netbox: "dcim/virtual-chassis"},
 	ObjectKindDeviceBay:                 {label: "Device Bay", plural: "Device Bays", table: "device_bays", phase: "2", netbox: "dcim/device-bay"},
+	ObjectKindVirtualDeviceContext:      {label: "Virtual Device Context", plural: "Virtual Device Contexts", table: "virtual_device_contexts", phase: "2", netbox: "dcim/virtual-device-context"},
+	ObjectKindRmaCase:                   {label: "RMA Case", plural: "RMA Cases", table: "rma_cases", phase: "6", netbox: ""},
 	ObjectKindInterfaceTemplate:         {label: "Interface Template", plural: "Interface Templates", table: "interface_templates", phase: "2", netbox: "dcim/interface-template"},
 	ObjectKindConsolePortTemplate:       {label: "Console Port Template", plural: "Console Port Templates", table: "console_port_templates", phase: "2", netbox: "dcim/console-port-template"},
 	ObjectKindConsoleServerPortTemplate: {label: "Console Server Port Template", plural: "Console Server Port Templates", table: "console_server_port_templates", phase: "2", netbox: "dcim/console-server-port-template"},
@@ -249,6 +271,8 @@ var objectKindInfos = map[ObjectKind]objectKindInfo{
 	ObjectKindRearPort:                  {label: "Rear Port", plural: "Rear Ports", table: "rear_ports", phase: "3", netbox: "dcim/rear-port"},
 	ObjectKindPowerPort:                 {label: "Power Port", plural: "Power Ports", table: "power_ports", phase: "3", netbox: "dcim/power-port"},
 	ObjectKindPowerOutlet:               {label: "Power Outlet", plural: "Power Outlets", table: "power_outlets", phase: "3", netbox: "dcim/power-outlet"},
+	ObjectKindPowerPanel:                {label: "Power Panel", plural: "Power Panels", table: "power_panels", phase: "6", netbox: "dcim/power-panel"},
+	ObjectKindPowerFeed:                 {label: "Power Feed", plural: "Power Feeds", table: "power_feeds", phase: "6", netbox: "dcim/power-feed"},
 	ObjectKindCable:                     {label: "Cable", plural: "Cables", table: "cables", phase: "3", netbox: "dcim/cable"},
 	ObjectKindCableTermination:          {label: "Cable Termination", plural: "Cable Terminations", table: "cable_terminations", phase: "3", netbox: "dcim/cable-termination"},
 	ObjectKindCablePath:                 {label: "Cable Path", plural: "Cable Paths", table: "cable_paths", phase: "3", netbox: "dcim/cable-path (internal)"},
@@ -263,9 +287,12 @@ var objectKindInfos = map[ObjectKind]objectKindInfo{
 	ObjectKindIpAddress:                 {label: "IP Address", plural: "IP Addresses", table: "ip_addresses", phase: "1", netbox: "ipam/ip-address"},
 	ObjectKindVlanGroup:                 {label: "VLAN Group", plural: "VLAN Groups", table: "vlan_groups", phase: "1", netbox: "ipam/vlan-group"},
 	ObjectKindVlan:                      {label: "VLAN", plural: "VLANs", table: "vlans", phase: "1", netbox: "ipam/vlan"},
+	ObjectKindVlanTranslationPolicy:     {label: "VLAN Translation Policy", plural: "VLAN Translation Policies", table: "vlan_translation_policies", phase: "1", netbox: "ipam/vlan-translation-policy"},
+	ObjectKindVlanTranslationRule:       {label: "VLAN Translation Rule", plural: "VLAN Translation Rules", table: "vlan_translation_rules", phase: "1", netbox: "ipam/vlan-translation-rule"},
 	ObjectKindFhrpGroup:                 {label: "FHRP Group", plural: "FHRP Groups", table: "fhrp_groups", phase: "1", netbox: "ipam/fhrp-group"},
 	ObjectKindFhrpGroupAssignment:       {label: "FHRP Group Assignment", plural: "FHRP Group Assignments", table: "fhrp_group_assignments", phase: "1", netbox: "ipam/fhrp-group-assignment"},
 	ObjectKindAsn:                       {label: "ASN", plural: "ASNs", table: "asns", phase: "1", netbox: "ipam/asn"},
+	ObjectKindAsnRange:                  {label: "ASN Range", plural: "ASN Ranges", table: "asn_ranges", phase: "1", netbox: "ipam/asn-range"},
 	ObjectKindProvider:                  {label: "Provider", plural: "Providers", table: "providers", phase: "4", netbox: "circuits/provider"},
 	ObjectKindProviderAccount:           {label: "Provider Account", plural: "Provider Accounts", table: "provider_accounts", phase: "4", netbox: "circuits/provider-account"},
 	ObjectKindProviderNetwork:           {label: "Provider Network", plural: "Provider Networks", table: "provider_networks", phase: "4", netbox: "circuits/provider-network"},
@@ -274,6 +301,9 @@ var objectKindInfos = map[ObjectKind]objectKindInfo{
 	ObjectKindCircuitTermination:        {label: "Circuit Termination", plural: "Circuit Terminations", table: "circuit_terminations", phase: "4", netbox: "circuits/circuit-termination"},
 	ObjectKindCircuitGroup:              {label: "Circuit Group", plural: "Circuit Groups", table: "circuit_groups", phase: "4", netbox: "circuits/circuit-group"},
 	ObjectKindCircuitGroupAssignment:    {label: "Circuit Group Assignment", plural: "Circuit Group Assignments", table: "circuit_group_assignments", phase: "4", netbox: "circuits/circuit-group-assignment"},
+	ObjectKindVirtualCircuitType:        {label: "Virtual Circuit Type", plural: "Virtual Circuit Types", table: "virtual_circuit_types", phase: "4", netbox: "circuits/virtual-circuit-type"},
+	ObjectKindVirtualCircuit:            {label: "Virtual Circuit", plural: "Virtual Circuits", table: "virtual_circuits", phase: "4", netbox: "circuits/virtual-circuit"},
+	ObjectKindVirtualCircuitTermination: {label: "Virtual Circuit Termination", plural: "Virtual Circuit Terminations", table: "virtual_circuit_terminations", phase: "4", netbox: "circuits/virtual-circuit-termination"},
 	ObjectKindClusterType:               {label: "Cluster Type", plural: "Cluster Types", table: "cluster_types", phase: "4", netbox: "virtualization/cluster-type"},
 	ObjectKindClusterGroup:              {label: "Cluster Group", plural: "Cluster Groups", table: "cluster_groups", phase: "4", netbox: "virtualization/cluster-group"},
 	ObjectKindCluster:                   {label: "Cluster", plural: "Clusters", table: "clusters", phase: "4", netbox: "virtualization/cluster"},

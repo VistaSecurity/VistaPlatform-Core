@@ -200,13 +200,15 @@ func (s *DCIMSyncService) engineFor(kind dcim.ObjectKind) (*ipamSpec, *IPAMServi
 	return nil, nil
 }
 
-// syncObjectSpecs are the row 4.1–4.4 specs a sync writes through.
+// syncObjectSpecs are the row 4.1–4.4 and 6.1 specs a sync writes through.
 func syncObjectSpecs() []*ipamSpec {
 	var out []*ipamSpec
 	out = append(out, circuitSpecs()...)
 	out = append(out, virtualizationSpecs()...)
 	out = append(out, vpnSpecs()...)
 	out = append(out, wirelessSpecs()...)
+	// Row 6.1: power panels and feeds.
+	out = append(out, powerSpecs()...)
 	return out
 }
 
@@ -214,6 +216,9 @@ func syncObjectSpecs() []*ipamSpec {
 func (s *DCIMSyncService) ListObjects(ctx context.Context, tenant uuid.UUID, kind dcim.ObjectKind, after uuid.UUID, limit int) ([]SyncObject, bool, error) {
 	if _, err := syncSpec(kind); err != nil {
 		return nil, false, err
+	}
+	if out, more, handled, err := s.listVM(ctx, tenant, kind, after, limit); handled {
+		return out, more, err
 	}
 	if out, more, handled, err := s.listDCIM(ctx, tenant, kind, after, limit); handled {
 		return out, more, err
@@ -234,10 +239,25 @@ func (s *DCIMSyncService) ListObjects(ctx context.Context, tenant uuid.UUID, kin
 	if (sp != nil && sp.Lifecycle) || kind == dcim.ObjectKindInterface {
 		where = append(where, "t.status <> 'rejected'")
 	}
+	if kind == dcim.ObjectKindInterface {
+		// A virtual machine's interface is a NetBox VM interface (kind
+		// vm_interface, its own id space), never a device interface: it is
+		// listed there, and pushed to virtualization/interfaces.
+		where = append(where, `NOT EXISTS (SELECT 1 FROM public.assets a WHERE a.tenant_id = t.tenant_id AND a.id = t.asset_id AND `+vmSideAsset+`)`)
+	}
+	sel := "to_jsonb(t)"
+	if kind == dcim.ObjectKindInterface {
+		// The interface's virtual device context memberships (DCIM gap 1;
+		// sync-authority computed field virtual_device_context_ids) live in
+		// the junction, not in a column.
+		sel = `to_jsonb(t) || jsonb_build_object('virtual_device_context_ids',
+			COALESCE((SELECT jsonb_agg(j.virtual_device_context_id ORDER BY j.virtual_device_context_id)
+			            FROM public.interface_virtual_device_contexts j WHERE j.interface_id = t.id), '[]'::jsonb))`
+	}
 	var out []SyncObject
 	err := shareddb.WithTenantTx(ctx, s.raw, tenant, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT to_jsonb(t) FROM public.%s t WHERE %s ORDER BY t.id LIMIT $2`,
-			pq.QuoteIdentifier(table), strings.Join(where, " AND ")), after, limit+1, tenant)
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM public.%s t WHERE %s ORDER BY t.id LIMIT $2`,
+			sel, pq.QuoteIdentifier(table), strings.Join(where, " AND ")), after, limit+1, tenant)
 		if err != nil {
 			return err
 		}
@@ -320,6 +340,9 @@ func (s *DCIMSyncService) Changes(ctx context.Context, tenant uuid.UUID, peer st
 		return nil, nil, err
 	}
 	source := string(changes.SyncSource(peer))
+	// A sync kind's rows are its object's (a VM is an asset): their changes
+	// are recorded under that kind, and its peer id under its own key.
+	stored, key := syncStored(kind), syncPeerKey(peer, kind)
 	var fields []SyncFieldChange
 	var deleted []SyncDeleted
 	err := shareddb.WithTenantTx(ctx, s.raw, tenant, func(tx *sql.Tx) error {
@@ -330,7 +353,7 @@ func (s *DCIMSyncService) Changes(ctx context.Context, tenant uuid.UUID, peer st
 			  FROM public.object_changes c, unnest(c.changed_fields) AS f(field)
 			 WHERE c.tenant_id = $1 AND c.object_kind = $2 AND c.created_at > $3
 			   AND c.action = 'update' AND c.source <> $4
-			 GROUP BY c.object_id, f.field`, tenant, string(kind), since, source)
+			 GROUP BY c.object_id, f.field`, tenant, string(stored), since, source)
 		if err != nil {
 			return err
 		}
@@ -353,6 +376,11 @@ func (s *DCIMSyncService) Changes(ctx context.Context, tenant uuid.UUID, peer st
 		if err := rows.Err(); err != nil {
 			return err
 		}
+		if kind == syncKindVirtualMachine {
+			var derr error
+			deleted, derr = vmDeleted(ctx, tx, tenant, since)
+			return derr
+		}
 		drows, err := tx.QueryContext(ctx, `
 			SELECT c.object_id, c.prechange_data -> 'external_ids' ->> $5,
 			       COALESCE(c.prechange_data ->> 'name', c.prechange_data ->> 'prefix', c.prechange_data ->> 'address',
@@ -361,7 +389,7 @@ func (s *DCIMSyncService) Changes(ctx context.Context, tenant uuid.UUID, peer st
 			  FROM public.object_changes c
 			 WHERE c.tenant_id = $1 AND c.object_kind = $2 AND c.created_at > $3
 			   AND c.action = 'delete' AND c.source <> $4
-			   AND c.prechange_data -> 'external_ids' ? $5`, tenant, string(kind), since, source, peer)
+			   AND c.prechange_data -> 'external_ids' ? $5`, tenant, string(stored), since, source, key)
 		if err != nil {
 			return err
 		}
@@ -475,6 +503,9 @@ func externalIDsWithout(existing any, peer string) map[string]any {
 }
 
 func (s *DCIMSyncService) create(ctx context.Context, tenant uuid.UUID, peer string, kind dcim.ObjectKind, it SyncWrite) (uuid.UUID, error) {
+	if id, handled, err := s.createVMKind(ctx, tenant, peer, kind, it); handled {
+		return id, err
+	}
 	if id, handled, err := s.createDCIM(ctx, tenant, peer, kind, it); handled {
 		return id, err
 	}
@@ -531,6 +562,9 @@ func (s *DCIMSyncService) create(ctx context.Context, tenant uuid.UUID, peer str
 }
 
 func (s *DCIMSyncService) update(ctx context.Context, tenant uuid.UUID, peer string, kind dcim.ObjectKind, it SyncWrite) error {
+	if handled, err := s.updateVMKind(ctx, tenant, peer, kind, it); handled {
+		return err
+	}
 	if handled, err := s.updateDCIM(ctx, tenant, peer, kind, it); handled {
 		return err
 	}
@@ -673,6 +707,9 @@ func (s *DCIMSyncService) Delete(ctx context.Context, tenant uuid.UUID, peer str
 		return err
 	}
 	ctx = changes.WithSource(ctx, changes.SyncSource(peer))
+	if handled, err := s.deleteVMKind(ctx, tenant, kind, id); handled {
+		return err
+	}
 	if handled, err := s.deleteDCIM(ctx, tenant, kind, id); handled {
 		return err
 	}
@@ -808,6 +845,13 @@ func (m syncKeyMatcher) MatchBySyncKey(ctx context.Context, tenant uuid.UUID, ke
 	if _, ok := syncauthority.Kind(kind); !ok {
 		return unresolved.Match{}, false, nil
 	}
+	if isVMSyncKind(kind) {
+		id, ok, err := vmMatch(ctx, m.raw, tenant, parts[0], kind, value)
+		if err != nil || !ok {
+			return unresolved.Match{}, false, err
+		}
+		return unresolved.Match{Kind: kind, ID: id}, true, nil
+	}
 	var id uuid.UUID
 	err := shareddb.WithTenantTx(ctx, m.raw, tenant, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT id FROM public.%s WHERE tenant_id = $1 AND external_ids ->> $2 = $3 ORDER BY created_at LIMIT 1`,
@@ -859,14 +903,18 @@ func (a syncApplier) ApplyAssignment(ctx context.Context, tenant uuid.UUID, p un
 	if p.OriginKind != dcim.ObjectKindIpAddress {
 		return fmt.Errorf("sync: an assignment from %s is not supported", p.OriginKind)
 	}
-	if far.Kind != dcim.ObjectKindInterface && far.Kind != dcim.ObjectKindFhrpGroup {
+	farKind := far.Kind
+	if farKind == syncKindVMInterface {
+		farKind = dcim.ObjectKindInterface // a VM interface is an interface row
+	}
+	if farKind != dcim.ObjectKindInterface && farKind != dcim.ObjectKindFhrpGroup {
 		return fmt.Errorf("sync: an address cannot be assigned to a %s", far.Kind)
 	}
 	sp := a.s.ipamSpecFor(dcim.ObjectKindIpAddress)
 	ctx = changes.WithSource(ctx, changes.SyncSource(p.Producer))
 	err := a.s.ipam.tx(ctx, tenant, func(tx *sql.Tx) error {
 		_, err := a.s.ipam.updateTx(ctx, tx, sp, tenant, p.OriginID, map[string]any{
-			"assigned_kind": string(far.Kind), "assigned_id": far.ID.String(),
+			"assigned_kind": string(farKind), "assigned_id": far.ID.String(),
 		}, "")
 		return err
 	})

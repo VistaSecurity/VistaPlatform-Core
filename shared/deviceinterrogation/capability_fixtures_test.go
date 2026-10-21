@@ -975,9 +975,23 @@ func snmpConformanceRuns(t *testing.T) []conformanceRun {
 		oid, tag, raw := v.Wire()
 		switchMIB = append(switchMIB, snmpTestValue{oid: oid, tag: tag, raw: raw})
 	}
+	// The PDU collectors (DCIM row 6.2): one rack PDU per vendor MIB and a
+	// server whose power supplies carry ENTITY-SENSOR-MIB power sensors.
+	recorded := func(r snmpfake.Recording) []snmpTestValue {
+		var out []snmpTestValue
+		for _, v := range r.MIB {
+			oid, tag, raw := v.Wire()
+			out = append(out, snmpTestValue{oid: oid, tag: tag, raw: raw})
+		}
+		return out
+	}
 	return []conformanceRun{
 		snmpConformanceRun(t, "mib-ii agent", snmpTestMIB()),
 		snmpConformanceRun(t, "layer-3 switch", switchMIB),
+		snmpConformanceRun(t, "APC rack PDU", recorded(snmpfake.APCRackPDU())),
+		snmpConformanceRun(t, "Raritan PDU", recorded(snmpfake.RaritanPDU())),
+		snmpConformanceRun(t, "Eaton ePDU", recorded(snmpfake.EatonEPDU())),
+		snmpConformanceRun(t, "server power supply sensors", recorded(snmpfake.ServerWithPSUSensors())),
 		expectWarnings(snmpConformanceRun(t, "mib-ii agent, interface table past the cap", truncated),
 			snmpColumnEndpoint(snmpOIDIfDescr)),
 	}

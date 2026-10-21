@@ -45,6 +45,8 @@ The tree is **hierarchical**, and picking a parent selects everything beneath it
 
 **The columns follow the class you pick.** Choose Server and you get operating system and model; choose Object storage and you get provider and account. Pick a parent class, or none at all, and the columns fall back to what everything shares — because a list mixing servers and switches has no common operating-system column to show.
 
+**Columns** in the toolbar changes that set. It lists every column the list can show — Standard, More (support group, site, business unit, network, endpoints, risk), Lifecycle (warranty end, end of support, purchased, seller) and, with a class picked, all of that class's attributes, not only the three shown by default. Tick a column to show it, untick one to hide it, search the list by name, or **Reset to default**. Your choice is remembered in this browser for your account, and a column you never touched keeps following the class you pick.
+
 To browse the taxonomy itself — every class, the attributes it carries, and what a class decides — see [Asset Classes & Identification Rules](./asset-classes.md).
 
 ### The other filters
@@ -115,7 +117,7 @@ address (`/inventory/assets/…`), which you can link to, and has tabs:
 | **Services & Endpoints** | Every network face of the asset: address, port, transport, the identified service and how confidently it was identified, and when it was last seen. |
 | **Interfaces** | The asset's physical and virtual interfaces, addresses and VLAN modes ([Interfaces](../inventory/interfaces.md)). |
 | **Ports** | The faceplate: ports drawn in the device type's order, with **Connect**, the bulk cable editor, **Trace** and the cryptography overlay ([Cabling](../inventory/cabling.md)). |
-| **Hardware** | Device type, modules and module bays, inventory items and virtual chassis ([Device types](../inventory/device-types.md)). |
+| **Hardware** | Device type, the **Lifecycle** card (purchase, warranty, support contract and end of support), modules and module bays, inventory items and virtual chassis ([Device types](../inventory/device-types.md)). |
 | **Relationships** | What this asset is attached to — each edge with its type, its direction, where it came from, and whether it is confirmed or still proposed — plus the impact closure: what else is affected if this goes away. |
 | **Cryptography** | The crypto configurations discovered on the asset. Click one for the full configuration drawer. |
 | **Findings** | Cryptographic findings on this asset, with the configuration each was found on. |
@@ -156,7 +158,7 @@ do with them:
 | **Archive** | Archives the selection, after a confirmation. | update assets |
 | **Restore** | Returns archived assets in the selection to active inventory. One that stays unseen past your lifecycle policy is archived again. | update assets |
 | **Delete** | Soft-deletes the selection, after a confirmation. Each asset can be restored from its own page. | delete assets |
-| **Export** | Downloads the selection as CSV — every matching asset, not only the page. | — |
+| **Export** | Downloads the selection as CSV — every matching asset, not only the page. The file keeps its standard columns and adds every column you have shown that they do not already include (owner, support group, a class's attributes as `attr.<name>`…). | — |
 
 Buttons you lack the permission for are not shown. Each result says how many
 assets changed and how many were already in that state. Every change is

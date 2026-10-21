@@ -1,0 +1,71 @@
+<!--
+  PAN-OS `show interface all` on a multi-vsys firewall. <ifnet>'s <vsys> is the
+  number of the virtual system that owns the interface; ethernet1/4 is assigned
+  to none (0). SYNTHESISED; see README.md.
+-->
+<response status="success">
+  <result>
+    <ifnet>
+      <entry>
+        <name>ethernet1/1</name>
+        <zone>untrust</zone>
+        <fwd>vr:default</fwd>
+        <vsys>1</vsys>
+        <tag>0</tag>
+        <ip>198.51.100.20/24</ip>
+        <id>16</id>
+        <comment>PlantedVdcSecret-4410</comment>
+      </entry>
+      <entry>
+        <name>ethernet1/2</name>
+        <zone>tenant-b-trust</zone>
+        <fwd>vr:tenant-b</fwd>
+        <vsys>2</vsys>
+        <tag>0</tag>
+        <ip>10.70.0.1/24</ip>
+        <id>17</id>
+      </entry>
+      <entry>
+        <name>ethernet1/2.20</name>
+        <zone>tenant-b-dmz</zone>
+        <fwd>vr:tenant-b</fwd>
+        <vsys>2</vsys>
+        <tag>20</tag>
+        <ip>10.70.20.1/24</ip>
+        <id>18</id>
+      </entry>
+      <entry>
+        <name>ethernet1/4</name>
+        <zone/>
+        <fwd/>
+        <vsys>0</vsys>
+        <tag>0</tag>
+        <ip>N/A</ip>
+        <id>20</id>
+      </entry>
+    </ifnet>
+    <hw>
+      <entry>
+        <name>ethernet1/1</name>
+        <state>up</state>
+        <mac>00:00:5e:00:53:11</mac>
+        <speed>1000</speed>
+        <id>16</id>
+      </entry>
+      <entry>
+        <name>ethernet1/2</name>
+        <state>up</state>
+        <mac>00:00:5e:00:53:12</mac>
+        <speed>1000</speed>
+        <id>17</id>
+      </entry>
+      <entry>
+        <name>ethernet1/4</name>
+        <state>down</state>
+        <mac>00:00:5e:00:53:14</mac>
+        <speed>unknown</speed>
+        <id>20</id>
+      </entry>
+    </hw>
+  </result>
+</response>

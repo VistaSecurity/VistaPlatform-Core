@@ -47,11 +47,15 @@ const SPEC_FIELDS: Record<string, string[]> = {
     'business_unit', 'business_unit.id', 'business_unit.parent', 'owner_email', 'support_group', 'site', 'site.id', 'site.group', 'site.region', 'location', 'region', 'zone',
     'device_type', 'device_type.id', 'device_type.manufacturer', 'device_role', 'device_role.id',
     'platform', 'platform.id', 'serial', 'asset_tag',
+    'purchase_date', 'warranty_end', 'support_contract_end', 'installed_at', 'decommissioned_at', 'vendor', 'end_of_support',
     'cluster', 'cluster.id', 'cluster.type', 'cluster.group',
     'circuit', 'circuit.cid', 'circuit.provider',
     'rack', 'rack.id', 'rack.site', 'rack.role', 'position', 'face',
-    'module_type', 'inventory_item.serial', 'virtual_chassis',
+    'module_type', 'inventory_item.serial', 'inventory_item.stock_state', 'virtual_chassis',
+    'virtual_circuit', 'virtual_circuit.cid', 'virtual_circuit.provider', 'virtual_circuit.role',
     'cable.type', 'cable.status', 'cabled_to',
+    'power_feed.status', 'power_feed.type', 'power_feed.supply', 'power_feed.phase', 'power_feed.voltage',
+    'power_feed.amperage', 'power_feed.available_power', 'power_feed.panel', 'power_feed.rack', 'power_feed.site',
     'provider', 'account', 'cloud.type',
     'status', 'ownership', 'stale_status', 'identity_status', 'source', 'proposed_by', 'cert_trust',
     // IPAM, computed from the asset's addresses (QUERY_LANGUAGE §15 D2).
@@ -109,6 +113,8 @@ const SPEC_FIELDS: Record<string, string[]> = {
   interface: [
     'name', 'type', 'mac_address', 'enabled', 'mgmt_only', 'mtu', 'speed_kbps', 'mode', 'status',
     'operational_status', 'description', 'id',
+    // §15 (DCIM gap 1): a virtual device context the interface belongs to.
+    'virtual_device_context',
   ],
 };
 

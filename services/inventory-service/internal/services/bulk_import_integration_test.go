@@ -110,11 +110,12 @@ func (f *bulkImpFixture) seed(t *testing.T, tenant uuid.UUID) {
 	}
 
 	mf := f.catalogue(t, tenant, "manufacturers", map[string]any{"name": "Acme Networks", "description": "Switches"})
-	plat := f.catalogue(t, tenant, "platforms", map[string]any{"name": "AcmeOS", "manufacturer_id": mf})
+	plat := f.catalogue(t, tenant, "platforms", map[string]any{"name": "AcmeOS", "manufacturer_id": mf, "end_of_support": "2029-06-30", "end_of_life": "2030-06-30"})
 	parent := f.catalogue(t, tenant, "device-roles", map[string]any{"name": "Network"})
 	role := f.catalogue(t, tenant, "device-roles", map[string]any{"name": "Core switch", "parent_id": parent, "color": "2196f3"})
 	dt := f.catalogue(t, tenant, "device-types", map[string]any{
-		"manufacturer_id": mf, "model": "AX-48", "u_height": "1", "is_full_depth": true, "weight": "7.3", "weight_unit": "kg", "default_platform_id": plat})
+		"manufacturer_id": mf, "model": "AX-48", "u_height": "1", "is_full_depth": true, "weight": "7.3", "weight_unit": "kg", "default_platform_id": plat,
+		"end_of_sale": "2025-10-31", "end_of_support": "2030-10-31"})
 
 	// The asset goes in through the identity engine, as an imported one will:
 	// both tenants then carry the same side effects (the observed address and
@@ -137,7 +138,11 @@ func (f *bulkImpFixture) seed(t *testing.T, tenant uuid.UUID) {
 		t.Fatal(err)
 	}
 	patch := HardwarePatch{}
-	for k, v := range map[string]string{"device_type_id": dt, "device_role_id": role, "platform_id": plat, "serial": "SN-100", "asset_tag": "A-0001"} {
+	for k, v := range map[string]string{"device_type_id": dt, "device_role_id": role, "platform_id": plat, "serial": "SN-100", "asset_tag": "A-0001",
+		// The commercial lifecycle (DCIM gap 4) round-trips with the rest.
+		"purchase_date": "2024-03-01", "warranty_start": "2024-03-01", "warranty_end": "2027-02-28", "purchase_cost": "4200.50",
+		"purchase_currency": "EUR", "purchase_order": "PO-1001", "vendor": "Acme Resale", "support_contract": "SC-77",
+		"support_contract_end": "2027-03-31", "installed_at": "2024-03-15"} {
 		raw, _ := json.Marshal(v)
 		patch[k] = raw
 	}
@@ -474,9 +479,9 @@ func TestBulkImport_ColumnsArePinned(t *testing.T) {
 		"location":      "site,name,parent,slug,operational_status,facility,description,comments",
 		"manufacturer":  "name,slug,description",
 		"device_role":   "name,slug,color,vm_role,parent,description",
-		"platform":      "name,slug,manufacturer,description",
-		"device_type":   "manufacturer,model,slug,part_number,u_height,is_full_depth,exclude_from_utilization,subdevice_role,airflow,weight,weight_unit,default_platform,description",
-		"asset":         "display_name,class_key,hostname,ip_address,environment,business_unit,owner_email,support_group,device_type,device_role,platform,serial,asset_tag,description",
+		"platform":      "name,slug,manufacturer,description,end_of_sale,end_of_support,end_of_life",
+		"device_type":   "manufacturer,model,slug,part_number,u_height,is_full_depth,exclude_from_utilization,subdevice_role,airflow,weight,weight_unit,default_platform,description,end_of_sale,end_of_support,end_of_life",
+		"asset":         "display_name,class_key,hostname,ip_address,environment,business_unit,owner_email,support_group,device_type,device_role,platform,serial,asset_tag,description,purchase_date,warranty_start,warranty_end,purchase_cost,purchase_currency,purchase_order,vendor,support_contract,support_contract_end,installed_at,decommissioned_at",
 		"interface":     "asset,name,type,label,enabled,mgmt_only,mtu,mac_address,speed_kbps,duplex,mode,description",
 		"rir":           "name,slug,is_private,description",
 		"aggregate":     "prefix,rir,business_unit,date_added,description",

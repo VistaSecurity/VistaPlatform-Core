@@ -55,6 +55,12 @@ type Asset struct {
 	// context field the CMDB buyer asked for that the old model had no home for.
 	SupportGroup *string `json:"support_group,omitempty" db:"support_group"`
 	Description  *string `json:"description" db:"description"`
+	// The commercial lifecycle columns (DCIM gap 4), flattened into the asset
+	// object, and the lifecycle block computed from them and the device type's
+	// and platform's end-of-support dates. Lifecycle is set by the list and
+	// single-asset reads; nil on paths that do not read it.
+	AssetCommercial
+	Lifecycle *AssetLifecycle `json:"lifecycle,omitempty" db:"-"`
 	// Site and Location are the asset's placement (DCIM row 2.1): the site, and
 	// a location inside it ("HQ / Hall 2 / Cage 7"), nil when unplaced.
 	// Region and Zone are the cloud provider's own placement words, text.

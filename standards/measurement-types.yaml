@@ -700,6 +700,237 @@ measurement_types:
       evidence:
         - { group: asset }
 
+  # DCIM record quality (DCIM gap 6): the hygiene producer's DCIM kinds,
+  # counted per asset. Zero is the compliant value. Each row's
+  # `subject_where` narrows the subjects to the assets the question is ABOUT
+  # — racked assets for a position, assets with a warranty date for a
+  # warranty, assets with an effective end of support for a support date — so
+  # an asset whose record holds nothing to judge is NOT ASSESSED rather than
+  # compliant, and every row inherits the finding shape's producer gate: an
+  # asset the hygiene producer has never evaluated is not assessed either.
+
+  - code: unracked_count
+    name: Rack-Mountable Assets Not Racked
+    description: >-
+      How many open `not_racked` findings the hygiene producer holds against
+      this asset: a monitored hardware asset whose device type is taller than
+      0 U, that is not in a parent's bay, and records no rack. Scoped to
+      monitored hardware assets with a device type; one with no device type is
+      not assessed. Zero is the compliant value.
+    data_type: integer
+    category: hygiene
+    units: findings
+    valid_range: { min: 0, max: 1000 }
+    allowed_rule_types: [threshold, range]
+    valid_operators: ["<=", ">=", "<", ">", "==", "!="]
+    subject: asset
+    source:
+      shape: finding
+      assessed_by: hygiene
+      value: finding_count
+      where: producer:hygiene and kind:not_racked
+      subject_where: status:monitoring and class:hardware and exists(device_type.id)
+      measured_at: now
+      evidence:
+        - { group: asset }
+
+  - code: rack_position_missing_count
+    name: Racked Assets Without a Position
+    description: >-
+      How many open `no_rack_position` findings the hygiene producer holds
+      against this asset: it records a rack but no unit position. Scoped to
+      monitored assets in a rack; an unracked asset is not assessed. Zero is the
+      compliant value.
+    data_type: integer
+    category: hygiene
+    units: findings
+    valid_range: { min: 0, max: 1000 }
+    allowed_rule_types: [threshold, range]
+    valid_operators: ["<=", ">=", "<", ">", "==", "!="]
+    subject: asset
+    source:
+      shape: finding
+      assessed_by: hygiene
+      value: finding_count
+      where: producer:hygiene and kind:no_rack_position
+      subject_where: status:monitoring and exists(rack.id)
+      measured_at: now
+      evidence:
+        - { group: asset }
+
+  - code: stale_planned_cable_count
+    name: Planned Cables Older Than 90 Days
+    description: >-
+      How many open `planned_cable_stale` findings the hygiene producer holds
+      against this asset: cables at its A end still planned more than 90 days
+      after they were created. Scoped to monitored assets with a planned cable.
+      Zero is the compliant value.
+    data_type: integer
+    category: hygiene
+    units: findings
+    valid_range: { min: 0, max: 1000 }
+    allowed_rule_types: [threshold, range]
+    valid_operators: ["<=", ">=", "<", ">", "==", "!="]
+    subject: asset
+    source:
+      shape: finding
+      assessed_by: hygiene
+      value: finding_count
+      where: producer:hygiene and kind:planned_cable_stale
+      subject_where: status:monitoring and cable.status:planned
+      measured_at: now
+      evidence:
+        - { group: asset }
+
+  - code: unconfirmed_cable_count
+    name: Cables Not Confirmed by Neighbours
+    description: >-
+      How many open `cable_unconfirmed` findings the hygiene producer holds
+      against this asset: declared, connected cables on its interfaces that no
+      LLDP or CDP observation has confirmed in 30 days, while the asset reported
+      neighbour data in that time. Scoped to monitored assets with a connected
+      cable. An asset that reports no neighbours raises nothing, because absent
+      data is not a contradiction. Zero is the compliant value.
+    data_type: integer
+    category: hygiene
+    units: findings
+    valid_range: { min: 0, max: 1000 }
+    allowed_rule_types: [threshold, range]
+    valid_operators: ["<=", ">=", "<", ">", "==", "!="]
+    subject: asset
+    source:
+      shape: finding
+      assessed_by: hygiene
+      value: finding_count
+      where: producer:hygiene and kind:cable_unconfirmed
+      subject_where: status:monitoring and cable.status:connected
+      measured_at: now
+      evidence:
+        - { group: asset }
+
+  - code: untyped_interface_count
+    name: Interfaces With No Type
+    description: >-
+      How many open `interface_no_type` findings the hygiene producer holds
+      against this asset: active interfaces whose type is `other` or empty.
+      One finding per asset, whatever the number of interfaces; the evidence
+      lists them. Zero is the compliant value.
+    data_type: integer
+    category: hygiene
+    units: findings
+    valid_range: { min: 0, max: 1000 }
+    allowed_rule_types: [threshold, range]
+    valid_operators: ["<=", ">=", "<", ">", "==", "!="]
+    subject: asset
+    source:
+      shape: finding
+      assessed_by: hygiene
+      value: finding_count
+      where: producer:hygiene and kind:interface_no_type
+      subject_where: status:monitoring
+      measured_at: now
+      evidence:
+        - { group: asset }
+
+  - code: duplicate_address_count
+    name: Duplicate Addresses Within a VRF
+    description: >-
+      How many open `duplicate_address` findings the hygiene producer holds
+      against this asset: an active address it holds is also assigned to another
+      monitored asset in the same VRF, with no role that allows sharing. Scoped
+      to monitored assets with an address. Zero is the compliant value.
+    data_type: integer
+    category: hygiene
+    units: findings
+    valid_range: { min: 0, max: 1000 }
+    allowed_rule_types: [threshold, range]
+    valid_operators: ["<=", ">=", "<", ">", "==", "!="]
+    subject: asset
+    source:
+      shape: finding
+      assessed_by: hygiene
+      value: finding_count
+      where: producer:hygiene and kind:duplicate_address
+      subject_where: status:monitoring and exists(ip.address)
+      measured_at: now
+      evidence:
+        - { group: asset }
+
+  - code: warranty_expired_count
+    name: Expired Warranty
+    description: >-
+      Whether the hygiene producer holds an open `warranty_expired` finding
+      against this asset (0 or 1): its recorded warranty end date has passed.
+      Scoped to monitored assets with a warranty end recorded, so an asset with
+      no warranty date is NOT ASSESSED — unknown is never expired, and never
+      covered.
+    data_type: integer
+    category: lifecycle
+    units: findings
+    valid_range: { min: 0, max: 1000 }
+    allowed_rule_types: [threshold, range]
+    valid_operators: ["<=", ">=", "<", ">", "==", "!="]
+    subject: asset
+    source:
+      shape: finding
+      assessed_by: hygiene
+      value: finding_count
+      where: producer:hygiene and kind:warranty_expired
+      subject_where: status:monitoring and exists(warranty_end)
+      measured_at: now
+      evidence:
+        - { group: asset }
+
+  - code: past_end_of_support_count
+    name: Past End of Support
+    description: >-
+      Whether the hygiene producer holds an open `past_end_of_support` finding
+      against this asset (0 or 1): its effective end of support — the earlier of
+      the device type's and the platform's, declared or from the end-of-life
+      catalogue — has passed. Scoped to monitored assets with an effective end of
+      support, so an asset with no date on either is NOT ASSESSED.
+    data_type: integer
+    category: lifecycle
+    units: findings
+    valid_range: { min: 0, max: 1000 }
+    allowed_rule_types: [threshold, range]
+    valid_operators: ["<=", ">=", "<", ">", "==", "!="]
+    subject: asset
+    source:
+      shape: finding
+      assessed_by: hygiene
+      value: finding_count
+      where: producer:hygiene and kind:past_end_of_support
+      subject_where: status:monitoring and exists(end_of_support)
+      measured_at: now
+      evidence:
+        - { group: asset }
+
+  - code: end_of_support_soon_count
+    name: End of Support Within 12 Months
+    description: >-
+      Whether the hygiene producer holds an open `end_of_support_soon` finding
+      against this asset (0 or 1): its effective end of support falls within the
+      next 12 months. Exclusive of past_end_of_support_count — an asset already
+      past end of support is counted there, not here. Scoped to monitored assets
+      with an effective end of support.
+    data_type: integer
+    category: lifecycle
+    units: findings
+    valid_range: { min: 0, max: 1000 }
+    allowed_rule_types: [threshold, range]
+    valid_operators: ["<=", ">=", "<", ">", "==", "!="]
+    subject: asset
+    source:
+      shape: finding
+      assessed_by: hygiene
+      value: finding_count
+      where: producer:hygiene and kind:end_of_support_soon
+      subject_where: status:monitoring and exists(end_of_support)
+      measured_at: now
+      evidence:
+        - { group: asset }
+
   # NOT ASSESSED ANYWHERE TODAY, and deliberately so. The finding shape reports
   # a count only for an asset whose `risk_assessed_by` names the producer, and
   # the `configuration` producer does not write that entry: all three of its

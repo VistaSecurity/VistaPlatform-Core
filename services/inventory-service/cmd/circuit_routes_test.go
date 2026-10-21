@@ -105,7 +105,7 @@ func serveCircuit(r http.Handler, rt catalogueRoute) *httptest.ResponseRecorder 
 
 func TestCircuitRoutes_Gates(t *testing.T) {
 	routes := circuitRoutes()
-	if want := 8 * 5; len(routes) != want {
+	if want := 11 * 5; len(routes) != want {
 		t.Fatalf("expected %d circuit routes, got %d", want, len(routes))
 	}
 	for _, rt := range routes {

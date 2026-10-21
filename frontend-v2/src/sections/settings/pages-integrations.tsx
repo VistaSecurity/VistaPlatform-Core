@@ -15,6 +15,7 @@ import { Icon } from '../../components/ui';
 import { SPage, SSection, SCard, STable, STableRow, STag, SDot, SToggle, StateNote, relTime, GREEN, AMBER, RED } from './kit';
 import { ChannelModal, ChannelDeleteModal, RuleModal, RuleDeleteModal, isDigest } from './notification-modals';
 import { ChannelTestButton, channelNotice } from './channel-test';
+import { INVENTORY_CHANGES_LABEL, OBJECT_CHANGED_ALERT_TYPE, ruleSummary } from './alert-sources';
 import { CONNECTOR_KIND_LABEL } from '@vistasecurity/primitives/connectors';
 import {
   connectorCatalogueQuery, connectorAction, connectorBadge, connectorCaption, isSelectable, type ConnectorEntry,
@@ -377,7 +378,7 @@ export function RoutingRulesPage({ meta }: { meta: SettingsNavItem }) {
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 12.5, color: 'var(--app-t1)', fontWeight: 500 }}>{r.rule_name}</div>
                   <div className="mono" style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>
-                    {[r.alert_source, r.alert_type, r.severity_filter?.join('/')].filter(Boolean).join(' · ')}
+                    {ruleSummary(r)}
                   </div>
                 </div>,
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: 'var(--app-t2)', minWidth: 0 }}>
@@ -421,6 +422,7 @@ const CATALOG_QK = ['settings', 'alert-catalog'];
 
 /** "certificate_expiring" → "Certificate expiring" */
 function catalogName(id: string): string {
+  if (id === OBJECT_CHANGED_ALERT_TYPE) return INVENTORY_CHANGES_LABEL;
   const s = id.replace(/_/g, ' ');
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
@@ -564,6 +566,7 @@ function CatalogCard({ entry }: { entry: AlertCatalogEntry }) {
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--app-t1)' }}>{catalogName(entry.id)}</span>
             <STag>{entry.kind === 'policy' ? 'Policy-driven' : 'Operational'}</STag>
             {planned && <STag color={AMBER}>Detector coming soon</STag>}
+            {entry.lifecycle === 'event' && <STag>Delivered per change · nothing stays open</STag>}
             {entry.severity_model === 'fixed' && !derivedSeverity && entry.default_severity && (
               <STag color={SEVERITY_TONE[fixedSeverity] ?? 'var(--app-t3)'}>{entry.default_severity}</STag>
             )}

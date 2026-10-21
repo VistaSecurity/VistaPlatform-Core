@@ -152,9 +152,14 @@ func bulkEngineKinds() []*bulkEngineKind {
 				{Name: "name", Example: "IOS XE"}, {Name: "slug", Example: "ios-xe"},
 				{Name: "manufacturer", Field: "manufacturer_id", Ref: "manufacturer", Example: "Cisco", Help: "Manufacturer name."},
 				{Name: "description", Example: "Cisco IOS XE"},
+				{Name: "end_of_sale", Example: "", Help: "YYYY-MM-DD."}, {Name: "end_of_support", Example: "", Help: "YYYY-MM-DD."},
+				{Name: "end_of_life", Example: "", Help: "YYYY-MM-DD."},
 			},
 			Identity: []string{"name"},
-			Skipped:  map[string]string{"external_ids": "sync keys are written by sync, not by a file"},
+			Skipped: map[string]string{
+				"external_ids":     "sync keys are written by sync, not by a file",
+				"eol_catalogue_id": "an end-of-life catalogue entry has no stable name to write in a file; link it in the platform form",
+			},
 		},
 		{
 			Kind: dcim.ObjectKindDeviceType, Label: "Device type", Plural: "Device types", Route: "device-types", DeviceCatalogue: true, Perm: rbac.PermissionDcimManage,
@@ -166,9 +171,14 @@ func bulkEngineKinds() []*bulkEngineKind {
 				{Name: "weight", Example: "7.3"}, {Name: "weight_unit", Example: "kg"},
 				{Name: "default_platform", Field: "default_platform_id", Ref: "platform", Example: "", Help: "Platform name."},
 				{Name: "description", Example: "48-port PoE+ access switch"},
+				{Name: "end_of_sale", Example: "2025-10-31", Help: "YYYY-MM-DD."}, {Name: "end_of_support", Example: "2030-10-31", Help: "YYYY-MM-DD."},
+				{Name: "end_of_life", Example: "", Help: "YYYY-MM-DD."},
 			},
 			Identity: []string{"manufacturer_id", "model"},
-			Skipped:  map[string]string{"external_ids": "sync keys are written by sync, not by a file"},
+			Skipped: map[string]string{
+				"external_ids":     "sync keys are written by sync, not by a file",
+				"eol_catalogue_id": "an end-of-life catalogue entry has no stable name to write in a file; link it in the device type form",
+			},
 		},
 		{
 			Kind: dcim.ObjectKindRir, Label: "RIR", Plural: "RIRs", Route: "rirs", Perm: rbac.PermissionIpamManage,

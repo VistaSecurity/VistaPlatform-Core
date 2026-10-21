@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/vistasecurity/vistaplatform/shared/dcim/changenotify"
 )
 
 type IdentityEvidenceSweeper interface {
@@ -49,14 +51,20 @@ func StartIdentityEvidenceWorker(ctx context.Context, bypass *sql.DB, sweeper Id
 				if ctx.Err() != nil {
 					return
 				}
-				for _, mergeSweeper := range mergeSweepers {
-					if _, err := mergeSweeper.PublishPendingMergeEvents(ctx, tenant); err != nil {
-						log.Printf("[IdentityEvidence] tenant %s merge publication: %v", tenant, err)
+				// One change-notification unit per tenant: the sweep replays
+				// observations through the identity engine, whose interface
+				// and address writes raise object_changed once committed.
+				_ = changenotify.Unit(ctx, func(ctx context.Context) error {
+					for _, mergeSweeper := range mergeSweepers {
+						if _, err := mergeSweeper.PublishPendingMergeEvents(ctx, tenant); err != nil {
+							log.Printf("[IdentityEvidence] tenant %s merge publication: %v", tenant, err)
+						}
 					}
-				}
-				if _, err := sweeper.SweepIdentityEvidence(ctx, tenant); err != nil {
-					log.Printf("[IdentityEvidence] tenant %s: %v", tenant, err)
-				}
+					if _, err := sweeper.SweepIdentityEvidence(ctx, tenant); err != nil {
+						log.Printf("[IdentityEvidence] tenant %s: %v", tenant, err)
+					}
+					return nil
+				})
 			}
 		}
 		select {

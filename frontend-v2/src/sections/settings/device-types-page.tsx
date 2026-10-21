@@ -7,12 +7,13 @@
 // (the nav entry); every write control sits behind `dcim.manage`.
 import { useState } from 'react';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
+import { POWER_OUTLET_TYPES, POWER_OUTLET_TYPE_LABELS, POWER_PORT_TYPES, POWER_PORT_TYPE_LABELS } from '@vistasecurity/primitives/dcim';
 import { Icon, Modal, ModalField } from '../../components/ui';
 import { PanelEmpty, PanelError, PanelLoading } from '../inventory/dcim/substrate-states';
-import { CatalogueDeleteModal, CatalogueFormModal, type CatalogueField } from '../inventory/dcim/catalogue-form';
+import { CatalogueDeleteModal, CatalogueFormModal, eosFields, eosInitial, type CatalogueField } from '../inventory/dcim/catalogue-form';
 import {
-  TEMPLATE_KINDS, isPlatformRow, uHeightText, useCatalogueList, useCatalogueWrite, useImportDeviceTypes,
-  useTemplateWrite, useTemplates, type DeviceType, type ImportedDeviceType, type Manufacturer, type TemplateKind,
+  TEMPLATE_KINDS, isPlatformRow, uHeightText, useCatalogueList, useCatalogueWrite, useEOLCatalogue, useImportDeviceTypes,
+  useTemplateWrite, useTemplates, type DeviceType, type EOLCatalogueRef, type ImportedDeviceType, type Manufacturer, type TemplateKind,
 } from '../inventory/dcim/catalogue-queries';
 import { SPage, SSection, STable, STableRow, STag, type STableCol } from './kit';
 import type { SettingsNavItem } from './nav';
@@ -22,7 +23,7 @@ const MANAGE = TENANT_PERMISSIONS.dcim.manage;
 const AIRFLOW = ['front-to-rear', 'rear-to-front', 'left-to-right', 'right-to-left', 'side-to-rear', 'rear-to-side',
   'bottom-to-top', 'top-to-bottom', 'passive', 'mixed'];
 
-function deviceTypeFields(mfrs: Manufacturer[]): CatalogueField[] {
+function deviceTypeFields(mfrs: Manufacturer[], eol: { entries: EOLCatalogueRef[]; loading: boolean; current?: string | null; source?: string | null }): CatalogueField[] {
   return [
     { name: 'manufacturer_id', label: 'Manufacturer', kind: 'select', required: true,
       options: [{ value: '', label: 'Choose a manufacturer' }, ...mfrs.map((m) => ({ value: m.id, label: m.name }))] },
@@ -33,11 +34,16 @@ function deviceTypeFields(mfrs: Manufacturer[]): CatalogueField[] {
     { name: 'is_full_depth', label: 'Full depth (occupies the front and rear of the rack)', kind: 'bool' },
     { name: 'airflow', label: 'Airflow', kind: 'select', options: [{ value: '', label: '—' }, ...AIRFLOW.map((a) => ({ value: a, label: a }))] },
     { name: 'description', label: 'Description' },
+    ...eosFields(eol.entries, eol.current, eol.loading, eol.source),
   ];
 }
 
-/** The editable fields of one template kind. */
-function templateFields(kind: TemplateKind): CatalogueField[] {
+/** The feed legs a PDU outlet can be on (NetBox PowerOutletFeedLegChoices). */
+const FEED_LEGS = [{ value: '', label: '—' }, { value: 'A', label: 'A' }, { value: 'B', label: 'B' }, { value: 'C', label: 'C' }];
+
+/** The editable fields of one template kind. powerPorts are the type's power
+ *  port templates, which a power outlet template draws from. */
+function templateFields(kind: TemplateKind, powerPorts: TemplateRowLike[] = []): CatalogueField[] {
   const base: CatalogueField[] = [{ name: 'name', label: 'Name', required: true, mono: true }, { name: 'label', label: 'Label' }];
   switch (kind) {
     case 'interface-templates':
@@ -52,12 +58,44 @@ function templateFields(kind: TemplateKind): CatalogueField[] {
       return [...base, { name: 'position', label: 'Position' }, { name: 'description', label: 'Description' }];
     case 'device-bay-templates':
       return [...base, { name: 'description', label: 'Description' }];
+    // Power (DCIM row 6.1): draws in watts, and an outlet's inlet and leg.
+    case 'power-port-templates':
+      return [...base,
+        { name: 'type', label: 'Type', kind: 'select', options: [{ value: '', label: '—' }, ...POWER_PORT_TYPES.map((t) => ({ value: t, label: POWER_PORT_TYPE_LABELS[t] }))] },
+        { name: 'maximum_draw', label: 'Maximum draw (W)', kind: 'number', hint: 'The most this port can draw. Leave empty when it is not recorded.' },
+        { name: 'allocated_draw', label: 'Allocated draw (W)', kind: 'number', hint: 'The draw budgeted for it. Leave empty when it is not recorded.' },
+        { name: 'description', label: 'Description' }];
+    case 'power-outlet-templates':
+      return [...base,
+        { name: 'type', label: 'Type', kind: 'select', options: [{ value: '', label: '—' }, ...POWER_OUTLET_TYPES.map((t) => ({ value: t, label: POWER_OUTLET_TYPE_LABELS[t] }))] },
+        { name: 'power_port_id', label: 'Power port', kind: 'select', hint: 'The power port template this outlet draws from (a PDU\'s inlet).',
+          options: [{ value: '', label: '—' }, ...powerPorts.map((p) => ({ value: p.id, label: p.name }))] },
+        { name: 'feed_leg', label: 'Feed leg', kind: 'select', options: FEED_LEGS },
+        { name: 'description', label: 'Description' }];
     default:
       return [...base, { name: 'type', label: 'Type', mono: true }, { name: 'description', label: 'Description' }];
   }
 }
 
-interface TemplateRowLike { id: string; name: string; label?: string | null; type?: string | null; description?: string | null }
+interface TemplateRowLike {
+  id: string; name: string; label?: string | null; type?: string | null; description?: string | null;
+  maximum_draw?: number | null; allocated_draw?: number | null; power_port_id?: string | null; feed_leg?: string | null;
+}
+
+/** The power column of a power template row ("" for the other kinds). */
+function powerDetail(kind: TemplateKind, t: TemplateRowLike, powerPorts: TemplateRowLike[]): string {
+  if (kind === 'power-port-templates') {
+    const draw = (n: number | null | undefined) => (n == null ? 'not recorded' : `${n} W`);
+    return `max ${draw(t.maximum_draw)} · allocated ${draw(t.allocated_draw)}`;
+  }
+  if (kind === 'power-outlet-templates') {
+    const port = powerPorts.find((p) => p.id === t.power_port_id)?.name;
+    return [port ? `from ${port}` : 'no power port', t.feed_leg ? `leg ${t.feed_leg}` : null].filter(Boolean).join(' · ');
+  }
+  return '';
+}
+
+const isPowerTemplate = (k: TemplateKind) => k === 'power-port-templates' || k === 'power-outlet-templates';
 
 function TemplatesTab({ dt, kind }: { dt: DeviceType; kind: TemplateKind }) {
   const q = useTemplates(dt.id, kind);
@@ -68,7 +106,12 @@ function TemplatesTab({ dt, kind }: { dt: DeviceType; kind: TemplateKind }) {
   const readOnly = isPlatformRow(dt);
   const label = TEMPLATE_KINDS.find((k) => k.kind === kind)?.label.toLowerCase() ?? 'templates';
   const rows = (q.data ?? []) as unknown as TemplateRowLike[];
-  const cols: STableCol[] = [{ label: 'Name', w: '1.3fr' }, { label: 'Type', w: '1fr' }, { label: 'Label', w: '1fr' }, { label: '', w: '84px', align: 'right' }];
+  // An outlet template names the power port template it draws from.
+  const ports = useTemplates(dt.id, 'power-port-templates', kind === 'power-outlet-templates');
+  const powerPorts = (ports.data ?? []) as unknown as TemplateRowLike[];
+  const power = isPowerTemplate(kind);
+  const cols: STableCol[] = [{ label: 'Name', w: '1.3fr' }, { label: 'Type', w: '1fr' }, ...(power ? [{ label: 'Power', w: '1.4fr' }] : []),
+    { label: 'Label', w: '1fr' }, { label: '', w: '84px', align: 'right' }];
   return (
     <div data-testid={`templates-${kind}`}>
       {!readOnly && (
@@ -87,6 +130,7 @@ function TemplatesTab({ dt, kind }: { dt: DeviceType; kind: TemplateKind }) {
             <STableRow key={t.id} first={i === 0} cols={cols} cells={[
               <span key="n" className="mono" data-testid="template-name">{t.name}</span>,
               <span key="t" className="mono">{t.type ?? '—'}</span>,
+              ...(power ? [<span key="p" data-testid="template-power">{powerDetail(kind, t, powerPorts)}</span>] : []),
               t.label ?? '—',
               readOnly ? <span key="r" /> : (
                 <PermissionGate key="a" permission={MANAGE} fallback={<span />}>
@@ -98,9 +142,9 @@ function TemplatesTab({ dt, kind }: { dt: DeviceType; kind: TemplateKind }) {
           ))}
         </STable>
       )}
-      {adding && <CatalogueFormModal title="Add template" editing={false} fields={templateFields(kind)} initial={{ enabled: true }}
+      {adding && <CatalogueFormModal title="Add template" editing={false} fields={templateFields(kind, powerPorts)} initial={{ enabled: true }}
         onSubmit={(body) => write.create.mutateAsync(body)} onClose={() => setAdding(false)} />}
-      {editing && <CatalogueFormModal title={`Edit ${editing.name}`} editing fields={templateFields(kind)} initial={editing as unknown as Record<string, unknown>}
+      {editing && <CatalogueFormModal title={`Edit ${editing.name}`} editing fields={templateFields(kind, powerPorts)} initial={editing as unknown as Record<string, unknown>}
         onSubmit={(body) => write.update.mutateAsync({ id: editing.id, body })} onClose={() => setEditing(null)} />}
       {deleting && <CatalogueDeleteModal what={deleting.name} onConfirm={() => write.remove.mutateAsync(deleting.id)} onClose={() => setDeleting(null)} />}
     </div>
@@ -194,6 +238,8 @@ export function DeviceTypesPage({ meta }: { meta: SettingsNavItem }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<DeviceType | null>(null);
   const [deleting, setDeleting] = useState<DeviceType | null>(null);
+  const eolQ = useEOLCatalogue('hardware', adding || editing !== null);
+  const eol = (current?: string | null, source?: string | null) => ({ entries: eolQ.data ?? [], loading: eolQ.isLoading, current, source });
   const rows = list.data?.rows ?? [];
   const mfrRows = mfrs.data?.rows ?? [];
   const mfrName = (dt: DeviceType) => dt.manufacturer?.name ?? mfrRows.find((m) => m.id === dt.manufacturer_id)?.name ?? '—';
@@ -264,12 +310,13 @@ export function DeviceTypesPage({ meta }: { meta: SettingsNavItem }) {
 
       {open && <DeviceTypeDetail dt={open} manufacturer={mfrName(open)} onClose={() => setOpen(null)} />}
       {importing && <ImportDeviceTypesModal onClose={() => setImporting(false)} />}
-      {adding && <CatalogueFormModal title="New device type" editing={false} fields={deviceTypeFields(mfrRows)} initial={{ u_height: 1, is_full_depth: true }}
+      {adding && <CatalogueFormModal title="New device type" editing={false} fields={deviceTypeFields(mfrRows, eol())} initial={{ u_height: 1, is_full_depth: true }}
         onSubmit={(body) => write.create.mutateAsync(body)} onClose={() => setAdding(false)} />}
       {editing && (
-        <CatalogueFormModal title={`Edit ${editing.model}`} editing fields={deviceTypeFields(mfrRows)}
+        <CatalogueFormModal title={`Edit ${editing.model}`} editing fields={deviceTypeFields(mfrRows, eol(editing.eol_catalogue_id, editing.eol_link_source))}
           initial={{ manufacturer_id: editing.manufacturer_id, model: editing.model, slug: editing.slug, part_number: editing.part_number ?? '',
-            u_height: editing.u_height, is_full_depth: editing.is_full_depth, airflow: editing.airflow ?? '', description: editing.description ?? '' }}
+            u_height: editing.u_height, is_full_depth: editing.is_full_depth, airflow: editing.airflow ?? '', description: editing.description ?? '',
+            ...eosInitial(editing) }}
           onSubmit={(body) => write.update.mutateAsync({ id: editing.id, body })} onClose={() => setEditing(null)} />
       )}
       {deleting && <CatalogueDeleteModal what={deleting.model} onConfirm={() => write.remove.mutateAsync(deleting.id)} onClose={() => setDeleting(null)} />}

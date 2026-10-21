@@ -162,7 +162,7 @@ func (s *NotificationService) SendNotification(ctx context.Context, req *models.
 		}
 	} else {
 		// Get tenant rules
-		rules, err = s.ruleEngine.GetTenantRulesForAlert(ctx, *req.TenantID, req.AlertSource, req.AlertType, req.Severity)
+		rules, err = s.ruleEngine.GetTenantRulesForAlert(ctx, *req.TenantID, req.AlertSource, req.AlertType, req.Severity, req.Metadata)
 		if err != nil {
 			s.logger.Printf("Failed to get tenant rules: %v", err)
 			return fmt.Errorf("failed to get tenant rules: %w", err)

@@ -761,6 +761,25 @@ paths:
         '403': { $ref: '#/components/responses/LegacyForbidden' }
         '404': { $ref: '#/components/responses/LegacyNotFound' }
         '500': { $ref: '#/components/responses/LegacyServerError' }
+  /dcim/locations/{id}/floor-plan:
+    parameters:
+    - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getLocationFloorPlan
+      tags: [sites]
+      summary: Get a Location's floor plan and its racks
+      description: 'DCIM gap 9. The location''s plan size (all null when it has none) and every rack in the location, placed or not: a rack on the plan carries floor_x / floor_y / floor_rotation, one off it carries nulls (the Floor plan tab''s "Unplaced racks" tray). Each rack''s footprint is given in the plan''s unit (outer width x depth, or the default footprint when either is not recorded, flagged by footprint_default) with its unit utilisation and power budget. Racks are placed through PATCH /dcim/racks/{id}. RBAC: `dcim.read`.'
+      responses:
+        '200':
+          description: The floor plan.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LocationFloorPlan' }
+        '400': { $ref: '#/components/responses/LegacyBadRequest' }
+        '401': { $ref: '#/components/responses/LegacyUnauthorized' }
+        '403': { $ref: '#/components/responses/LegacyForbidden' }
+        '404': { $ref: '#/components/responses/LegacyNotFound' }
+        '500': { $ref: '#/components/responses/LegacyServerError' }
   /admin/algorithms:
     post:
       operationId: createAlgorithm
@@ -8998,6 +9017,7 @@ paths:
         - { name: dns_name, in: query, required: false, schema: { type: string }, description: 'Filter on `dns_name`.' }
         - { name: mac_address, in: query, required: false, schema: { type: string }, description: 'Filter on `mac_address`.' }
         - { name: parent, in: query, required: false, schema: { type: string }, description: 'Rows whose address lies inside this prefix (pass vrf_id too: containment is per VRF).' }
+        - { name: asset_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Addresses this asset holds: assigned to one of its interfaces, or named as its primary IPv4, primary IPv6 or out-of-band address.' }
         - { name: q, in: query, required: false, schema: { type: string }, description: 'Free-text search.' }
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
         - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
@@ -9901,6 +9921,520 @@ paths:
                 $ref: '#/components/schemas/Error'
         '409':
           description: Other objects still reference it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /ipam/asn-ranges:
+    get:
+      operationId: listIpamAsnRanges
+      tags: [ipam]
+      summary: List ASN ranges
+      description: RBAC-gated `ipam.read`.
+      parameters:
+        - { name: rir_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `rir_id`.' }
+        - { name: slug, in: query, required: false, schema: { type: string }, description: 'Filter on `slug`.' }
+        - { name: business_unit_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `business_unit_id`.' }
+        - { name: contains, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 4294967295 }, description: 'Only ranges containing this AS number.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Free-text search.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of ASN ranges.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsnRangeListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+    post:
+      operationId: createIpamAsnRange
+      tags: [ipam]
+      summary: Create an ASN range
+      description: RBAC-gated `ipam.manage`. Recorded in the change log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsnRangeCreateInput'
+      responses:
+        '201':
+          description: The ASN range.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsnRangeResponse'
+        '400':
+          description: Invalid or unknown field, a value outside its allowed set, or a reference that is not yours.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /ipam/asn-ranges/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getIpamAsnRange
+      tags: [ipam]
+      summary: One ASN range
+      description: RBAC-gated `ipam.read`.
+      responses:
+        '200':
+          description: The object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsnRangeResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateIpamAsnRange
+      tags: [ipam]
+      summary: Edit an ASN range
+      description: RBAC-gated `ipam.manage`. Fields left out are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsnRangeUpdateInput'
+      responses:
+        '200':
+          description: The ASN range after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsnRangeResponse'
+        '400':
+          description: Invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `ipam.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteIpamAsnRange
+      tags: [ipam]
+      summary: Delete an ASN range
+      description: RBAC-gated `ipam.manage`. Recorded in the change log.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `ipam.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Other objects still reference it (`in_use`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /ipam/vlan-translation-policies:
+    get:
+      operationId: listIpamVlanTranslationPolicies
+      tags: [ipam]
+      summary: List VLAN translation policies
+      description: RBAC-gated `ipam.read`.
+      parameters:
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Free-text search.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of VLAN translation policies.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VlanTranslationPolicyListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+    post:
+      operationId: createIpamVlanTranslationPolicy
+      tags: [ipam]
+      summary: Create a VLAN translation policy
+      description: RBAC-gated `ipam.manage`. Recorded in the change log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VlanTranslationPolicyCreateInput'
+      responses:
+        '201':
+          description: The VLAN translation policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VlanTranslationPolicyResponse'
+        '400':
+          description: Invalid or unknown field, a value outside its allowed set, or a reference that is not yours.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /ipam/vlan-translation-policies/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getIpamVlanTranslationPolicy
+      tags: [ipam]
+      summary: One VLAN translation policy
+      description: RBAC-gated `ipam.read`.
+      responses:
+        '200':
+          description: The object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VlanTranslationPolicyResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateIpamVlanTranslationPolicy
+      tags: [ipam]
+      summary: Edit a VLAN translation policy
+      description: RBAC-gated `ipam.manage`. Fields left out are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VlanTranslationPolicyUpdateInput'
+      responses:
+        '200':
+          description: The VLAN translation policy after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VlanTranslationPolicyResponse'
+        '400':
+          description: Invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `ipam.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteIpamVlanTranslationPolicy
+      tags: [ipam]
+      summary: Delete a VLAN translation policy
+      description: RBAC-gated `ipam.manage`. Recorded in the change log.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `ipam.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Other objects still reference it (`in_use`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /ipam/vlan-translation-rules:
+    get:
+      operationId: listIpamVlanTranslationRules
+      tags: [ipam]
+      summary: List VLAN translation rules
+      description: RBAC-gated `ipam.read`.
+      parameters:
+        - { name: policy_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Only this policy''s rules.' }
+        - { name: local_vid, in: query, required: false, schema: { type: integer }, description: 'Filter on `local_vid`.' }
+        - { name: remote_vid, in: query, required: false, schema: { type: integer }, description: 'Filter on `remote_vid`.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Free-text search.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of VLAN translation rules.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VlanTranslationRuleListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+    post:
+      operationId: createIpamVlanTranslationRule
+      tags: [ipam]
+      summary: Create a VLAN translation rule
+      description: RBAC-gated `ipam.manage`. Recorded in the change log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VlanTranslationRuleCreateInput'
+      responses:
+        '201':
+          description: The VLAN translation rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VlanTranslationRuleResponse'
+        '400':
+          description: Invalid or unknown field, a value outside its allowed set, or a reference that is not yours.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /ipam/vlan-translation-rules/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getIpamVlanTranslationRule
+      tags: [ipam]
+      summary: One VLAN translation rule
+      description: RBAC-gated `ipam.read`.
+      responses:
+        '200':
+          description: The object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VlanTranslationRuleResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateIpamVlanTranslationRule
+      tags: [ipam]
+      summary: Edit a VLAN translation rule
+      description: RBAC-gated `ipam.manage`. Fields left out are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VlanTranslationRuleUpdateInput'
+      responses:
+        '200':
+          description: The VLAN translation rule after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VlanTranslationRuleResponse'
+        '400':
+          description: Invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `ipam.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteIpamVlanTranslationRule
+      tags: [ipam]
+      summary: Delete a VLAN translation rule
+      description: RBAC-gated `ipam.manage`. Recorded in the change log.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `ipam.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Other objects still reference it (`in_use`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /ipam/asn-ranges/{id}/available-asns:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getIpamAsnRangeAvailableAsns
+      tags: [ipam]
+      summary: The free AS numbers of an ASN range
+      description: RBAC-gated `ipam.read`. The first free numbers (no ASN of the tenant holds them) in order, how many are free and how many ASNs are in the range (NetBox available-asns). Read-only.
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 }, description: 'How many free numbers to list (default 50).' }
+      responses:
+        '200':
+          description: The range's free numbers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AvailableAsnsResponse'
+        '400':
+          description: Invalid limit or id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such ASN range.
           content:
             application/json:
               schema:
@@ -15209,7 +15743,7 @@ paths:
       summary: List inventory items
       description: 'RBAC-gated `dcim.read`.'
       parameters:
-        - { name: asset_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: asset_id, in: query, required: false, schema: { type: string }, description: 'The asset (UUID), or `null` for the items on none (spares).' }
         - { name: name, in: query, required: false, schema: { type: string }, description: 'Exact `name`.' }
         - { name: parent_id, in: query, required: false, schema: { type: string, format: uuid } }
         - { name: role_id, in: query, required: false, schema: { type: string, format: uuid } }
@@ -15217,6 +15751,9 @@ paths:
         - { name: discovered, in: query, required: false, schema: { type: boolean } }
         - { name: component_kind, in: query, required: false, schema: { type: string }, description: 'interface, module, console_port, ...' }
         - { name: status, in: query, required: false, schema: { type: string }, description: 'Lifecycle status.' }
+        - { name: stock_state, in: query, required: false, schema: { type: string, enum: [installed, in_stock, reserved, rma, retired] }, description: 'DCIM gap 8: installed, in_stock, reserved, rma or retired.' }
+        - { name: location_id, in: query, required: false, schema: { type: string }, description: 'The stock location (UUID), or `null` for items at none.' }
+        - { name: site_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Spares at any of the site''s locations.' }
         - { name: q, in: query, required: false, schema: { type: string }, description: 'Substring of name, label, part id, serial or description.' }
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
         - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
@@ -15356,6 +15893,230 @@ paths:
                 $ref: '#/components/schemas/Error'
         '409':
           description: In use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/inventory-items/{id}/install:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: installDcimInventoryItem
+      tags: [dcim]
+      summary: Install a spare on an asset
+      description: 'RBAC-gated `dcim.manage`. DCIM gap 8. A spare that is `in_stock` or `reserved` goes onto the asset (state `installed`). `quantity` (default 1) units split off a stock row of more; the rest stays on the shelf. With `module_bay_id` the item is linked to the module in that bay of the asset, or a module of the module type its part number names is installed there first. Recorded in the change log.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpareInstallInput'
+      responses:
+        '200':
+          description: The installed item, and the stock row left behind when it was split off one.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpareResultResponse'
+        '400':
+          description: Not a spare in stock, a quantity it does not hold, no such asset or bay, or no module type for an empty bay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The asset already has an item of that name.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/inventory-items/{id}/remove:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: removeDcimInventoryItem
+      tags: [dcim]
+      summary: Remove an item from its asset to stock
+      description: 'RBAC-gated `dcim.manage`. DCIM gap 8. An item on an asset (installed, or out for RMA) moves to the stock location; an installed one becomes `in_stock` (or `reserved`), an RMA unit stays `rma`. An unserialised item joins a stock row of the same name and part at that location (its quantity adds and the item row is removed). An item with child items is refused. Recorded in the change log.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpareRemoveInput'
+      responses:
+        '200':
+          description: The item at its stock location (or the stock row it joined).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpareResultResponse'
+        '400':
+          description: Not on an asset, no such location, a bad stock state, or child items.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: A spare of that name and another part is already there.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/inventory-items/{id}/rma:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      operationId: openDcimInventoryItemRma
+      tags: [dcim]
+      summary: Open an RMA case for an item
+      description: 'RBAC-gated `dcim.manage`. DCIM gap 8. Opens an RMA case (state `open`) and puts the item in `rma`; one unit splits off a row of several. An installed item stays on its asset unless `location_id` names the stock location it comes off to (required for an installed row of several). Recorded in the change log.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpareRMAInput'
+      responses:
+        '200':
+          description: The unit out for RMA, the stock row left behind, and the case.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpareResultResponse'
+        '400':
+          description: A retired item, or a field outside its allowed form.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such item.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The item is already out for RMA.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/rma-cases:
+    get:
+      operationId: listDcimRmaCases
+      tags: [dcim]
+      summary: List RMA cases
+      description: 'RBAC-gated `dcim.read`. DCIM gap 8. Newest opened first.'
+      parameters:
+        - { name: state, in: query, required: false, schema: { type: string, enum: [open, shipped, received, closed] } }
+        - { name: inventory_item_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: open, in: query, required: false, schema: { type: string, enum: ['true', 'false'] }, description: '`true`: every case that is not closed; `false`: the closed ones.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Substring of vendor, case number, notes or description.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of RMA cases.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RmaCaseListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+  /dcim/rma-cases/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getDcimRmaCase
+      tags: [dcim]
+      summary: One RMA case
+      description: RBAC-gated `dcim.read`.
+      responses:
+        '200':
+          description: The RMA case.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RmaCaseResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateDcimRmaCase
+      tags: [dcim]
+      summary: Edit an RMA case or move it on
+      description: 'RBAC-gated `dcim.manage`. DCIM gap 8. `shipped` stamps shipped_at (today unless given) and the unit leaves its asset or shelf; `received` stamps received_at and the replacement lands in stock — `replacement_item_id` if given, else a new unit like the failed one at the case''s `replacement_location_id`, recorded as the case''s replacement; `closed` is final: a unit still on its asset or shelf goes back into service, a shipped one is retired. Recorded in the change log.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RmaCaseUpdateInput'
+      responses:
+        '200':
+          description: The case after the change.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RmaCaseResponse'
+        '400':
+          description: Invalid field, a closed case, a date before the case opened, or no stock location for the replacement.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: A spare of the same name and another part is already in stock where the replacement would land.
           content:
             application/json:
               schema:
@@ -15677,6 +16438,279 @@ paths:
           $ref: '#/components/responses/LegacyForbidden'
         '404':
           description: The asset is not a member of this chassis.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/virtual-device-contexts:
+    get:
+      operationId: listDcimVirtualDeviceContexts
+      tags: [dcim]
+      summary: List virtual device contexts
+      description: 'RBAC-gated `dcim.read`. NetBox dcim/virtual-device-contexts: the logical partitions of a device (a Nexus VDC, a Palo Alto vsys, a Fortinet VDOM, an F5 route domain), across the tenant''s assets.'
+      parameters:
+        - { name: asset_id, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: name, in: query, required: false, schema: { type: string }, description: 'Exact `name`.' }
+        - { name: identifier, in: query, required: false, schema: { type: integer, minimum: 0 }, description: 'Exact `identifier`.' }
+        - { name: status, in: query, required: false, schema: { type: string }, description: 'Lifecycle status.' }
+        - { name: operational_status, in: query, required: false, schema: { type: string, enum: [active, planned, offline] }, description: 'NetBox status.' }
+        - { name: business_unit_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'The business unit (NetBox tenant); `null` for none.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Substring of name or description.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of virtual device contexts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualDeviceContextListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+    post:
+      operationId: createDcimVirtualDeviceContext
+      tags: [dcim]
+      summary: Create a virtual device context
+      description: 'RBAC-gated `dcim.manage`. Recorded in the change log.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VirtualDeviceContextCreateInput'
+      responses:
+        '201':
+          description: The virtual device context.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualDeviceContextResponse'
+        '400':
+          description: Invalid or unknown field, a value outside its allowed set, or a rule broken.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          description: The identity is taken (the name, or the identifier, is already used on the asset).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/virtual-device-contexts/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getDcimVirtualDeviceContext
+      tags: [dcim]
+      summary: One virtual device context
+      description: RBAC-gated `dcim.read`.
+      responses:
+        '200':
+          description: The virtual device context.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualDeviceContextResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateDcimVirtualDeviceContext
+      tags: [dcim]
+      summary: Edit a virtual device context
+      description: 'RBAC-gated `dcim.manage`. Fields left out are unchanged.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VirtualDeviceContextUpdateInput'
+      responses:
+        '200':
+          description: The virtual device context after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualDeviceContextResponse'
+        '400':
+          description: Invalid field or a rule broken.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The identity is taken.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteDcimVirtualDeviceContext
+      tags: [dcim]
+      summary: Delete a virtual device context
+      description: 'RBAC-gated `dcim.manage`.'
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: In use.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/assets/{id}/virtual-device-contexts:
+    parameters:
+      - { $ref: '#/components/parameters/AssetId' }
+    get:
+      operationId: listDcimAssetVirtualDeviceContexts
+      tags: [dcim]
+      summary: One asset's virtual device contexts
+      description: 'RBAC-gated `dcim.read`. Takes the filters of `/dcim/virtual-device-contexts`.'
+      parameters:
+        - { name: name, in: query, required: false, schema: { type: string }, description: 'Exact `name`.' }
+        - { name: identifier, in: query, required: false, schema: { type: integer, minimum: 0 }, description: 'Exact `identifier`.' }
+        - { name: status, in: query, required: false, schema: { type: string }, description: 'Lifecycle status.' }
+        - { name: operational_status, in: query, required: false, schema: { type: string, enum: [active, planned, offline] }, description: 'NetBox status.' }
+        - { name: business_unit_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'The business unit (NetBox tenant); `null` for none.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Substring of name or description.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: The asset's virtual device contexts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualDeviceContextListResponse'
+        '400':
+          description: Invalid id, filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such asset.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      operationId: createDcimAssetVirtualDeviceContext
+      tags: [dcim]
+      summary: Declare a virtual device context on this asset
+      description: 'RBAC-gated `dcim.manage`. `asset_id` in the body is optional here but, if sent, must be the asset in the path.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VirtualDeviceContextCreateInput'
+      responses:
+        '201':
+          description: The virtual device context.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualDeviceContextResponse'
+        '400':
+          description: Invalid or unknown field, or a rule broken.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such asset.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: The identity is taken.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/assets/{id}/primary-ips:
+    parameters:
+      - { $ref: '#/components/parameters/AssetId' }
+    patch:
+      operationId: patchDcimAssetPrimaryIps
+      tags: [dcim]
+      summary: Set the asset's primary and out-of-band addresses
+      description: 'RBAC-gated `ipam.manage`. Sets, moves or clears the asset''s primary IPv4, primary IPv6 and out-of-band address; an absent field is left alone and null clears it. IPv4 is accepted only as `primary_ip4_id` and IPv6 only as `primary_ip6_id` (`oob_ip_id` takes either), and the address must be one the asset holds. Recorded in the change log.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssetPrimaryIpsPatch'
+      responses:
+        '200':
+          description: The asset's three address columns after the write.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetPrimaryIpsResponse'
+        '400':
+          description: Unknown field, wrong address family, or an address the asset does not hold.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such asset.
           content:
             application/json:
               schema:
@@ -16354,6 +17388,322 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /dcim/power-panels:
+    get:
+      operationId: listDcimPowerPanels
+      tags: [dcim]
+      summary: List power panels
+      description: RBAC-gated `dcim.read`.
+      parameters:
+        - { name: site_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `site_id`.' }
+        - { name: location_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `location_id`.' }
+        - { name: name, in: query, required: false, schema: { type: string }, description: 'Filter on `name`.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Free-text search.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of power panels.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PowerPanelListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+    post:
+      operationId: createDcimPowerPanel
+      tags: [dcim]
+      summary: Create a power panel
+      description: RBAC-gated `dcim.manage`. Recorded in the change log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PowerPanelCreateInput'
+      responses:
+        '201':
+          description: The power panel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PowerPanelResponse'
+        '400':
+          description: Invalid or unknown field, an unknown reference, or a value outside its allowed set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          description: A panel of that name already exists at the site.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/power-panels/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getDcimPowerPanel
+      tags: [dcim]
+      summary: One power panel
+      description: RBAC-gated `dcim.read`.
+      responses:
+        '200':
+          description: The object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PowerPanelResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateDcimPowerPanel
+      tags: [dcim]
+      summary: Edit a power panel
+      description: RBAC-gated `dcim.manage`. Fields left out are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PowerPanelUpdateInput'
+      responses:
+        '200':
+          description: The power panel after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PowerPanelResponse'
+        '400':
+          description: Invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `dcim.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: A panel of that name already exists at the site.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteDcimPowerPanel
+      tags: [dcim]
+      summary: Delete a power panel
+      description: 'RBAC-gated `dcim.manage`. Deletes the panel''s feeds with it and detaches their cables.'
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `dcim.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/power-feeds:
+    get:
+      operationId: listDcimPowerFeeds
+      tags: [dcim]
+      summary: List power feeds
+      description: RBAC-gated `dcim.read`.
+      parameters:
+        - { name: power_panel_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `power_panel_id`.' }
+        - { name: rack_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `rack_id`.' }
+        - { name: site_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Feeds whose panel is at this site.' }
+        - { name: location_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Feeds whose panel is in this location.' }
+        - { name: operational_status, in: query, required: false, schema: { type: string, enum: [offline, active, planned, failed] }, description: 'Filter on `operational_status`.' }
+        - { name: type, in: query, required: false, schema: { type: string, enum: [primary, redundant] }, description: 'Filter on `type`.' }
+        - { name: supply, in: query, required: false, schema: { type: string, enum: [ac, dc] }, description: 'Filter on `supply`.' }
+        - { name: phase, in: query, required: false, schema: { type: string, enum: [single-phase, three-phase] }, description: 'Filter on `phase`.' }
+        - { name: business_unit_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `business_unit_id`.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Free-text search.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of power feeds.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PowerFeedListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+    post:
+      operationId: createDcimPowerFeed
+      tags: [dcim]
+      summary: Create a power feed
+      description: RBAC-gated `dcim.manage`. Recorded in the change log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PowerFeedCreateInput'
+      responses:
+        '201':
+          description: The power feed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PowerFeedResponse'
+        '400':
+          description: Invalid or unknown field, an unknown reference, or a value outside its allowed set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          description: A feed of that name already exists on the panel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/power-feeds/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getDcimPowerFeed
+      tags: [dcim]
+      summary: One power feed
+      description: RBAC-gated `dcim.read`.
+      responses:
+        '200':
+          description: The object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PowerFeedResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateDcimPowerFeed
+      tags: [dcim]
+      summary: Edit a power feed
+      description: RBAC-gated `dcim.manage`. Fields left out are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PowerFeedUpdateInput'
+      responses:
+        '200':
+          description: The power feed after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PowerFeedResponse'
+        '400':
+          description: Invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `dcim.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: A feed of that name already exists on the panel.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteDcimPowerFeed
+      tags: [dcim]
+      summary: Delete a power feed
+      description: 'RBAC-gated `dcim.manage`. Detaches the feed''s cable.'
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `dcim.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /dcim/racks/{id}/elevation:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -16496,7 +17846,7 @@ paths:
     patch:
       operationId: updateDcimAssetHardware
       tags: [dcim]
-      summary: Set an asset's device type, role, platform, serial or asset tag
+      summary: Set an asset's device type, role, platform, serial, asset tag or commercial lifecycle
       description: RBAC-gated `dcim.manage`. Recorded in the change log as one asset change. A device type applies to hardware-class assets only; setting it here does not instantiate its templates.
       requestBody:
         required: true
@@ -16533,6 +17883,33 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /dcim/eol-catalogue:
+    get:
+      operationId: listDcimEolCatalogue
+      tags: [dcim]
+      summary: End-of-life catalogue entries a device type or platform may link to
+      description: RBAC-gated `dcim.read`. The platform-curated end-of-life catalogue, filtered to one product kind (`hardware` for a device type, `os` for a platform) and an optional case-insensitive substring of vendor, product or cycle; ordered by vendor, product and cycle (DCIM gap 4).
+      parameters:
+        - { name: product_kind, in: query, required: true, schema: { type: string, enum: [hardware, os] } }
+        - { name: q, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000, default: 200 } }
+      responses:
+        '200':
+          description: The matching entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EOLCatalogueListResponse'
+        '400':
+          description: product_kind missing or not hardware/os, or a bad limit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
   /dcim/assets/{id}/device-type:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -17858,6 +19235,490 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
   # END circuits (row 4.1)
+  /circuits/virtual-circuit-types:
+    get:
+      operationId: listCircuitsVirtualCircuitTypes
+      tags: [circuits]
+      summary: List virtual circuit types
+      description: RBAC-gated `circuits.read`.
+      parameters:
+        - { name: slug, in: query, required: false, schema: { type: string }, description: 'Filter on `slug`.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Free-text search.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of virtual circuit types.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitTypeListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+    post:
+      operationId: createCircuitsVirtualCircuitType
+      tags: [circuits]
+      summary: Create a virtual circuit type
+      description: RBAC-gated `circuits.manage`. Recorded in the change log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VirtualCircuitTypeCreateInput'
+      responses:
+        '201':
+          description: The virtual circuit type.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitTypeResponse'
+        '400':
+          description: Invalid or unknown field, a value outside its allowed set, or a reference that is not yours.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /circuits/virtual-circuit-types/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getCircuitsVirtualCircuitType
+      tags: [circuits]
+      summary: One virtual circuit type
+      description: RBAC-gated `circuits.read`.
+      responses:
+        '200':
+          description: The object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitTypeResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateCircuitsVirtualCircuitType
+      tags: [circuits]
+      summary: Edit a virtual circuit type
+      description: RBAC-gated `circuits.manage`. Fields left out are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VirtualCircuitTypeUpdateInput'
+      responses:
+        '200':
+          description: The virtual circuit type after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitTypeResponse'
+        '400':
+          description: Invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `circuits.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteCircuitsVirtualCircuitType
+      tags: [circuits]
+      summary: Delete a virtual circuit type
+      description: RBAC-gated `circuits.manage`. Recorded in the change log.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `circuits.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Other objects still reference it (`in_use`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /circuits/virtual-circuits:
+    get:
+      operationId: listCircuitsVirtualCircuits
+      tags: [circuits]
+      summary: List virtual circuits
+      description: RBAC-gated `circuits.read`.
+      parameters:
+        - { name: provider_network_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Only virtual circuits over this provider network.' }
+        - { name: provider_account_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `provider_account_id`.' }
+        - { name: provider_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Only virtual circuits over one of this provider''s networks.' }
+        - { name: type_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `type_id`.' }
+        - { name: operational_status, in: query, required: false, schema: { type: string }, description: 'Filter on `operational_status`.' }
+        - { name: business_unit_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Filter on `business_unit_id`.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Free-text search.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of virtual circuits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+    post:
+      operationId: createCircuitsVirtualCircuit
+      tags: [circuits]
+      summary: Create a virtual circuit
+      description: RBAC-gated `circuits.manage`. Recorded in the change log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VirtualCircuitCreateInput'
+      responses:
+        '201':
+          description: The virtual circuit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitResponse'
+        '400':
+          description: Invalid or unknown field, a value outside its allowed set, or a reference that is not yours.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /circuits/virtual-circuits/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getCircuitsVirtualCircuit
+      tags: [circuits]
+      summary: One virtual circuit
+      description: RBAC-gated `circuits.read`.
+      responses:
+        '200':
+          description: The object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateCircuitsVirtualCircuit
+      tags: [circuits]
+      summary: Edit a virtual circuit
+      description: RBAC-gated `circuits.manage`. Fields left out are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VirtualCircuitUpdateInput'
+      responses:
+        '200':
+          description: The virtual circuit after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitResponse'
+        '400':
+          description: Invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `circuits.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteCircuitsVirtualCircuit
+      tags: [circuits]
+      summary: Delete a virtual circuit
+      description: RBAC-gated `circuits.manage`. Recorded in the change log.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `circuits.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Other objects still reference it (`in_use`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /circuits/virtual-circuit-terminations:
+    get:
+      operationId: listCircuitsVirtualCircuitTerminations
+      tags: [circuits]
+      summary: List virtual circuit terminations
+      description: RBAC-gated `circuits.read`.
+      parameters:
+        - { name: virtual_circuit_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Only this virtual circuit''s terminations.' }
+        - { name: interface_id, in: query, required: false, schema: { type: string, format: uuid }, description: 'Only this interface''s termination.' }
+        - { name: role, in: query, required: false, schema: { type: string }, description: 'Filter on `role`.' }
+        - { name: q, in: query, required: false, schema: { type: string }, description: 'Free-text search.' }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 1000 } }
+        - { name: offset, in: query, required: false, schema: { type: integer, minimum: 0 } }
+      responses:
+        '200':
+          description: One page of virtual circuit terminations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitTerminationListResponse'
+        '400':
+          description: Invalid filter or pagination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+    post:
+      operationId: createCircuitsVirtualCircuitTermination
+      tags: [circuits]
+      summary: Create a virtual circuit termination
+      description: RBAC-gated `circuits.manage`. Recorded in the change log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VirtualCircuitTerminationCreateInput'
+      responses:
+        '201':
+          description: The virtual circuit termination.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitTerminationResponse'
+        '400':
+          description: Invalid or unknown field, a value outside its allowed set, or a reference that is not yours.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /circuits/virtual-circuit-terminations/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getCircuitsVirtualCircuitTermination
+      tags: [circuits]
+      summary: One virtual circuit termination
+      description: RBAC-gated `circuits.read`.
+      responses:
+        '200':
+          description: The object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitTerminationResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      operationId: updateCircuitsVirtualCircuitTermination
+      tags: [circuits]
+      summary: Edit a virtual circuit termination
+      description: RBAC-gated `circuits.manage`. Fields left out are unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VirtualCircuitTerminationUpdateInput'
+      responses:
+        '200':
+          description: The virtual circuit termination after the edit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VirtualCircuitTerminationResponse'
+        '400':
+          description: Invalid field.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `circuits.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: An object with the same identity exists.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      operationId: deleteCircuitsVirtualCircuitTermination
+      tags: [circuits]
+      summary: Delete a virtual circuit termination
+      description: RBAC-gated `circuits.manage`. Recorded in the change log.
+      responses:
+        '204':
+          description: Deleted.
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          description: Missing `circuits.manage`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Other objects still reference it (`in_use`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /dcim/interfaces:
     get:
       tags: [dcim-interfaces]
@@ -23100,6 +24961,131 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /dcim/power-ports/{id}/trace:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: traceDcimPowerPort
+      tags: [dcim]
+      summary: Trace the cable path of a power port
+      description: 'RBAC-gated `dcim.read`. The cached cable path (DCIM rows 3.2 and 6.1) hop by hop, grouped per cable crossed, with its far endpoint. A power path continues from a PDU outlet through the power port it draws from, so a server''s power port reaches its power feed when every hop is cabled; none when the power port is not cabled.'
+      responses:
+        '200':
+          description: The paths.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CablePathsResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/power-outlets/{id}/trace:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: traceDcimPowerOutlet
+      tags: [dcim]
+      summary: Trace the cable path of a power outlet
+      description: 'RBAC-gated `dcim.read`. The cached cable path (DCIM rows 3.2 and 6.1) hop by hop, grouped per cable crossed, with its far endpoint. A power path continues from a PDU outlet through the power port it draws from, so a server''s power port reaches its power feed when every hop is cabled; none when the power outlet is not cabled.'
+      responses:
+        '200':
+          description: The paths.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CablePathsResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/power-feeds/{id}/trace:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: traceDcimPowerFeed
+      tags: [dcim]
+      summary: Trace the cable path of a power feed
+      description: 'RBAC-gated `dcim.read`. The cached cable path (DCIM rows 3.2 and 6.1) hop by hop, grouped per cable crossed, with its far endpoint. A power path continues from a PDU outlet through the power port it draws from, so a server''s power port reaches its power feed when every hop is cabled; none when the power feed is not cabled.'
+      responses:
+        '200':
+          description: The paths.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CablePathsResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such object.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/assets/{id}/power:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getDcimAssetPower
+      tags: [dcim]
+      summary: The power ports, outlets and feeds of an asset
+      description: 'RBAC-gated `dcim.read`. DCIM row 6.1: each power port with its declared draws, where its cable path ends (an outlet, or the power feed beyond a PDU) and what the asset''s own outlets on it feed (a PDU inlet''s downstream draw, NetBox PowerPort.get_power_draw); each outlet with its feed leg, the port it draws from and what it powers; the feeds the ports reach with their available power; and the asset''s totals. A port with no declared draw adds nothing to a sum and is not counted in `recorded_count`.'
+      responses:
+        '200':
+          description: The summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetPowerSummaryResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such asset.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /dcim/racks/{id}/power:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      operationId: getDcimRackPower
+      tags: [dcim]
+      summary: The power budget of a rack
+      description: 'RBAC-gated `dcim.read`. DCIM row 6.2: NetBox Rack.get_power_utilization — each power feed declared as serving the rack with the draw allocated on it (the PDU inlet''s own allocated draw, or the sum of what the devices on its outlets declare), per leg for a three-phase feed, against the feed''s available power; the rack''s totals; each device in the rack with its own declared draw and its share of the rack''s available power. Measured draws (PDU collectors) are reported beside the declared figures and never enter the budget.'
+      responses:
+        '200':
+          description: The budget.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RackPowerBudgetResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
+        '404':
+          description: No such rack.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /dcim/assets/{id}/interface-posture:
     parameters:
       - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
@@ -23125,6 +25111,23 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /dcim/capacity:
+    get:
+      operationId: getDcimCapacity
+      tags: [dcim]
+      summary: The facilities capacity roll-up
+      description: 'RBAC-gated `dcim.read`. One read for the Facilities dashboard, computed set-based over the rack and prefix utilisation caches, interfaces and cables; every list is capped at 10 (the per-site table at 200, `sites_total` says how many sites have racks). Thresholds are plain capacity percentages (over 80, over 95; strictly greater), not risk bands. A rack with no utilisation row has never had a placement and counts as empty; a deprecated rack is not capacity. A prefix with no addresses and no child prefixes recorded counts as 0 % and in `prefixes.no_addresses_recorded`. A switch interface counts as free when it is enabled, uncabled and not marked connected; virtual and wireless interfaces cannot take a cable and are not counted. Switches are the `switch` asset class. Cable figures count live (`active`) cables; proposals awaiting approval are `proposed_pending`.'
+      responses:
+        '200':
+          description: The roll-up.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapacityReportResponse'
+        '401':
+          $ref: '#/components/responses/LegacyUnauthorized'
+        '403':
+          $ref: '#/components/responses/LegacyForbidden'
 components:
   parameters:
     SourceTenantHeader:
@@ -24046,7 +26049,7 @@ components:
       type: object
       additionalProperties: false
       description: An interface of an asset — physical or virtual (asset-inventory ADR-0010 D3; DCIM DATA_MODEL §2.4). `enabled` is declared by a person; `operational_status` / `admin_status` are measured and never overwrite it.
-      required: [id, asset_id, module_id, name, label, type, type_label, enabled, mgmt_only, mtu, mac_address, mac_addresses, speed_kbps, duplex, mode, untagged_vlan_id, tagged_vlan_ids, vrf_id, parent_id, bridge_id, lag_id, rf_role, rf_channel, rf_channel_frequency, rf_channel_width, tx_power, poe_mode, poe_type, wwn, operational_status, admin_status, vdcs, mark_connected, cable_id, cable_end, source_kind, source_ref, custom_fields, description, comments, status, first_seen_at, last_seen_at, observation_count, approved_by, approved_at, created_at, updated_at, created_by]
+      required: [id, asset_id, module_id, name, label, type, type_label, enabled, mgmt_only, mtu, mac_address, mac_addresses, speed_kbps, duplex, mode, untagged_vlan_id, tagged_vlan_ids, vrf_id, parent_id, bridge_id, lag_id, rf_role, rf_channel, rf_channel_frequency, rf_channel_width, tx_power, poe_mode, poe_type, wwn, operational_status, admin_status, vdcs, virtual_device_contexts, virtual_device_context_ids, mark_connected, cable_id, cable_end, source_kind, source_ref, custom_fields, description, comments, status, first_seen_at, last_seen_at, observation_count, approved_by, approved_at, created_at, updated_at, created_by, vlan_translation_policy_id]
       properties:
         id: { type: string, format: uuid }
         asset_id: { type: string, format: uuid }
@@ -24085,7 +26088,16 @@ components:
         admin_status: { type: [string, 'null'], enum: [up, down, testing, null] }
         vdcs:
           type: array
+          description: Names of the virtual device contexts the interface belongs to (read from its memberships).
           items: { type: string }
+        virtual_device_contexts:
+          type: array
+          description: The virtual device contexts (on the same asset) the interface belongs to (NetBox Interface.vdcs).
+          items: { $ref: '#/components/schemas/VirtualDeviceContextRef' }
+        virtual_device_context_ids:
+          type: array
+          description: The same memberships as ids, the form a PATCH sends.
+          items: { type: string, format: uuid }
         mark_connected: { type: boolean }
         cable_id: { type: [string, 'null'], format: uuid }
         cable_end: { type: [string, 'null'] }
@@ -24103,6 +26115,10 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         created_by: { type: [string, 'null'], format: uuid }
+        vlan_translation_policy_id:
+          type: [string, 'null']
+          format: uuid
+          description: The interface's VLAN translation policy (NetBox Interface.vlan_translation_policy; DCIM gap 10).
     InterfacePatch:
       type: object
       additionalProperties: false
@@ -24140,11 +26156,20 @@ components:
         wwn: { type: [string, 'null'] }
         vdcs:
           type: [array, 'null']
+          description: Membership by context name; each must name a virtual device context of the interface's asset. Send this or `virtual_device_context_ids`, not both.
           items: { type: string }
+        virtual_device_context_ids:
+          type: [array, 'null']
+          description: Membership by id; each must be a virtual device context of the interface's asset (422 otherwise). Replaces the interface's memberships.
+          items: { type: string, format: uuid }
         mark_connected: { type: boolean }
         description: { type: [string, 'null'] }
         comments: { type: [string, 'null'] }
         custom_fields: { type: [object, 'null'], additionalProperties: true }
+        vlan_translation_policy_id:
+          type: [string, 'null']
+          format: uuid
+          description: One of the tenant's VLAN translation policies (422 otherwise); null clears it.
     InterfaceCreate:
       description: A new declared interface. `asset_id`, `name` and `type` are required; `enabled` defaults to true.
       allOf:
@@ -24327,6 +26352,8 @@ components:
       - inventory_item_role
       - virtual_chassis
       - device_bay
+      - virtual_device_context
+      - rma_case
       - interface_template
       - console_port_template
       - console_server_port_template
@@ -24344,6 +26371,8 @@ components:
       - rear_port
       - power_port
       - power_outlet
+      - power_panel
+      - power_feed
       - cable
       - cable_termination
       - cable_path
@@ -24358,9 +26387,12 @@ components:
       - ip_address
       - vlan_group
       - vlan
+      - vlan_translation_policy
+      - vlan_translation_rule
       - fhrp_group
       - fhrp_group_assignment
       - asn
+      - asn_range
       - provider
       - provider_account
       - provider_network
@@ -24369,6 +26401,9 @@ components:
       - circuit_termination
       - circuit_group
       - circuit_group_assignment
+      - virtual_circuit_type
+      - virtual_circuit
+      - virtual_circuit_termination
       - cluster_type
       - cluster_group
       - cluster
@@ -25077,7 +27112,7 @@ components:
       type: object
       additionalProperties: false
       description: A Location (NetBox dcim/location) - a position inside one site (a hall, a cage, a row). `path` is the site name then the location chain, " / "-joined.
-      required: [id, tenant_id, site_id, parent_id, name, slug, operational_status, facility, business_unit_id, source_kind, custom_fields, created_at, updated_at, path, asset_count]
+      required: [id, tenant_id, site_id, parent_id, name, slug, operational_status, facility, business_unit_id, source_kind, custom_fields, created_at, updated_at, path, asset_count, floor_plan_width, floor_plan_depth, floor_plan_unit]
       properties:
         id: { type: string, format: uuid }
         tenant_id: { type: string, format: uuid }
@@ -25098,6 +27133,9 @@ components:
         updated_at: { type: string, format: date-time }
         path: { type: string }
         asset_count: { type: integer, description: Live assets in this location (not its sub-locations). }
+        floor_plan_width: { type: [number, 'null'], description: 'The floor plan''s width (x) in floor_plan_unit (DCIM gap 9); null when the location has no plan.' }
+        floor_plan_depth: { type: [number, 'null'], description: 'The floor plan''s depth (y) in floor_plan_unit; null when the location has no plan.' }
+        floor_plan_unit: { type: [string, 'null'], enum: [m, ft, null], description: 'Metres or feet; null when the location has no plan.' }
     LocationInput:
       type: object
       additionalProperties: false
@@ -25112,6 +27150,61 @@ components:
         business_unit_id: { type: [string, 'null'], format: uuid }
         description: { type: [string, 'null'] }
         comments: { type: [string, 'null'] }
+        floor_plan_width: { type: [number, 'null'], exclusiveMinimum: 0, maximum: 10000, description: 'The floor plan''s width (DCIM gap 9). Width, depth and unit are set together; null all three to remove the plan (refused while racks are placed on it). A plan cannot shrink past a placed rack, and its unit cannot change while racks are placed.' }
+        floor_plan_depth: { type: [number, 'null'], exclusiveMinimum: 0, maximum: 10000 }
+        floor_plan_unit: { type: [string, 'null'], enum: [m, ft, null] }
+    LocationFloorPlan:
+      type: object
+      additionalProperties: false
+      description: A location's floor plan (DCIM gap 9) and the racks in the location.
+      required: [location, default_footprint, racks]
+      properties:
+        location:
+          type: object
+          additionalProperties: false
+          required: [id, site_id, name, path, floor_plan_width, floor_plan_depth, floor_plan_unit]
+          properties:
+            id: { type: string, format: uuid }
+            site_id: { type: string, format: uuid }
+            name: { type: string }
+            path: { type: string }
+            floor_plan_width: { type: [number, 'null'] }
+            floor_plan_depth: { type: [number, 'null'] }
+            floor_plan_unit: { type: [string, 'null'], enum: [m, ft, null] }
+        default_footprint:
+          type: object
+          additionalProperties: false
+          description: The footprint that stands in for a rack whose outer width or depth is not recorded.
+          required: [width, depth, unit]
+          properties:
+            width: { type: number }
+            depth: { type: number }
+            unit: { type: string, enum: [mm] }
+        racks:
+          type: array
+          items: { $ref: '#/components/schemas/FloorPlanRack' }
+    FloorPlanRack:
+      type: object
+      additionalProperties: false
+      required: [id, name, operational_status, floor_x, floor_y, floor_rotation, outer_width, outer_depth, outer_unit, footprint_width, footprint_depth, footprint_default, utilization, used_units, total_units, power_utilization, device_count]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        operational_status: { type: string, enum: [reserved, available, planned, active, deprecated] }
+        floor_x: { type: [number, 'null'], description: Null when the rack is not on the plan. }
+        floor_y: { type: [number, 'null'] }
+        floor_rotation: { type: [integer, 'null'], enum: [0, 90, 180, 270, null] }
+        outer_width: { type: [number, 'null'] }
+        outer_depth: { type: [number, 'null'] }
+        outer_unit: { type: [string, 'null'], enum: [mm, in, null] }
+        footprint_width: { type: [number, 'null'], description: 'The footprint''s width in the plan''s unit, unturned; null when the location has no plan.' }
+        footprint_depth: { type: [number, 'null'] }
+        footprint_default: { type: boolean, description: True when the default footprint stood in for the outer width or depth. }
+        utilization: { type: [number, 'null'], description: Percentage of the rack's units in use (the utilisation cache); null before its first refresh. }
+        used_units: { type: [number, 'null'] }
+        total_units: { type: [number, 'null'] }
+        power_utilization: { type: [number, 'null'], description: 'Allocated draw / available power of the feeds serving the rack, percent; null when no feed serves it or none declares power.' }
+        device_count: { type: integer }
     LocationListResponse:
       type: object
       additionalProperties: false
@@ -26525,6 +28618,19 @@ components:
       - risk_assessed_by
       - risk_level
       properties:
+        # The commercial lifecycle (DCIM gap 4): declared columns, null when not recorded.
+        purchase_date: { type: ['string', 'null'], format: date }
+        warranty_start: { type: ['string', 'null'], format: date }
+        warranty_end: { type: ['string', 'null'], format: date }
+        purchase_cost: { type: ['number', 'null'], description: 'numeric(14,2).' }
+        purchase_currency: { type: ['string', 'null'], pattern: '^[A-Z]{3}$', description: 'ISO 4217 code.' }
+        purchase_order: { type: ['string', 'null'] }
+        vendor: { type: ['string', 'null'], description: 'Who sold it (the reseller), not the manufacturer.' }
+        support_contract: { type: ['string', 'null'] }
+        support_contract_end: { type: ['string', 'null'], format: date }
+        installed_at: { type: ['string', 'null'], format: date }
+        decommissioned_at: { type: ['string', 'null'], format: date }
+        lifecycle: { $ref: '#/components/schemas/AssetLifecycle' }
         identity_status:
           type: string
           enum: [legacy, established, provisional, operator_confirmed]
@@ -34208,8 +36314,12 @@ components:
       type: object
       additionalProperties: false
       description: 'A device type (`device_types`; DCIM DATA_MODEL §2). NetBox-shaped. tenant_id NULL is a platform-seeded row: readable, never writable by a tenant.'
-      required: [id, tenant_id, manufacturer_id, model, slug, part_number, u_height, exclude_from_utilization, is_full_depth, subdevice_role, airflow, weight, weight_unit, front_image_ref, rear_image_ref, default_platform_id, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      required: [id, tenant_id, manufacturer_id, model, slug, part_number, u_height, exclude_from_utilization, is_full_depth, subdevice_role, airflow, weight, weight_unit, front_image_ref, rear_image_ref, default_platform_id, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by, end_of_sale, end_of_support, end_of_life, eol_catalogue_id]
       properties:
+        end_of_sale: { type: ['string', 'null'], format: date, description: 'Declared end of sale (DCIM gap 4).' }
+        end_of_support: { type: ['string', 'null'], format: date, description: 'Declared end of support; when null, the linked end-of-life catalogue entry''s eol_date applies.' }
+        end_of_life: { type: ['string', 'null'], format: date, description: 'Declared end of life; when null, the linked end-of-life catalogue entry''s extended_support_date applies.' }
+        eol_catalogue_id: { type: ['string', 'null'], format: uuid, description: 'The end-of-life catalogue entry the dates fall back to (a hardware entry).' }
         id: { type: 'string', format: uuid }
         tenant_id: { type: ['string', 'null'], format: uuid }
         manufacturer_id: { type: 'string', format: uuid }
@@ -34237,11 +36347,16 @@ components:
         created_by: { type: ['string', 'null'], format: uuid }
         manufacturer: { type: object, description: 'The manufacturer, on list rows.', properties: { id: { type: string, format: uuid }, name: { type: string }, slug: { type: string } } }
         interface_template_count: { type: integer, description: 'Interface templates, on list rows.' }
+        eol_link_source: { type: ['string', 'null'], enum: [automatic, manual, null], description: 'On list rows: how the end-of-life catalogue link was made. `automatic` when the inventory matched it itself (exactly one catalogue entry fit), `manual` when a person or an import did; null when there is no link.' }
     DeviceTypeCreateInput:
       type: object
       additionalProperties: false
       required: [manufacturer_id, model]
       properties:
+        end_of_sale: { type: ['string', 'null'], format: date }
+        end_of_support: { type: ['string', 'null'], format: date }
+        end_of_life: { type: ['string', 'null'], format: date }
+        eol_catalogue_id: { type: ['string', 'null'], format: uuid }
         airflow: { type: ['string', 'null'], enum: ['front-to-rear', 'rear-to-front', 'left-to-right', 'right-to-left', 'side-to-rear', 'rear-to-side', 'bottom-to-top', 'top-to-bottom', 'passive', 'mixed', null] }
         comments: { type: ['string', 'null'] }
         custom_fields: { type: 'object', additionalProperties: true }
@@ -34264,6 +36379,10 @@ components:
       type: object
       additionalProperties: false
       properties:
+        end_of_sale: { type: ['string', 'null'], format: date }
+        end_of_support: { type: ['string', 'null'], format: date }
+        end_of_life: { type: ['string', 'null'], format: date }
+        eol_catalogue_id: { type: ['string', 'null'], format: uuid }
         airflow: { type: ['string', 'null'], enum: ['front-to-rear', 'rear-to-front', 'left-to-right', 'right-to-left', 'side-to-rear', 'rear-to-side', 'bottom-to-top', 'top-to-bottom', 'passive', 'mixed', null] }
         comments: { type: ['string', 'null'] }
         custom_fields: { type: 'object', additionalProperties: true }
@@ -34437,8 +36556,13 @@ components:
       type: object
       additionalProperties: false
       description: 'A platform (OS) (`platforms`; DCIM DATA_MODEL §2). NetBox-shaped. tenant_id NULL is a platform-seeded row: readable, never writable by a tenant.'
-      required: [id, tenant_id, name, slug, manufacturer_id, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      required: [id, tenant_id, name, slug, manufacturer_id, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by, end_of_sale, end_of_support, end_of_life, eol_catalogue_id]
       properties:
+        end_of_sale: { type: ['string', 'null'], format: date, description: 'Declared end of sale (DCIM gap 4).' }
+        end_of_support: { type: ['string', 'null'], format: date, description: 'Declared end of support; when null, the linked end-of-life catalogue entry''s eol_date applies.' }
+        end_of_life: { type: ['string', 'null'], format: date, description: 'Declared end of life; when null, the linked end-of-life catalogue entry''s extended_support_date applies.' }
+        eol_catalogue_id: { type: ['string', 'null'], format: uuid, description: 'The end-of-life catalogue entry the dates fall back to (a os entry).' }
+        eol_link_source: { type: ['string', 'null'], enum: [automatic, manual, null], description: 'On list rows: how the end-of-life catalogue link was made. `automatic` when the inventory matched it itself (exactly one catalogue entry fit), `manual` when a person or an import did; null when there is no link.' }
         id: { type: 'string', format: uuid }
         tenant_id: { type: ['string', 'null'], format: uuid }
         name: { type: 'string' }
@@ -34458,6 +36582,10 @@ components:
       additionalProperties: false
       required: [name]
       properties:
+        end_of_sale: { type: ['string', 'null'], format: date }
+        end_of_support: { type: ['string', 'null'], format: date }
+        end_of_life: { type: ['string', 'null'], format: date }
+        eol_catalogue_id: { type: ['string', 'null'], format: uuid }
         comments: { type: ['string', 'null'] }
         custom_fields: { type: 'object', additionalProperties: true }
         external_ids: { type: 'object', additionalProperties: true }
@@ -34471,6 +36599,10 @@ components:
       type: object
       additionalProperties: false
       properties:
+        end_of_sale: { type: ['string', 'null'], format: date }
+        end_of_support: { type: ['string', 'null'], format: date }
+        end_of_life: { type: ['string', 'null'], format: date }
+        eol_catalogue_id: { type: ['string', 'null'], format: uuid }
         comments: { type: ['string', 'null'] }
         custom_fields: { type: 'object', additionalProperties: true }
         external_ids: { type: 'object', additionalProperties: true }
@@ -35487,12 +37619,12 @@ components:
     InventoryItem:
       type: object
       additionalProperties: false
-      description: 'An inventory item of an asset (`inventory_items`; DCIM DATA_MODEL §2): a hardware part a collector listed (entPhysicalTable, `show inventory`) or a person declared. Identity (asset, parent, name). `component_kind`/`component_id` link it to the interface or module it is.'
-      required: [id, tenant_id, asset_id, parent_id, name, label, role_id, manufacturer_id, part_id, serial, asset_tag, discovered, component_kind, component_id, source_kind, source_ref, custom_fields, external_ids, description, comments, status, first_seen_at, last_seen_at, observation_count, approved_by, approved_at, created_at, updated_at, created_by]
+      description: 'An inventory item (`inventory_items`; DCIM DATA_MODEL §2): a hardware part a collector listed (entPhysicalTable, `show inventory`) or a person declared, on an asset — or, since DCIM gap 8, a spare at a stock location (`location_id`, no asset) with a `quantity` and a `stock_state`. Identity (asset, parent, name) on an asset; (location, name, serial, state) among spares in stock. `component_kind`/`component_id` link an item on an asset to the interface or module it is.'
+      required: [id, tenant_id, asset_id, parent_id, name, label, role_id, manufacturer_id, part_id, serial, asset_tag, discovered, component_kind, component_id, source_kind, source_ref, custom_fields, external_ids, description, comments, status, first_seen_at, last_seen_at, observation_count, approved_by, approved_at, created_at, updated_at, created_by, location_id, quantity, stock_state]
       properties:
         id: { type: 'string', format: uuid }
         tenant_id: { type: 'string', format: uuid }
-        asset_id: { type: 'string', format: uuid }
+        asset_id: { type: ['string','null'], format: uuid }
         parent_id: { type: ['string','null'], format: uuid }
         name: { type: 'string' }
         label: { type: ['string','null'] }
@@ -35519,12 +37651,16 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         created_by: { type: ['string','null'], format: uuid }
+        location_id: { type: ['string','null'], format: uuid, description: 'The stock location of a spare (no asset).' }
+        quantity: { type: integer, minimum: 1, description: 'Units this row counts (a box of optics is one row).' }
+        stock_state: { type: string, enum: [installed, in_stock, reserved, rma, retired] }
     InventoryItemCreateInput:
       type: object
       additionalProperties: false
-      required: [asset_id, name]
+      description: 'An item on an asset (`asset_id`) or a spare at a stock location (`location_id`) — one of the two. `stock_state` defaults to `installed` on an asset and `in_stock` at a location; `rma` is opened by `POST /dcim/inventory-items/{id}/rma`.'
+      required: [name]
       properties:
-        asset_id: { type: 'string', format: uuid }
+        asset_id: { type: ['string','null'], format: uuid }
         parent_id: { type: ['string','null'], format: uuid }
         name: { type: 'string' }
         label: { type: ['string','null'] }
@@ -35543,11 +37679,15 @@ components:
         source_ref: { type: ['string','null'] }
         external_ids: { type: object }
         status: { type: string }
+        location_id: { type: ['string','null'], format: uuid }
+        quantity: { type: integer, minimum: 1 }
+        stock_state: { type: string, enum: [installed, in_stock, reserved, rma, retired] }
     InventoryItemUpdateInput:
       type: object
       additionalProperties: false
+      description: 'A write never moves an item between an asset and a stock location, and never makes it installed or rma (install, remove and rma do); it may move a spare between stock locations and between in_stock, reserved and retired.'
       properties:
-        asset_id: { type: 'string', format: uuid }
+        asset_id: { type: ['string','null'], format: uuid }
         parent_id: { type: ['string','null'], format: uuid }
         name: { type: 'string' }
         label: { type: ['string','null'] }
@@ -35566,6 +37706,9 @@ components:
         source_ref: { type: ['string','null'] }
         external_ids: { type: object }
         status: { type: string }
+        location_id: { type: ['string','null'], format: uuid }
+        quantity: { type: integer, minimum: 1 }
+        stock_state: { type: string, enum: [installed, in_stock, reserved, rma, retired] }
     InventoryItemResponse:
       type: object
       additionalProperties: false
@@ -35578,6 +37721,104 @@ components:
       required: [data, pagination]
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/InventoryItem' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    SpareInstallInput:
+      type: object
+      additionalProperties: false
+      required: [asset_id]
+      properties:
+        asset_id: { type: string, format: uuid }
+        module_bay_id: { type: ['string','null'], format: uuid, description: 'A module bay of the asset: the item is the module in it (or one installed now from its part number).' }
+        parent_id: { type: ['string','null'], format: uuid, description: 'A parent item on the asset.' }
+        name: { type: string, description: 'The name on the asset (default the spare''s).' }
+        quantity: { type: integer, minimum: 1, description: 'Units to install (default 1).' }
+    SpareRemoveInput:
+      type: object
+      additionalProperties: false
+      required: [location_id]
+      properties:
+        location_id: { type: string, format: uuid }
+        name: { type: string, description: 'The name on the shelf (default the item''s).' }
+        stock_state: { type: string, enum: [in_stock, reserved], description: 'For an installed item (default in_stock).' }
+    SpareRMAInput:
+      type: object
+      additionalProperties: false
+      properties:
+        vendor: { type: string }
+        case_number: { type: string }
+        opened_at: { type: string, format: date, description: 'Default today.' }
+        notes: { type: string }
+        location_id: { type: ['string','null'], format: uuid, description: 'For an installed item: the stock location it comes off its asset to.' }
+    SpareResult:
+      type: object
+      additionalProperties: false
+      required: [item]
+      properties:
+        item: { $ref: '#/components/schemas/InventoryItem' }
+        stock: { $ref: '#/components/schemas/InventoryItem' }
+        rma_case: { $ref: '#/components/schemas/RmaCase' }
+    SpareResultResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/SpareResult' }
+    RmaCase:
+      type: object
+      additionalProperties: false
+      description: 'A return-merchandise case for one inventory item (`rma_cases`; DCIM gap 8): vendor, case number, opened / shipped / received dates and the replacement unit. One case that is not closed per item. No NetBox counterpart.'
+      required: [id, tenant_id, inventory_item_id, vendor, case_number, opened_at, shipped_at, received_at, replacement_item_id, replacement_location_id, state, notes, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        inventory_item_id: { type: string, format: uuid }
+        vendor: { type: ['string','null'] }
+        case_number: { type: ['string','null'] }
+        opened_at: { type: string, format: date }
+        shipped_at: { type: ['string','null'], format: date }
+        received_at: { type: ['string','null'], format: date }
+        replacement_item_id: { type: ['string','null'], format: uuid }
+        replacement_location_id: { type: ['string','null'], format: uuid, description: 'The stock location the replacement lands at: where the unit was when the case opened (its shelf, or its asset''s location), editable.' }
+        state: { type: string, enum: [open, shipped, received, closed] }
+        notes: { type: ['string','null'] }
+        description: { type: ['string','null'] }
+        comments: { type: ['string','null'] }
+        source_kind: { type: string }
+        source_ref: { type: ['string','null'] }
+        custom_fields: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        created_by: { type: ['string','null'], format: uuid }
+    RmaCaseUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        vendor: { type: ['string','null'] }
+        case_number: { type: ['string','null'] }
+        opened_at: { type: string, format: date }
+        shipped_at: { type: ['string','null'], format: date }
+        received_at: { type: ['string','null'], format: date }
+        replacement_item_id: { type: ['string','null'], format: uuid }
+        replacement_location_id: { type: ['string','null'], format: uuid }
+        state: { type: string, enum: [open, shipped, received, closed] }
+        notes: { type: ['string','null'] }
+        description: { type: ['string','null'] }
+        comments: { type: ['string','null'] }
+        custom_fields: { type: object }
+        source_kind: { type: string }
+        source_ref: { type: ['string','null'] }
+    RmaCaseResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/RmaCase' }
+    RmaCaseListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/RmaCase' } }
         pagination: { $ref: '#/components/schemas/Pagination' }
     VirtualChassis:
       type: object
@@ -35665,6 +37906,94 @@ components:
       required: [data]
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/VirtualChassisMember' } }
+    VirtualDeviceContext:
+      type: object
+      additionalProperties: false
+      description: 'A virtual device context on an asset (`virtual_device_contexts`; NetBox dcim/virtual-device-context; DCIM DATA_MODEL §2.4): a logical partition of the device that owns interfaces and addresses. `operational_status` is NetBox''s status; `status` is the discovery lifecycle. `primary_ip4_id` / `primary_ip6_id` must be of that family and assigned to one of the asset''s interfaces. An interface''s membership is on the interface (`virtual_device_context_ids`).'
+      required: [id, tenant_id, asset_id, name, identifier, operational_status, business_unit_id, primary_ip4_id, primary_ip6_id, source_kind, source_ref, custom_fields, external_ids, description, comments, status, first_seen_at, last_seen_at, observation_count, approved_by, approved_at, created_at, updated_at, created_by]
+      properties:
+        id: { type: 'string', format: uuid }
+        tenant_id: { type: 'string', format: uuid }
+        asset_id: { type: 'string', format: uuid }
+        name: { type: 'string', minLength: 1, maxLength: 64 }
+        identifier: { type: ['integer','null'], minimum: 0, maximum: 32767 }
+        operational_status: { type: string, enum: [active, planned, offline] }
+        business_unit_id: { type: ['string','null'], format: uuid }
+        primary_ip4_id: { type: ['string','null'], format: uuid }
+        primary_ip6_id: { type: ['string','null'], format: uuid }
+        source_kind: { type: string }
+        source_ref: { type: ['string','null'] }
+        custom_fields: { type: object }
+        external_ids: { type: object }
+        description: { type: ['string','null'] }
+        comments: { type: ['string','null'] }
+        status: { type: string }
+        first_seen_at: { type: string, format: date-time }
+        last_seen_at: { type: string, format: date-time }
+        observation_count: { type: integer }
+        approved_by: { type: ['string','null'], format: uuid }
+        approved_at: { type: ['string','null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        created_by: { type: ['string','null'], format: uuid }
+    VirtualDeviceContextCreateInput:
+      type: object
+      additionalProperties: false
+      required: [asset_id, name]
+      properties:
+        asset_id: { type: 'string', format: uuid }
+        name: { type: 'string', minLength: 1, maxLength: 64 }
+        identifier: { type: ['integer','null'], minimum: 0, maximum: 32767 }
+        operational_status: { type: string, enum: [active, planned, offline] }
+        business_unit_id: { type: ['string','null'], format: uuid }
+        primary_ip4_id: { type: ['string','null'], format: uuid }
+        primary_ip6_id: { type: ['string','null'], format: uuid }
+        description: { type: ['string','null'] }
+        comments: { type: ['string','null'] }
+        custom_fields: { type: object }
+        source_kind: { type: string }
+        source_ref: { type: ['string','null'] }
+        external_ids: { type: object }
+        status: { type: string }
+    VirtualDeviceContextUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        asset_id: { type: 'string', format: uuid }
+        name: { type: 'string', minLength: 1, maxLength: 64 }
+        identifier: { type: ['integer','null'], minimum: 0, maximum: 32767 }
+        operational_status: { type: string, enum: [active, planned, offline] }
+        business_unit_id: { type: ['string','null'], format: uuid }
+        primary_ip4_id: { type: ['string','null'], format: uuid }
+        primary_ip6_id: { type: ['string','null'], format: uuid }
+        description: { type: ['string','null'] }
+        comments: { type: ['string','null'] }
+        custom_fields: { type: object }
+        source_kind: { type: string }
+        source_ref: { type: ['string','null'] }
+        external_ids: { type: object }
+        status: { type: string }
+    VirtualDeviceContextResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/VirtualDeviceContext' }
+    VirtualDeviceContextListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/VirtualDeviceContext' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    VirtualDeviceContextRef:
+      type: object
+      additionalProperties: false
+      description: 'A virtual device context an interface belongs to.'
+      required: [id, name]
+      properties:
+        id: { type: 'string', format: uuid }
+        name: { type: string }
     AssetVirtualChassis:
       type: object
       additionalProperties: false
@@ -35762,7 +38091,7 @@ components:
       type: object
       additionalProperties: false
       description: 'A power port on an asset (`power_ports`; DCIM DATA_MODEL §2.4). `cable_id`/`cable_end` are set by the cable model (row 3.2), `module_id` by modules (row 2.4).'
-      required: [id, tenant_id, asset_id, module_id, name, label, type, maximum_draw, allocated_draw, mark_connected, cable_id, cable_end, source_kind, source_ref, custom_fields, external_ids, description, comments, status, first_seen_at, last_seen_at, observation_count, approved_by, approved_at, created_at, updated_at, created_by]
+      required: [id, tenant_id, asset_id, module_id, name, label, type, maximum_draw, allocated_draw, mark_connected, cable_id, cable_end, source_kind, source_ref, custom_fields, external_ids, description, comments, status, first_seen_at, last_seen_at, observation_count, approved_by, approved_at, created_at, updated_at, created_by, measured_draw, measured_current, measured_legs, measured_at]
       properties:
         id: { type: 'string', format: uuid }
         tenant_id: { type: 'string', format: uuid }
@@ -35791,6 +38120,18 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         created_by: { type: ['string','null'], format: uuid }
+        measured_draw: { type: ['integer','null'], minimum: 0, description: 'Read-only (DCIM row 6.2): the total active power (W) a PDU collector measured through the port at `measured_at`; null when nothing measured it. Never the declared `allocated_draw`.' }
+        measured_current: { type: ['number','null'], minimum: 0, description: 'Read-only: the measured RMS current (A).' }
+        measured_legs: { type: ['array','null'], description: 'Read-only: a three-phase inlet''s measured load per leg.', items: { $ref: '#/components/schemas/MeasuredPowerLeg' } }
+        measured_at: { type: ['string','null'], format: date-time, description: 'Read-only: when the reading was taken.' }
+    MeasuredPowerLeg:
+      type: object
+      additionalProperties: false
+      required: [leg]
+      properties:
+        leg: { type: string, enum: ['A', 'B', 'C'] }
+        measured_draw: { type: ['integer','null'] }
+        measured_current: { type: ['number','null'] }
     PowerPortCreateInput:
       type: object
       additionalProperties: false
@@ -35845,7 +38186,7 @@ components:
       type: object
       additionalProperties: false
       description: 'A power outlet on an asset (`power_outlets`; DCIM DATA_MODEL §2.4). `cable_id`/`cable_end` are set by the cable model (row 3.2), `module_id` by modules (row 2.4).'
-      required: [id, tenant_id, asset_id, module_id, name, label, type, power_port_id, feed_leg, mark_connected, cable_id, cable_end, source_kind, source_ref, custom_fields, external_ids, description, comments, status, first_seen_at, last_seen_at, observation_count, approved_by, approved_at, created_at, updated_at, created_by]
+      required: [id, tenant_id, asset_id, module_id, name, label, type, power_port_id, feed_leg, mark_connected, cable_id, cable_end, source_kind, source_ref, custom_fields, external_ids, description, comments, status, first_seen_at, last_seen_at, observation_count, approved_by, approved_at, created_at, updated_at, created_by, measured_draw, measured_current, measured_state, measured_at]
       properties:
         id: { type: 'string', format: uuid }
         tenant_id: { type: 'string', format: uuid }
@@ -35874,6 +38215,10 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         created_by: { type: ['string','null'], format: uuid }
+        measured_draw: { type: ['integer','null'], minimum: 0, description: 'Read-only (DCIM row 6.2): the outlet''s active power (W) as a PDU collector measured it at `measured_at`.' }
+        measured_current: { type: ['number','null'], minimum: 0, description: 'Read-only: the measured RMS current (A).' }
+        measured_state: { type: ['string','null'], enum: ['on', 'off', null], description: 'Read-only: the switched state the PDU reported; null for an outlet it does not switch or nothing measured.' }
+        measured_at: { type: ['string','null'], format: date-time, description: 'Read-only: when the reading was taken.' }
     PowerOutletCreateInput:
       type: object
       additionalProperties: false
@@ -36096,7 +38441,7 @@ components:
       type: object
       additionalProperties: false
       description: 'A rack (`racks`; DCIM DATA_MODEL §3). NetBox-shaped. Unique by name within its site and location. Naming a rack type copies the type''s dimensions onto the rack.'
-      required: [id, tenant_id, name, facility_id, site_id, location_id, business_unit_id, role_id, rack_type_id, operational_status, serial, asset_tag, form_factor, width, u_height, starting_unit, desc_units, outer_width, outer_depth, outer_unit, mounting_depth, weight, max_weight, weight_unit, airflow, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      required: [id, tenant_id, name, facility_id, site_id, location_id, business_unit_id, role_id, rack_type_id, operational_status, serial, asset_tag, form_factor, width, u_height, starting_unit, desc_units, outer_width, outer_depth, outer_unit, mounting_depth, weight, max_weight, weight_unit, airflow, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by, floor_x, floor_y, floor_rotation]
       properties:
         id: { type: 'string', format: uuid }
         tenant_id: { type: 'string', format: uuid }
@@ -36132,12 +38477,26 @@ components:
         created_at: { type: 'string', format: date-time }
         updated_at: { type: 'string', format: date-time }
         created_by: { type: ['string', 'null'], format: uuid }
+        floor_x: { type: ['number', 'null'], description: 'DCIM gap 9: the centre of the rack''s footprint on its location''s floor plan, from the plan''s left edge, in the plan''s unit; null when the rack is not on a plan.' }
+        floor_y: { type: ['number', 'null'], description: 'The centre of the footprint from the plan''s top edge.' }
+        floor_rotation: { type: ['integer', 'null'], enum: [0, 90, 180, 270, null], description: 'Which way the rack''s front faces: 0 = towards the bottom edge of the plan, then clockwise.' }
         site: { type: 'object', description: 'List rows only: the site.', properties: { id: { type: 'string', format: uuid }, name: { type: 'string' }, slug: { type: 'string' } } }
         location: { type: ['object', 'null'], description: 'List rows only: the location.', properties: { id: { type: 'string', format: uuid }, name: { type: 'string' } } }
         role: { type: ['object', 'null'], description: 'List rows only: the rack role.', properties: { id: { type: 'string', format: uuid }, name: { type: 'string' }, slug: { type: 'string' }, color: { type: 'string' } } }
         rack_type: { type: ['object', 'null'], description: 'List rows only: the rack type.', properties: { id: { type: 'string', format: uuid }, model: { type: 'string' }, slug: { type: 'string' } } }
         utilization: { type: ['object', 'null'], description: 'List rows only: the cached utilisation (rack_utilization); null before the first refresh.', properties: { used_units: { type: number }, total_units: { type: number }, utilization: { type: number } } }
         device_count: { type: 'integer', description: 'List rows only: live assets in the rack, with or without a position.' }
+        power_utilization: { oneOf: [{ $ref: '#/components/schemas/RackPowerUtilization' }, { type: 'null' }], description: 'List rows only (DCIM row 6.2): the rack''s power budget; null when no power feed is declared as serving it.' }
+    RackPowerUtilization:
+      type: object
+      additionalProperties: false
+      required: [feed_count, available_power, allocated_draw, utilization, measured_draw]
+      properties:
+        feed_count: { type: integer }
+        available_power: { type: integer, description: 'VA, summed over the feeds serving the rack.' }
+        allocated_draw: { type: integer, description: 'W allocated on those feeds (NetBox Rack.get_power_utilization).' }
+        utilization: { type: ['number', 'null'], description: 'allocated_draw / available_power × 100, one decimal.' }
+        measured_draw: { type: ['integer', 'null'], description: 'W measured by PDU collectors on the feeds'' inlets; null when nothing was measured.' }
     RackCreateInput:
       type: object
       additionalProperties: false
@@ -36152,6 +38511,9 @@ components:
         description: { type: ['string', 'null'] }
         external_ids: { type: 'object', additionalProperties: true }
         facility_id: { type: ['string', 'null'] }
+        floor_rotation: { type: ['integer', 'null'], enum: [0, 90, 180, 270, null], description: 'DCIM gap 9: defaults to 0 when floor_x / floor_y are set.' }
+        floor_x: { type: ['number', 'null'], minimum: 0, description: 'DCIM gap 9: place the rack on its location''s floor plan (the centre of its footprint, in the plan''s unit). floor_x and floor_y are set together; null both to take the rack off the plan. The location must have a plan and the footprint (outer width x depth, or 600 x 1000 mm when not recorded), turned by floor_rotation, must lie inside it. Moving the rack to another location takes it off the old plan.' }
+        floor_y: { type: ['number', 'null'], minimum: 0 }
         form_factor: { type: ['string', 'null'], enum: ['2-post-frame', '4-post-frame', '4-post-cabinet', 'wall-frame', 'wall-frame-vertical', 'wall-cabinet', 'wall-cabinet-vertical', null] }
         location_id: { type: ['string', 'null'], format: uuid }
         max_weight: { type: ['integer', 'null'] }
@@ -36185,6 +38547,9 @@ components:
         description: { type: ['string', 'null'] }
         external_ids: { type: 'object', additionalProperties: true }
         facility_id: { type: ['string', 'null'] }
+        floor_rotation: { type: ['integer', 'null'], enum: [0, 90, 180, 270, null], description: 'DCIM gap 9: defaults to 0 when floor_x / floor_y are set.' }
+        floor_x: { type: ['number', 'null'], minimum: 0, description: 'DCIM gap 9: place the rack on its location''s floor plan (the centre of its footprint, in the plan''s unit). floor_x and floor_y are set together; null both to take the rack off the plan. The location must have a plan and the footprint (outer width x depth, or 600 x 1000 mm when not recorded), turned by floor_rotation, must lie inside it. Moving the rack to another location takes it off the old plan.' }
+        floor_y: { type: ['number', 'null'], minimum: 0 }
         form_factor: { type: ['string', 'null'], enum: ['2-post-frame', '4-post-frame', '4-post-cabinet', 'wall-frame', 'wall-frame-vertical', 'wall-cabinet', 'wall-cabinet-vertical', null] }
         location_id: { type: ['string', 'null'], format: uuid }
         max_weight: { type: ['integer', 'null'] }
@@ -36282,6 +38647,312 @@ components:
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/RackReservation' } }
         pagination: { $ref: '#/components/schemas/Pagination' }
+    PowerPanel:
+      type: object
+      additionalProperties: false
+      description: 'A power panel (`power_panels`; NetBox dcim/power-panel; DCIM DATA_MODEL §3a): an electrical panel at a site, optionally in one of its locations. Identity (site, name).'
+      required: [id, tenant_id, site_id, location_id, name, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      properties:
+        id: { type: 'string', format: uuid }
+        tenant_id: { type: 'string', format: uuid }
+        site_id: { type: 'string', format: uuid }
+        location_id: { type: ['string', 'null'], format: uuid, description: 'A location in the panel''s site.' }
+        name: { type: 'string', minLength: 1, maxLength: 100 }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        created_at: { type: 'string', format: date-time }
+        updated_at: { type: 'string', format: date-time }
+        created_by: { type: ['string', 'null'], format: uuid }
+        site: { type: 'object', description: 'List rows only: the site.', properties: { id: { type: 'string', format: uuid }, name: { type: 'string' } } }
+        location: { type: ['object', 'null'], description: 'List rows only: the location, or null.', properties: { id: { type: 'string', format: uuid }, name: { type: 'string' } } }
+        feed_count: { type: 'integer', description: 'List rows only: the panel''s feeds.' }
+    PowerPanelCreateInput:
+      type: object
+      additionalProperties: false
+      required: [site_id, name]
+      properties:
+        site_id: { type: 'string', format: uuid }
+        location_id: { type: ['string', 'null'], format: uuid, description: 'A location in the panel''s site.' }
+        name: { type: 'string', minLength: 1, maxLength: 100 }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+    PowerPanelUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        site_id: { type: 'string', format: uuid }
+        location_id: { type: ['string', 'null'], format: uuid, description: 'A location in the panel''s site.' }
+        name: { type: 'string', minLength: 1, maxLength: 100 }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+    PowerPanelResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/PowerPanel' }
+    PowerPanelListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/PowerPanel' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    PowerFeed:
+      type: object
+      additionalProperties: false
+      description: 'A power feed (`power_feeds`; NetBox dcim/power-feed; DCIM DATA_MODEL §3a): one circuit from a power panel, optionally serving a rack. A cable end (to a power port) and a cable path origin. Identity (panel, name).'
+      required: [id, tenant_id, power_panel_id, rack_id, name, operational_status, type, supply, phase, voltage, amperage, max_utilization, available_power, mark_connected, cable_id, cable_end, business_unit_id, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      properties:
+        id: { type: 'string', format: uuid }
+        tenant_id: { type: 'string', format: uuid }
+        power_panel_id: { type: 'string', format: uuid }
+        rack_id: { type: ['string', 'null'], format: uuid, description: 'The rack the feed serves; in the panel''s site.' }
+        name: { type: 'string', minLength: 1, maxLength: 100 }
+        operational_status: { type: 'string', enum: [offline, active, planned, failed], description: 'NetBox PowerFeedStatusChoices; default active.' }
+        type: { type: 'string', enum: [primary, redundant], description: 'Default primary.' }
+        supply: { type: 'string', enum: [ac, dc], description: 'Default ac. A DC supply cannot be three-phase.' }
+        phase: { type: 'string', enum: [single-phase, three-phase], description: 'Default single-phase.' }
+        voltage: { type: 'integer', minimum: -32767, maximum: 32767, description: 'Volts, not zero (negative for a DC plant such as -48 V); default 120.' }
+        amperage: { type: 'integer', minimum: 1, maximum: 32767, description: 'Amperes; default 20.' }
+        max_utilization: { type: 'integer', minimum: 1, maximum: 100, description: 'The percentage of the feed''s capacity that may be drawn; default 80.' }
+        mark_connected: { type: 'boolean', description: 'A cable is attached that is not modelled; cannot be set while a cable is.' }
+        business_unit_id: { type: ['string', 'null'], format: uuid }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        available_power: { type: 'integer', readOnly: true, description: 'Volt-amperes, computed as NetBox does: |voltage| x amperage x max_utilization / 100, x 1.732 for three-phase, rounded.' }
+        cable_id: { type: ['string', 'null'], format: uuid, readOnly: true }
+        cable_end: { type: ['string', 'null'], enum: ['A', 'B', null], readOnly: true }
+        created_at: { type: 'string', format: date-time }
+        updated_at: { type: 'string', format: date-time }
+        created_by: { type: ['string', 'null'], format: uuid }
+        power_panel: { type: 'object', description: 'List rows only: the panel.', properties: { id: { type: 'string', format: uuid }, name: { type: 'string' }, site_id: { type: 'string', format: uuid } } }
+        rack: { type: ['object', 'null'], description: 'List rows only: the rack, or null.', properties: { id: { type: 'string', format: uuid }, name: { type: 'string' } } }
+        connected_endpoint: { oneOf: [{ $ref: '#/components/schemas/PowerEndpoint' }, { type: 'null' }], description: 'List rows only: the power port the feed''s complete cable path reaches (a PDU inlet), or null.' }
+    PowerFeedCreateInput:
+      type: object
+      additionalProperties: false
+      required: [power_panel_id, name]
+      properties:
+        power_panel_id: { type: 'string', format: uuid }
+        rack_id: { type: ['string', 'null'], format: uuid, description: 'The rack the feed serves; in the panel''s site.' }
+        name: { type: 'string', minLength: 1, maxLength: 100 }
+        operational_status: { type: 'string', enum: [offline, active, planned, failed], description: 'NetBox PowerFeedStatusChoices; default active.' }
+        type: { type: 'string', enum: [primary, redundant], description: 'Default primary.' }
+        supply: { type: 'string', enum: [ac, dc], description: 'Default ac. A DC supply cannot be three-phase.' }
+        phase: { type: 'string', enum: [single-phase, three-phase], description: 'Default single-phase.' }
+        voltage: { type: 'integer', minimum: -32767, maximum: 32767, description: 'Volts, not zero (negative for a DC plant such as -48 V); default 120.' }
+        amperage: { type: 'integer', minimum: 1, maximum: 32767, description: 'Amperes; default 20.' }
+        max_utilization: { type: 'integer', minimum: 1, maximum: 100, description: 'The percentage of the feed''s capacity that may be drawn; default 80.' }
+        mark_connected: { type: 'boolean', description: 'A cable is attached that is not modelled; cannot be set while a cable is.' }
+        business_unit_id: { type: ['string', 'null'], format: uuid }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+    PowerFeedUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        power_panel_id: { type: 'string', format: uuid }
+        rack_id: { type: ['string', 'null'], format: uuid, description: 'The rack the feed serves; in the panel''s site.' }
+        name: { type: 'string', minLength: 1, maxLength: 100 }
+        operational_status: { type: 'string', enum: [offline, active, planned, failed], description: 'NetBox PowerFeedStatusChoices; default active.' }
+        type: { type: 'string', enum: [primary, redundant], description: 'Default primary.' }
+        supply: { type: 'string', enum: [ac, dc], description: 'Default ac. A DC supply cannot be three-phase.' }
+        phase: { type: 'string', enum: [single-phase, three-phase], description: 'Default single-phase.' }
+        voltage: { type: 'integer', minimum: -32767, maximum: 32767, description: 'Volts, not zero (negative for a DC plant such as -48 V); default 120.' }
+        amperage: { type: 'integer', minimum: 1, maximum: 32767, description: 'Amperes; default 20.' }
+        max_utilization: { type: 'integer', minimum: 1, maximum: 100, description: 'The percentage of the feed''s capacity that may be drawn; default 80.' }
+        mark_connected: { type: 'boolean', description: 'A cable is attached that is not modelled; cannot be set while a cable is.' }
+        business_unit_id: { type: ['string', 'null'], format: uuid }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+    PowerFeedResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/PowerFeed' }
+    PowerFeedListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/PowerFeed' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    PowerEndpoint:
+      type: object
+      additionalProperties: true
+      description: 'The far end of a power cable path: a power port or outlet (with its asset) or a power feed (with its panel).'
+      required: [kind, id, name]
+      properties:
+        kind: { type: string, enum: [power_port, power_outlet, power_feed] }
+        id: { type: 'string', format: uuid }
+        name: { type: ['string', 'null'] }
+        asset_id: { type: ['string', 'null'], format: uuid }
+        asset_name: { type: ['string', 'null'] }
+        power_panel_id: { type: ['string', 'null'], format: uuid }
+        power_panel_name: { type: ['string', 'null'] }
+    PowerDraw:
+      type: object
+      additionalProperties: false
+      description: 'Declared draws, summed (watts). `recorded_count` counts the ports that declared a draw: one that did not adds nothing and is not a zero.'
+      required: [outlet_count, connected_count, recorded_count, maximum_draw, allocated_draw]
+      properties:
+        outlet_count: { type: integer }
+        connected_count: { type: integer }
+        recorded_count: { type: integer }
+        maximum_draw: { type: integer }
+        allocated_draw: { type: integer }
+    AssetPowerPort:
+      type: object
+      additionalProperties: false
+      required: [id, name, type, maximum_draw, allocated_draw, cable_id, mark_connected, endpoint, path_complete, downstream]
+      properties:
+        id: { type: 'string', format: uuid }
+        name: { type: string }
+        type: { type: ['string', 'null'] }
+        maximum_draw: { type: ['integer', 'null'] }
+        allocated_draw: { type: ['integer', 'null'] }
+        cable_id: { type: ['string', 'null'], format: uuid }
+        mark_connected: { type: boolean }
+        endpoint: { oneOf: [{ $ref: '#/components/schemas/PowerEndpoint' }, { type: 'null' }] }
+        path_complete: { type: boolean }
+        downstream: { $ref: '#/components/schemas/PowerDraw' }
+    AssetPowerOutlet:
+      type: object
+      additionalProperties: false
+      required: [id, name, type, feed_leg, power_port_id, power_port_name, cable_id, mark_connected, endpoint]
+      properties:
+        id: { type: 'string', format: uuid }
+        name: { type: string }
+        type: { type: ['string', 'null'] }
+        feed_leg: { type: ['string', 'null'], enum: ['A', 'B', 'C', null] }
+        power_port_id: { type: ['string', 'null'], format: uuid }
+        power_port_name: { type: ['string', 'null'] }
+        cable_id: { type: ['string', 'null'], format: uuid }
+        mark_connected: { type: boolean }
+        endpoint: { oneOf: [{ $ref: '#/components/schemas/PowerEndpoint' }, { type: 'null' }] }
+    AssetPowerFeed:
+      type: object
+      additionalProperties: false
+      required: [id, name, power_panel_id, power_panel_name, operational_status, supply, phase, voltage, amperage, available_power]
+      properties:
+        id: { type: 'string', format: uuid }
+        name: { type: string }
+        power_panel_id: { type: 'string', format: uuid }
+        power_panel_name: { type: string }
+        operational_status: { type: string }
+        supply: { type: string }
+        phase: { type: string }
+        voltage: { type: integer }
+        amperage: { type: integer }
+        available_power: { type: integer }
+    AssetPowerSummary:
+      type: object
+      additionalProperties: false
+      required: [asset_id, power_ports, power_outlets, feeds, totals]
+      properties:
+        asset_id: { type: 'string', format: uuid }
+        power_ports: { type: array, items: { $ref: '#/components/schemas/AssetPowerPort' } }
+        power_outlets: { type: array, items: { $ref: '#/components/schemas/AssetPowerOutlet' } }
+        feeds: { type: array, items: { $ref: '#/components/schemas/AssetPowerFeed' } }
+        totals: { $ref: '#/components/schemas/PowerDraw' }
+    AssetPowerSummaryResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/AssetPowerSummary' }
+    RackPowerLeg:
+      type: object
+      additionalProperties: false
+      description: 'One leg of a three-phase feed: its PDU outlets on that leg and what they feed, against a third of the feed''s available power.'
+      required: [leg, outlet_count, allocated_draw, maximum_draw, available_power, utilization, measured_draw]
+      properties:
+        leg: { type: string, enum: ['A', 'B', 'C'] }
+        outlet_count: { type: integer }
+        allocated_draw: { type: integer }
+        maximum_draw: { type: integer }
+        available_power: { type: integer }
+        utilization: { type: ['number', 'null'] }
+        measured_draw: { type: ['integer', 'null'] }
+    RackPowerFeed:
+      type: object
+      additionalProperties: false
+      required: [id, name, power_panel_id, power_panel_name, operational_status, phase, available_power, power_port, aggregated, allocated_draw, maximum_draw, recorded_count, outlet_count, utilization, measured_draw, measured_at, legs]
+      properties:
+        id: { type: 'string', format: uuid }
+        name: { type: string }
+        power_panel_id: { type: 'string', format: uuid }
+        power_panel_name: { type: string }
+        operational_status: { type: string }
+        phase: { type: string }
+        available_power: { type: integer }
+        power_port: { oneOf: [{ $ref: '#/components/schemas/PowerEndpoint' }, { type: 'null' }], description: 'The power port (PDU inlet) at the far end of the feed''s cable; null when the feed is not cabled.' }
+        aggregated: { type: boolean, description: 'The port declares no draw of its own, so the draw is what its outlets'' devices declare (NetBox PowerPort.get_power_draw).' }
+        allocated_draw: { type: integer }
+        maximum_draw: { type: integer }
+        recorded_count: { type: integer, description: 'The ports whose declared draw is in the sum: 0 means nobody declared one, not 0 W.' }
+        outlet_count: { type: integer }
+        utilization: { type: ['number', 'null'] }
+        measured_draw: { type: ['integer', 'null'], description: 'The inlet''s measured load (else its outlets'', summed); null when nothing measured it.' }
+        measured_at: { type: ['string', 'null'], format: date-time }
+        legs: { type: array, items: { $ref: '#/components/schemas/RackPowerLeg' } }
+    RackPowerDevice:
+      type: object
+      additionalProperties: false
+      required: [asset_id, power_port_count, allocated_draw, maximum_draw, measured_draw, share]
+      properties:
+        asset_id: { type: 'string', format: uuid }
+        power_port_count: { type: integer }
+        allocated_draw: { type: ['integer', 'null'], description: 'The device''s own power ports'' declared allocated draw; null when none declares one.' }
+        maximum_draw: { type: ['integer', 'null'] }
+        measured_draw: { type: ['integer', 'null'] }
+        share: { type: ['number', 'null'], description: 'allocated_draw as a percentage of the rack''s available power.' }
+    RackPowerBudget:
+      type: object
+      additionalProperties: false
+      required: [rack_id, feed_count, available_power, allocated_draw, maximum_draw, utilization, measured_draw, feeds, devices]
+      properties:
+        rack_id: { type: 'string', format: uuid }
+        feed_count: { type: integer }
+        available_power: { type: integer }
+        allocated_draw: { type: integer }
+        maximum_draw: { type: integer }
+        utilization: { type: ['number', 'null'], description: 'null when no feed serves the rack.' }
+        measured_draw: { type: ['integer', 'null'] }
+        feeds: { type: array, items: { $ref: '#/components/schemas/RackPowerFeed' } }
+        devices: { type: array, items: { $ref: '#/components/schemas/RackPowerDevice' } }
+    RackPowerBudgetResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/RackPowerBudget' }
     RackPlacementRef:
       type: object
       additionalProperties: false
@@ -36470,8 +39141,12 @@ components:
       type: object
       additionalProperties: false
       description: 'An asset''s catalogue view (the Hardware card): device type, its manufacturer, device role, platform (OS), serial and asset tag (DCIM row 2.2).'
-      required: [asset_id, class_key, is_hardware, device_type, manufacturer, device_role, platform, serial, asset_tag, template_counts]
+      required: [asset_id, class_key, is_hardware, device_type, manufacturer, device_role, platform, serial, asset_tag, template_counts, commercial, device_type_eos, platform_eos, lifecycle]
       properties:
+        commercial: { $ref: '#/components/schemas/AssetCommercial' }
+        device_type_eos: { oneOf: [{ $ref: '#/components/schemas/CatalogueEOS' }, { type: 'null' }], description: 'The device type''s lifecycle dates with their sources; null when no device type.' }
+        platform_eos: { oneOf: [{ $ref: '#/components/schemas/CatalogueEOS' }, { type: 'null' }], description: 'The platform''s lifecycle dates with their sources; null when no platform.' }
+        lifecycle: { $ref: '#/components/schemas/AssetLifecycle' }
         asset_id: { type: string, format: uuid }
         class_key: { type: string }
         is_hardware: { type: boolean, description: 'Whether the asset''s class descends from hardware (a device type applies only then).' }
@@ -36829,11 +39504,86 @@ components:
       required: [data]
       properties:
         data: { $ref: '#/components/schemas/AssetHardware' }
+    AssetCommercial:
+      type: object
+      additionalProperties: false
+      description: 'An asset''s commercial lifecycle columns (DCIM gap 4). Declared by a person or an import; null is "not recorded".'
+      required: [purchase_date, warranty_start, warranty_end, purchase_cost, purchase_currency, purchase_order, vendor, support_contract, support_contract_end, installed_at, decommissioned_at]
+      properties:
+        purchase_date: { type: ['string', 'null'], format: date }
+        warranty_start: { type: ['string', 'null'], format: date }
+        warranty_end: { type: ['string', 'null'], format: date }
+        purchase_cost: { type: ['number', 'null'], description: 'numeric(14,2).' }
+        purchase_currency: { type: ['string', 'null'], pattern: '^[A-Z]{3}$', description: 'ISO 4217 code.' }
+        purchase_order: { type: ['string', 'null'] }
+        vendor: { type: ['string', 'null'], description: 'Who sold it (the reseller), not the manufacturer.' }
+        support_contract: { type: ['string', 'null'] }
+        support_contract_end: { type: ['string', 'null'], format: date }
+        installed_at: { type: ['string', 'null'], format: date }
+        decommissioned_at: { type: ['string', 'null'], format: date }
+    AssetLifecycle:
+      type: object
+      additionalProperties: false
+      description: 'Computed, read-only (DCIM gap 4). warranty_state from warranty_end (expiring_90 = ends within 90 days, inclusive); eos_state from the effective end of support, the earlier of the device type''s and the platform''s (declared, else the linked end-of-life catalogue entry''s eol_date; eos_within_12m = within 12 months, inclusive). unknown when nothing is recorded — never a default to healthy.'
+      required: [warranty_state, eos_state, effective_end_of_support, source, subject]
+      properties:
+        warranty_state: { type: string, enum: [active, expiring_90, expired, unknown] }
+        eos_state: { type: string, enum: [supported, eos_within_12m, past_eos, unknown] }
+        effective_end_of_support: { type: ['string', 'null'], format: date }
+        source: { type: string, enum: [declared, catalogue, none] }
+        subject: { type: ['string', 'null'], enum: [device_type, platform, null], description: 'Which catalogue object effective_end_of_support belongs to.' }
+    EOSDate:
+      type: object
+      additionalProperties: false
+      required: [date, source]
+      properties:
+        date: { type: ['string', 'null'], format: date }
+        source: { type: string, enum: [declared, catalogue, none] }
+    CatalogueEOS:
+      type: object
+      additionalProperties: false
+      description: 'A device type''s or platform''s lifecycle dates. A declared date wins; a null one falls back to the linked end-of-life catalogue entry (end_of_support <- eol_date, end_of_life <- extended_support_date; the catalogue has no end-of-sale date).'
+      required: [end_of_sale, end_of_support, end_of_life, eol_catalogue]
+      properties:
+        end_of_sale: { $ref: '#/components/schemas/EOSDate' }
+        end_of_support: { $ref: '#/components/schemas/EOSDate' }
+        end_of_life: { $ref: '#/components/schemas/EOSDate' }
+        eol_catalogue: { oneOf: [{ $ref: '#/components/schemas/EOLCatalogueRef' }, { type: 'null' }] }
+    EOLCatalogueRef:
+      type: object
+      additionalProperties: false
+      description: An end-of-life catalogue entry (platform-curated; DCIM gap 4).
+      required: [id, product_kind, vendor, product, cycle, eol_date, extended_support_date]
+      properties:
+        id: { type: string, format: uuid }
+        product_kind: { type: string, enum: [os, software, hardware] }
+        vendor: { type: ['string', 'null'] }
+        product: { type: string }
+        cycle: { type: string }
+        eol_date: { type: ['string', 'null'], format: date }
+        extended_support_date: { type: ['string', 'null'], format: date }
+    EOLCatalogueListResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/EOLCatalogueRef' } }
     AssetHardwareUpdateInput:
       type: object
       additionalProperties: false
-      description: 'Fields left out are unchanged; null or an empty string clears one. Setting device_type_id here does not instantiate templates (POST /dcim/assets/{id}/device-type does).'
+      description: 'The catalogue columns and the commercial lifecycle (DCIM gap 4). Fields left out are unchanged; null or an empty string clears one. Setting device_type_id here does not instantiate templates (POST /dcim/assets/{id}/device-type does).'
       properties:
+        purchase_date: { type: ['string', 'null'], format: date }
+        warranty_start: { type: ['string', 'null'], format: date }
+        warranty_end: { type: ['string', 'null'], format: date, description: 'Not before warranty_start.' }
+        purchase_cost: { type: ['number', 'string', 'null'], description: 'Non-negative, at most 12 integer digits and two decimals.' }
+        purchase_currency: { type: ['string', 'null'], description: 'ISO 4217; stored upper-case.' }
+        purchase_order: { type: ['string', 'null'], maxLength: 200 }
+        vendor: { type: ['string', 'null'], maxLength: 200 }
+        support_contract: { type: ['string', 'null'], maxLength: 200 }
+        support_contract_end: { type: ['string', 'null'], format: date }
+        installed_at: { type: ['string', 'null'], format: date }
+        decommissioned_at: { type: ['string', 'null'], format: date, description: 'Not before installed_at.' }
         device_type_id: { type: ['string', 'null'], format: uuid }
         device_role_id: { type: ['string', 'null'], format: uuid }
         platform_id: { type: ['string', 'null'], format: uuid }
@@ -37532,6 +40282,204 @@ components:
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/CircuitGroupAssignment' } }
         pagination: { $ref: '#/components/schemas/Pagination' }
+    VirtualCircuitType:
+      type: object
+      additionalProperties: false
+      description: 'A tenant''s kind of virtual circuit, such as an SD-WAN overlay or an MPLS L3VPN (`virtual_circuit_types`; NetBox circuits/virtual-circuit-type).'
+      required: [id, tenant_id, name, slug, color, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      properties:
+        id: { type: 'string', format: uuid }
+        tenant_id: { type: 'string', format: uuid }
+        name: { type: 'string' }
+        slug: { type: 'string' }
+        color: { type: ['string', 'null'], pattern: '^[0-9a-f]{6}$' }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        created_at: { type: 'string', format: date-time }
+        updated_at: { type: 'string', format: date-time }
+        created_by: { type: ['string', 'null'], format: uuid }
+    VirtualCircuitTypeCreateInput:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        color: { type: ['string', 'null'], pattern: '^[0-9a-f]{6}$' }
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        name: { type: 'string' }
+        slug: { type: 'string' }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+    VirtualCircuitTypeUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        color: { type: ['string', 'null'], pattern: '^[0-9a-f]{6}$' }
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        name: { type: 'string' }
+        slug: { type: 'string' }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+    VirtualCircuitTypeResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/VirtualCircuitType' }
+    VirtualCircuitTypeListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/VirtualCircuitType' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    VirtualCircuit:
+      type: object
+      additionalProperties: false
+      description: 'A circuit delivered over a provider network rather than a physical one (`virtual_circuits`; NetBox circuits/virtual-circuit). The cid is unique per provider network. List rows add the provider network''s and provider''s names, the type''s name and the terminations.'
+      required: [id, tenant_id, cid, provider_network_id, provider_account_id, type_id, operational_status, business_unit_id, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      properties:
+        id: { type: 'string', format: uuid }
+        tenant_id: { type: 'string', format: uuid }
+        cid: { type: 'string' }
+        provider_network_id: { type: 'string', format: uuid }
+        provider_account_id: { type: ['string', 'null'], format: uuid }
+        type_id: { type: 'string', format: uuid }
+        operational_status: { type: 'string', enum: ['planned', 'provisioning', 'active', 'offline', 'deprovisioning', 'decommissioned'] }
+        business_unit_id: { type: ['string', 'null'], format: uuid }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        created_at: { type: 'string', format: date-time }
+        updated_at: { type: 'string', format: date-time }
+        created_by: { type: ['string', 'null'], format: uuid }
+        provider_network_name: { type: ['string', 'null'] }
+        provider_id: { type: ['string', 'null'], format: uuid }
+        provider_name: { type: ['string', 'null'] }
+        type_name: { type: ['string', 'null'] }
+        terminations: { type: array, items: { $ref: '#/components/schemas/VirtualCircuitTerminationSummary' } }
+    VirtualCircuitCreateInput:
+      type: object
+      additionalProperties: false
+      required: [cid, provider_network_id, type_id]
+      properties:
+        business_unit_id: { type: ['string', 'null'], format: uuid }
+        cid: { type: 'string' }
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        operational_status: { type: 'string', enum: ['planned', 'provisioning', 'active', 'offline', 'deprovisioning', 'decommissioned'] }
+        provider_account_id: { type: ['string', 'null'], format: uuid }
+        provider_network_id: { type: 'string', format: uuid }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        type_id: { type: 'string', format: uuid }
+    VirtualCircuitUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        business_unit_id: { type: ['string', 'null'], format: uuid }
+        cid: { type: 'string' }
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        operational_status: { type: 'string', enum: ['planned', 'provisioning', 'active', 'offline', 'deprovisioning', 'decommissioned'] }
+        provider_account_id: { type: ['string', 'null'], format: uuid }
+        provider_network_id: { type: 'string', format: uuid }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        type_id: { type: 'string', format: uuid }
+    VirtualCircuitResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/VirtualCircuit' }
+    VirtualCircuitListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/VirtualCircuit' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    VirtualCircuitTermination:
+      type: object
+      additionalProperties: false
+      description: 'An interface''s place in a virtual circuit, with its role (`virtual_circuit_terminations`; NetBox circuits/virtual-circuit-termination). An interface terminates at most one virtual circuit. List rows add the circuit''s cid and the interface''s and its asset''s names.'
+      required: [id, tenant_id, virtual_circuit_id, role, interface_id, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      properties:
+        id: { type: 'string', format: uuid }
+        tenant_id: { type: 'string', format: uuid }
+        virtual_circuit_id: { type: 'string', format: uuid }
+        role: { type: 'string', enum: ['peer', 'hub', 'spoke'] }
+        interface_id: { type: 'string', format: uuid }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        created_at: { type: 'string', format: date-time }
+        updated_at: { type: 'string', format: date-time }
+        created_by: { type: ['string', 'null'], format: uuid }
+        virtual_circuit_cid: { type: ['string', 'null'] }
+        interface_name: { type: ['string', 'null'] }
+        asset_id: { type: ['string', 'null'], format: uuid }
+        asset_name: { type: ['string', 'null'] }
+    VirtualCircuitTerminationCreateInput:
+      type: object
+      additionalProperties: false
+      required: [virtual_circuit_id, interface_id]
+      properties:
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        interface_id: { type: 'string', format: uuid }
+        role: { type: 'string', enum: ['peer', 'hub', 'spoke'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        virtual_circuit_id: { type: 'string', format: uuid }
+    VirtualCircuitTerminationUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        interface_id: { type: 'string', format: uuid }
+        role: { type: 'string', enum: ['peer', 'hub', 'spoke'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        virtual_circuit_id: { type: 'string', format: uuid }
+    VirtualCircuitTerminationResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/VirtualCircuitTermination' }
+    VirtualCircuitTerminationListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/VirtualCircuitTermination' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
     CircuitTerminationSummary:
       type: object
       additionalProperties: false
@@ -38109,11 +41057,37 @@ components:
           oneOf:
             - type: object
               additionalProperties: false
-              required: [id, name]
+              required: [id, name, is_primary_ip4, is_primary_ip6, is_oob_ip]
               properties:
                 id: { type: string, format: uuid }
                 name: { type: string }
+                is_primary_ip4: { type: boolean, description: 'This address is that asset''s primary IPv4 address.' }
+                is_primary_ip6: { type: boolean, description: 'This address is that asset''s primary IPv6 address.' }
+                is_oob_ip: { type: boolean, description: 'This address is that asset''s out-of-band address.' }
             - { type: 'null' }
+    AssetPrimaryIps:
+      type: object
+      additionalProperties: false
+      required: [asset_id, primary_ip4_id, primary_ip6_id, oob_ip_id]
+      properties:
+        asset_id: { type: string, format: uuid }
+        primary_ip4_id: { type: ['string', 'null'], format: uuid }
+        primary_ip6_id: { type: ['string', 'null'], format: uuid }
+        oob_ip_id: { type: ['string', 'null'], format: uuid }
+    AssetPrimaryIpsPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        primary_ip4_id: { type: ['string', 'null'], format: uuid }
+        primary_ip6_id: { type: ['string', 'null'], format: uuid }
+        oob_ip_id: { type: ['string', 'null'], format: uuid }
+    AssetPrimaryIpsResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/AssetPrimaryIps' }
     IpAddressCreateInput:
       type: object
       additionalProperties: false
@@ -38496,6 +41470,234 @@ components:
       properties:
         data: { type: array, items: { $ref: '#/components/schemas/Asn' } }
         pagination: { $ref: '#/components/schemas/Pagination' }
+    AsnRange:
+      type: object
+      additionalProperties: false
+      description: 'A block of AS numbers a RIR delegated, start to end inclusive (`asn_ranges`; NetBox ipam/asn-range). List rows add how many of the tenant''s ASNs are in it and how many numbers are free.'
+      required: [id, tenant_id, name, slug, rir_id, start, end, business_unit_id, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      properties:
+        id: { type: 'string', format: uuid }
+        tenant_id: { type: 'string', format: uuid }
+        name: { type: 'string' }
+        slug: { type: 'string' }
+        rir_id: { type: 'string', format: uuid }
+        start: { type: 'integer', minimum: 1, maximum: 4294967295 }
+        end: { type: 'integer', minimum: 1, maximum: 4294967295 }
+        business_unit_id: { type: ['string', 'null'], format: uuid }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        created_at: { type: 'string', format: date-time }
+        updated_at: { type: 'string', format: date-time }
+        created_by: { type: ['string', 'null'], format: uuid }
+        asn_count: { type: 'integer' }
+        available_count: { type: 'integer' }
+    AsnRangeCreateInput:
+      type: object
+      additionalProperties: false
+      required: [name, rir_id, start, end]
+      properties:
+        business_unit_id: { type: ['string', 'null'], format: uuid }
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        end: { type: 'integer', minimum: 1, maximum: 4294967295 }
+        external_ids: { type: 'object', additionalProperties: true }
+        name: { type: 'string' }
+        rir_id: { type: 'string', format: uuid }
+        slug: { type: 'string' }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        start: { type: 'integer', minimum: 1, maximum: 4294967295 }
+    AsnRangeUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        business_unit_id: { type: ['string', 'null'], format: uuid }
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        end: { type: 'integer', minimum: 1, maximum: 4294967295 }
+        external_ids: { type: 'object', additionalProperties: true }
+        name: { type: 'string' }
+        rir_id: { type: 'string', format: uuid }
+        slug: { type: 'string' }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        start: { type: 'integer', minimum: 1, maximum: 4294967295 }
+    AsnRangeResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/AsnRange' }
+    AsnRangeListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/AsnRange' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    VlanTranslationPolicy:
+      type: object
+      additionalProperties: false
+      description: 'A named set of local VID to remote VID rules an interface applies (`vlan_translation_policies`; NetBox ipam/vlan-translation-policy). List rows add the rules and how many interfaces apply the policy.'
+      required: [id, tenant_id, name, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      properties:
+        id: { type: 'string', format: uuid }
+        tenant_id: { type: 'string', format: uuid }
+        name: { type: 'string' }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        created_at: { type: 'string', format: date-time }
+        updated_at: { type: 'string', format: date-time }
+        created_by: { type: ['string', 'null'], format: uuid }
+        rules: { type: array, items: { $ref: '#/components/schemas/VlanTranslationRuleSummary' } }
+        interface_count: { type: 'integer' }
+    VlanTranslationPolicyCreateInput:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        name: { type: 'string' }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+    VlanTranslationPolicyUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        name: { type: 'string' }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+    VlanTranslationPolicyResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/VlanTranslationPolicy' }
+    VlanTranslationPolicyListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/VlanTranslationPolicy' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    VlanTranslationRule:
+      type: object
+      additionalProperties: false
+      description: 'One local VID to remote VID mapping of a VLAN translation policy (`vlan_translation_rules`; NetBox ipam/vlan-translation-rule). A policy''s local VIDs are unique, and so are its remote VIDs.'
+      required: [id, tenant_id, policy_id, local_vid, remote_vid, external_ids, description, comments, source_kind, source_ref, custom_fields, created_at, updated_at, created_by]
+      properties:
+        id: { type: 'string', format: uuid }
+        tenant_id: { type: 'string', format: uuid }
+        policy_id: { type: 'string', format: uuid }
+        local_vid: { type: 'integer', minimum: 1, maximum: 4094 }
+        remote_vid: { type: 'integer', minimum: 1, maximum: 4094 }
+        external_ids: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        comments: { type: ['string', 'null'] }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        created_at: { type: 'string', format: date-time }
+        updated_at: { type: 'string', format: date-time }
+        created_by: { type: ['string', 'null'], format: uuid }
+    VlanTranslationRuleCreateInput:
+      type: object
+      additionalProperties: false
+      required: [policy_id, local_vid, remote_vid]
+      properties:
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        local_vid: { type: 'integer', minimum: 1, maximum: 4094 }
+        policy_id: { type: 'string', format: uuid }
+        remote_vid: { type: 'integer', minimum: 1, maximum: 4094 }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+    VlanTranslationRuleUpdateInput:
+      type: object
+      additionalProperties: false
+      properties:
+        comments: { type: ['string', 'null'] }
+        custom_fields: { type: 'object', additionalProperties: true }
+        description: { type: ['string', 'null'] }
+        external_ids: { type: 'object', additionalProperties: true }
+        local_vid: { type: 'integer', minimum: 1, maximum: 4094 }
+        policy_id: { type: 'string', format: uuid }
+        remote_vid: { type: 'integer', minimum: 1, maximum: 4094 }
+        source_kind: { type: 'string', enum: ['measured', 'declared', 'imported', 'inferred'] }
+        source_ref: { type: ['string', 'null'] }
+    VlanTranslationRuleResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/VlanTranslationRule' }
+    VlanTranslationRuleListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/VlanTranslationRule' } }
+        pagination: { $ref: '#/components/schemas/Pagination' }
+    VirtualCircuitTerminationSummary:
+      type: object
+      additionalProperties: false
+      description: 'A virtual circuit termination as a virtual circuit list row carries it.'
+      required: [id, role, interface_id, interface_name, asset_id, asset_name]
+      properties:
+        id: { type: 'string', format: uuid }
+        role: { type: 'string', enum: ['peer', 'hub', 'spoke'] }
+        interface_id: { type: 'string', format: uuid }
+        interface_name: { type: ['string', 'null'] }
+        asset_id: { type: ['string', 'null'], format: uuid }
+        asset_name: { type: ['string', 'null'] }
+    VlanTranslationRuleSummary:
+      type: object
+      additionalProperties: false
+      description: 'A VLAN translation rule as a policy list row carries it.'
+      required: [id, local_vid, remote_vid, description]
+      properties:
+        id: { type: 'string', format: uuid }
+        local_vid: { type: 'integer' }
+        remote_vid: { type: 'integer' }
+        description: { type: ['string', 'null'] }
+    AvailableAsns:
+      type: object
+      additionalProperties: false
+      description: 'What an ASN range has free: the first free AS numbers in order, how many numbers are free, and how many of the tenant''s ASNs are in it.'
+      required: [range_id, start, end, size, used, available, asns]
+      properties:
+        range_id: { type: 'string', format: uuid }
+        start: { type: 'integer' }
+        end: { type: 'integer' }
+        size: { type: 'integer', description: 'end - start + 1' }
+        used: { type: 'integer', description: 'ASNs of the tenant inside the range' }
+        available: { type: 'integer', description: 'size - used' }
+        asns: { type: array, items: { type: integer }, description: 'The first free AS numbers, at most `limit`.' }
+    AvailableAsnsResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/AvailableAsns' }
     PrefixDetail:
       type: object
       additionalProperties: false
@@ -39043,7 +42245,7 @@ components:
         data: { $ref: '#/components/schemas/RenderedConfigContext' }
     CableTerminationKind:
       type: string
-      description: 'An object kind a cable may terminate on (DCIM DATA_MODEL §4). `power_feed` is refused until power feeds exist.'
+      description: 'An object kind a cable may terminate on (DCIM DATA_MODEL §4; a power feed since row 6.1).'
       enum: [interface, front_port, rear_port, console_port, console_server_port, circuit_termination, power_port, power_outlet, power_feed]
     CableTerminationInput:
       type: object
@@ -39068,6 +42270,8 @@ components:
         site_name: { type: ['string','null'] }
         rack_id: { type: ['string','null'], format: uuid }
         rack_name: { type: ['string','null'] }
+        power_panel_id: { type: ['string','null'], format: uuid, description: 'A power feed''s panel (row 6.1).' }
+        power_panel_name: { type: ['string','null'] }
     Cable:
       type: object
       additionalProperties: false
@@ -39167,8 +42371,10 @@ components:
         asset_id: { type: ['string','null'], format: uuid }
         asset_name: { type: ['string','null'] }
         circuit_id: { type: ['string','null'], format: uuid }
+        power_panel_id: { type: ['string','null'], format: uuid, description: 'A power feed''s panel (row 6.1).' }
+        power_panel_name: { type: ['string','null'] }
         type: { type: ['string','null'] }
-        operational_status: { type: ['string','null'] }
+        operational_status: { type: ['string','null'], description: 'A cable''s link status, or a power feed''s status.' }
         color: { type: ['string','null'] }
     CablePathStep:
       type: object
@@ -39249,6 +42455,142 @@ components:
         open_findings: { type: integer, minimum: 0 }
         top_finding: { oneOf: [{ $ref: '#/components/schemas/InterfacePostureFinding' }, { type: 'null' }] }
         interfaces: { type: array, items: { $ref: '#/components/schemas/InterfacePosture' } }
+    CapacityReportResponse:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data: { $ref: '#/components/schemas/CapacityReport' }
+    CapacityReport:
+      type: object
+      additionalProperties: false
+      required: [sites_total, rack_totals, sites, racks_top, ports, prefixes, cables, generated_at]
+      properties:
+        sites_total: { type: integer }
+        rack_totals: { $ref: '#/components/schemas/CapacityRackTotals' }
+        sites: { type: array, items: { $ref: '#/components/schemas/CapacitySite' } }
+        racks_top: { type: array, items: { $ref: '#/components/schemas/CapacityRack' } }
+        ports: { $ref: '#/components/schemas/CapacityPorts' }
+        prefixes: { $ref: '#/components/schemas/CapacityPrefixes' }
+        cables: { $ref: '#/components/schemas/CapacityCables' }
+        generated_at: { type: string, format: date-time }
+    CapacityRackTotals:
+      type: object
+      additionalProperties: false
+      description: Tenant-wide rack figures, not capped.
+      required: [racks, total_units, used_units, reserved_units, free_units, racks_over_80, racks_over_95, racks_with_power, racks_over_power_budget]
+      properties:
+        racks: { type: integer }
+        total_units: { type: number }
+        used_units: { type: number }
+        reserved_units: { type: number }
+        free_units: { type: number }
+        racks_over_80: { type: integer }
+        racks_over_95: { type: integer }
+        racks_with_power: { type: integer, description: 'Racks a power feed is declared to serve (DCIM row 6.2).' }
+        racks_over_power_budget: { type: integer, description: 'Racks whose allocated draw exceeds their feeds'' available power.' }
+    CapacitySite:
+      type: object
+      additionalProperties: false
+      required: [site_id, site_name, racks, total_units, used_units, reserved_units, free_units, utilization, racks_over_80, racks_over_95, racks_with_power, racks_over_power_budget]
+      properties:
+        site_id: { type: string, format: uuid }
+        site_name: { type: string }
+        racks: { type: integer }
+        total_units: { type: number }
+        used_units: { type: number }
+        reserved_units: { type: number }
+        free_units: { type: number }
+        utilization: { type: number }
+        racks_over_80: { type: integer }
+        racks_over_95: { type: integer }
+        racks_with_power: { type: integer }
+        racks_over_power_budget: { type: integer }
+    CapacityRack:
+      type: object
+      additionalProperties: false
+      required: [rack_id, rack_name, site_id, site_name, used_units, total_units, utilization]
+      properties:
+        rack_id: { type: string, format: uuid }
+        rack_name: { type: string }
+        site_id: { type: string, format: uuid }
+        site_name: { type: string }
+        used_units: { type: number }
+        total_units: { type: number }
+        utilization: { type: number }
+    CapacitySwitchInterfaces:
+      type: object
+      additionalProperties: false
+      required: [asset_id, name, total, cabled, marked_connected, free]
+      properties:
+        asset_id: { type: string, format: uuid }
+        name: { type: string }
+        total: { type: integer }
+        cabled: { type: integer }
+        marked_connected: { type: integer }
+        free: { type: integer }
+    CapacityPorts:
+      type: object
+      additionalProperties: false
+      required: [switches, total, cabled, marked_connected, free, fewest_free]
+      properties:
+        switches: { type: integer }
+        total: { type: integer }
+        cabled: { type: integer }
+        marked_connected: { type: integer }
+        free: { type: integer }
+        fewest_free: { type: array, items: { $ref: '#/components/schemas/CapacitySwitchInterfaces' } }
+    CapacityPrefixFill:
+      type: object
+      additionalProperties: false
+      required: [prefix_id, prefix, vrf_id, vrf_name, size, ip_count, child_count, utilization]
+      properties:
+        prefix_id: { type: string, format: uuid }
+        prefix: { type: string }
+        vrf_id: { type: string, format: uuid, nullable: true }
+        vrf_name: { type: string, nullable: true }
+        size: { type: string, description: Decimal address count. }
+        ip_count: { type: integer }
+        child_count: { type: integer }
+        utilization: { type: number }
+    CapacityPrefixes:
+      type: object
+      additionalProperties: false
+      required: [total, no_addresses_recorded, over_80, over_95, fullest]
+      properties:
+        total: { type: integer }
+        no_addresses_recorded: { type: integer }
+        over_80: { type: integer }
+        over_95: { type: integer }
+        fullest: { type: array, items: { $ref: '#/components/schemas/CapacityPrefixFill' } }
+    CapacityCableByStatus:
+      type: object
+      additionalProperties: false
+      required: [connected, planned, decommissioning]
+      properties:
+        connected: { type: integer }
+        planned: { type: integer }
+        decommissioning: { type: integer }
+    CapacityPlannedCable:
+      type: object
+      additionalProperties: false
+      required: [cable_id, label, created_at, age_days]
+      properties:
+        cable_id: { type: string, format: uuid }
+        label: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        age_days: { type: integer }
+    CapacityCables:
+      type: object
+      additionalProperties: false
+      required: [by_status, proposed_pending, planned_over_30_days, planned_over_90_days, oldest_planned, declared_never_confirmed]
+      properties:
+        by_status: { $ref: '#/components/schemas/CapacityCableByStatus' }
+        proposed_pending: { type: integer }
+        planned_over_30_days: { type: integer }
+        planned_over_90_days: { type: integer }
+        oldest_planned: { type: array, items: { $ref: '#/components/schemas/CapacityPlannedCable' } }
+        declared_never_confirmed: { type: integer }
     AssetInterfacePostureResponse:
       type: object
       additionalProperties: false

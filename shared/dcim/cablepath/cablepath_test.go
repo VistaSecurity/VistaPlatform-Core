@@ -276,10 +276,83 @@ func TestSegments_GroupsTriples(t *testing.T) {
 func TestIsOrigin(t *testing.T) {
 	for k, want := range map[dcim.ObjectKind]bool{
 		dcim.ObjectKindInterface: true, dcim.ObjectKindConsolePort: true, dcim.ObjectKindCircuitTermination: true,
+		dcim.ObjectKindPowerPort: true, dcim.ObjectKindPowerOutlet: true, dcim.ObjectKindPowerFeed: true,
 		dcim.ObjectKindFrontPort: false, dcim.ObjectKindRearPort: false, dcim.ObjectKindAsset: false,
 	} {
 		if IsOrigin(k) != want {
 			t.Errorf("IsOrigin(%s) = %v", k, !want)
 		}
+	}
+}
+
+func (m ids) pport(n string) Node  { return N(dcim.ObjectKindPowerPort, m.id(n)) }
+func (m ids) outlet(n string) Node { return N(dcim.ObjectKindPowerOutlet, m.id(n)) }
+func (m ids) feed(n string) Node   { return N(dcim.ObjectKindPowerFeed, m.id(n)) }
+
+// A server's power supply → a PDU outlet; the outlet draws from the PDU's
+// inlet, which is cabled to a power feed: the path runs through the PDU to the
+// feed (DCIM row 6.1).
+func powerChain(m ids) *MemGraph {
+	g := NewMemGraph()
+	g.AddCable(m.id("C1"), "connected", []Node{m.pport("PSU1")}, []Node{m.outlet("OUT1")})
+	g.SetOutletPowerPort(m.id("OUT1"), m.id("INLET"))
+	g.AddCable(m.id("C2"), "connected", []Node{m.pport("INLET")}, []Node{m.feed("FEED")})
+	return g
+}
+
+func TestWalk_PowerPortThroughPDUToFeed(t *testing.T) {
+	m := ids{}
+	check(t, m, powerChain(m), m.pport("PSU1"), want{
+		path: "PSU1 | C1 | OUT1 | INLET | C2 | FEED", dest: "FEED", complete: true, active: true,
+	})
+}
+
+func TestWalk_PowerOutletWithUncabledInletCompletesAtOutlet(t *testing.T) {
+	m := ids{}
+	g := powerChain(m)
+	g.RemoveCable(m.id("C2"))
+	check(t, m, g, m.pport("PSU1"), want{path: "PSU1 | C1 | OUT1", dest: "OUT1", complete: true, active: true})
+}
+
+func TestWalk_PowerOutletWithNoInletCompletesAtOutlet(t *testing.T) {
+	m := ids{}
+	g := NewMemGraph()
+	g.AddCable(m.id("C1"), "connected", []Node{m.pport("PSU1")}, []Node{m.outlet("OUT1")})
+	check(t, m, g, m.pport("PSU1"), want{path: "PSU1 | C1 | OUT1", dest: "OUT1", complete: true, active: true})
+}
+
+func TestWalk_PowerFeedToPDUInlet(t *testing.T) {
+	m := ids{}
+	check(t, m, powerChain(m), m.feed("FEED"), want{path: "FEED | C2 | INLET", dest: "INLET", complete: true, active: true})
+}
+
+func TestWalk_PowerThroughTwoPDUs(t *testing.T) {
+	m := ids{}
+	g := NewMemGraph()
+	g.AddCable(m.id("C1"), "connected", []Node{m.pport("PSU1")}, []Node{m.outlet("OUT1")})
+	g.SetOutletPowerPort(m.id("OUT1"), m.id("INLET1"))
+	g.AddCable(m.id("C2"), "planned", []Node{m.pport("INLET1")}, []Node{m.outlet("OUT2")})
+	g.SetOutletPowerPort(m.id("OUT2"), m.id("INLET2"))
+	g.AddCable(m.id("C3"), "connected", []Node{m.pport("INLET2")}, []Node{m.feed("FEED")})
+	check(t, m, g, m.pport("PSU1"), want{
+		path: "PSU1 | C1 | OUT1 | INLET1 | C2 | OUT2 | INLET2 | C3 | FEED", dest: "FEED", complete: true,
+	})
+}
+
+// A PDU whose inlet is cabled to one of its own outlets is a loop: the walk
+// stops at the hop cap, incomplete.
+func TestWalk_PowerLoopStopsAtCap(t *testing.T) {
+	m := ids{}
+	g := NewMemGraph()
+	g.AddCable(m.id("C1"), "connected", []Node{m.pport("PSU1")}, []Node{m.outlet("OUT1")})
+	g.SetOutletPowerPort(m.id("OUT1"), m.id("INLET"))
+	g.SetOutletPowerPort(m.id("OUT2"), m.id("INLET"))
+	g.AddCable(m.id("C2"), "connected", []Node{m.pport("INLET")}, []Node{m.outlet("OUT2")})
+	p, err := Walk(context.Background(), g, m.pport("PSU1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.Truncated || p.IsComplete || p.Destination() != nil {
+		t.Fatalf("a power loop must truncate incomplete: truncated=%v complete=%v", p.Truncated, p.IsComplete)
 	}
 }

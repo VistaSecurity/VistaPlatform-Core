@@ -392,8 +392,14 @@ func (b *builder) derivedOver(sc scope, f ast.FieldRef, sp ast.Span, raw bool, i
 	if isWirelessDerived(f.Accessor.Derived) {
 		return b.wirelessOver(sc, f, sp, inner)
 	}
+	if isVirtualCircuitDerived(f.Accessor.Derived) {
+		return b.virtualCircuitOver(sc, f, sp, inner)
+	}
 	if isCablingDerived(f.Accessor.Derived) {
 		return b.cablingOver(sc, f, sp, inner)
+	}
+	if isPowerDerived(f.Accessor.Derived) {
+		return b.powerOver(sc, f, sp, inner)
 	}
 	switch f.Accessor.Derived {
 	case "asset.proposed_by":
@@ -425,6 +431,15 @@ func (b *builder) derivedOver(sc scope, f ast.FieldRef, sp ast.Span, raw bool, i
 		m := sc.self + ".mac_address"
 		return inner(expr{alias: sc.self, sql: "(CASE WHEN substr(" + m + "::text, 10, 5) = " + b.param("ff:fe") + " THEN (" + m +
 			"::macaddr)::text ELSE " + m + "::text END)"})
+	case "interface.virtual_device_context":
+		// A virtual device context the interface belongs to (DCIM gap 1), by
+		// name, through the membership junction. Row-shaped, so `!=` means
+		// "in no context of that name".
+		j, c := b.alias("ivc"), b.alias("vdc")
+		return "EXISTS (SELECT 1 FROM interface_virtual_device_contexts " + j +
+			" JOIN virtual_device_contexts " + c + " ON " + c + ".id = " + j + ".virtual_device_context_id" +
+			" WHERE " + j + ".interface_id = " + sc.self + ".id AND " + c + ".status <> " + b.param("rejected") +
+			" AND " + inner(expr{alias: c, sql: c + ".name"}) + ")"
 	case "asset.business_unit":
 		// The unit the asset is assigned to, matched by NAME or SLUG. An EXISTS
 		// over the one referenced row (rowShaped, so `!=` negates the whole
@@ -597,6 +612,14 @@ func (b *builder) derivedOver(sc scope, f ast.FieldRef, sp ast.Span, raw bool, i
 			" WHERE " + ii + ".asset_id = " + sc.self + ".id AND " + ii + ".status <> " + b.param("rejected") +
 			" AND " + inner(expr{alias: ii, sql: ii + ".serial"}) + ")"
 
+	case "asset.inventory_item_stock_state":
+		// The stock state of any of the asset's inventory items (DCIM gap 8):
+		// installed, or rma for a part out for RMA still in the asset.
+		ii := b.alias("ii")
+		return "EXISTS (SELECT 1 FROM inventory_items " + ii +
+			" WHERE " + ii + ".asset_id = " + sc.self + ".id AND " + ii + ".status <> " + b.param("rejected") +
+			" AND " + inner(expr{alias: ii, sql: ii + ".stock_state"}) + ")"
+
 	case "asset.virtual_chassis":
 		// The virtual chassis the asset is a member of (DCIM row 2.4), by
 		// name or domain.
@@ -635,6 +658,12 @@ func (b *builder) derivedOver(sc scope, f ast.FieldRef, sp ast.Span, raw bool, i
 		// has none — the same expression the `region` facet counts.
 		return inner(expr{alias: sc.self, sql: "COALESCE(NULLIF(" + sc.self + ".region, " + b.param("") + "), " +
 			sc.self + ".attributes ->> " + b.param("region") + ")"})
+
+	case "asset.end_of_support":
+		// The effective end of support (DCIM gap 4): a value, not an EXISTS,
+		// so `end_of_support < now` is "the earlier of the two dates has
+		// passed" and an asset with neither date is UNKNOWN (no row).
+		return inner(expr{alias: sc.self, sql: AssetEffectiveEndOfSupportSQL(sc.self, b.alias)})
 
 	case "asset.cert_trust":
 		// The worst trust status of the asset's certificates, the
@@ -690,8 +719,10 @@ func derivedRowShaped(derived string) bool {
 		"asset.cluster", "asset.cluster_type", "asset.cluster_group",
 		"asset.circuit", "asset.circuit_provider", "asset.circuit_cid",
 		"asset.rack", "asset.rack_site", "asset.rack_role",
-		"asset.module_type", "asset.inventory_item_serial", "asset.virtual_chassis":
+		"asset.module_type", "asset.inventory_item_serial", "asset.inventory_item_stock_state", "asset.virtual_chassis",
+		"interface.virtual_device_context":
 		return true
 	}
-	return isIPAMDerived(derived) || isTunnelDerived(derived) || isWirelessDerived(derived) || isCablingDerived(derived)
+	return isIPAMDerived(derived) || isTunnelDerived(derived) || isWirelessDerived(derived) || isCablingDerived(derived) ||
+		isPowerDerived(derived) || isVirtualCircuitDerived(derived)
 }

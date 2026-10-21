@@ -37,9 +37,9 @@ export interface NavSection {
 
 export const SECTIONS: NavSection[] = [
   {
-    // Four dashboards, not one. The section keeps `/dashboard` as its own path —
+    // Five dashboards, not one. The section keeps `/dashboard` as its own path —
     // Overview is still where the rail row lands and where `/` redirects — and
-    // gains a sub-nav group for the three focused pages.
+    // gains a sub-nav group for the focused pages.
     //
     // Items are DERIVED from the dashboard registry rather than restated here:
     // a second copy of the list is a second thing to keep in step, which is the
@@ -140,6 +140,7 @@ export const SECTIONS: NavSection[] = [
         items: [
           { path: '/inventory/manage/catalog', label: 'Device catalog', icon: 'blocks' },
           { path: '/inventory/manage/import', label: 'Import', icon: 'file-up' },
+          { path: '/inventory/manage/spares', label: 'Spares & RMA', icon: 'package' },
         ],
       },
       {

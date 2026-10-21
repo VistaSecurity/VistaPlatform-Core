@@ -209,10 +209,19 @@ to an asset's risk score — it is reported beside risk, never inside it.
 | **Duplicate suspected** | A merge proposal is waiting in Approvals. Raised on **both** records, because a suspected duplicate is a statement about a pair — showing it on only one leaves the other looking fine from its own page. Deciding the proposal closes both. |
 | **Stale** | Nothing has observed the subject for **30**, **90** or **180** days — escalating rungs, on assets, endpoints and installed software alike. |
 | **Orphan relationship** | A relationship points at an asset that has been archived or deleted. The edge is kept so the history stays readable; the finding is how you find it. |
+| **Not racked** | A hardware asset whose device type is taller than 0 U, not in a parent's bay, records no rack. |
+| **No rack position** | The asset is in a rack but has no unit position. 0 U devices and children in a bay are exempt. |
+| **Planned cable stale** | A cable at the asset's A end has been *planned* for more than 90 days. |
+| **Cable unconfirmed** | The asset reports LLDP or CDP neighbours, yet a declared, connected cable on one of its interfaces has gone 30 days without a neighbour confirming it. Never raised on an asset that reports no neighbours. |
+| **Interface with no type** | An active interface is typed `other` or not at all. One finding per asset; the evidence lists the interfaces. |
+| **Duplicate address** | An active address is also assigned to another approved asset in the same VRF, and its role does not allow sharing. Raised on both assets. |
+| **Warranty expired** | The recorded warranty end date has passed. No warranty date recorded raises nothing. |
+| **Past end of support** / **End of support within 12 months** | The asset's effective end of support — the one its Hardware tab's Lifecycle card shows — has passed, or falls within the next 12 months. Exclusive: an asset past end of support gets only the first. |
 
-The first four and stale apply to assets you have **approved into the
-inventory**; something still waiting in Approvals is not yet a record anybody
-has accepted. Archived assets are judged for nothing at all — you took them out
+The first four, stale and the DCIM kinds (not racked through end of support)
+apply to assets you have **approved into the inventory**; something still
+waiting in Approvals is not yet a record anybody has accepted. The DCIM kinds
+also skip an asset whose decommission date has arrived. Archived assets are judged for nothing at all — you took them out
 of the queue, and a producer putting fresh work back in would undo that.
 Suspected duplicates are the exception: the newly-seen half of a contested pair
 is by definition still awaiting approval, and that is precisely the record in

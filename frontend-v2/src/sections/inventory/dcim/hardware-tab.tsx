@@ -10,11 +10,17 @@
 //     already measured; removing keeps anything that carries measured data.
 //   - Inventory items: the hardware parts a collector listed (power supplies,
 //     fans, transceivers) or someone declared, as a tree, each linked to the
-//     interface or module it is.
+//     interface or module it is. Remove to stock and RMA (DCIM gap 8,
+//     spares/spare-actions.tsx) take a part off the asset to a stock location
+//     or open a return case for it.
 //   - Virtual chassis: the chassis this asset is a member of, its members with
 //     position and priority and the master; add or remove a member.
 //   - Device bays: the bays of row 3.1 with the child asset in each; install a
 //     child or empty the bay.
+//   - Virtual device contexts (DCIM gap 1): the device's VDOMs, vsys, VDCs or
+//     route domains, with the interfaces in each (vdc-section.tsx).
+//   - Lifecycle (DCIM gap 4): purchase, warranty, support contract and the
+//     device type's and platform's end-of-support dates (lifecycle-card.tsx).
 //
 // Every section has its five states: loading, error, empty (nothing declared
 // or reported — which is not "this asset has none"), the list, and the result
@@ -31,7 +37,10 @@ import {
   type InventoryItem, type Module, type ModuleBay,
 } from './hardware-queries';
 import { useAssetInterfaces } from './interface-queries';
+import { LifecycleCard } from './lifecycle-card';
+import { OpenRmaModal, RemoveToStockModal } from '../spares/spare-actions';
 import { PanelEmpty, PanelError, PanelLoading } from './substrate-states';
+import { VirtualDeviceContextsSection } from './vdc-section';
 
 export function HardwareTab({ asset }: { asset: Asset }) {
   return (
@@ -50,10 +59,12 @@ function HardwareBody({ asset }: { asset: Asset }) {
   return (
     <div data-testid="hardware-tab" style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
       <DeviceTypeLine asset={asset} />
+      <LifecycleCard assetId={asset.id} canManage={canManage} />
       <ModulesSection asset={asset} canManage={canManage} />
-      <InventoryItemsSection asset={asset} />
+      <InventoryItemsSection asset={asset} canManage={canManage} />
       <VirtualChassisSection asset={asset} canManage={canManage} />
       <DeviceBaysSection asset={asset} canManage={canManage} />
+      <VirtualDeviceContextsSection asset={asset} canManage={canManage} />
     </div>
   );
 }
@@ -230,8 +241,10 @@ export function InstallModuleModal({ asset, bay, onClose }: { asset: Asset; bay:
 
 // --------------------------------------------------------- inventory items --
 
-function InventoryItemsSection({ asset }: { asset: Asset }) {
+function InventoryItemsSection({ asset, canManage }: { asset: Asset; canManage: boolean }) {
   const items = useAssetInventoryItems(asset.id);
+  const [removing, setRemoving] = useState<InventoryItem | null>(null);
+  const [rma, setRma] = useState<InventoryItem | null>(null);
   const roles = useInventoryItemRoles();
   const bays = useAssetModuleBays(asset.id);
   const modules = useAssetModules(asset.id);
@@ -275,8 +288,21 @@ function InventoryItemsSection({ asset }: { asset: Asset }) {
                 <td style={cell} className="mono">{i.part_id ?? '—'}</td>
                 <td style={cell} className="mono">{i.serial ?? '—'}</td>
                 <td style={cell}>{link(i)}</td>
-                <td style={{ ...cell, textAlign: 'right' }}>
+                <td style={{ ...cell, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                  {i.stock_state === 'rma' && <span data-testid="rma-badge" title="Out for RMA" style={{ fontSize: 11, padding: '1px 6px', borderRadius: 6, marginRight: 4, background: 'color-mix(in srgb, var(--warn) 14%, transparent)', color: 'var(--app-t1)' }}>out for RMA</span>}
                   {i.discovered && <span data-testid="discovered-badge" title="Reported by a collector" style={{ fontSize: 11, padding: '1px 6px', borderRadius: 6, background: 'color-mix(in srgb, var(--accent) 12%, transparent)', color: 'var(--accent)' }}>discovered</span>}
+                  {canManage && (
+                    <>
+                      <button type="button" className="ui-btn sm ghost" style={{ marginLeft: 4 }} aria-label={`Remove ${i.name} to stock`} onClick={() => setRemoving(i)}>
+                        <Icon name="archive" size={12} />To stock
+                      </button>
+                      {i.stock_state === 'installed' && (
+                        <button type="button" className="ui-btn sm ghost" aria-label={`Open RMA for ${i.name}`} onClick={() => setRma(i)}>
+                          <Icon name="recycle" size={12} />RMA
+                        </button>
+                      )}
+                    </>
+                  )}
                 </td>
               </tr>
             ))}
@@ -289,6 +315,8 @@ function InventoryItemsSection({ asset }: { asset: Asset }) {
     <section data-testid="hardware-inventory-items">
       <SectionHead title="Inventory items" icon="boxes" />
       {body}
+      {removing && <RemoveToStockModal item={removing} assetId={asset.id} onClose={() => setRemoving(null)} />}
+      {rma && <OpenRmaModal item={rma} assetId={asset.id} onClose={() => setRma(null)} />}
     </section>
   );
 }

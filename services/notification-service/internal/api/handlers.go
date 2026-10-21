@@ -301,6 +301,10 @@ func (s *Server) createTenantRule(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
+	if err := req.ChangeFilter.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	rule, err := s.ruleEngine.CreateTenantRule(c.Request.Context(), tenantID, &req)
 	if err != nil {
@@ -324,6 +328,10 @@ func (s *Server) updateTenantRule(c *gin.Context) {
 	var req models.UpdateRuleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if err := req.ChangeFilter.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 

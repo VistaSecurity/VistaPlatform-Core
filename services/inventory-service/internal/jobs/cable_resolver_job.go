@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/vistasecurity/vistaplatform/shared/dcim/changenotify"
 	"github.com/vistasecurity/vistaplatform/shared/dcim/unresolved"
 )
 
@@ -87,7 +88,15 @@ func RunCableResolverPass(ctx context.Context, bypass *sql.DB, tenants func(cont
 		if ctx.Err() != nil {
 			return
 		}
-		n, err := r.ResolveParked(ctx, tenant)
+		// One change-notification unit per tenant: the proposed cables this
+		// pass files raise object_changed (for a rule that includes intake)
+		// once it has committed.
+		var n unresolved.ResolvedCount
+		err := changenotify.Unit(ctx, func(ctx context.Context) error {
+			var err error
+			n, err = r.ResolveParked(ctx, tenant)
+			return err
+		})
 		if err != nil {
 			log.Printf("[CableResolver] tenant %s: %v (resolved %d before the error; retried next tick)", tenant, err, n.Resolved)
 			continue

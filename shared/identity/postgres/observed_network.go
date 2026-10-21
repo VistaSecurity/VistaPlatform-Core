@@ -23,7 +23,9 @@ package postgres
 //     are added, never removed;
 //   - an address's configured length on its interface (NetBox records an
 //     interface address with its mask), and addresses in a NAMED VRF, which
-//     are recorded on the interface but are never identity.
+//     are recorded on the interface but are never identity;
+//   - the device's virtual device contexts and each interface's membership
+//     (DCIM gap 1, observed_vdc.go).
 //
 // It never writes a MAC or a global-VRF address the identity half did not:
 // an interface's MAC is filled only when it is empty AND the asset already
@@ -76,6 +78,9 @@ func (r *Repository) RecordObservedNetwork(ctx context.Context, asset identity.A
 			}
 		}
 		if err := w.interfaces(n.Interfaces); err != nil {
+			return err
+		}
+		if err := w.virtualDeviceContexts(n); err != nil {
 			return err
 		}
 		return w.wirelessOf(n)

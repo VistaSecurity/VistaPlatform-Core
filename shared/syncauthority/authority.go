@@ -40,6 +40,12 @@ type FieldSpec struct {
 // KindSpec is one synced object kind.
 type KindSpec struct {
 	Kind dcim.ObjectKind
+	// Object, when set, makes Kind a SYNC KIND over that object's table rather
+	// than an object kind of its own: a NetBox virtual machine is an asset of
+	// the virtual_machine class, a VM interface an interface on such an asset
+	// (standards/sync-authority.yaml `object:`). The kind is not in the
+	// vocabulary; its rows' changes are recorded under Object.
+	Object dcim.ObjectKind
 	// NetBox is the peer's REST endpoint, module/object ("ipam/prefixes").
 	NetBox string
 	// Order is the dependency order: a kind is planned and applied after every
@@ -51,6 +57,15 @@ type KindSpec struct {
 	// columns are matched, never synced as fields.
 	Identity []string
 	Fields   []FieldSpec
+}
+
+// Stored is the object kind k's rows are: Object for a sync kind, Kind
+// otherwise. object_changes, tags and the other substrate name it.
+func (k KindSpec) Stored() dcim.ObjectKind {
+	if k.Object != "" {
+		return k.Object
+	}
+	return k.Kind
 }
 
 // Field returns the spec of one field of k.

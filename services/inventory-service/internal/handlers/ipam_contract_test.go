@@ -79,8 +79,8 @@ func TestIPAMContract_SchemasMatchTablesAndEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	objs := services.IPAMObjects()
-	if len(objs) != 13 {
-		t.Fatalf("engine serves %d IPAM objects, want 13", len(objs))
+	if len(objs) != 16 {
+		t.Fatalf("engine serves %d IPAM objects, want 16", len(objs))
 	}
 	keys := func(m map[string]interface{}) []string {
 		var out []string
@@ -107,6 +107,10 @@ func TestIPAMContract_SchemasMatchTablesAndEngine(t *testing.T) {
 			want = append(want, "prefixes")
 		case "ip_addresses":
 			want = append(want, "asset")
+		case "asn_ranges": // DCIM gap 10
+			want = append(want, "asn_count", "available_count")
+		case "vlan_translation_policies":
+			want = append(want, "rules", "interface_count")
 		}
 		slices.Sort(want)
 		if got := keys(read.Properties); !slices.Equal(got, want) {

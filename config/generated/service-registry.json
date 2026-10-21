@@ -77,11 +77,11 @@
     }
   },
   "docker_images": {
-    "go_builder": "golang:1.26.9-alpine",
+    "go_builder": "golang:1.26.10-alpine",
     "runtime": "alpine:3.24.2",
     "node": "node:24.18.1-alpine3.24",
     "dhi": {
-      "go_builder": "dhi.io/golang:1.26.9-alpine3.24-dev",
+      "go_builder": "dhi.io/golang:1.26.10-alpine3.24-dev",
       "runtime": "dhi.io/alpine-base:3.24-dev",
       "node": "dhi.io/node:24-alpine3.24-dev"
     }
@@ -131,7 +131,8 @@
       "/auth-service/internal/",
       "/audit-service/internal/",
       "/inventory-service/internal/",
-      "/maintenance-service/internal/"
+      "/maintenance-service/internal/",
+      "/compliance-engine/internal/"
     ],
     "internal_routes": [
       {

@@ -203,7 +203,7 @@ describe('Settings → Wireless', () => {
 const ASSET = { id: ASSET_ID, hostname: 'ap-1.example.test', display_name: 'ap-1', class_key: 'switch', asset_status: 'monitoring', risk_score: 0, deleted_at: null };
 const radio = {
   id: 'i1', asset_id: ASSET_ID, name: 'ra0', type: 'ieee802.11n', type_label: 'IEEE 802.11n', status: 'active', enabled: true,
-  mgmt_only: false, mac_addresses: [], tagged_vlan_ids: [], vdcs: [], custom_fields: {}, source_kind: 'measured',
+  mgmt_only: false, mac_addresses: [], tagged_vlan_ids: [], vdcs: [], virtual_device_contexts: [], virtual_device_context_ids: [], custom_fields: {}, source_kind: 'measured',
 };
 const wired = { ...radio, id: 'i2', name: 'Port 1', type: '1000base-t', type_label: '1000BASE-T' };
 const ifaces = (rows: unknown[]) => ({ data: { data: rows, pagination: { total: rows.length, limit: 1000, offset: 0, next_offset: null } } });

@@ -1,6 +1,6 @@
 # Cabling
 
-A **cable** joins two ends: a port on one asset and a port on another (or on the same one). Each end is an interface, a console port, a console server port, a front port, a rear port or a circuit termination. Vista Platform follows NetBox here: a patch panel's front and rear ports carry a connection through the panel, and a circuit's two ends carry it across a provider's network, so a **cable path** can run from a switch port through several panels and a circuit to a device in another building.
+A **cable** joins two ends: a port on one asset and a port on another (or on the same one). Each end is an interface, a console port, a console server port, a front port, a rear port, a circuit termination, a power port, a power outlet or a power feed (see [Power](./power.md)). Vista Platform follows NetBox here: a patch panel's front and rear ports carry a connection through the panel, and a circuit's two ends carry it across a provider's network, so a **cable path** can run from a switch port through several panels and a circuit to a device in another building.
 
 You can record cables by hand, paste a whole switch's cabling from a spreadsheet, or let discovery propose them from what devices report about their neighbours. Cabling is first-class inventory, and the platform draws the cryptography it has seen behind each port on top of it.
 
@@ -42,6 +42,14 @@ Click a row to open the cable. The drawer shows:
 
 A proposed cable's drawer says it is waiting for approval in **Discovery → Approvals**.
 
+### The cable page
+
+A cable row opens **the cable's own page** (`/inventory/cables/<id>`), which you can bookmark and share. It
+shows both ends, the cable's type, status, length and colour (editable with `dcim.manage`), whether an
+LLDP / CDP neighbour has confirmed it, and the trace from either end, then custom fields, tags, contacts,
+images, changes and journal. The drawer's title (open from a map or a link) goes to the same page. **Back**
+returns to the Cabling lens with its filters.
+
 ## The Ports tab and the faceplate
 
 **Inventory → open an asset → Ports** opens with the **Faceplate**, a picture of the device's ports followed by tables of its port components.
@@ -80,15 +88,15 @@ The overlay tints interfaces only; console, front and rear ports are not tinted.
 ## Connect a port
 
 1. Click a port on the faceplate (or use the **Cable** column on the **Interfaces** tab or the tables on the **Ports** tab) and choose **Connect**.
-2. **Far end is**: the kind of port at the other end: *Interface*, *Front port*, *Rear port*, *Console port*, *Console server port* or *Circuit termination*. Kinds that cannot be cabled to this port are labelled **(not compatible)**, and **Connect** stays disabled with the reason shown.
-3. For a port on an asset, optionally narrow by **Site** and **Rack** (picking a rack lists the assets placed in it), then search for the **Asset** by name, hostname or identifier and choose the **Port**. For a circuit termination, search by circuit ID and choose the side.
+2. **Far end is**: the kind of port at the other end: *Interface*, *Front port*, *Rear port*, *Console port*, *Console server port*, *Circuit termination*, *Power port*, *Power outlet* or *Power feed*. Kinds that cannot be cabled to this port are labelled **(not compatible)**, and **Connect** stays disabled with the reason shown.
+3. For a port on an asset, optionally narrow by **Site** and **Rack** (picking a rack lists the assets placed in it), then search for the **Asset** by name, hostname or identifier and choose the **Port**. For a circuit termination, search by circuit ID and choose the side. For a power feed, pick the **Site** (and optionally the **Rack**) and choose the feed.
 4. Optionally set **Cable type**, **Status**, **Label**, **Colour** (six hex digits) and **Length** with a unit. A length needs its unit.
 5. Click **Connect**.
 
 The rules:
 
 - **One cable per port.** A port that already has a cable (or is marked connected) cannot take another; disconnect first.
-- **Compatibility.** Interfaces, front ports, rear ports and circuit terminations can be cabled to each other; a console port cables to a console server port, a front port or a rear port. An interface cannot be cabled to a console port, for example. The Connect dialog shows the matrix as you choose.
+- **Compatibility.** Interfaces, front ports, rear ports and circuit terminations can be cabled to each other; a console port cables to a console server port, a front port or a rear port; a power outlet cables to a power port, and a power port to a power outlet or a power feed. An interface cannot be cabled to a console port, for example. The Connect dialog shows the matrix as you choose.
 - A cable can join two ports of the **same asset**.
 - Virtual and wireless interfaces cannot be cabled.
 
@@ -116,7 +124,7 @@ Paths are worked out when cables change and follow at most 64 cables. A proposed
 
 ## Port components
 
-Besides interfaces, an asset can hold **console ports**, **console server ports**, **front ports**, **rear ports** and **device bays**. They live below the faceplate on the Ports tab, one tab per kind with its count; you need `dcim.read` to see them and `dcim.manage` to change them.
+Besides interfaces, an asset can hold **console ports**, **console server ports**, **front ports**, **rear ports**, **device bays**, and **power ports** and **power outlets** (described in [Power](./power.md)). They live below the faceplate on the Ports tab, one tab per kind with its count; you need `dcim.read` to see them and `dcim.manage` to change them.
 
 - **Add console port** and the other add buttons open a drawer. A console port has a **Name**, **Type** and **Speed (baud)**; a **rear port** has **Positions** (how many front-port positions it carries; a 12-fibre trunk has 12); a **front port** names the **Rear port** it belongs to and its **Position** on it. Declare rear ports first. Every kind also takes a **Label** and **Description**.
 - The rear ports table shows how many of its positions are **Mapped** to front ports. A rear port cannot be made smaller than a position that is already mapped.

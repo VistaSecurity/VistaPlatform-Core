@@ -349,6 +349,12 @@ Webhooks receive notifications in this format:
 }
 ```
 
+An **Inventory changes** notification (alert type `object_changed`) also
+carries the change itself at the top level of the body — `object_kind`,
+`object_id`, `action`, `actor`, `source`, `request_id`, `changed_fields`,
+`object_label` and `link`. See
+[Inventory change notifications](../../guides/tenant-admin-guide.md#inventory-change-notifications).
+
 ### Step 4: Verify the signature and de-duplicate
 
 Every delivery carries three headers:

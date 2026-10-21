@@ -299,9 +299,10 @@ describe('Apply templates', () => {
 });
 
 describe('asset page wiring', () => {
-  it('Ports is in the tab registry, right after Interfaces', () => {
+  it('Ports is in the tab registry, right after Interfaces and IP Addresses', () => {
     const keys = ASSET_TABS.map((t) => t.key);
-    expect(keys.indexOf('ports')).toBe(keys.indexOf('interfaces') + 1);
+    expect(keys.indexOf('ports')).toBe(keys.indexOf('ip-addresses') + 1);
+    expect(keys.indexOf('ip-addresses')).toBe(keys.indexOf('interfaces') + 1);
     expect(ASSET_TABS.find((t) => t.key === 'ports')?.placeholder).toBeUndefined();
   });
 

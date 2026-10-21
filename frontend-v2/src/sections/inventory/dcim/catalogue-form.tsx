@@ -7,8 +7,42 @@ import { useState } from 'react';
 import { Icon, Modal, ModalField, ModalInput, ModalSelect } from '../../../components/ui';
 import { cleanBody } from '../ipam/ipam-queries';
 import type { IpamField } from '../ipam/ipam-ui';
+import { eolEntryLabel, type EOLCatalogueRef } from './catalogue-queries';
 
 export type CatalogueField = IpamField;
+
+/**
+ * The end-of-sale / end-of-support / end-of-life dates and the end-of-life
+ * catalogue link a device type or platform carries (DCIM gap 4). A declared
+ * date wins; a blank one falls back to the linked entry (end of support ← its
+ * end-of-support date, end of life ← its extended-support date).
+ */
+export function eosFields(entries: EOLCatalogueRef[], current?: string | null, loading = false, linkSource?: string | null): CatalogueField[] {
+  const options = [{ value: '', label: loading ? 'Loading the catalogue…' : 'None' }, ...entries.map((e) => ({ value: e.id, label: eolEntryLabel(e) }))];
+  if (current && !entries.some((e) => e.id === current)) options.push({ value: current, label: 'The linked entry (not in this list)' });
+  return [
+    { name: 'end_of_sale', label: 'End of sale', kind: 'date' },
+    { name: 'end_of_support', label: 'End of support', kind: 'date', hint: 'Left blank, the linked end-of-life catalogue entry’s date applies.' },
+    { name: 'end_of_life', label: 'End of life', kind: 'date', hint: 'Left blank, the linked entry’s extended-support date applies.' },
+    { name: 'eol_catalogue_id', label: 'End-of-life catalogue entry', kind: 'select', options, hint: eolLinkHint(current, linkSource) },
+  ];
+}
+
+/**
+ * Says how the current link was made: the inventory links an entry itself when
+ * exactly one fits, and a person's choice is never replaced by it.
+ */
+export function eolLinkHint(current?: string | null, linkSource?: string | null): string | undefined {
+  if (!current) return undefined;
+  if (linkSource === 'automatic') return 'Linked automatically: exactly one catalogue entry fit. Choose another, or None, to override it.';
+  if (linkSource === 'manual') return 'Linked by you.';
+  return undefined;
+}
+
+/** The edit form's initial values for eosFields. */
+export function eosInitial(row: { end_of_sale?: string | null; end_of_support?: string | null; end_of_life?: string | null; eol_catalogue_id?: string | null }) {
+  return { end_of_sale: row.end_of_sale ?? '', end_of_support: row.end_of_support ?? '', end_of_life: row.end_of_life ?? '', eol_catalogue_id: row.eol_catalogue_id ?? '' };
+}
 
 function str(v: unknown): string {
   if (typeof v === 'string') return v;
@@ -85,7 +119,7 @@ export function CatalogueFormModal({ title, icon = 'server', fields, initial = {
             <input type="checkbox" aria-label={f.label} checked={values[f.name] === true} onChange={(e) => set(f.name, e.target.checked)} />
           ) : (
             <ModalInput aria-label={f.label} className={f.mono ? 'mono' : undefined} placeholder={f.placeholder}
-              type={f.kind === 'number' ? 'number' : 'text'} value={str(values[f.name])} onChange={(e) => set(f.name, e.target.value)} />
+              type={f.kind === 'number' ? 'number' : f.kind === 'date' ? 'date' : 'text'} value={str(values[f.name])} onChange={(e) => set(f.name, e.target.value)} />
           )}
         </ModalField>
       ))}

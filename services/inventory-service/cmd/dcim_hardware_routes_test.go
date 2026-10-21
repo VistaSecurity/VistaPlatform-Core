@@ -72,7 +72,8 @@ func hardwareRoutes() []catalogueRoute {
 			catalogueRoute{http.MethodPatch, one, `{}`, true, http.StatusOK},
 			catalogueRoute{http.MethodDelete, one, "", true, http.StatusNoContent},
 		)
-		if k == services.HardwareModuleBay || k == services.HardwareModule || k == services.HardwareInventoryItem {
+		if k == services.HardwareModuleBay || k == services.HardwareModule || k == services.HardwareInventoryItem ||
+			k == services.HardwareVirtualDeviceContext {
 			onAsset := base + "/assets/" + uuid.NewString() + "/" + k
 			out = append(out,
 				catalogueRoute{http.MethodGet, onAsset, "", false, http.StatusOK},
@@ -91,7 +92,7 @@ func hardwareRoutes() []catalogueRoute {
 
 func TestDcimHardwareRoutes_Gates(t *testing.T) {
 	routes := hardwareRoutes()
-	if want := 5*5 + 3*2 + 4; len(routes) != want {
+	if want := 6*5 + 4*2 + 4; len(routes) != want {
 		t.Fatalf("expected %d hardware routes, got %d", want, len(routes))
 	}
 	for _, rt := range routes {

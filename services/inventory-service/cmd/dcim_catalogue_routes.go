@@ -141,4 +141,5 @@ func mountDcimCatalogueRoutes(v2 gin.IRouter, rawDB *sql.DB, h *handlers.Catalog
 	d.GET("/assets/:id/hardware", read, h.Hardware)
 	d.PATCH("/assets/:id/hardware", manage, h.UpdateHardware)
 	d.POST("/assets/:id/device-type", manage, h.ApplyDeviceType)
+	d.GET("/eol-catalogue", read, h.EOLCatalogue)
 }

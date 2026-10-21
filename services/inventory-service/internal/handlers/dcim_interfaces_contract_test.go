@@ -49,7 +49,8 @@ func contractInterface() services.Interface {
 		ID: uuid.New(), AssetID: uuid.New(), Name: "GigabitEthernet1/0/24", Type: "1000base-t",
 		TypeLabel: "1000BASE-T (1GE)", Enabled: true, MACAddress: &mac,
 		MACAddresses: []services.MacAddress{{ID: uuid.New(), MAC: mac, IsPrimary: true, SourceKind: "declared"}},
-		Mode:         &mode, TaggedVLANIDs: []uuid.UUID{uuid.New()}, LagID: &lag, VDCs: []string{},
+		Mode:         &mode, TaggedVLANIDs: []uuid.UUID{uuid.New()}, LagID: &lag, VDCs: []string{"ctx-a"},
+		VirtualDeviceContexts: []services.VirtualDeviceContextRef{{ID: uuid.New(), Name: "ctx-a"}}, VirtualDeviceContextIDs: []uuid.UUID{uuid.New()},
 		SourceKind: "declared", CustomFields: map[string]any{}, Description: &desc, Status: "active",
 		FirstSeenAt: now, LastSeenAt: now, CreatedAt: now, UpdatedAt: now,
 	}

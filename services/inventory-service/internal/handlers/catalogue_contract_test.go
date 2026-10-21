@@ -52,6 +52,9 @@ func TestCatalogueContract_SchemasMatchTablesAndEngine(t *testing.T) {
 		if o.Table == "device_types" {
 			want = append(want, "manufacturer", "interface_template_count") // list rows only
 		}
+		if o.Table == "device_types" || o.Table == "platforms" {
+			want = append(want, "eol_link_source") // list rows only: how the end-of-life link was made
+		}
 		slices.Sort(want)
 		if got := keys(read.Properties); !slices.Equal(got, want) {
 			t.Errorf("%s properties %v\n  != %s columns %v", name, got, o.Table, want)

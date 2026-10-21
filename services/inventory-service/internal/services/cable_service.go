@@ -56,8 +56,6 @@ func CableStatuses() []string {
 }
 
 // terminationTables maps a termination kind onto the table holding it.
-// power_feed and power_panel are not object kinds until power ships
-// (ADR-0010 D9); a cable onto one is refused as an unknown kind.
 var terminationTables = map[dcim.ObjectKind]string{
 	dcim.ObjectKindInterface:          "interfaces",
 	dcim.ObjectKindFrontPort:          "front_ports",
@@ -67,6 +65,7 @@ var terminationTables = map[dcim.ObjectKind]string{
 	dcim.ObjectKindPowerPort:          "power_ports",
 	dcim.ObjectKindPowerOutlet:        "power_outlets",
 	dcim.ObjectKindCircuitTermination: "circuit_terminations",
+	dcim.ObjectKindPowerFeed:          "power_feeds",
 }
 
 // TraceRoutes maps each trace route segment onto its termination kind.
@@ -77,11 +76,14 @@ var TraceRoutes = map[string]dcim.ObjectKind{
 	"console-ports":        dcim.ObjectKindConsolePort,
 	"console-server-ports": dcim.ObjectKindConsoleServerPort,
 	"circuit-terminations": dcim.ObjectKindCircuitTermination,
+	"power-ports":          dcim.ObjectKindPowerPort,
+	"power-outlets":        dcim.ObjectKindPowerOutlet,
+	"power-feeds":          dcim.ObjectKindPowerFeed,
 }
 
 // cableTermName is the SQL naming one termination (alias ct) after the
 // per-kind LEFT JOINs in cableTermJoins.
-const cableTermName = `COALESCE(ti.name, tcp.name, tcs.name, tfp.name, trp.name, tpp.name, tpo.name, tci.cid || ' ' || tct.term_side::text)`
+const cableTermName = `COALESCE(ti.name, tcp.name, tcs.name, tfp.name, trp.name, tpp.name, tpo.name, tpf.name, tci.cid || ' ' || tct.term_side::text)`
 
 const cableTermJoins = `
 	LEFT JOIN public.assets ta ON ta.id = ct.asset_id
@@ -94,6 +96,8 @@ const cableTermJoins = `
 	LEFT JOIN public.power_outlets tpo ON ct.termination_kind = 'power_outlet' AND tpo.id = ct.termination_id
 	LEFT JOIN public.circuit_terminations tct ON ct.termination_kind = 'circuit_termination' AND tct.id = ct.termination_id
 	LEFT JOIN public.circuits tci ON tci.id = tct.circuit_id
+	LEFT JOIN public.power_feeds tpf ON ct.termination_kind = 'power_feed' AND tpf.id = ct.termination_id
+	LEFT JOIN public.power_panels tpn ON tpn.id = tpf.power_panel_id
 	LEFT JOIN public.sites tsi ON tsi.id = ct.site_id
 	LEFT JOIN public.racks trk ON trk.id = ct.rack_id`
 
@@ -102,6 +106,7 @@ func cableEndSQL(end string) string {
 		'termination_kind', ct.termination_kind, 'termination_id', ct.termination_id,
 		'asset_id', ct.asset_id, 'asset_name', COALESCE(ta.display_name, ta.hostname, host(ta.primary_address)),
 		'circuit_id', tct.circuit_id, 'name', ` + cableTermName + `,
+		'power_panel_id', tpf.power_panel_id, 'power_panel_name', tpn.name,
 		'site_id', ct.site_id, 'site_name', tsi.name, 'rack_id', ct.rack_id, 'rack_name', trk.name)
 		ORDER BY ` + cableTermName + `, ct.termination_id)
 		FROM public.cable_terminations ct` + cableTermJoins + `
@@ -266,7 +271,7 @@ func splitCableBody(body []byte) (rest []byte, a, b []TerminationRef, hasA, hasB
 // termTarget is a termination's target row as the rules need it.
 type termTarget struct {
 	ref           TerminationRef
-	parent        uuid.UUID // asset, or circuit for a circuit termination
+	parent        uuid.UUID // asset, circuit for a circuit termination, power panel for a power feed
 	assetID       uuid.NullUUID
 	siteID        uuid.NullUUID
 	locationID    uuid.NullUUID
@@ -295,6 +300,14 @@ func loadTermTarget(ctx context.Context, tx *sql.Tx, tenant uuid.UUID, r Termina
 		            CASE WHEN x.termination_kind = 'location' THEN x.termination_id END, NULL::uuid,
 		            x.cable_id, x.mark_connected, ''
 		       FROM public.circuit_terminations x WHERE x.tenant_id = $1 AND x.id = $2`
+	case dcim.ObjectKindPowerFeed:
+		// A feed's placement: its panel's site, its rack's location (else the
+		// panel's) and its rack (power_service.go feedPlacementSQL).
+		q = `SELECT x.power_panel_id, NULL::uuid, p.site_id, COALESCE(r.location_id, p.location_id), x.rack_id,
+		            x.cable_id, x.mark_connected, ''
+		       FROM public.power_feeds x JOIN public.power_panels p ON p.id = x.power_panel_id
+		       LEFT JOIN public.racks r ON r.id = x.rack_id
+		      WHERE x.tenant_id = $1 AND x.id = $2`
 	case dcim.ObjectKindInterface:
 		q = `SELECT x.asset_id, x.asset_id, a.site_id, a.location_id, a.rack_id, x.cable_id, x.mark_connected, x.type
 		       FROM public.interfaces x JOIN public.assets a ON a.id = x.asset_id
@@ -366,8 +379,11 @@ func checkEnds(ctx context.Context, tx *sql.Tx, tenant, cable uuid.UUID, a, b []
 }
 
 func parentNoun(k dcim.ObjectKind) string {
-	if k == dcim.ObjectKindCircuitTermination {
+	switch k {
+	case dcim.ObjectKindCircuitTermination:
 		return "circuit"
+	case dcim.ObjectKindPowerFeed:
+		return "power panel"
 	}
 	return "asset"
 }
@@ -733,10 +749,12 @@ type TraceNode struct {
 	ID   uuid.UUID       `json:"id"`
 	Name string          `json:"name"`
 	// AssetID / AssetName for a component; CircuitID for a circuit
-	// termination.
-	AssetID   *uuid.UUID `json:"asset_id"`
-	AssetName *string    `json:"asset_name"`
-	CircuitID *uuid.UUID `json:"circuit_id"`
+	// termination; PowerPanelID / PowerPanelName for a power feed.
+	AssetID        *uuid.UUID `json:"asset_id"`
+	AssetName      *string    `json:"asset_name"`
+	CircuitID      *uuid.UUID `json:"circuit_id"`
+	PowerPanelID   *uuid.UUID `json:"power_panel_id,omitempty"`
+	PowerPanelName *string    `json:"power_panel_name,omitempty"`
 	// Cable hops: the cable's type, operational status, label and colour.
 	Type   *string `json:"type,omitempty"`
 	Status *string `json:"operational_status,omitempty"`
@@ -892,6 +910,11 @@ func describeNodes(ctx context.Context, tx *sql.Tx, nodes []cablepath.Node) (map
 		case dcim.ObjectKindProviderNetwork:
 			q = `SELECT x.id, x.name, NULL::uuid, NULL::text, NULL::uuid, NULL::text, NULL::text, NULL::text
 			       FROM public.provider_networks x WHERE x.id = ANY($1)`
+		case dcim.ObjectKindPowerFeed:
+			// The panel rides in the asset columns' slots and is moved onto
+			// PowerPanelID / PowerPanelName below.
+			q = `SELECT x.id, x.name, x.power_panel_id, p.name, NULL::uuid, NULL::text, x.operational_status, NULL::text
+			       FROM public.power_feeds x JOIN public.power_panels p ON p.id = x.power_panel_id WHERE x.id = ANY($1)`
 		default:
 			table, ok := terminationTables[k]
 			if !ok {
@@ -922,6 +945,10 @@ func describeNodes(ctx context.Context, tx *sql.Tx, nodes []cablepath.Node) (map
 				tn.CircuitID = &c
 			}
 			tn.AssetName, tn.Type, tn.Status, tn.Color = nullStrPtr(assetName), nullStrPtr(typ), nullStrPtr(status), nullStrPtr(color)
+			if k == dcim.ObjectKindPowerFeed {
+				tn.PowerPanelID, tn.PowerPanelName = tn.AssetID, tn.AssetName
+				tn.AssetID, tn.AssetName = nil, nil
+			}
 			out[cablepath.N(k, tn.ID)] = tn
 			found[cablepath.N(k, tn.ID)] = true
 		}

@@ -91,6 +91,12 @@ export interface AssetLike {
   certificate_count?: unknown;
   crypto_implementation_count?: unknown;
   protocol_summary?: { protocol: string; count: number; max_risk_score: number }[] | null;
+  /** The commercial lifecycle (DCIM gap 4): declared dates and the seller; null = not recorded. */
+  purchase_date?: string | null;
+  warranty_end?: string | null;
+  vendor?: string | null;
+  /** The computed block; effective_end_of_support is the earlier of the device type's and platform's. */
+  lifecycle?: { effective_end_of_support?: string | null } | null;
 }
 
 const clean = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');

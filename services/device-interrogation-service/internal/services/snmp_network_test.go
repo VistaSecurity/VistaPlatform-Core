@@ -54,6 +54,8 @@ func TestSNMPNetwork_WireTypesMatchIdentity(t *testing.T) {
 		{"inventory item", reflect.TypeOf(di.ObservedInventoryItem{}), reflect.TypeOf(identity.ObservedInventoryItem{})},
 		{"module", reflect.TypeOf(di.ObservedModule{}), reflect.TypeOf(identity.ObservedModule{})},
 		{"virtual chassis", reflect.TypeOf(di.ObservedVirtualChassis{}), reflect.TypeOf(identity.ObservedVirtualChassis{})},
+		{"power port", reflect.TypeOf(di.ObservedPowerPort{}), reflect.TypeOf(identity.ObservedPowerPort{})},
+		{"power outlet", reflect.TypeOf(di.ObservedPowerOutlet{}), reflect.TypeOf(identity.ObservedPowerOutlet{})},
 	}
 	for _, p := range pairs {
 		a, b := map[string]string{}, map[string]string{}

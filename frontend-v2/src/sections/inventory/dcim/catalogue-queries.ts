@@ -20,6 +20,11 @@ export type ModuleType = S['ModuleType'];
 export type DeviceRole = S['DeviceRole'];
 export type Platform = S['Platform'];
 export type AssetHardware = S['AssetHardware'];
+export type AssetCommercial = S['AssetCommercial'];
+export type AssetLifecycle = S['AssetLifecycle'];
+export type CatalogueEOS = S['CatalogueEOS'];
+export type EOSDate = S['EOSDate'];
+export type EOLCatalogueRef = S['EOLCatalogueRef'];
 export type ApplyDeviceTypeResult = S['ApplyDeviceTypeResult'];
 export type ImportedDeviceType = S['ImportedDeviceType'];
 
@@ -87,6 +92,7 @@ export const catalogueKeys = {
   one: (route: CatalogueRoute, id: string) => ['dcim-catalogue', 'one', route, id] as const,
   templates: (parent: string, kind: TemplateKind) => ['dcim-catalogue', 'templates', parent, kind] as const,
   hardware: (asset: string) => ['dcim-hardware', asset] as const,
+  eol: (kind: string) => ['dcim-eol-catalogue', kind] as const,
 };
 
 export interface CataloguePage<T> { rows: T[]; total: number }
@@ -142,10 +148,10 @@ export function useCatalogueWrite<R extends CatalogueRoute>(route: R) {
 }
 
 /** A device type's templates of one kind (all of them: a chassis has hundreds at most). */
-export function useTemplates<K extends TemplateKind>(deviceTypeId: string | null, kind: K) {
+export function useTemplates<K extends TemplateKind>(deviceTypeId: string | null, kind: K, enabled = true) {
   return useQuery({
     queryKey: catalogueKeys.templates(deviceTypeId ?? '', kind),
-    enabled: !!deviceTypeId,
+    enabled: !!deviceTypeId && enabled,
     queryFn: async ({ signal }): Promise<TemplateRows[K][]> => {
       const { data, error } = await inv().GET(`/dcim/device-types/{id}/${kind}`, {
         signal, params: { path: { id: deviceTypeId }, query: { limit: 1000 } },
@@ -220,6 +226,43 @@ export async function patchAssetHardware(assetId: string, body: HardwarePatch): 
   const { data, error } = await clients.inventory.PATCH('/dcim/assets/{id}/hardware', { params: { path: { id: assetId } }, body });
   if (error || !data) throw new Error(ipamError(error, "Could not save the asset's hardware"));
   return data.data;
+}
+
+/**
+ * Write an asset's commercial lifecycle columns (DCIM gap 4) through the
+ * hardware PATCH; the Hardware view is replaced with the server's answer and
+ * the asset reads (list, page) refetch, since they carry the same columns.
+ */
+export function usePatchAssetLifecycle(assetId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: HardwarePatch) => patchAssetHardware(assetId, body),
+    onSuccess: (hw) => {
+      qc.setQueryData(catalogueKeys.hardware(assetId), hw);
+      void qc.invalidateQueries({ queryKey: ['asset-detail', assetId] });
+      void qc.invalidateQueries({ queryKey: ['inventory'] });
+    },
+  });
+}
+
+/** End-of-life catalogue entries a device type (hardware) or platform (os) may link to. */
+export function useEOLCatalogue(kind: 'hardware' | 'os', enabled = true) {
+  return useQuery({
+    queryKey: catalogueKeys.eol(kind),
+    enabled,
+    staleTime: 5 * 60_000,
+    queryFn: async ({ signal }): Promise<EOLCatalogueRef[]> => {
+      const { data, error } = await clients.inventory.GET('/dcim/eol-catalogue', { signal, params: { query: { product_kind: kind, limit: 1000 } } });
+      if (error || !data) throw new Error(ipamError(error, 'Failed to load the end-of-life catalogue'));
+      return data.data;
+    },
+  });
+}
+
+/** An end-of-life catalogue entry as one line: "Cisco Catalyst 9300 · 1 (support ends". */
+export function eolEntryLabel(e: EOLCatalogueRef): string {
+  const name = [e.vendor, e.product].filter(Boolean).join(' ');
+  return `${name} · ${e.cycle}${e.eol_date ? ` (support ends ${e.eol_date})` : ''}`;
 }
 
 /** "Apply templates": assign the type and instantiate its interfaces. */

@@ -270,6 +270,11 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'created_at' },
     },
     {
+      name: 'decommissioned_at',
+      type: 'timestamp',
+      accessor: { kind: 'column', column: 'decommissioned_at' },
+    },
+    {
       name: 'description',
       type: 'text',
       accessor: { kind: 'column', column: 'description' },
@@ -303,6 +308,12 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       name: 'display_name',
       type: 'text',
       accessor: { kind: 'column', column: 'display_name' },
+    },
+    {
+      name: 'end_of_support',
+      type: 'timestamp',
+      accessor: { kind: 'derived', derived: 'asset.end_of_support' },
+      description: 'the effective end of support: the earlier of the device type\'s and the platform\'s, declared or from the end-of-life catalogue',
     },
     {
       name: 'environment',
@@ -339,9 +350,21 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       enum: ['legacy', 'established', 'provisional', 'operator_confirmed'],
     },
     {
+      name: 'installed_at',
+      type: 'timestamp',
+      accessor: { kind: 'column', column: 'installed_at' },
+    },
+    {
       name: 'inventory_item.serial',
       type: 'keyword',
       accessor: { kind: 'derived', derived: 'asset.inventory_item_serial' },
+    },
+    {
+      name: 'inventory_item.stock_state',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.inventory_item_stock_state' },
+      enum: ['installed', 'in_stock', 'reserved', 'rma', 'retired'],
+      description: 'the stock state of one of the asset\'s inventory items (rma: a part out for RMA still in the asset)',
     },
     {
       name: 'ip.address',
@@ -420,6 +443,67 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'position' },
     },
     {
+      name: 'power_feed.amperage',
+      type: 'number',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.amperage' },
+      description: 'the amperage of a power feed the asset draws from',
+    },
+    {
+      name: 'power_feed.available_power',
+      type: 'number',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.available_power' },
+      description: 'the available power (VA) of a power feed the asset draws from',
+    },
+    {
+      name: 'power_feed.panel',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.panel' },
+      description: 'the power panel of a feed the asset draws from, by name',
+    },
+    {
+      name: 'power_feed.phase',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.phase' },
+      enum: ['single-phase', 'three-phase'],
+    },
+    {
+      name: 'power_feed.rack',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.rack' },
+      description: 'the rack a feed the asset draws from serves, by name',
+    },
+    {
+      name: 'power_feed.site',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.site' },
+      description: 'the site of a feed the asset draws from, by name or slug',
+    },
+    {
+      name: 'power_feed.status',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.status' },
+      enum: ['offline', 'active', 'planned', 'failed'],
+      description: 'the status of a power feed one of the asset\'s power ports reaches',
+    },
+    {
+      name: 'power_feed.supply',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.supply' },
+      enum: ['ac', 'dc'],
+    },
+    {
+      name: 'power_feed.type',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.type' },
+      enum: ['primary', 'redundant'],
+    },
+    {
+      name: 'power_feed.voltage',
+      type: 'number',
+      accessor: { kind: 'derived', derived: 'asset.power_feed.voltage' },
+      description: 'the voltage of a power feed the asset draws from',
+    },
+    {
       name: 'prefix.network_type',
       type: 'keyword',
       accessor: { kind: 'derived', derived: 'asset.prefix.network_type' },
@@ -457,6 +541,11 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       type: 'keyword',
       accessor: { kind: 'derived', derived: 'asset.cloud_provider' },
       enum: ['aws', 'azure', 'gcp', 'oci', 'other'],
+    },
+    {
+      name: 'purchase_date',
+      type: 'timestamp',
+      accessor: { kind: 'column', column: 'purchase_date' },
     },
     {
       name: 'rack',
@@ -544,6 +633,11 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       enum: ['pending_approval', 'monitoring', 'denied', 'archived'],
     },
     {
+      name: 'support_contract_end',
+      type: 'timestamp',
+      accessor: { kind: 'column', column: 'support_contract_end' },
+    },
+    {
       name: 'support_group',
       type: 'keyword',
       accessor: { kind: 'column', column: 'support_group' },
@@ -578,9 +672,39 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       accessor: { kind: 'column', column: 'updated_at' },
     },
     {
+      name: 'vendor',
+      type: 'keyword',
+      accessor: { kind: 'column', column: 'vendor' },
+    },
+    {
       name: 'virtual_chassis',
       type: 'keyword',
       accessor: { kind: 'derived', derived: 'asset.virtual_chassis' },
+    },
+    {
+      name: 'virtual_circuit',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.virtual_circuit' },
+      description: 'a virtual circuit one of the asset\'s interfaces terminates, by circuit ID or type',
+    },
+    {
+      name: 'virtual_circuit.cid',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.virtual_circuit.cid' },
+      description: 'the circuit ID of a virtual circuit the asset terminates',
+    },
+    {
+      name: 'virtual_circuit.provider',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.virtual_circuit.provider' },
+      description: 'the provider of a virtual circuit the asset terminates, by name or slug',
+    },
+    {
+      name: 'virtual_circuit.role',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'asset.virtual_circuit.role' },
+      enum: ['peer', 'hub', 'spoke'],
+      description: 'the role (peer, hub, spoke) of the asset\'s interface in a virtual circuit',
     },
     {
       name: 'vlan.name',
@@ -598,6 +722,11 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       type: 'keyword',
       accessor: { kind: 'derived', derived: 'asset.vrf.name' },
       description: 'the VRF one of the asset\'s addresses is in',
+    },
+    {
+      name: 'warranty_end',
+      type: 'timestamp',
+      accessor: { kind: 'column', column: 'warranty_end' },
     },
     {
       name: 'wireless_lan.auth_type',
@@ -1060,6 +1189,12 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
       name: 'type',
       type: 'keyword',
       accessor: { kind: 'column', column: 'type' },
+    },
+    {
+      name: 'virtual_device_context',
+      type: 'keyword',
+      accessor: { kind: 'derived', derived: 'interface.virtual_device_context' },
+      description: 'the name of a virtual device context (VDOM, vsys, VDC) the interface belongs to',
     },
   ],
   relationship: [

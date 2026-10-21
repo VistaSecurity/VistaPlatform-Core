@@ -2525,6 +2525,30 @@
     "sql": {"where":"(EXISTS (SELECT 1 FROM interfaces ifc1 JOIN wireless_lans wl2 ON wl2.id = ANY(ifc1.wireless_lan_ids) WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND wl2.status \u003c\u003e $2 AND (lower(wl2.auth_type) = $3)) OR EXISTS (SELECT 1 FROM interfaces ifc3 JOIN wireless_lans wl4 ON wl4.id = ANY(ifc3.wireless_lan_ids) WHERE ifc3.asset_id = a.id AND ifc3.status \u003c\u003e $4 AND wl4.status \u003c\u003e $5 AND (lower(wl4.auth_type) = $6)))","arg_count":6,"args":["rejected","rejected","open","rejected","rejected","wep"]}
   },
   {
+    "name": "dcim-virtual-circuit",
+    "query": "virtual_circuit = sdwan",
+    "note": "DCIM gap 10: some virtual circuit one of the asset's interfaces terminates has the cid, type name or type slug sdwan",
+    "canonical": "virtual_circuit=sdwan",
+    "ast": {"cmp":{"f":"virtual_circuit","op":"=","v":"sdwan"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM virtual_circuit_terminations vct1 JOIN interfaces vif2 ON vif2.id = vct1.interface_id JOIN virtual_circuits vc3 ON vc3.id = vct1.virtual_circuit_id JOIN virtual_circuit_types vcy4 ON vcy4.id = vc3.type_id WHERE vif2.asset_id = a.id AND vif2.status \u003c\u003e $1 AND ((vc3.cid = $2) OR (vcy4.name = $3) OR (vcy4.slug = $4)))","arg_count":4,"args":["rejected","sdwan","sdwan","sdwan"]}
+  },
+  {
+    "name": "dcim-virtual-circuit-provider",
+    "query": "virtual_circuit.provider:acme*",
+    "note": "DCIM gap 10: the provider of the virtual circuit's provider network, by name or slug",
+    "canonical": "virtual_circuit.provider:acme*",
+    "ast": {"cmp":{"f":"virtual_circuit.provider","op":":","v":"acme*"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM virtual_circuit_terminations vct1 JOIN interfaces vif2 ON vif2.id = vct1.interface_id JOIN virtual_circuits vc3 ON vc3.id = vct1.virtual_circuit_id JOIN provider_networks vpn4 ON vpn4.id = vc3.provider_network_id JOIN providers vpv5 ON vpv5.id = vpn4.provider_id WHERE vif2.asset_id = a.id AND vif2.status \u003c\u003e $1 AND ((vpv5.name ILIKE $2) OR (vpv5.slug ILIKE $3)))","arg_count":3,"args":["rejected","acme%","acme%"]}
+  },
+  {
+    "name": "dcim-virtual-circuit-role-not",
+    "query": "virtual_circuit.role != hub",
+    "note": "DCIM gap 10: row-shaped, so != negates the whole EXISTS: no interface of the asset is a hub",
+    "canonical": "virtual_circuit.role != hub",
+    "ast": {"cmp":{"f":"virtual_circuit.role","op":"!=","v":"hub"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM virtual_circuit_terminations vct1 JOIN interfaces vif2 ON vif2.id = vct1.interface_id JOIN virtual_circuits vc3 ON vc3.id = vct1.virtual_circuit_id WHERE vif2.asset_id = a.id AND vif2.status \u003c\u003e $1 AND (vct1.role = $2))","arg_count":2,"args":["rejected","hub"]}
+  },
+  {
     "name": "dcim-platform",
     "query": "platform = ios-xe",
     "note": "DCIM 2.2: the assigned platform (OS) by name or slug",
@@ -2547,6 +2571,30 @@
     "canonical": "serial=FOC1234X0YZ or asset_tag=IT-0042",
     "ast": {"or":[{"cmp":{"f":"serial","op":"=","v":"FOC1234X0YZ"}},{"cmp":{"f":"asset_tag","op":"=","v":"IT-0042"}}]},
     "sql": {"where":"((a.serial = $1) OR (a.asset_tag = $2))","arg_count":2,"args":["FOC1234X0YZ","IT-0042"]}
+  },
+  {
+    "name": "dcim-lifecycle-warranty-ending",
+    "query": "warranty_end \u003c now+90d and vendor = \"Acme Resale\"",
+    "note": "DCIM gap 4: a declared commercial date and the seller",
+    "canonical": "warranty_end \u003c now+90d and vendor=\"Acme Resale\"",
+    "ast": {"and":[{"cmp":{"f":"warranty_end","op":"\u003c","v":"now+90d"}},{"cmp":{"f":"vendor","op":"=","v":"Acme Resale"}}]},
+    "sql": {"where":"((a.warranty_end \u003c $1) AND (a.vendor = $2))","arg_count":2,"args":["2026-12-10T12:00:00Z","Acme Resale"]}
+  },
+  {
+    "name": "dcim-lifecycle-past-end-of-support",
+    "query": "end_of_support \u003c now",
+    "note": "DCIM gap 4: the effective end of support, the earlier of the device type's and the platform's (declared, else the end-of-life catalogue entry); an asset with neither date is unknown, not matched",
+    "canonical": "end_of_support \u003c now",
+    "ast": {"cmp":{"f":"end_of_support","op":"\u003c","v":"now"}},
+    "sql": {"where":"(LEAST((SELECT COALESCE(eosdt1.end_of_support, eosdte2.eol_date) FROM device_types eosdt1 LEFT JOIN eol_catalogue eosdte2 ON eosdte2.id = eosdt1.eol_catalogue_id WHERE eosdt1.id = a.device_type_id), (SELECT COALESCE(eospl3.end_of_support, eosple4.eol_date) FROM platforms eospl3 LEFT JOIN eol_catalogue eosple4 ON eosple4.id = eospl3.eol_catalogue_id WHERE eospl3.id = a.platform_id)) \u003c $1)","arg_count":1,"args":["2026-09-11T12:00:00Z"]}
+  },
+  {
+    "name": "dcim-lifecycle-dates",
+    "query": "purchase_date \u003e= 2024-01-01 and installed_at:* and not decommissioned_at:* and support_contract_end \u003c 2027-01-01",
+    "note": "DCIM gap 4: the declared commercial dates; a missing date is absent, not a value",
+    "canonical": "purchase_date \u003e= 2024-01-01 and installed_at:* and not decommissioned_at:* and support_contract_end \u003c 2027-01-01",
+    "ast": {"and":[{"cmp":{"f":"purchase_date","op":"\u003e=","v":"2024-01-01"}},{"cmp":{"f":"installed_at","op":":","v":"*"}},{"not":{"cmp":{"f":"decommissioned_at","op":":","v":"*"}}},{"cmp":{"f":"support_contract_end","op":"\u003c","v":"2027-01-01"}}]},
+    "sql": {"where":"((a.purchase_date \u003e= $1) AND (a.installed_at IS NOT NULL) AND NOT ((a.decommissioned_at IS NOT NULL)) AND (a.support_contract_end \u003c $2))","arg_count":2,"args":["2024-01-01T00:00:00Z","2027-01-01T00:00:00Z"]}
   },
   {
     "name": "dcim-circuit-by-cid-or-type",
@@ -2603,6 +2651,22 @@
     "canonical": "interface:(mac_address:00:11:22:33:44:55)",
     "ast": {"sub":{"c":"interface","p":{"cmp":{"f":"mac_address","op":":","v":"00:11:22:33:44:55"}}}},
     "sql": {"where":"EXISTS (SELECT 1 FROM interfaces ifc1 WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND (lower((CASE WHEN substr(ifc1.mac_address::text, 10, 5) = $2 THEN (ifc1.mac_address::macaddr)::text ELSE ifc1.mac_address::text END)) = $3))","arg_count":3,"args":["rejected","ff:fe","00:11:22:33:44:55"]}
+  },
+  {
+    "name": "dcim-interface-in-virtual-device-context",
+    "query": "interface:(virtual_device_context:\"vsys1\")",
+    "note": "§15 (DCIM gap 1): an asset with an interface in the virtual device context named vsys1, through the membership junction; row-shaped",
+    "canonical": "interface:(virtual_device_context:vsys1)",
+    "ast": {"sub":{"c":"interface","p":{"cmp":{"f":"virtual_device_context","op":":","v":"vsys1"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM interfaces ifc1 WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND EXISTS (SELECT 1 FROM interface_virtual_device_contexts ivc2 JOIN virtual_device_contexts vdc3 ON vdc3.id = ivc2.virtual_device_context_id WHERE ivc2.interface_id = ifc1.id AND vdc3.status \u003c\u003e $2 AND (lower(vdc3.name) = $3)))","arg_count":3,"args":["rejected","rejected","vsys1"]}
+  },
+  {
+    "name": "dcim-interface-not-in-virtual-device-context",
+    "query": "interface:(virtual_device_context!=\"root\")",
+    "note": "§15 (DCIM gap 1): != negates the whole membership (an interface in no context named root), not a per-row inequality",
+    "canonical": "interface:(virtual_device_context != root)",
+    "ast": {"sub":{"c":"interface","p":{"cmp":{"f":"virtual_device_context","op":"!=","v":"root"}}}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM interfaces ifc1 WHERE ifc1.asset_id = a.id AND ifc1.status \u003c\u003e $1 AND NOT EXISTS (SELECT 1 FROM interface_virtual_device_contexts ivc2 JOIN virtual_device_contexts vdc3 ON vdc3.id = ivc2.virtual_device_context_id WHERE ivc2.interface_id = ifc1.id AND vdc3.status \u003c\u003e $2 AND (vdc3.name = $3)))","arg_count":3,"args":["rejected","rejected","root"]}
   },
   {
     "name": "dcim-interface-name-and-mode",
@@ -2830,11 +2894,51 @@
     "sql": {"where":"EXISTS (SELECT 1 FROM inventory_items ii1 WHERE ii1.asset_id = a.id AND ii1.status \u003c\u003e $1 AND (ii1.serial = $2))","arg_count":2,"args":["rejected","DCB2341G0A1"]}
   },
   {
+    "name": "dcim-inventory-item-stock-state",
+    "query": "inventory_item.stock_state = rma",
+    "note": "DCIM gap 8: one of the asset's inventory items is out for RMA (a failed part still in the asset); row-shaped",
+    "canonical": "inventory_item.stock_state=rma",
+    "ast": {"cmp":{"f":"inventory_item.stock_state","op":"=","v":"rma"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM inventory_items ii1 WHERE ii1.asset_id = a.id AND ii1.status \u003c\u003e $1 AND (ii1.stock_state = $2))","arg_count":2,"args":["rejected","rma"]}
+  },
+  {
+    "name": "dcim-inventory-item-stock-state-negated",
+    "query": "inventory_item.stock_state != rma",
+    "note": "DCIM gap 8: no inventory item of the asset is out for RMA; != negates the whole EXISTS",
+    "canonical": "inventory_item.stock_state != rma",
+    "ast": {"cmp":{"f":"inventory_item.stock_state","op":"!=","v":"rma"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM inventory_items ii1 WHERE ii1.asset_id = a.id AND ii1.status \u003c\u003e $1 AND (ii1.stock_state = $2))","arg_count":2,"args":["rejected","rma"]}
+  },
+  {
     "name": "dcim-virtual-chassis",
     "query": "virtual_chassis:core-stack",
     "note": "DCIM 2.4: the virtual chassis the asset is a member of, by name or domain",
     "canonical": "virtual_chassis:core-stack",
     "ast": {"cmp":{"f":"virtual_chassis","op":":","v":"core-stack"}},
     "sql": {"where":"EXISTS (SELECT 1 FROM virtual_chassis vc1 WHERE vc1.id = a.virtual_chassis_id AND ((lower(vc1.name) = $1) OR (lower(vc1.domain) = $2)))","arg_count":2,"args":["core-stack","core-stack"]}
+  },
+  {
+    "name": "dcim-power-feed-status",
+    "query": "power_feed.status = failed",
+    "note": "DCIM 6.1: some power feed one of the asset's power ports reaches (its complete cable path, through a PDU) has failed; row-shaped",
+    "canonical": "power_feed.status=failed",
+    "ast": {"cmp":{"f":"power_feed.status","op":"=","v":"failed"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM power_ports ppt1 JOIN cable_paths pcp2 ON pcp2.origin_kind = $1 AND pcp2.origin_id = ppt1.id AND pcp2.destination_kind = $2 AND pcp2.is_complete JOIN power_feeds pf3 ON pf3.id = pcp2.destination_id WHERE ppt1.asset_id = a.id AND ppt1.status \u003c\u003e $3 AND (pf3.operational_status = $4))","arg_count":4,"args":["power_port","power_feed","rejected","failed"]}
+  },
+  {
+    "name": "dcim-power-feed-available-power",
+    "query": "power_feed.available_power \u003c 2000",
+    "note": "DCIM 6.1: a feed the asset draws from has less than 2000 VA available",
+    "canonical": "power_feed.available_power \u003c 2000",
+    "ast": {"cmp":{"f":"power_feed.available_power","op":"\u003c","v":"2000"}},
+    "sql": {"where":"EXISTS (SELECT 1 FROM power_ports ppt1 JOIN cable_paths pcp2 ON pcp2.origin_kind = $1 AND pcp2.origin_id = ppt1.id AND pcp2.destination_kind = $2 AND pcp2.is_complete JOIN power_feeds pf3 ON pf3.id = pcp2.destination_id WHERE ppt1.asset_id = a.id AND ppt1.status \u003c\u003e $3 AND (pf3.available_power \u003c $4))","arg_count":4,"args":["power_port","power_feed","rejected",2000]}
+  },
+  {
+    "name": "dcim-power-feed-site-not-equal",
+    "query": "power_feed.site != hq",
+    "note": "DCIM 6.1: row-shaped, so != negates the whole EXISTS; the site matches by name or slug",
+    "canonical": "power_feed.site != hq",
+    "ast": {"cmp":{"f":"power_feed.site","op":"!=","v":"hq"}},
+    "sql": {"where":"NOT EXISTS (SELECT 1 FROM power_ports ppt1 JOIN cable_paths pcp2 ON pcp2.origin_kind = $1 AND pcp2.origin_id = ppt1.id AND pcp2.destination_kind = $2 AND pcp2.is_complete JOIN power_feeds pf3 ON pf3.id = pcp2.destination_id JOIN power_panels ppn4 ON ppn4.id = pf3.power_panel_id JOIN sites pst5 ON pst5.id = ppn4.site_id WHERE ppt1.asset_id = a.id AND ppt1.status \u003c\u003e $3 AND ((pst5.name = $4) OR (pst5.slug = $5)))","arg_count":5,"args":["power_port","power_feed","rejected","hq","hq"]}
   }
 ]

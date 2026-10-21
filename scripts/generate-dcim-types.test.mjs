@@ -105,7 +105,7 @@ describe('generate-dcim-types', () => {
 
   it('rejects an asymmetric termination matrix', () => {
     const d = tree();
-    edit(d, 'standards/cable-types.yaml', sub('power_outlet: [power_port]', 'power_outlet: [power_port, console_port]'));
+    edit(d, 'standards/cable-types.yaml', sub('power_outlet: [power_port]', 'power_outlet: [power_port, power_feed]'));
     const r = run(d);
     assert.notEqual(r.status, 0);
     assert.match(r.stderr, /must be symmetric/);
@@ -113,7 +113,7 @@ describe('generate-dcim-types', () => {
 
   it('rejects a matrix kind that is not an ObjectKind', () => {
     const d = tree();
-    edit(d, 'standards/cable-types.yaml', sub('power_outlet: [power_port]', 'power_outleet: [power_port]'));
+    edit(d, 'standards/cable-types.yaml', sub('power_feed: [power_port]', 'power_feeed: [power_port]'));
     assert.match(run(d).stderr, /not an ObjectKind/);
   });
 

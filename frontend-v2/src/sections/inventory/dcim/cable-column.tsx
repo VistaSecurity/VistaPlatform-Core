@@ -1,8 +1,9 @@
 // The Cable column of the asset page's Interfaces and Ports tabs, with the
 // Connect modal and Disconnect (DCIM BUILD_PLAN row 3.2; asset-inventory
 // ADR-0010 D6), upgraded by row 3.4: the Connect flow picks the far end by
-// site › rack › asset › port kind › port, or a circuit's termination; the
-// compatibility matrix is checked inline; a cabled port offers Trace.
+// site › rack › asset › port kind › port, a circuit's termination, or (row
+// 6.1) a power feed by site › rack; the compatibility matrix is checked
+// inline; a cabled port offers Trace.
 //
 // A cabled port names its far end as asset:port, linking to the far asset. An
 // uncabled one offers Connect. States: the asset's cables loading, failing
@@ -22,6 +23,7 @@ import { quoteValue } from '../facet-query';
 import { useSites } from '../sites/sites-queries';
 import { useRacks } from '../racks/racks-queries';
 import { useCircuitList } from '../circuits/circuits-queries';
+import { usePowerFeeds } from '../power/power-queries';
 import { TraceModal } from '../cabling/trace-view';
 import { isTraceKind } from '../cabling/cabling-queries';
 import {
@@ -40,8 +42,9 @@ export interface CablePort {
   markConnected: boolean;
 }
 
-/** Far-end kinds the Connect modal offers (power has no UI, ADR-0010 D9). */
-export const CONNECTABLE_KINDS = ['interface', 'front_port', 'rear_port', 'console_port', 'console_server_port', 'circuit_termination'] as const;
+/** Far-end kinds the Connect modal offers (power since row 6.1). */
+export const CONNECTABLE_KINDS = ['interface', 'front_port', 'rear_port', 'console_port', 'console_server_port', 'circuit_termination',
+  'power_port', 'power_outlet', 'power_feed'] as const;
 export type ConnectableKind = (typeof CONNECTABLE_KINDS)[number];
 
 export const KIND_LABEL: Record<ConnectableKind, string> = {
@@ -51,14 +54,22 @@ export const KIND_LABEL: Record<ConnectableKind, string> = {
   console_port: 'Console port',
   console_server_port: 'Console server port',
   circuit_termination: 'Circuit termination',
+  power_port: 'Power port',
+  power_outlet: 'Power outlet',
+  power_feed: 'Power feed',
 };
 
-const KIND_ROUTE: Record<Exclude<ConnectableKind, 'interface' | 'circuit_termination'>, PortKind> = {
+const KIND_ROUTE: Record<Exclude<ConnectableKind, 'interface' | 'circuit_termination' | 'power_feed'>, PortKind> = {
   front_port: 'front-ports',
   rear_port: 'rear-ports',
   console_port: 'console-ports',
   console_server_port: 'console-server-ports',
+  power_port: 'power-ports',
+  power_outlet: 'power-outlets',
 };
+
+/** Far ends that are not on an asset: picked by circuit, or by site for a feed. */
+const offAsset = (k: ConnectableKind) => k === 'circuit_termination' || k === 'power_feed';
 
 export function CableCell({ port, cables, canManage }: { port: CablePort; cables: UseQueryResult<CableIndex>; canManage: boolean }) {
   const [connecting, setConnecting] = useState(false);
@@ -158,7 +169,7 @@ interface FarPort { id: string; name: string; cabled: boolean }
 
 function useFarPorts(assetId: string | undefined, kind: ConnectableKind): { rows: FarPort[]; isLoading: boolean; isError: boolean } {
   const isIface = kind === 'interface';
-  const isPort = !isIface && kind !== 'circuit_termination';
+  const isPort = !isIface && !offAsset(kind);
   const ifaces = useAssetInterfaces(assetId, '', !!assetId && isIface);
   const route: PortKind = isPort ? KIND_ROUTE[kind] : 'front-ports';
   const ports = useAssetPorts(isPort ? assetId : undefined, route);
@@ -180,7 +191,7 @@ function useFarPorts(assetId: string | undefined, kind: ConnectableKind): { rows
 export function connectProblem(local: CableTerminationKind, far: ConnectableKind, farPort?: FarPort | null): string | null {
   if (!cableCompatible(local, far)) {
     const a = (w: string) => `${/^[aeiou]/.test(w) ? 'an' : 'a'} ${w}`;
-    const near = a(KIND_LABEL[local as ConnectableKind]?.toLowerCase() ?? local.replace(/_/g, ' '));
+    const near = a(KIND_LABEL[local].toLowerCase());
     return `${near.charAt(0).toUpperCase()}${near.slice(1)} cannot be cabled to ${a(KIND_LABEL[far].toLowerCase())} (cable compatibility matrix).`;
   }
   if (farPort?.cabled) return `${farPort.name} is already cabled or marked connected; each port takes one cable.`;
@@ -204,7 +215,7 @@ export function ConnectCableModal({ port, onClose }: { port: CablePort; onClose:
   const [circuit, setCircuit] = useState<{ id: string; name: string } | null>(null);
   const [kind, setKind] = useState<ConnectableKind>(firstCompatible);
   const [farId, setFarId] = useState('');
-  const [type, setType] = useState<string>(port.kind.startsWith('console') ? '' : 'cat6');
+  const [type, setType] = useState<string>(port.kind.startsWith('console') ? '' : port.kind.startsWith('power') ? 'power' : 'cat6');
   const [status, setStatus] = useState<string>('connected');
   const [label, setLabel] = useState('');
   const [color, setColor] = useState('');
@@ -212,25 +223,34 @@ export function ConnectCableModal({ port, onClose }: { port: CablePort; onClose:
   const [unit, setUnit] = useState('m');
   const connect = useConnectCable();
   const isCircuit = kind === 'circuit_termination';
+  const isFeed = kind === 'power_feed';
 
   const sites = useSites();
   const racks = useRacks({ siteId: siteId || undefined }, !isCircuit);
+  // A power feed is not on an asset: it is picked from the chosen site's (or
+  // rack's) feeds.
+  const feeds = usePowerFeeds({ site_id: siteId || undefined, rack_id: rackId || undefined }, isFeed);
   const term = useDebouncedValue(search).trim();
   // A chosen rack lists its assets with no search term; otherwise two characters.
   const query = farAssetQuery(term.length >= 2 ? term : '', siteId, rackId);
-  const results = useAssetsQuery(query, 1, !isCircuit && !asset && (!!rackId || term.length >= 2));
+  const results = useAssetsQuery(query, 1, !isCircuit && !isFeed && !asset && (!!rackId || term.length >= 2));
   const candidates = useMemo(() => (results.data?.assets ?? []).slice(0, rackId ? 48 : 8), [results.data, rackId]);
   const circuits = useCircuitList('circuits', term ? { q: term } : {}, { enabled: isCircuit && !circuit && term.length >= 2 });
   const circuitTerms = useCircuitList('circuit-terminations', { circuit_id: circuit?.id ?? '' }, { enabled: isCircuit && !!circuit });
-  const far = useFarPorts(isCircuit ? undefined : asset?.id, kind);
+  const far = useFarPorts(isCircuit || isFeed ? undefined : asset?.id, kind);
   const farRows: FarPort[] = isCircuit
     ? (circuitTerms.data?.rows ?? []).map((t) => ({ id: t.id, name: `Side ${t.term_side}`, cabled: !!t.cable_id || t.mark_connected }))
-    : far.rows;
-  const farLoading = isCircuit ? circuitTerms.isLoading : far.isLoading;
-  const farError = isCircuit ? circuitTerms.isError : far.isError;
+    : isFeed
+      ? (feeds.data ?? []).map((f) => ({ id: f.id, name: `${f.power_panel?.name ?? 'Panel'}:${f.name}`, cabled: !!f.cable_id || f.mark_connected }))
+      : far.rows;
+  const farLoading = isCircuit ? circuitTerms.isLoading : isFeed ? feeds.isLoading : far.isLoading;
+  const farError = isCircuit ? circuitTerms.isError : isFeed ? feeds.isError : far.isError;
   const picked = farRows.find((r) => r.id === farId) ?? null;
   const problem = connectProblem(port.kind, kind, picked);
-  const showList = isCircuit ? !circuit && term.length >= 2 : !asset && (!!rackId || term.length >= 2);
+  const showList = isFeed ? false : isCircuit ? !circuit && term.length >= 2 : !asset && (!!rackId || term.length >= 2);
+  // What the far-port picker waits for: a circuit, a site (for a feed), or an asset.
+  const farParent = isCircuit ? !!circuit : isFeed ? !!siteId || !!rackId : !!asset;
+  const farParentWord = isCircuit ? 'a circuit' : isFeed ? 'a site' : 'an asset';
 
   const ready = !!farId && !problem && !connect.isPending;
   const submit = () => {
@@ -257,13 +277,13 @@ export function ConnectCableModal({ port, onClose }: { port: CablePort; onClose:
       size="md"
       icon="cable"
       title={`Connect ${port.name}`}
-      description="Pick the port on the other end of the cable: by site, rack and asset, or a circuit's end. Each port takes one cable."
+      description="Pick the port on the other end of the cable: by site, rack and asset, a circuit's end, or a power feed by site. Each port takes one cable."
       secondary={<button type="button" className="ui-btn" onClick={onClose}>Cancel</button>}
       primary={<button type="button" className="ui-btn primary" aria-label="Connect cable" disabled={!ready} onClick={submit}>{connect.isPending ? 'Connecting…' : 'Connect'}</button>}
     >
       <div data-testid="connect-cable-modal">
         <ModalField label="Far end is">
-          <ModalSelect aria-label="Far port kind" value={kind} onChange={(e) => { setKind(e.target.value as ConnectableKind); setFarId(''); if ((e.target.value === 'circuit_termination') !== isCircuit) resetFar(); }}>
+          <ModalSelect aria-label="Far port kind" value={kind} onChange={(e) => { setKind(e.target.value as ConnectableKind); setFarId(''); if (offAsset(e.target.value as ConnectableKind) || offAsset(kind)) resetFar(); }}>
             {CONNECTABLE_KINDS.map((k) => (
               <option key={k} value={k}>{KIND_LABEL[k]}{cableCompatible(port.kind, k) ? '' : ' (not compatible)'}</option>
             ))}
@@ -271,13 +291,13 @@ export function ConnectCableModal({ port, onClose }: { port: CablePort; onClose:
         </ModalField>
         {!isCircuit && (
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <ModalField label="Site" hint="Optional: narrows the asset search.">
+            <ModalField label="Site" hint={isFeed ? 'The site whose power feeds to list.' : 'Optional: narrows the asset search.'}>
               <ModalSelect aria-label="Site" value={siteId} onChange={(e) => { setSiteId(e.target.value); setRackId(''); resetFar(); }}>
                 <option value="">{sites.isError ? 'Couldn’t load sites' : 'Any site'}</option>
                 {(sites.data ?? []).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
               </ModalSelect>
             </ModalField>
-            <ModalField label="Rack" hint="Optional: lists the rack's assets.">
+            <ModalField label="Rack" hint={isFeed ? 'Optional: only the feeds serving this rack.' : 'Optional: lists the rack\'s assets.'}>
               <ModalSelect aria-label="Rack" value={rackId} onChange={(e) => { setRackId(e.target.value); resetFar(); }}>
                 <option value="">{racks.isError ? 'Couldn’t load racks' : 'Any rack'}</option>
                 {(racks.data ?? []).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
@@ -285,14 +305,14 @@ export function ConnectCableModal({ port, onClose }: { port: CablePort; onClose:
             </ModalField>
           </div>
         )}
-        <ModalField label={isCircuit ? 'Circuit' : 'Asset'}>
+        {!isFeed && <ModalField label={isCircuit ? 'Circuit' : 'Asset'}>
           <ModalInput
             aria-label={isCircuit ? 'Search for the circuit' : 'Search for the far asset'}
             placeholder={isCircuit ? 'Search by circuit ID…' : rackId ? 'Filter this rack’s assets…' : 'Search by name, hostname or identifier…'}
             value={isCircuit ? (circuit ? circuit.name : search) : asset ? asset.name : search}
             onChange={(e) => { resetFar(); setSearch(e.target.value); }}
           />
-        </ModalField>
+        </ModalField>}
         {showList && (
           <div data-testid="far-asset-results" style={{ marginTop: -8, marginBottom: 14, border: '1px solid var(--app-border)', borderRadius: 10, overflow: 'hidden', maxHeight: 220, overflowY: 'auto' }}>
             {(isCircuit ? circuits.isLoading : results.isLoading) && <div style={{ padding: '8px 11px', fontSize: 12, color: 'var(--app-t3)' }}>Searching…</div>}
@@ -317,9 +337,9 @@ export function ConnectCableModal({ port, onClose }: { port: CablePort; onClose:
           </div>
         )}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <ModalField label="Port">
-            <ModalSelect aria-label="Far port" value={farId} disabled={(isCircuit ? !circuit : !asset) || farLoading} onChange={(e) => setFarId(e.target.value)}>
-              <option value="">{(isCircuit ? !circuit : !asset) ? `Pick ${isCircuit ? 'a circuit' : 'an asset'} first` : farLoading ? 'Loading…' : farError ? 'Couldn’t load ports' : farRows.length === 0 ? 'None here' : 'Choose…'}</option>
+          <ModalField label={isFeed ? 'Power feed' : 'Port'}>
+            <ModalSelect aria-label="Far port" value={farId} disabled={!farParent || farLoading} onChange={(e) => setFarId(e.target.value)}>
+              <option value="">{!farParent ? `Pick ${farParentWord} first` : farLoading ? 'Loading…' : farError ? `Couldn’t load ${isFeed ? 'feeds' : 'ports'}` : farRows.length === 0 ? 'None here' : 'Choose…'}</option>
               {farRows.filter((r) => r.id !== port.id).map((r) => (
                 <option key={r.id} value={r.id} disabled={r.cabled}>{r.name}{r.cabled ? ' (in use)' : ''}</option>
               ))}

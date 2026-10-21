@@ -34,6 +34,10 @@ import (
 //	                      software_install days (ladder)
 //	orphan_relationship   relationship     an edge whose other end is gone
 //
+// plus nine DCIM record-quality kinds on the asset — placement, cabling,
+// interface types, duplicate addresses, warranty and end of support — read in
+// the same pass by hygiene_dcim.go (DCIM gap 6).
+//
 // # Nothing here feeds risk, and that is enforced three times
 //
 // Every kind's `feeds_risk` is false and every score is 0. A missing owner does
@@ -210,6 +214,9 @@ type hygieneInventory struct {
 	assets    []hygieneAsset
 	edges     []hygieneEdge
 	proposals []hygieneProposal
+	// dcim is the DCIM record-quality hits (hygiene_dcim.go), already scoped
+	// to monitored assets by their own SQL.
+	dcim []dcimHit
 }
 
 // read loads the tenant's live inventory in one transaction.
@@ -332,6 +339,12 @@ func (p *HygieneProducer) read(ctx context.Context, tenantID uuid.UUID, run *Hyg
 			return err
 		}
 		inv.proposals = proposals
+
+		dcim, err := readDCIMHygiene(ctx, tx, tenantID, p.now())
+		if err != nil {
+			return err
+		}
+		inv.dcim = dcim
 		return nil
 	})
 	if err != nil {
@@ -656,6 +669,21 @@ func (p *HygieneProducer) plan(inv *hygieneInventory, run *HygieneRun) ([]planne
 		}
 		f, err := p.fixed(findings.KindOrphanRelationship,
 			producer.Subject{Type: findings.SubjectRelationship, ID: e.id}, e.label, "", evidence)
+		if err != nil {
+			return nil, err
+		}
+		planned = append(planned, plannedHygiene{finding: f})
+	}
+
+	// The DCIM record-quality kinds (hygiene_dcim.go). Their reads already
+	// scoped themselves to monitored live assets; the `labels` check is the
+	// guard against an asset the asset read did not see in the same snapshot.
+	for _, h := range dcimHitsSorted(inv.dcim) {
+		label, ok := labels[h.assetID]
+		if !ok {
+			continue
+		}
+		f, err := p.fixed(h.kind, producer.Subject{Type: findings.SubjectAsset, ID: h.assetID}, label, h.detail, h.evidence)
 		if err != nil {
 			return nil, err
 		}

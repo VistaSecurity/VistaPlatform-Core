@@ -12,12 +12,13 @@ import { Link } from 'react-router';
 import { Icon, Modal } from '../../../components/ui';
 import { PanelEmpty, PanelError, PanelLoading } from '../dcim/substrate-states';
 import { useTrace, type CablePath, type CablePathNode, type TraceKind } from './cabling-queries';
+import { circuitHref } from '../object-pages/object-links';
 import { isDestination, kindWord, nodeText, pathHops, pathState, traceText } from './trace-model';
 
-/** Where a hop's node links: its asset page, or the circuit in the Circuits lens. */
+/** Where a hop's node links: its asset page, or the circuit's page. */
 export function nodeHref(n: CablePathNode): string | null {
   if (n.asset_id) return `/inventory/assets/${n.asset_id}/ports`;
-  if (n.circuit_id) return `/inventory?lens=circuits&circuit=${n.circuit_id}`;
+  if (n.circuit_id) return circuitHref(n.circuit_id);
   return null;
 }
 

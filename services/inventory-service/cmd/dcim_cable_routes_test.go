@@ -106,7 +106,8 @@ func cableRoutes() []catalogueRoute {
 		{http.MethodPost, one + "/approve", "", true, http.StatusOK},
 		{http.MethodPost, one + "/reject", "", true, http.StatusOK},
 	}
-	for _, k := range []string{"interfaces", "front-ports", "rear-ports", "console-ports", "console-server-ports", "circuit-terminations"} {
+	for _, k := range []string{"interfaces", "front-ports", "rear-ports", "console-ports", "console-server-ports", "circuit-terminations",
+		"power-ports", "power-outlets", "power-feeds"} {
 		out = append(out, catalogueRoute{http.MethodGet, base + "/" + k + "/" + uuid.NewString() + "/trace", "", false, http.StatusOK})
 	}
 	out = append(out, catalogueRoute{http.MethodGet, base + "/assets/" + uuid.NewString() + "/interface-posture", "", false, http.StatusOK})
@@ -115,8 +116,8 @@ func cableRoutes() []catalogueRoute {
 
 func TestDcimCableRoutes_Gates(t *testing.T) {
 	routes := cableRoutes()
-	if len(routes) != 14 {
-		t.Fatalf("expected 14 cable routes, got %d", len(routes))
+	if len(routes) != 17 {
+		t.Fatalf("expected 17 cable routes, got %d", len(routes))
 	}
 	for _, rt := range routes {
 		name := rt.method + " " + rt.path
@@ -169,6 +170,8 @@ func TestDcimCableRoutes_TraceKinds(t *testing.T) {
 		"interfaces": dcim.ObjectKindInterface, "front-ports": dcim.ObjectKindFrontPort, "rear-ports": dcim.ObjectKindRearPort,
 		"console-ports": dcim.ObjectKindConsolePort, "console-server-ports": dcim.ObjectKindConsoleServerPort,
 		"circuit-terminations": dcim.ObjectKindCircuitTermination,
+		// Row 6.1: the power ends.
+		"power-ports": dcim.ObjectKindPowerPort, "power-outlets": dcim.ObjectKindPowerOutlet, "power-feeds": dcim.ObjectKindPowerFeed,
 	}
 	for seg, k := range want {
 		store.kinds = nil

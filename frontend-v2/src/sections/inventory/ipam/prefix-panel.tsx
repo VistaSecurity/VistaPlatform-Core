@@ -9,7 +9,7 @@
 // address is in it are shown and edited here — what Settings → Network
 // Segments did before the table was retired.
 import { useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useLocation } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { Icon, Modal } from '../../../components/ui';
 import { ObjectChanges } from '../dcim/object-changes';
@@ -24,6 +24,7 @@ import { CustomFieldsPanel } from '../dcim/custom-fields-panel';
 import { useBusinessUnits } from '../../settings/business-units-queries';
 import { GATEWAY_NOT_RECORDED, GATEWAY_NOT_RECORDED_TITLE, dhcpText, fhrpText } from '../prefix-gateway';
 import { CoverageText, GatewayLink } from '../prefix-gateway-view';
+import { fromState, prefixHref } from '../object-pages/object-links';
 
 /** The add/edit prefix form. */
 export function prefixFields(roles: PrefixRole[], vlans: Vlan[], units: { id: string; name: string }[] = []): IpamField[] {
@@ -123,7 +124,11 @@ function IpRow({ ip }: { ip: IpAddress }) {
   );
 }
 
-export function PrefixPanel({ id, onClose, onSelect }: { id: string; onClose: () => void; onSelect: (id: string) => void }) {
+/** `embedded` is the prefix PAGE's body (`/inventory/prefixes/:id`): the page
+ *  supplies the close affordance and the substrate panels (custom fields,
+ *  changes, journal), so the panel leaves those out. */
+export function PrefixPanel({ id, onClose, onSelect, embedded = false }: { id: string; onClose: () => void; onSelect: (id: string) => void; embedded?: boolean }) {
+  const loc = useLocation();
   const [length, setLength] = useState(0);
   const q = usePrefixDetail(id, length);
   const roles = useIpamList('prefix-roles', { limit: 1000 });
@@ -143,7 +148,9 @@ export function PrefixPanel({ id, onClose, onSelect }: { id: string; onClose: ()
   return (
     <aside data-testid="prefix-panel" style={{ border: '1px solid var(--app-border)', borderRadius: 12, background: 'var(--app-panel)', padding: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span className="mono" style={{ fontSize: 16, fontWeight: 700 }}>{p?.prefix ?? '…'}</span>
+        {p && !embedded
+          ? <Link to={prefixHref(p.id)} state={fromState(loc)} data-testid="prefix-open-page" title="Open the prefix page" className="mono" style={{ fontSize: 16, fontWeight: 700, color: 'inherit' }}>{p.prefix}</Link>
+          : <span className="mono" style={{ fontSize: 16, fontWeight: 700 }}>{p?.prefix ?? '…'}</span>}
         {p && <Chip>{PREFIX_STATUS_LABEL[p.operational_status]}</Chip>}
         {p && p.status !== 'active' && <Chip tone="var(--warn)">{LIFECYCLE_LABEL[p.status]}</Chip>}
         {p && p.status === 'pending' && <ApproveButton route="prefixes" id={p.id} />}
@@ -154,7 +161,7 @@ export function PrefixPanel({ id, onClose, onSelect }: { id: string; onClose: ()
               <button type="button" className="ui-btn sm ghost" title="Delete" style={{ color: 'var(--danger-text)' }} onClick={() => setDeleting(true)}><Icon name="trash-2" size={13} /></button>
             </PermissionGate>
           )}
-          <button type="button" className="ui-btn sm ghost" aria-label="Close" onClick={onClose}><Icon name="x" size={13} /></button>
+          {!embedded && <button type="button" className="ui-btn sm ghost" aria-label="Close" onClick={onClose}><Icon name="x" size={13} /></button>}
         </span>
       </div>
 
@@ -264,13 +271,15 @@ export function PrefixPanel({ id, onClose, onSelect }: { id: string; onClose: ()
           )}
 
           {/* Custom fields (DCIM row 5.1): edited through the prefix's PATCH. */}
-          <Section title="Custom fields">
-            <CustomFieldsPanel kind="prefix" id={p.id} values={p.custom_fields} permission={TENANT_PERMISSIONS.ipam.manage}
-              onChange={(custom_fields) => updatePrefix.mutateAsync({ id: p.id, body: { custom_fields } })} />
-          </Section>
+          {!embedded && (
+            <Section title="Custom fields">
+              <CustomFieldsPanel kind="prefix" id={p.id} values={p.custom_fields} permission={TENANT_PERMISSIONS.ipam.manage}
+                onChange={(custom_fields) => updatePrefix.mutateAsync({ id: p.id, body: { custom_fields } })} />
+            </Section>
+          )}
 
           <div role="tablist" style={{ display: 'flex', gap: 4, marginTop: 16, borderBottom: '1px solid var(--app-border)' }}>
-            {(['addresses', 'changes', 'journal'] as const).map((t) => (
+            {(embedded ? (['addresses'] as const) : (['addresses', 'changes', 'journal'] as const)).map((t) => (
               <button key={t} type="button" role="tab" aria-selected={tab === t} className="ui-btn ghost sm"
                 style={{ borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent', borderRadius: 0 }} onClick={() => setTab(t)}>
                 {t === 'addresses' ? 'IP addresses' : t === 'changes' ? 'Changes' : 'Journal'}

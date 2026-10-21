@@ -2142,6 +2142,38 @@ spec:
       middlewares:
         - name: deny-internal-plane
     {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v1/compliance-engine/internal/`) || Path(`/api/v1/compliance-engine/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: compliance-engine
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    {{- end }}
+    {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "compliance-engine") }}
+    - match: {{ $apiHost }} && (PathPrefix(`/api/v2/compliance-engine/internal/`) || Path(`/api/v2/compliance-engine/internal`))
+      kind: Rule
+      priority: 900
+      services:
+        - name: compliance-engine
+          {{- if $.Values.serviceMtls.enabled }}
+          port: 8443
+          scheme: https
+          serversTransport: backends-mtls
+          {{- else }}
+          port: 8080
+          {{- end }}
+      middlewares:
+        - name: deny-internal-plane
+    {{- end }}
     {{- if include "vistaplatform.backendEnabled" (dict "root" $ "name" "audit-service") }}
     - match: {{ $apiHost }} && Method(`POST`) && (Path(`/api/v1/audit-service/activity-logs`) || Path(`/api/v1/audit-service/activity-logs/`))
       kind: Rule

@@ -76,3 +76,7 @@ func (crudOnlyStore) PrefixTree(context.Context, uuid.UUID, *uuid.UUID) ([]*serv
 func (crudOnlyStore) FindAddress(context.Context, uuid.UUID, netip.Addr, *uuid.UUID, bool) ([]services.FindResult, error) {
 	return nil, services.ErrIPAMNotFound
 }
+
+func (crudOnlyStore) AvailableASNs(context.Context, uuid.UUID, uuid.UUID, int) (*services.AvailableASNs, error) {
+	return nil, services.ErrIPAMNotFound
+}

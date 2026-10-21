@@ -7,10 +7,7 @@
 // ANY class, checked against a few real ones.
 import { describe, expect, it } from 'vitest';
 import { ASSET_CLASS_KEYS, ATTRIBUTE_SCHEMAS } from '@vistasecurity/primitives/assets';
-import {
-  BASE_COLUMNS, MAX_CLASS_COLUMNS, classColumns, classesWithAttributes,
-  columnsForClass, gridTemplate, humanise,
-} from './columns';
+import { BASE_COLUMNS, MAX_CLASS_COLUMNS, classColumns, classesWithAttributes, columnGroupsForClass, columnsForClass, gridTemplate, humanise, OPTIONAL_BASE_COLUMNS, LIFECYCLE_COLUMN_KEYS, visibleColumns } from './columns';
 import type { AssetLike } from './asset-shape';
 
 describe('classColumns', () => {
@@ -137,5 +134,60 @@ describe('humanise', () => {
 describe('base columns', () => {
   it('are the ones every class has', () => {
     expect(BASE_COLUMNS.map((c) => c.key)).toEqual(['class', 'address', 'environment', 'owner', 'last_seen']);
+  });
+});
+
+// DCIM gap 4: the lifecycle columns exist, read the asset's declared dates and
+// the EFFECTIVE end of support, are blank when not recorded, and are hidden by
+// default — no class's default column set includes them.
+describe('lifecycle columns', () => {
+  const byKey = (k: string) => OPTIONAL_BASE_COLUMNS.find((c) => c.key === k);
+  it('are optional columns reading the commercial fields', () => {
+    const a = { warranty_end: '2027-02-28', purchase_date: '2024-03-01', vendor: 'Acme Resale', lifecycle: { effective_end_of_support: '2030-10-31' } };
+    expect(LIFECYCLE_COLUMN_KEYS.map((k) => byKey(k)?.value(a))).toEqual(['2027-02-28', '2030-10-31', '2024-03-01', 'Acme Resale']);
+    expect(LIFECYCLE_COLUMN_KEYS.map((k) => byKey(k)?.value({}))).toEqual(['', '', '', '']);
+  });
+  it('are hidden by default', () => {
+    for (const cls of [null, 'server', 'switch', 'virtual_machine']) {
+      const keys = columnsForClass(cls).map((c) => c.key);
+      for (const k of LIFECYCLE_COLUMN_KEYS) expect(keys).not.toContain(k);
+    }
+  });
+});
+
+describe('the column chooser', () => {
+  it('with no choice made, shows exactly the class defaults, in their order', () => {
+    // The chooser must be invisible until used: for every class (and none)
+    // the table is what it was before the chooser existed.
+    for (const cls of [undefined, ...ASSET_CLASS_KEYS]) {
+      expect(visibleColumns(cls, {}).map((c) => c.key)).toEqual(columnsForClass(cls).map((c) => c.key));
+    }
+  });
+
+  it('offers every base, optional and lifecycle column, grouped as this file declares them', () => {
+    const groups = columnGroupsForClass(undefined);
+    expect(groups.map((g) => g.key)).toEqual(['standard', 'more', 'lifecycle']);
+    expect(groups[2].columns.map((c) => c.key)).toEqual([...LIFECYCLE_COLUMN_KEYS]);
+    const offered = groups.flatMap((g) => g.columns.map((c) => c.key));
+    for (const c of [...BASE_COLUMNS, ...OPTIONAL_BASE_COLUMNS]) expect(offered).toContain(c.key);
+    expect(new Set(offered).size).toBe(offered.length);
+  });
+
+  it('offers ALL of a class\'s attributes, beyond the default budget', () => {
+    const attrs = columnGroupsForClass('server').find((g) => g.key === 'class')!.columns;
+    expect(attrs.length).toBe(Object.keys(ATTRIBUTE_SCHEMAS.server.properties).length);
+    expect(attrs.length).toBeGreaterThan(MAX_CLASS_COLUMNS);
+  });
+
+  it('shows a hidden column and hides a default one, keeping the chooser order', () => {
+    const keys = visibleColumns(undefined, { warranty_end: true, environment: false }).map((c) => c.key);
+    expect(keys).toContain('warranty_end');
+    expect(keys).not.toContain('environment');
+    expect(keys.indexOf('warranty_end')).toBeGreaterThan(keys.indexOf('prefix'));
+  });
+
+  it('ignores a choice about a column the class does not have', () => {
+    expect(visibleColumns(undefined, { 'attr.operating_system': true }).map((c) => c.key)).not.toContain('attr.operating_system');
+    expect(visibleColumns('server', { 'attr.operating_system': true }).map((c) => c.key)).toContain('attr.operating_system');
   });
 });

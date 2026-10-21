@@ -45,7 +45,7 @@ describe('the dashboard registry', () => {
   });
 
   it('lists the dashboards, Overview first', () => {
-    expect(DASHBOARDS.map((d) => d.key)).toEqual(['overview', 'assets', 'compliance', 'pqc']);
+    expect(DASHBOARDS.map((d) => d.key)).toEqual(['overview', 'assets', 'compliance', 'pqc', 'facilities']);
   });
 
   it('gives every non-Overview dashboard a /dashboard/<key> path', () => {
@@ -88,8 +88,8 @@ describe('registry ↔ rail', () => {
   });
 
   it('marks none of them a cross-link', () => {
-    // `crossLink` renders an arrow meaning "this leaves the section". All four
-    // of these ARE the section.
+    // `crossLink` renders an arrow meaning "this leaves the section". All of
+    // these ARE the section.
     for (const item of railItems) expect(item.crossLink).toBeUndefined();
   });
 });
@@ -153,6 +153,16 @@ describe('registry ↔ command palette', () => {
     const pqc = DASHBOARD_NAV_ITEMS.find((i) => i.to === '/dashboard/pqc')!;
     const haystack = `${pqc.label} ${pqc.sublabel ?? ''}`.toLowerCase();
     for (const term of ['pqc', 'quantum', 'migration']) {
+      expect(haystack, `typing “${term}” finds nothing`).toContain(term);
+    }
+  });
+});
+
+describe('the Facilities dashboard', () => {
+  it('is findable by the words a facilities operator would type', () => {
+    const f = DASHBOARD_NAV_ITEMS.find((i) => i.to === '/dashboard/facilities')!;
+    const haystack = `${f.label} ${f.sublabel ?? ''}`.toLowerCase();
+    for (const term of ['facilities', 'rack', 'capacity', 'cabling']) {
       expect(haystack, `typing “${term}” finds nothing`).toContain(term);
     }
   });

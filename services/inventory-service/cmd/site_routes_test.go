@@ -46,8 +46,8 @@ func TestSiteRoutesCarryTheirPermissions(t *testing.T) {
 			}
 		}
 	}
-	if routes != 20 {
-		t.Errorf("site_routes.go mounts %d routes, want 20 (5 per object)", routes)
+	if routes != 21 {
+		t.Errorf("site_routes.go mounts %d routes, want 21 (5 per object and the location floor plan)", routes)
 	}
 	if !strings.Contains(src, "rbac.PermissionDcimManage") || !strings.Contains(src, "rbac.PermissionDcimRead") {
 		t.Error("the gates are not dcim.read / dcim.manage")

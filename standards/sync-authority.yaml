@@ -23,7 +23,12 @@
 # or a field is not a column of the kind's table in scripts/database/schema.sql.
 #
 # Per kind:
-#   kind      the vocabulary key (standards/vocabulary.yaml)
+#   kind      the vocabulary key (standards/vocabulary.yaml) — or, with
+#   object    set, a SYNC KIND over that vocabulary object's table: a subset of
+#             its rows the peer keeps in a separate id space (a NetBox virtual
+#             machine is an asset, a VM interface an interface). A sync kind is
+#             not a vocabulary object; sync_conflicts' object_kind CHECK must
+#             accept it.
 #   netbox    the NetBox REST endpoint (module/object)
 #   identity  the natural identity on the wire, in our column names — the
 #             third matching step after the peer id and our id in the peer
@@ -126,6 +131,20 @@ kinds:
       description: newest
       comments: newest
 
+  # DCIM gap 10 (NetBox 4.2 parity; class "netbox42", off by default): an ASN
+  # range after its RIR. NetBox's range has no comments.
+  - kind: asn_range
+    netbox: ipam/asn-ranges
+    identity: [slug]
+    order: 40
+    fields:
+      name: newest
+      rir_id: declared_here
+      start: declared_here
+      end: declared_here
+      business_unit_id: declared_here
+      description: newest
+
   - kind: vlan_group
     netbox: ipam/vlan-groups
     identity: [slug]
@@ -136,6 +155,24 @@ kinds:
       business_unit_id: declared_here
       description: newest
       comments: newest
+
+  # DCIM gap 10: VLAN translation policies and their rules, before
+  # interfaces, so an interface's policy always has a peer id. Policy and rule
+  # carry no comments in NetBox.
+  - kind: vlan_translation_policy
+    netbox: ipam/vlan-translation-policies
+    identity: [name]
+    order: 50
+    fields:
+      description: newest
+
+  - kind: vlan_translation_rule
+    netbox: ipam/vlan-translation-rules
+    identity: [policy_id, local_vid]
+    order: 55
+    fields:
+      remote_vid: declared_here
+      description: newest
 
   - kind: vlan
     netbox: ipam/vlans
@@ -188,6 +225,7 @@ kinds:
   - kind: interface
     netbox: dcim/interfaces
     identity: [asset_id, name]
+    computed: [virtual_device_context_ids]
     order: 80
     fields:
       label: declared_here
@@ -203,6 +241,12 @@ kinds:
       mark_connected: declared_here
       untagged_vlan_id: declared_here
       vrf_id: declared_here
+      # NetBox Interface.vdcs (DCIM gap 1): the interface's memberships, as
+      # context ids; lives in interface_virtual_device_contexts.
+      virtual_device_context_ids: declared_here
+      # NetBox Interface.vlan_translation_policy (DCIM gap 10). Synced only
+      # while the policy kind is (its class is on); otherwise left alone.
+      vlan_translation_policy_id: declared_here
       description: newest
 
   - kind: mac_address
@@ -222,6 +266,26 @@ kinds:
       business_unit_id: declared_here
       dns_name: newest
       assigned_id: observed
+      description: newest
+      comments: newest
+
+  # DCIM gap 1: a device's virtual device contexts (a Nexus VDC, a Palo Alto
+  # vsys, a Fortinet VDOM, an F5 route domain). After ip_address, so a primary
+  # IP always has a peer id. An interface's membership (its vdcs list, field
+  # virtual_device_context_ids on `interface`) names contexts planned AFTER the
+  # interface: a membership of a context this run creates is synced by the
+  # next run, never written as a partial list. The device reference resolves
+  # through the NetBox import's device ids, as an interface's does.
+  - kind: virtual_device_context
+    netbox: dcim/virtual-device-contexts
+    identity: [asset_id, name]
+    order: 95
+    fields:
+      identifier: peer
+      operational_status: declared_here
+      business_unit_id: declared_here
+      primary_ip4_id: peer
+      primary_ip6_id: peer
       description: newest
       comments: newest
 
@@ -293,6 +357,40 @@ kinds:
       mark_connected: declared_here
       description: newest
 
+  # DCIM gap 10: virtual circuits (NetBox 4.2). A virtual circuit after its
+  # provider network and account; a termination is an interface's, one per
+  # interface, so the interface is its identity. Types and terminations carry
+  # no comments in NetBox.
+  - kind: virtual_circuit_type
+    netbox: circuits/virtual-circuit-types
+    identity: [slug]
+    order: 100
+    fields:
+      name: peer
+      color: peer
+      description: newest
+
+  - kind: virtual_circuit
+    netbox: circuits/virtual-circuits
+    identity: [provider_network_id, cid]
+    order: 120
+    fields:
+      provider_account_id: declared_here
+      type_id: declared_here
+      operational_status: declared_here
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
+  - kind: virtual_circuit_termination
+    netbox: circuits/virtual-circuit-terminations
+    identity: [interface_id]
+    order: 130
+    fields:
+      virtual_circuit_id: declared_here
+      role: declared_here
+      description: newest
+
   # --- Row 4.5: virtualisation ----------------------------------------------
 
   - kind: cluster_type
@@ -321,6 +419,58 @@ kinds:
       business_unit_id: declared_here
       description: newest
       comments: newest
+
+  # --- NetBox virtual machines (DCIM gap; owner decision: no asset-kind split)
+  # A NetBox VirtualMachine is an ASSET of the virtual_machine class, a VM
+  # interface a row of the one `interfaces` table on such an asset, a virtual
+  # disk a virtual_disks row. NetBox keeps devices and VMs (and their
+  # interfaces) in separate id spaces, so the two VM kinds are SYNC kinds over
+  # the asset and interface tables (`object:`), each with its own peer-id key:
+  # a NetBox device 12 and VM 12 are two different assets. Their columns are
+  # the object's table's. Order: after cluster, site, device role and platform
+  # (110), which a VM names, and after ip_address (90): an address assigned
+  # to a VM interface planned later in the run is parked and assigned when the
+  # interface arrives (the address of an already-linked one translates).
+  # Measured resources (vCPUs, memory, disk, platform, serial) are `observed`
+  # — ours when a hypervisor collector saw the VM, NetBox's otherwise (an
+  # `observed` field nothing here measured follows `newest`); placement and
+  # role are NetBox's (`peer`), as for a device.
+
+  - kind: virtual_machine
+    object: asset
+    netbox: virtualization/virtual-machines
+    identity: [cluster_id, display_name]
+    order: 150
+    fields:
+      site_id: peer
+      device_role_id: peer
+      platform_id: observed
+      serial: observed
+      vcpus: observed
+      memory_mb: observed
+      disk_mb: observed
+
+  - kind: vm_interface
+    object: interface
+    netbox: virtualization/interfaces
+    identity: [asset_id, name]
+    order: 155
+    fields:
+      enabled: observed
+      mtu: observed
+      mac_address: observed
+      mode: declared_here
+      untagged_vlan_id: declared_here
+      vrf_id: declared_here
+      description: newest
+
+  - kind: virtual_disk
+    netbox: virtualization/virtual-disks
+    identity: [asset_id, name]
+    order: 155
+    fields:
+      size_mb: observed
+      description: newest
 
   # --- Row 4.5: vpn ---------------------------------------------------------
   # Proposals, policies and tunnels are what our collectors measure on the
@@ -658,6 +808,39 @@ kinds:
       description: newest
       comments: newest
 
+  # --- Row 6.1: power panels and feeds (NetBox dcim/power-panels,
+  # dcim/power-feeds; ADR-0010 D9). A panel hangs off a site (and optionally
+  # one of its locations), so it is planned with the racks; a feed names its
+  # panel and the rack it serves, so it comes after racks and before the
+  # power ports that cable to it. Prose and electrical ratings follow
+  # `newest`; a feed's status is ours to declare.
+  - kind: power_panel
+    netbox: dcim/power-panels
+    identity: [site_id, name]
+    order: 130
+    fields:
+      location_id: newest
+      description: newest
+      comments: newest
+
+  - kind: power_feed
+    netbox: dcim/power-feeds
+    identity: [power_panel_id, name]
+    order: 140
+    fields:
+      rack_id: newest
+      operational_status: declared_here
+      type: newest
+      supply: newest
+      phase: newest
+      voltage: newest
+      amperage: newest
+      max_utilization: newest
+      mark_connected: newest
+      business_unit_id: declared_here
+      description: newest
+      comments: newest
+
   # Pulled and compared both ways, but never created in NetBox: a NetBox
   # reservation needs a NetBox user, which no Vista Platform person maps to.
   - kind: rack_reservation
@@ -735,6 +918,13 @@ kinds:
       asset_tag: peer
       discovered: observed
       description: newest
+      # DCIM gap 8 (spares and RMA): stock is ours. NetBox has no stock
+      # location, quantity or stock state, and an item with no asset (a spare)
+      # is never pushed (NetBox requires a device) — the plan reports it as
+      # local only.
+      stock_state: declared_here
+      quantity: declared_here
+      location_id: declared_here
 
   # --- Row 3.5: ports and cables (NetBox dcim/*-ports, dcim/power-*, dcim/cables).
   # A component sits on an asset (identity: the asset and its name, like an

@@ -13,9 +13,22 @@ import { useBusinessUnits } from '../../settings/business-units-queries';
 import { PanelEmpty, PanelError, PanelLoading } from '../dcim/substrate-states';
 import { flattenNodes, useLocations, useSites } from '../sites/sites-queries';
 import { UtilisationBar } from './rack-page';
+import { fillColor } from '../../dashboard/facilities-dashboard-metrics';
 import { RACK_STATUSES, useRackRoles, useRacks, type Rack } from './racks-queries';
 
-const COLS = 'minmax(0,1.1fr) minmax(0,1.5fr) minmax(0,0.8fr) 90px 60px minmax(170px,1.2fr) 64px minmax(0,0.9fr)';
+const COLS = 'minmax(0,1.1fr) minmax(0,1.5fr) minmax(0,0.8fr) 90px 60px minmax(170px,1.2fr) 70px 64px minmax(0,0.9fr)';
+
+/** The rack's power budget cell (row 6.2): allocated draw as a share of its
+ *  feeds' available power; "no feed" when none is declared — never 0 %. */
+function PowerCell({ r }: { r: Rack }) {
+  const p = r.power_utilization;
+  if (!p) return <span data-testid="rack-power-cell" style={{ color: 'var(--app-t3)' }}>no feed</span>;
+  if (p.utilization == null) return <span data-testid="rack-power-cell" style={{ color: 'var(--app-t3)' }}>—</span>;
+  return (
+    <span data-testid="rack-power-cell" className="mono" title={`${p.allocated_draw} W of ${p.available_power} VA on ${p.feed_count} feed${p.feed_count === 1 ? '' : 's'}`}
+      style={{ color: fillColor(p.utilization) }}>{Number(p.utilization.toFixed(1))}%</span>
+  );
+}
 
 const statusLabel = (s: string) => RACK_STATUSES.find((x) => x.value === s)?.label ?? s;
 
@@ -23,10 +36,10 @@ const statusLabel = (s: string) => RACK_STATUSES.find((x) => x.value === s)?.lab
 export function racksCsvRows(rows: readonly Rack[], buName: (id: string | null) => string): (string | number | null)[][] {
   return rows.map((r) => [
     r.name, r.facility_id, r.site?.name ?? '', r.location?.name ?? '', r.role?.name ?? '', statusLabel(r.operational_status),
-    r.u_height, r.utilization?.used_units ?? '', r.utilization?.utilization ?? '', r.device_count ?? 0, buName(r.business_unit_id), r.id,
+    r.u_height, r.utilization?.used_units ?? '', r.utilization?.utilization ?? '', r.power_utilization?.utilization ?? '', r.device_count ?? 0, buName(r.business_unit_id), r.id,
   ]);
 }
-export const RACKS_CSV_HEADER = ['name', 'facility_id', 'site', 'location', 'role', 'status', 'u_height', 'used_units', 'utilization_pct', 'devices', 'business_unit', 'id'];
+export const RACKS_CSV_HEADER = ['name', 'facility_id', 'site', 'location', 'role', 'status', 'u_height', 'used_units', 'utilization_pct', 'power_utilization_pct', 'devices', 'business_unit', 'id'];
 
 export function RacksLens() {
   const [params, setParams] = useSearchParams();
@@ -99,7 +112,7 @@ export function RacksLens() {
 
       <div style={{ border: '1px solid var(--app-border)', borderRadius: 12, background: 'var(--app-panel)', overflow: 'hidden' }}>
         <div style={{ display: 'grid', gridTemplateColumns: COLS, gap: 10, padding: '8px 12px', fontSize: 11, fontWeight: 600, color: 'var(--app-t3)', borderBottom: '1px solid var(--app-border)' }}>
-          <span>Rack</span><span>Site › Location</span><span>Role</span><span>Status</span><span>Height</span><span>Utilisation</span><span style={{ textAlign: 'right' }}>Devices</span><span>Business unit</span>
+          <span>Rack</span><span>Site › Location</span><span>Role</span><span>Status</span><span>Height</span><span>Utilisation</span><span>Power</span><span style={{ textAlign: 'right' }}>Devices</span><span>Business unit</span>
         </div>
         {q.isLoading && <div style={{ padding: 14 }}><PanelLoading label="Loading racks…" /></div>}
         {q.isError && <div style={{ padding: 14 }}><PanelError message={q.error instanceof Error ? q.error.message : 'Request failed'} onRetry={() => { void q.refetch(); }} /></div>}
@@ -120,6 +133,7 @@ export function RacksLens() {
             <span style={{ color: 'var(--app-t3)' }}>{statusLabel(r.operational_status)}</span>
             <span className="mono">{r.u_height}U</span>
             <UtilisationBar used={r.utilization?.used_units ?? 0} total={r.utilization?.total_units ?? r.u_height} pct={r.utilization?.utilization ?? null} />
+            <PowerCell r={r} />
             <span className="mono" style={{ textAlign: 'right' }}>{r.device_count ?? 0}</span>
             <span style={{ color: 'var(--app-t2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{buName(r.business_unit_id) || '—'}</span>
           </Link>

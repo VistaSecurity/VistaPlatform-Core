@@ -79,6 +79,8 @@ var ciscoAllowedCommands = []string{
 	// column of `show interfaces status` (the port description) is never read.
 	"show interfaces status",
 	"show interfaces trunk",
+	// NX-OS only (DCIM gap 1): each VDC's id, name and allocated interfaces.
+	"show vdc membership",
 	// stack members (cisco_ops.go, DCIM row 2.4): switch number, role, MAC,
 	// priority, hardware version and state; asked only of a stack.
 	"show switch",

@@ -100,7 +100,7 @@
   },
   {
     "name": "vistaplatform_get_asset",
-    "description": "Fetch one asset by UUID with full detail: its class and how the class was decided (`class_source_kind` measured/declared/imported/inferred, `class_source_ref`, `class_confidence`), all of its identifiers (serial number, MAC, cloud resource id, …), all of its endpoints (address, port, transport, protocol, service), its class attributes and tags, its risk, and its crypto configurations and linked certificates. An empty `endpoints` array is a real answer, not a gap — an at-rest cloud resource has no endpoint at all. If the result carries `merged_into`, this id is a TOMBSTONE: the asset was merged into the one that field names, and it answers 200 with `asset_status: archived` rather than 404 so a stale id still resolves. Follow the pointer and report the survivor — never present a tombstone as live inventory.\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
+    "description": "Fetch one asset by UUID with full detail: its class and how the class was decided (`class_source_kind` measured/declared/imported/inferred, `class_source_ref`, `class_confidence`), all of its identifiers (serial number, MAC, cloud resource id, …), all of its endpoints (address, port, transport, protocol, service), its class attributes and tags, its risk, and its crypto configurations and linked certificates. It also carries the commercial lifecycle a person declared (`purchase_date`, `warranty_start`, `warranty_end`, `purchase_cost` + `purchase_currency`, `purchase_order`, `vendor` = the seller, not the manufacturer, `support_contract`, `support_contract_end`, `installed_at`, `decommissioned_at`; null = not recorded) and a computed `lifecycle` block: `warranty_state` (active, expiring_90, expired) and `eos_state` (supported, eos_within_12m, past_eos) from `effective_end_of_support`, the earlier of the device type's and the platform's end of support, with its `source` (declared or catalogue). `unknown` means nothing is recorded — never report it as covered or supported. An empty `endpoints` array is a real answer, not a gap — an at-rest cloud resource has no endpoint at all. If the result carries `merged_into`, this id is a TOMBSTONE: the asset was merged into the one that field names, and it answers 200 with `asset_status: archived` rather than 404 so a stale id still resolves. Follow the pointer and report the survivor — never present a tombstone as live inventory.\nHONESTY: `risk_score` 0 with an EMPTY `risk_assessed_by` means NOT ASSESSED — nobody looked. 0 with a non-empty `risk_assessed_by` means assessed and clean. Never report the first as \"no risk\".",
     "read_only": true,
     "title": "Get asset detail",
     "input_schema": {
@@ -165,7 +165,7 @@
   },
   {
     "name": "vistaplatform_get_asset_interfaces",
-    "description": "List one asset's interfaces in natural name order (Gi0/2 before Gi0/10). Use after vistaplatform_get_asset when the question is about a device's ports, its LAG members or its MAC addresses. An unknown asset id returns an empty list, not an error.",
+    "description": "List one asset's interfaces in natural name order (Gi0/2 before Gi0/10). Use after vistaplatform_get_asset when the question is about a device's ports, its LAG members or its MAC addresses, or which of the device's virtual device contexts (VDOMs, vsys, VDCs, route domains) each interface belongs to (`virtual_device_contexts`). An unknown asset id returns an empty list, not an error.",
     "read_only": true,
     "title": "Get an asset's interfaces",
     "input_schema": {
@@ -514,7 +514,7 @@
   },
   {
     "name": "vistaplatform_list_interfaces",
-    "description": "List network interfaces, physical and virtual, across the tenant's assets. An Interface belongs to one asset and carries its name, type, speed, enabled state, MAC addresses, LAG and parent links and 802.1Q mode. Filter by asset_id for one device, or by mac_address to find which asset owns a MAC (the same MAC on two assets is a duplicate or a move). Returns `data` (the page) and `pagination.total` (the whole match). To see every interface of ONE asset in natural name order use vistaplatform_get_asset_interfaces. To find who holds an IP address use vistaplatform_find_ip.",
+    "description": "List network interfaces, physical and virtual, across the tenant's assets. An Interface belongs to one asset and carries its name, type, speed, enabled state, MAC addresses, LAG and parent links, 802.1Q mode and the virtual device contexts (VDOM, vsys, VDC, route domain) it belongs to (`virtual_device_contexts`, by id and name). Filter by asset_id for one device, or by mac_address to find which asset owns a MAC (the same MAC on two assets is a duplicate or a move). Returns `data` (the page) and `pagination.total` (the whole match). To see every interface of ONE asset in natural name order use vistaplatform_get_asset_interfaces. To find who holds an IP address use vistaplatform_find_ip.",
     "read_only": true,
     "title": "List interfaces",
     "input_schema": {

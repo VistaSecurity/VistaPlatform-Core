@@ -1,0 +1,12 @@
+{
+  "http_method": "GET",
+  "status": "success",
+  "vdom": "root",
+  "results": [
+    {"name": "port1", "ip": "203.0.113.10 255.255.255.248", "macaddr": "00:00:5e:00:53:01", "status": "up", "vlanid": 0, "type": "physical", "vdom": "root", "password": "PlantedVdcSecret-4410"},
+    {"name": "port2", "ip": "0.0.0.0 0.0.0.0", "macaddr": "00:00:5e:00:53:02", "status": "up", "vlanid": 0, "type": "physical", "vdom": "root"},
+    {"name": "port3", "ip": "10.60.0.1 255.255.255.0", "macaddr": "00:00:5e:00:53:03", "status": "up", "vlanid": 0, "type": "physical", "vdom": "branch-a"},
+    {"name": "vlan-a-users", "ip": "10.60.10.1 255.255.255.0", "status": "up", "vlanid": 10, "type": "vlan", "interface": "port3", "vdom": "branch-a", "psksecret": "PlantedVdcSecret-4410"},
+    {"name": "ha", "ip": "0.0.0.0 0.0.0.0", "macaddr": "00:00:5e:00:53:04", "status": "up", "vlanid": 0, "type": "physical", "vdom": ""}
+  ]
+}

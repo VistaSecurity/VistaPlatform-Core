@@ -30,6 +30,10 @@ export const ASSET_TABS: AssetTab[] = [
   // asset-inventory ADR-0010 D3). Declared here today; discovery fills it once
   // intake (row 1.5) maps the agent, SNMP and UniFi interface data onto it.
   { key: 'interfaces', label: 'Interfaces', icon: 'network' },
+  // Every address the asset holds in one table, with its primary and
+  // out-of-band flags (DCIM gap 2): through its interfaces, or named in its
+  // primary IPv4 / IPv6 / OOB columns. Reads ipam.read; the row actions ipam.manage.
+  { key: 'ip-addresses', label: 'IP Addresses', icon: 'route' },
   // The asset's other port components (DCIM BUILD_PLAN row 3.1, ADR-0010 D3):
   // console ports, console server ports, front and rear ports, device bays.
   { key: 'ports', label: 'Ports', icon: 'cable' },

@@ -86,6 +86,12 @@ func TestEnumsMatchSchema(t *testing.T) {
 			{"interfaces_status_check", interfaceStatusValues},
 			{"interfaces_operational_status_check", interfaceOperStatusValues},
 			{"tunnels_encapsulation_check", tunnelEncapsulationValues},
+			{"power_feeds_operational_status_check", powerFeedStatusValues},
+			{"power_feeds_type_check", powerFeedTypeValues},
+			{"power_feeds_supply_check", powerFeedSupplyValues},
+			{"power_feeds_phase_check", powerFeedPhaseValues},
+			{"inventory_items_stock_state_check", inventoryItemStockStateValues},
+			{"virtual_circuit_terminations_role_check", virtualCircuitRoleValues},
 		} {
 			got := checkConstraintValues(t, body, tc.constraint)
 			assertSameSet(t, tc.constraint, got, tc.want)

@@ -45,7 +45,8 @@ const MT_PSU = { id: 'mt-psu', tenant_id: null, manufacturer_id: 'cisco', model:
 const IFACE = { id: 'if-1', name: 'TenGigabitEthernet1/1/1', module_id: 'mod-1' };
 const item = (id: string, name: string, extra: Partial<InventoryItem> = {}): InventoryItem => ({
   ...life, id, asset_id: ASSET_ID, parent_id: null, name, label: null, role_id: null, manufacturer_id: null, part_id: null,
-  serial: null, asset_tag: null, discovered: false, component_kind: null, component_id: null, ...extra,
+  serial: null, asset_tag: null, discovered: false, component_kind: null, component_id: null,
+  location_id: null, quantity: 1, stock_state: 'installed', ...extra,
 });
 const PSU = item('i1', 'Switch 1 - Power Supply A', { role_id: 'psu', serial: 'DCB1A', discovered: true, source_kind: 'measured' });
 const SFP = item('i2', 'Te1/1/1', { role_id: 'opt', discovered: true, component_kind: 'interface', component_id: 'if-1' });
@@ -125,6 +126,19 @@ function button(label: string): HTMLButtonElement {
 }
 
 describe('<HardwareTab> states', () => {
+  it('carries the Lifecycle card (DCIM gap 4), with Edit for a manager only', async () => {
+    answer({});
+    await mount(<HardwareTab asset={ASSET as never} />, MANAGE);
+    await vi.waitFor(() => expect(byTest('hardware-lifecycle')).toHaveLength(1));
+    await vi.waitFor(() => expect(byTest('eos-badge')[0]?.textContent).toBe('End of support not recorded'));
+    expect(byTest('lifecycle-edit')).toHaveLength(1);
+    act(() => root.unmount());
+    root = createRoot(host);
+    await mount(<HardwareTab asset={ASSET as never} />, READ);
+    await vi.waitFor(() => expect(byTest('hardware-lifecycle')).toHaveLength(1));
+    expect(byTest('lifecycle-edit')).toHaveLength(0);
+  });
+
   it('default: bays grid with the installed module card, the item tree, the chassis members and device bays', async () => {
     answer({
       '/dcim/assets/{id}/module-bays': () => page([BAY_NM, BAY_PS2]),
@@ -233,6 +247,55 @@ describe('module install and removal', () => {
     const confirms = [...document.body.querySelectorAll('button')].filter((b) => b.textContent?.trim() === 'Remove' && !b.getAttribute('aria-label'));
     await act(async () => { confirms[confirms.length - 1].click(); });
     await vi.waitFor(() => expect(mocks.del).toHaveBeenCalledWith('/dcim/modules/{id}', { params: { path: { id: 'mod-1' } } }));
+  });
+});
+
+// DCIM gap 8: a part on the asset goes to stock or out for RMA from its row.
+//
+// Mutation: drop the RemoveToStockModal / OpenRmaModal mount, or the
+// canManage gate on the row buttons → red.
+describe('spares actions on an inventory item', () => {
+  const LOC = { id: 'loc-1', site_id: 's', name: 'Stores', path: 'DC1 / Stores' };
+  const withLocations: RouteMap = {
+    '/dcim/assets/{id}/inventory-items': () => page([PSU, item('i9', 'PSU B', { stock_state: 'rma' })]),
+    '/dcim/locations': () => ({ data: { locations: [LOC] } }),
+  };
+
+  it('read-only: no To stock or RMA on a row', async () => {
+    answer(withLocations);
+    await mount(<HardwareTab asset={ASSET as never} />, READ);
+    await vi.waitFor(() => expect(byTest('inventory-item-row')).toHaveLength(2));
+    expect(text()).not.toContain('To stock');
+    expect(byTest('rma-badge')).toHaveLength(1);
+  });
+
+  it('removes a part to a stock location with the request body', async () => {
+    answer(withLocations);
+    mocks.post.mockResolvedValue({ data: { data: { item: { ...PSU, asset_id: null, location_id: 'loc-1', stock_state: 'in_stock' } } } });
+    await mount(<HardwareTab asset={ASSET as never} />, MANAGE);
+    await vi.waitFor(() => expect(byTest('inventory-item-row')).toHaveLength(2));
+    await act(async () => { button('Remove Switch 1 - Power Supply A to stock').click(); });
+    await vi.waitFor(() => expect(document.body.querySelector('select[aria-label="Stock location"] option[value="loc-1"]')).not.toBeNull());
+    expect(button('Remove to stock').disabled).toBe(true);
+    await act(async () => { setValue(byLabel<HTMLSelectElement>('Stock location')!, 'loc-1'); });
+    await act(async () => { button('Remove to stock').click(); });
+    await vi.waitFor(() => expect(mocks.post).toHaveBeenCalled());
+    expect(mocks.post.mock.calls[0]).toEqual(['/dcim/inventory-items/{id}/remove', { params: { path: { id: 'i1' } }, body: { location_id: 'loc-1' } }]);
+  });
+
+  it('opens an RMA (RMA only on an installed part) and shows a refusal', async () => {
+    answer(withLocations);
+    mocks.post.mockResolvedValue({ error: { error: { code: 'conflict', message: 'this item is already out for RMA' } } });
+    await mount(<HardwareTab asset={ASSET as never} />, MANAGE);
+    await vi.waitFor(() => expect(byTest('inventory-item-row')).toHaveLength(2));
+    expect(byLabel('Open RMA for PSU B')).toBeNull();
+    await act(async () => { button('Open RMA for Switch 1 - Power Supply A').click(); });
+    await act(async () => { setValue(byLabel<HTMLInputElement>('Vendor')!, 'Acme Networks'); });
+    await act(async () => { setValue(byLabel<HTMLInputElement>('Case number')!, 'RMA-77'); });
+    await act(async () => { button('Open RMA').click(); });
+    await vi.waitFor(() => expect(mocks.post).toHaveBeenCalled());
+    expect(mocks.post.mock.calls[0]).toEqual(['/dcim/inventory-items/{id}/rma', { params: { path: { id: 'i1' } }, body: { vendor: 'Acme Networks', case_number: 'RMA-77' } }]);
+    await vi.waitFor(() => expect(byTest('spare-error')[0]?.textContent).toContain('already out for RMA'));
   });
 });
 

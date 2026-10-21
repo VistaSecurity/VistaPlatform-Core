@@ -30,16 +30,20 @@ const (
 	HardwareInventoryItemRole = "inventory-item-roles"
 	HardwareInventoryItem     = "inventory-items"
 	HardwareVirtualChassis    = "virtual-chassis"
+	// HardwareVirtualDeviceContext is DCIM gap 1 (virtual_device_context_service.go).
+	HardwareVirtualDeviceContext = "virtual-device-contexts"
 )
 
 // HardwareRoutes lists the hardware route segments, in order.
 func HardwareRoutes() []string {
-	return []string{HardwareModuleBay, HardwareModule, HardwareInventoryItemRole, HardwareInventoryItem, HardwareVirtualChassis}
+	return []string{HardwareModuleBay, HardwareModule, HardwareInventoryItemRole, HardwareInventoryItem, HardwareVirtualChassis,
+		HardwareVirtualDeviceContext}
 }
 
 // hardwareAssetRoutes are the hardware kinds an asset owns (served under
 // /dcim/assets/{id}/{kind} too).
-var hardwareAssetRoutes = map[string]bool{HardwareModuleBay: true, HardwareModule: true, HardwareInventoryItem: true}
+var hardwareAssetRoutes = map[string]bool{HardwareModuleBay: true, HardwareModule: true, HardwareInventoryItem: true,
+	HardwareVirtualDeviceContext: true}
 
 // moduleOperationalStatuses is NetBox's ModuleStatusChoices
 // (modules_operational_status_check).
@@ -131,7 +135,9 @@ func hardwareSpecs() []*ipamSpec {
 		{
 			Kind: dcim.ObjectKindInventoryItem, Table: "inventory_items", Route: HardwareInventoryItem, Lifecycle: true,
 			Cols: lifecycleSubstrate(
-				ipamCol{Name: "asset_id", Type: colUUID, Required: true},
+				// DCIM gap 8: an item is on an asset (asset_id) or a spare at a
+				// stock location (location_id) — prepareInventoryItem.
+				ipamCol{Name: "asset_id", Type: colUUID},
 				ipamCol{Name: "parent_id", Type: colUUID},
 				ipamCol{Name: "name", Type: colText, Required: true},
 				ipamCol{Name: "label", Type: colText},
@@ -143,6 +149,9 @@ func hardwareSpecs() []*ipamSpec {
 				ipamCol{Name: "discovered", Type: colBool},
 				ipamCol{Name: "component_kind", Type: colText},
 				ipamCol{Name: "component_id", Type: colUUID},
+				ipamCol{Name: "location_id", Type: colUUID},
+				ipamCol{Name: "quantity", Type: colInt},
+				ipamCol{Name: "stock_state", Type: colText},
 			),
 			Filters: assetFilters(
 				ipamFilter{Param: "name", Column: "name", Type: colText},
@@ -151,6 +160,9 @@ func hardwareSpecs() []*ipamSpec {
 				ipamFilter{Param: "serial", Column: "serial", Type: colText},
 				ipamFilter{Param: "discovered", Column: "discovered", Type: colBool},
 				ipamFilter{Param: "component_kind", Column: "component_kind", Type: colText},
+				ipamFilter{Param: "stock_state", Column: "stock_state", Type: colText},
+				ipamFilter{Param: "location_id", Column: "location_id", Type: colUUID},
+				ipamFilter{Param: "site_id", Custom: inventoryItemSiteFilter},
 			),
 			Search:  []string{"name", "label", "part_id", "serial", "description"},
 			Order:   naturalNameOrder,
@@ -174,6 +186,7 @@ func hardwareSpecs() []*ipamSpec {
 			AfterWrite:   afterVirtualChassisWrite,
 			BeforeDelete: beforeVirtualChassisDelete,
 		},
+		virtualDeviceContextSpec(),
 	}
 }
 
@@ -223,12 +236,41 @@ func prepareModule(ctx context.Context, tx *sql.Tx, _ uuid.UUID, id uuid.UUID, r
 	return visible(ctx, tx, "module_types", row["module_type_id"])
 }
 
-// prepareInventoryItem: the asset's own and never moved; a parent on the same
-// asset and no cycle; a role and manufacturer the tenant can read; a component
-// link naming a row of that kind on the same asset.
+// prepareInventoryItem: an item is on an asset or a spare at a stock location
+// (DCIM gap 8, spares_service.go has the state rules); on an asset it is the
+// asset's own and never moved by a plain write; a parent on the same asset and
+// no cycle; a role and manufacturer the tenant can read; a component link
+// naming a row of that kind on the same asset.
 func prepareInventoryItem(ctx context.Context, tx *sql.Tx, tenant, id uuid.UUID, row map[string]any) error {
-	if err := preparePortAsset(ctx, tx, "inventory_items", id, tenant, row); err != nil {
+	name, _ := row["name"].(string)
+	if len(name) < 1 || len(name) > 64 {
+		return ipamInvalid("name must be 1 to 64 characters")
+	}
+	if err := prepareStockPlacement(ctx, tx, tenant, id, row); err != nil {
 		return err
+	}
+	if err := visible(ctx, tx, "inventory_item_roles", row["role_id"]); err != nil {
+		return err
+	}
+	if err := visible(ctx, tx, "manufacturers", row["manufacturer_id"]); err != nil {
+		return err
+	}
+	if isEmpty(row["asset_id"]) {
+		// A spare belongs to no asset, so nothing on one can be its parent or
+		// the component it is.
+		if !isEmpty(row["parent_id"]) || !isEmpty(row["component_kind"]) || !isEmpty(row["component_id"]) {
+			return ipamInvalid("an item that is not on an asset has no parent item or component; those are an asset's")
+		}
+		row["parent_id"], row["component_kind"], row["component_id"] = nil, nil, nil
+		return nil
+	}
+	var ok bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM assets WHERE tenant_id = $1 AND id = $2::uuid AND deleted_at IS NULL)`,
+		tenant, fmt.Sprint(row["asset_id"])).Scan(&ok); err != nil {
+		return mapIPAMError(err, false)
+	}
+	if !ok {
+		return ipamInvalid("no such asset %v", row["asset_id"])
 	}
 	if err := sameAssetRef(ctx, tx, "inventory_items", "parent_id", row); err != nil {
 		return err
@@ -246,12 +288,6 @@ func prepareInventoryItem(ctx context.Context, tx *sql.Tx, tenant, id uuid.UUID,
 		if cycle {
 			return ipamInvalid("parent_id would make an inventory item its own ancestor")
 		}
-	}
-	if err := visible(ctx, tx, "inventory_item_roles", row["role_id"]); err != nil {
-		return err
-	}
-	if err := visible(ctx, tx, "manufacturers", row["manufacturer_id"]); err != nil {
-		return err
 	}
 	kind, _ := row["component_kind"].(string)
 	if isEmpty(row["component_kind"]) != isEmpty(row["component_id"]) {

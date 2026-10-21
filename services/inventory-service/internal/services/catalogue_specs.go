@@ -140,6 +140,10 @@ func catalogueSpecs() []*ipamSpec {
 				ipamCol{Name: "weight", Type: colNumeric},
 				ipamCol{Name: "weight_unit", Type: colText},
 				ipamCol{Name: "default_platform_id", Type: colUUID},
+				ipamCol{Name: "end_of_sale", Type: colDate},
+				ipamCol{Name: "end_of_support", Type: colDate},
+				ipamCol{Name: "end_of_life", Type: colDate},
+				ipamCol{Name: "eol_catalogue_id", Type: colUUID},
 				externalIDsCol,
 			),
 			Filters: []ipamFilter{
@@ -154,9 +158,11 @@ func catalogueSpecs() []*ipamSpec {
 			// The list carries the manufacturer's name and the template counts,
 			// so the catalogue browse needs no second request per row.
 			ListSelect: `to_jsonb(t) || jsonb_build_object(
+				'eol_link_source', ` + eolLinkSourceSQL("device_type") + `,
 				'manufacturer', jsonb_build_object('id', m.id, 'name', m.name, 'slug', m.slug),
 				'interface_template_count', (SELECT count(*) FROM public.interface_templates it WHERE it.device_type_id = t.id))`,
-			Join: "JOIN public.manufacturers m ON m.id = t.manufacturer_id",
+			Join:       "JOIN public.manufacturers m ON m.id = t.manufacturer_id",
+			AfterWrite: matchEOLAfterWrite(eolDeviceTypes),
 			Prepare: func(ctx context.Context, tx *sql.Tx, _, _ uuid.UUID, row map[string]any) error {
 				if err := prepareModelSlug(row); err != nil {
 					return err
@@ -168,6 +174,9 @@ func catalogueSpecs() []*ipamSpec {
 					return err
 				}
 				if err := visible(ctx, tx, "manufacturers", row["manufacturer_id"]); err != nil {
+					return err
+				}
+				if err := eolCatalogueOfKind(ctx, tx, row["eol_catalogue_id"], "hardware"); err != nil {
 					return err
 				}
 				return visible(ctx, tx, "platforms", row["default_platform_id"])
@@ -242,6 +251,10 @@ func catalogueSpecs() []*ipamSpec {
 				ipamCol{Name: "name", Type: colText, Required: true},
 				ipamCol{Name: "slug", Type: colText},
 				ipamCol{Name: "manufacturer_id", Type: colUUID},
+				ipamCol{Name: "end_of_sale", Type: colDate},
+				ipamCol{Name: "end_of_support", Type: colDate},
+				ipamCol{Name: "end_of_life", Type: colDate},
+				ipamCol{Name: "eol_catalogue_id", Type: colUUID},
 				externalIDsCol,
 			),
 			Filters: []ipamFilter{
@@ -249,10 +262,15 @@ func catalogueSpecs() []*ipamSpec {
 				{Param: "manufacturer_id", Column: "manufacturer_id", Type: colUUID},
 				{Param: "scope", Custom: scopeFilter},
 			},
-			Search: []string{"name", "slug", "description"},
-			Order:  "lower(t.name), t.id",
+			Search:     []string{"name", "slug", "description"},
+			Order:      "lower(t.name), t.id",
+			ListSelect: `to_jsonb(t) || jsonb_build_object('eol_link_source', ` + eolLinkSourceSQL("platform") + `)`,
+			AfterWrite: matchEOLAfterWrite(eolPlatforms),
 			Prepare: func(ctx context.Context, tx *sql.Tx, _, id uuid.UUID, row map[string]any) error {
 				if err := prepareSlug(ctx, tx, uuid.Nil, id, row); err != nil {
+					return err
+				}
+				if err := eolCatalogueOfKind(ctx, tx, row["eol_catalogue_id"], "os"); err != nil {
 					return err
 				}
 				return visible(ctx, tx, "manufacturers", row["manufacturer_id"])
@@ -261,6 +279,28 @@ func catalogueSpecs() []*ipamSpec {
 	}
 	specs[0].Filters = append(specs[0].Filters, ipamFilter{Param: "scope", Custom: scopeFilter})
 	return append(specs, templateSpecs()...)
+}
+
+// eolCatalogueOfKind checks a device type's or platform's eol_catalogue_id
+// (DCIM gap 4): the entry exists and is of the kind the object is — a device
+// type's is a `hardware` entry, a platform's an `os` entry — so a platform
+// cannot fall back to a hardware model's end-of-support date.
+func eolCatalogueOfKind(ctx context.Context, tx *sql.Tx, id any, kind string) error {
+	if id == nil || id == "" {
+		return nil
+	}
+	var got string
+	err := tx.QueryRowContext(ctx, `SELECT product_kind FROM public.eol_catalogue WHERE id = $1::uuid`, fmt.Sprint(id)).Scan(&got)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ipamInvalid("no such end-of-life catalogue entry %v", id)
+	}
+	if err != nil {
+		return mapIPAMError(err, false)
+	}
+	if got != kind {
+		return ipamInvalid("eol_catalogue_id must be a %s entry (this one is %s)", kind, got)
+	}
+	return nil
 }
 
 // scopeFilter is ?scope=platform|tenant: the platform-seeded rows or the

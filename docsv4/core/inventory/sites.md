@@ -59,6 +59,34 @@ holds (assets, locations, racks, prefixes, VLANs), its
 locations, its findings by environment, and its change log and journal. The asset count
 opens the asset list filtered to the site.
 
+## Floor plans
+
+A location — a hall, a room, a cage — can carry a **floor plan**: a rectangle of a width
+and a depth in metres or feet, drawn as a grid, with the location's racks placed on it.
+Open the site, then the **Floor plan** tab, and pick the location.
+
+- **Set up a plan.** For a location without one, a person with `dcim.manage` enters the
+  width, depth and unit and presses **Create plan**. **Edit plan size** changes it later.
+  A plan cannot be removed, change its unit or shrink past a rack placed on it; move or
+  take off those racks first.
+- **Place racks.** The racks of the location that are not on the plan wait in the
+  **Unplaced racks** tray. Drag one onto the plan, or press **Place** to put it in the
+  middle. Drag a placed rack to move it; a position that runs past the edge of the plan
+  is drawn in red and not saved. With a rack focused, the arrow keys nudge it (a tenth of
+  the unit; Shift for a whole one), **R** turns it a quarter turn and Enter opens it. The
+  **On this plan** list turns a rack or takes it off the plan.
+- **Read it.** Each rack is drawn at its outer width and depth, turned the way its front
+  faces (the thick edge). A rack with no recorded outer size is drawn at 600 × 1000 mm and
+  marked `*`. **Utilisation** colours racks by the units in use, **Power** by the share of
+  the power their feeds can supply that is allocated: the accent colour up to 80 %, amber
+  over 80 %, red over 95 % — the Facilities dashboard's thresholds. A rack whose figure is
+  not recorded is drawn dashed, never as 0 %. Click a rack to open its page.
+
+A rack is placed only on its own location's plan; moving a rack to another location takes
+it off the old plan, and deleting a location takes its racks off. A rack's place is part
+of its change log. Floor plans are not exchanged with NetBox, which has no floor plan of
+its own.
+
 ## Filter by place
 
 The **Site** facet in the Inventory filter rail lists sites by name. In the query box:
@@ -82,3 +110,9 @@ example `us-east-1`); they are not the Region tree.
 (list, get, create, update, delete). Reads need `dcim.read`, writes `dcim.manage`.
 `DELETE /dcim/sites/{id}?reassign_to=<site id>` moves a site's assets before deleting it;
 without it a site holding assets answers 409.
+
+Floor plans: a location's `floor_plan_width`, `floor_plan_depth` and `floor_plan_unit`
+are set with `PUT /dcim/locations/{id}`; a rack's `floor_x`, `floor_y` (the centre of its
+footprint, in the plan's unit) and `floor_rotation` (0, 90, 180, 270) with
+`PATCH /dcim/racks/{id}`. `GET /dcim/locations/{id}/floor-plan` returns the plan and every
+rack in the location with its footprint, utilisation and power budget.

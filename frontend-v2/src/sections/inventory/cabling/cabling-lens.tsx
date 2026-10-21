@@ -10,7 +10,7 @@
 // States: loading, error, empty (no cables yet / none match), the table, and
 // the drawer's save result.
 import { useMemo, useState } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router';
 import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
 import {
   CABLE_LENGTH_UNITS, CABLE_LENGTH_UNIT_LABELS, CABLE_STATUSES, CABLE_STATUS_LABELS, CABLE_TYPES, CABLE_TYPE_LABELS,
@@ -27,6 +27,7 @@ import { KIND_LABEL, CONNECTABLE_KINDS } from '../dcim/cable-column';
 import { CABLE_LIST_PAGE, isTraceKind, useCable, useCableList, useUpdateCable, type CableFilters, type CableUpdateInput } from './cabling-queries';
 import { STATUS_FILTERS, cablesCsv, endText, lengthText, statusFilter, statusText, typeText, whereText } from './cabling-model';
 import { TraceBody } from './trace-view';
+import { cableHref, circuitHref, fromState } from '../object-pages/object-links';
 
 const COLS = '0.9fr 1.4fr 1.4fr 0.9fr 0.9fr 0.6fr 0.4fr 1fr';
 
@@ -50,7 +51,7 @@ function Ends({ ts }: { ts: readonly CableTerminationRef[] }) {
           {t.asset_id
             ? <Link to={`/inventory/assets/${t.asset_id}/ports`} style={{ color: 'var(--accent)' }}>{t.asset_name}:{t.name}</Link>
             : t.circuit_id
-              ? <Link to={`/inventory?lens=circuits&circuit=${t.circuit_id}`} style={{ color: 'var(--accent)' }}>{t.name}</Link>
+              ? <Link to={circuitHref(t.circuit_id)} style={{ color: 'var(--accent)' }}>{t.name}</Link>
               : t.name}
         </span>
       ))}
@@ -96,6 +97,8 @@ function AssetFilter({ assetId, assetName, onPick }: { assetId: string; assetNam
 
 export function CablingLens() {
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
+  const loc = useLocation();
   const set = (patch: Record<string, string | null>) => {
     const n = new URLSearchParams(params);
     for (const [k, v] of Object.entries(patch)) { if (v) n.set(k, v); else n.delete(k); }
@@ -174,8 +177,8 @@ export function CablingLens() {
             message={filtered ? 'Nothing matches these filters.' : 'Connect a port from an asset’s Ports or Interfaces tab — or paste a whole switch’s cabling with “Edit cables as table” on its faceplate. Cables proposed from LLDP/CDP neighbours appear here as Proposed.'} />
         )}
         {rows.map((c) => (
-          <div key={c.id} data-testid="cable-row" data-status={c.status} role="button" tabIndex={0} onClick={() => set({ cable: c.id })}
-            onKeyDown={(e) => { if (e.key === 'Enter') set({ cable: c.id }); }}
+          <div key={c.id} data-testid="cable-row" data-status={c.status} role="button" tabIndex={0} onClick={() => navigate(cableHref(c.id), { state: fromState(loc) })}
+            onKeyDown={(e) => { if (e.key === 'Enter') navigate(cableHref(c.id), { state: fromState(loc) }); }}
             style={{ display: 'grid', gridTemplateColumns: COLS, gap: 10, alignItems: 'center', padding: '7px 12px', borderBottom: '1px solid var(--app-border)', fontSize: 12.5, cursor: 'pointer', background: selected === c.id ? 'var(--app-panel2)' : undefined, borderLeft: c.status === 'pending' ? '3px dashed var(--warn)' : undefined }}>
             <span className="mono" style={{ fontWeight: 600 }}>{c.label?.trim() ? c.label : '—'}</span>
             <Ends ts={c.a_terminations} />
@@ -224,16 +227,84 @@ export function patchOf(c: Cable, d: Draft): CableUpdateInput {
   return p;
 }
 
+/** The Disconnect button and its confirmation, shared by the drawer and the
+ *  cable page (`dcim.manage`). `onDone` runs after the cable is deleted. */
+export function CableDisconnect({ cable: c, onDone }: { cable: Cable; onDone: () => void }) {
+  const disconnect = useDisconnectCable();
+  const [confirm, setConfirm] = useState(false);
+  return (
+    <>
+      <PermissionGate permission={TENANT_PERMISSIONS.dcim.manage}>
+        <button type="button" className="ui-btn sm ghost" data-testid="cable-disconnect" style={{ color: 'var(--danger-text)' }} onClick={() => setConfirm(true)}><Icon name="unplug" size={13} />Disconnect</button>
+      </PermissionGate>
+      {confirm && (
+        <Modal open onClose={() => setConfirm(false)} size="sm" tone="danger" icon="unplug" title="Disconnect this cable?"
+          description={`Deletes the cable between ${endText(c.a_terminations)} and ${endText(c.b_terminations)}. Both ends become free; the change log keeps the cable.`}
+          secondary={<button type="button" className="ui-btn" onClick={() => setConfirm(false)}>Cancel</button>}
+          primary={<button type="button" className="ui-btn danger" disabled={disconnect.isPending} onClick={() => disconnect.mutate(c.id, { onSuccess: () => { setConfirm(false); onDone(); } })}>Disconnect</button>} />
+      )}
+    </>
+  );
+}
+
+/** The cable's body — proposal notice, ends, editor, LLDP confirmation, trace —
+ *  shared by the drawer and the cable page. `substrate` adds the change log the
+ *  page supplies itself. */
+export function CableDetails({ cable: c, substrate = true }: { cable: Cable; substrate?: boolean }) {
+  const perms = usePermissions();
+  const canManage = perms.hasPermission(TENANT_PERMISSIONS.dcim.manage);
+  const [traceFrom, setTraceFrom] = useState<CableTerminationRef | null>(null);
+  const traceable = [...c.a_terminations, ...c.b_terminations].filter((t) => isTraceKind(t.termination_kind));
+  const from = traceFrom ?? traceable[0] ?? null;
+  return (
+    <>
+      {c.status === 'pending' && (
+        <div data-testid="cable-proposed" style={{ marginTop: 10, fontSize: 12.5, color: 'var(--warn)' }}>
+          Proposed from a neighbour observation and awaiting approval in Discovery → Approvals.
+        </div>
+      )}
+      <SectionLabel icon="ethernet-port">Ends</SectionLabel>
+      {(['A', 'B'] as const).map((side) => (
+        <div key={side} data-testid={`cable-end-${side}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', borderBottom: '1px solid var(--app-border)', fontSize: 12.5 }}>
+          <span className="mono" style={{ fontWeight: 700, width: 16 }}>{side}</span>
+          <span style={{ flex: 1 }}><Ends ts={side === 'A' ? c.a_terminations : c.b_terminations} /></span>
+          <span style={{ color: 'var(--app-t3)', fontSize: 11.5 }}>{(side === 'A' ? c.a_terminations : c.b_terminations).map((t) => [t.site_name, t.rack_name].filter(Boolean).join(' / ')).filter(Boolean)[0] ?? ''}</span>
+          {(side === 'A' ? c.a_terminations : c.b_terminations).filter((t) => isTraceKind(t.termination_kind)).slice(0, 1).map((t) => (
+            <button key={t.termination_id} type="button" className="ui-btn sm" data-testid={`trace-from-${side}`} onClick={() => setTraceFrom(t)}>
+              <Icon name="route" size={12} />Trace
+            </button>
+          ))}
+        </div>
+      ))}
+
+      <SectionLabel icon="sliders-horizontal">Cable</SectionLabel>
+      <CableEditor key={`${c.id}:${c.updated_at}`} cable={c} canManage={canManage} />
+      <div data-testid="cable-lldp" style={{ marginTop: 8, fontSize: 12.5, color: 'var(--app-t2)' }}>
+        <span style={{ color: 'var(--app-t3)' }}>LLDP / CDP: </span>
+        {c.lldp_confirmed_at
+          ? `a neighbour agreed with this cable on ${new Date(c.lldp_confirmed_at).toLocaleString()}`
+          : 'no neighbour observation has confirmed this cable'}
+      </div>
+
+      <SectionLabel icon="route">Trace{from ? ` from ${from.asset_name ? `${from.asset_name}:` : ''}${from.name ?? ''}` : ''}</SectionLabel>
+      {from && isTraceKind(from.termination_kind)
+        ? <TraceBody kind={from.termination_kind} id={from.termination_id} />
+        : <PanelEmpty icon="route" title="Nothing to trace" message="Neither end of this cable is a port with a cable path." />}
+
+      {substrate && (
+        <>
+          <SectionLabel icon="git-compare">Changes</SectionLabel>
+          <ObjectChanges kind="cable" id={c.id} />
+        </>
+      )}
+    </>
+  );
+}
+
 function CableDrawer({ id, fallback, onClose }: { id: string; fallback: Cable | undefined; onClose: () => void }) {
   const q = useCable(id);
   const c = q.data ?? fallback;
-  const perms = usePermissions();
-  const canManage = perms.hasPermission(TENANT_PERMISSIONS.dcim.manage);
-  const disconnect = useDisconnectCable();
-  const [confirm, setConfirm] = useState(false);
-  const [traceFrom, setTraceFrom] = useState<CableTerminationRef | null>(null);
-  const traceable = c ? [...c.a_terminations, ...c.b_terminations].filter((t) => isTraceKind(t.termination_kind)) : [];
-  const from = traceFrom ?? traceable[0] ?? null;
+  const loc = useLocation();
 
   return (
     <DrawerShell onClose={onClose} width={560}>
@@ -241,56 +312,16 @@ function CableDrawer({ id, fallback, onClose }: { id: string; fallback: Cable | 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <Icon name="cable" size={18} style={{ color: 'var(--accent)' }} />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="mono" style={{ fontWeight: 700, fontSize: 15 }}>{c?.label?.trim() ? c.label : 'Cable'}</div>
+            <Link to={cableHref(id)} state={fromState(loc)} data-testid="cable-open-page" title="Open the cable page" className="mono" style={{ fontWeight: 700, fontSize: 15, color: 'inherit' }}>{c?.label?.trim() ? c.label : 'Cable'}</Link>
             {c && <div style={{ fontSize: 12, color: 'var(--app-t3)' }}>{typeText(c.type)} · {statusText(c)}</div>}
           </div>
-          <PermissionGate permission={TENANT_PERMISSIONS.dcim.manage}>
-            {c && <button type="button" className="ui-btn sm ghost" data-testid="cable-disconnect" style={{ color: 'var(--danger-text)' }} onClick={() => setConfirm(true)}><Icon name="unplug" size={13} />Disconnect</button>}
-          </PermissionGate>
+          {c && <CableDisconnect cable={c} onDone={onClose} />}
           <DrawerCloseBtn onClose={onClose} />
         </div>
         {!c && q.isLoading && <PanelLoading label="Loading the cable…" />}
         {!c && q.isError && <PanelError message={q.error instanceof Error ? q.error.message : 'Request failed'} onRetry={() => { void q.refetch(); }} />}
-        {c && (
-          <>
-            {c.status === 'pending' && (
-              <div data-testid="cable-proposed" style={{ marginTop: 10, fontSize: 12.5, color: 'var(--warn)' }}>
-                Proposed from a neighbour observation and awaiting approval in Discovery → Approvals.
-              </div>
-            )}
-            <SectionLabel icon="ethernet-port">Ends</SectionLabel>
-            {(['A', 'B'] as const).map((side) => (
-              <div key={side} data-testid={`cable-end-${side}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0', borderBottom: '1px solid var(--app-border)', fontSize: 12.5 }}>
-                <span className="mono" style={{ fontWeight: 700, width: 16 }}>{side}</span>
-                <span style={{ flex: 1 }}><Ends ts={side === 'A' ? c.a_terminations : c.b_terminations} /></span>
-                <span style={{ color: 'var(--app-t3)', fontSize: 11.5 }}>{(side === 'A' ? c.a_terminations : c.b_terminations).map((t) => [t.site_name, t.rack_name].filter(Boolean).join(' / ')).filter(Boolean)[0] ?? ''}</span>
-                {(side === 'A' ? c.a_terminations : c.b_terminations).filter((t) => isTraceKind(t.termination_kind)).slice(0, 1).map((t) => (
-                  <button key={t.termination_id} type="button" className="ui-btn sm" data-testid={`trace-from-${side}`} onClick={() => setTraceFrom(t)}>
-                    <Icon name="route" size={12} />Trace
-                  </button>
-                ))}
-              </div>
-            ))}
-
-            <SectionLabel icon="sliders-horizontal">Cable</SectionLabel>
-            <CableEditor key={`${c.id}:${c.updated_at}`} cable={c} canManage={canManage} />
-
-            <SectionLabel icon="route">Trace{from ? ` from ${from.asset_name ? `${from.asset_name}:` : ''}${from.name ?? ''}` : ''}</SectionLabel>
-            {from && isTraceKind(from.termination_kind)
-              ? <TraceBody kind={from.termination_kind} id={from.termination_id} />
-              : <PanelEmpty icon="route" title="Nothing to trace" message="Neither end of this cable is a port with a cable path (power cables have none)." />}
-
-            <SectionLabel icon="git-compare">Changes</SectionLabel>
-            <ObjectChanges kind="cable" id={c.id} />
-          </>
-        )}
+        {c && <CableDetails cable={c} />}
       </div>
-      {confirm && c && (
-        <Modal open onClose={() => setConfirm(false)} size="sm" tone="danger" icon="unplug" title="Disconnect this cable?"
-          description={`Deletes the cable between ${endText(c.a_terminations)} and ${endText(c.b_terminations)}. Both ends become free; the change log keeps the cable.`}
-          secondary={<button type="button" className="ui-btn" onClick={() => setConfirm(false)}>Cancel</button>}
-          primary={<button type="button" className="ui-btn danger" disabled={disconnect.isPending} onClick={() => disconnect.mutate(c.id, { onSuccess: () => { setConfirm(false); onClose(); } })}>Disconnect</button>} />
-      )}
     </DrawerShell>
   );
 }

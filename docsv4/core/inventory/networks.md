@@ -11,8 +11,8 @@ every object.
 | Page | What it is for |
 |---|---|
 | **Inventory → Networks** | Your prefixes as a tree, one VRF at a time, with how full each one is; the panel for one prefix; the **Find** box |
-| **Inventory → VLANs** | VLAN groups and the VLANs in them, with the prefixes each carries |
-| **Settings → Infrastructure → IPAM** | The catalogues the tree builds on: VRFs, aggregates, RIRs, prefix roles and AS numbers |
+| **Inventory → VLANs** | VLAN groups and the VLANs in them, with the prefixes each carries; and, under **Translation policies**, the VLAN translation policies interfaces apply |
+| **Settings → Infrastructure → IPAM** | The catalogues the tree builds on: VRFs, aggregates, RIRs, prefix roles, AS numbers and ASN ranges |
 
 Reading needs the **IPAM read** permission; adding, editing and deleting need
 **IPAM manage**. Tenant Administrators and Security Administrators hold both;
@@ -77,6 +77,68 @@ Click a prefix to open its panel:
 - **Changes** — every edit to the prefix: what changed, who changed it and when.
 - **Journal** — dated notes anyone with access can add.
 
+### The prefix and VLAN pages
+
+Click a prefix's name in the panel to **open the prefix's page**
+(`/inventory/prefixes/<id>`), or a VLAN's row in **Inventory → VLANs** to open the VLAN's page
+(`/inventory/vlans/<id>`). Both can be bookmarked and shared. The prefix page shows its VLAN, role and
+business unit, then everything in the panel above. The VLAN page shows its group, site and status, the
+prefixes it carries and every interface that uses it, untagged or tagged. Each page ends with the same
+panels as every other inventory object: custom fields, tags, contacts, images, changes and journal. **Back**
+returns to the lens with the filters you had.
+
+## VLAN translation policies
+
+A **VLAN translation policy** is a named set of rules that rewrite VLAN IDs as
+traffic crosses an interface: a provider edge port that carries a customer's
+VLAN 100 as VLAN 2100 on its own side. Each **rule** maps one **local VLAN ID**
+to one **remote VLAN ID**. The model is NetBox 4.2's.
+
+**Inventory → VLANs → Translation policies** lists every policy with its rules
+and how many interfaces apply it. **Add translation policy** asks for a **Name**
+and a **Description**. Click a policy to open its rules; **Add rule** asks for
+the two VLAN IDs (1–4094). Within one policy each local VLAN ID appears once,
+and so does each remote VLAN ID; a second rule for either is refused.
+
+An interface picks its policy in its edit drawer (**Inventory → open an asset →
+Interfaces → open an interface → VLAN translation policy**), and the interface's
+page shows it. Deleting a policy removes it from the interfaces that applied it;
+it deletes no interface.
+
+## ASN ranges
+
+An **ASN range** is a block of autonomous system numbers a registry delegated
+to you, from a first to a last number, such as the private 16-bit range
+64512–65534. **Settings → Infrastructure → IPAM → ASN ranges** lists each range
+with its **RIR** and how many of its numbers your ASNs already use and how many
+are free; **Show free** lists the first free numbers, in order. **Add ASN
+range** asks for a **Name**, a **Slug** (made from the name when left blank),
+the **RIR**, the **First ASN** and **Last ASN** (the first may not be after the
+last) and a **Description**. A range only describes the block: the ASNs
+themselves are kept in the **ASNs** section above it, and a range counts every
+ASN whose number falls inside it.
+
+## An asset's IP addresses
+
+**Inventory → open any asset → IP Addresses tab** lists every address the asset
+holds in one table: the ones assigned to its interfaces, plus any it names as
+its primary IPv4, primary IPv6 or out-of-band address. Each row shows the
+address with its prefix length, its VRF, the interface it sits on (a link to
+the Interfaces tab), role, status, DNS name, where it came from (measured,
+declared or imported, and what last saw it) and when it was first and last
+seen. A **Primary** badge marks the asset's primary address and **OOB** its
+out-of-band management address.
+
+Click a row to open the address: its details, its change record and **Edit**.
+**Set as primary** and **Set as OOB** (needs the IPAM manage permission) record
+the choice on the asset; an IPv4 address becomes the primary IPv4 and an IPv6
+address the primary IPv6, and only an address the asset holds can be chosen.
+Choosing the same button again unsets it.
+
+"No interfaces recorded" means the asset has not been interrogated and none of
+its interfaces has been declared, so it says nothing about whether the asset has
+addresses; "No IP addresses" means its interfaces are known and none carries one.
+
 ## Find
 
 Type an address into **Find** — `10.10.0.5` — and Vista tells you, for every VRF
@@ -104,6 +166,10 @@ never answers for an address in another.
   VLAN ID ranges (1–4094 by default).
 - **IP ranges** must start and end in the same address family, start before they
   end, and not overlap another range in the same VRF.
+- **A VLAN translation rule's local and remote VLAN IDs are each unique within
+  its policy**, and both are 1–4094.
+- **An ASN range starts at or before it ends**, and both ends are AS numbers
+  (1–4294967295).
 - **Something still in use cannot be deleted.** A VRF that prefixes or addresses
   are in, or a VLAN group with VLANs, is refused with the reason.
 - **Built-in catalogue rows** — the regional internet registries and private

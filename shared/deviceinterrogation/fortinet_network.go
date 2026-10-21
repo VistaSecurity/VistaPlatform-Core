@@ -20,6 +20,9 @@ import (
 //   - VDOM → VRF: an interface's `vdom` names its virtual domain. `root` is the
 //     default VDOM every FortiGate has and is the global table; any other VDOM
 //     is the VRF its addresses are in.
+//   - VDOM → virtual device context (DCIM gap 1): the same `vdom` is also the
+//     context that owns the interface, `root` included (as "root"). A VDOM has
+//     a name and no number, so the context carries no identifier.
 //   - A `vlan` interface is a sub-interface: its `interface` is the parent and
 //     its `vlanid` the untagged VLAN (a FortiGate has no VLAN database, so the
 //     VLAN is named after the interface that declares it).
@@ -142,6 +145,10 @@ func fortinetNetwork(configured, running, arp []map[string]interface{}) *vendorN
 		}
 		vrf := fortinetVRF(c.VDOM)
 		vrfOf[strings.ToLower(name)] = vrf
+		if vdom := strings.TrimSpace(c.VDOM); vdom != "" {
+			ifc.Context = vdom
+			n.addContext(vdom, 0, false)
+		}
 		if a := netAddressFromCIDR(fortinetAddress(c.IP)); a != "" {
 			ifc.Addresses = append(ifc.Addresses, netAddr{Address: a, VRF: vrf})
 		}

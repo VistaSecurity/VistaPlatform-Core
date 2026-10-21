@@ -324,6 +324,11 @@ function Sidebar() {
                                 || (pathname.startsWith('/inventory/clusters/') && item.lens === 'clusters')
                                 || (pathname.startsWith('/inventory/sites/') && item.lens === 'sites')
                                 || (pathname.startsWith('/inventory/racks/') && item.lens === 'racks')
+                                || (pathname.startsWith('/inventory/prefixes/') && item.lens === 'networks')
+                                || (pathname.startsWith('/inventory/vlans/') && item.lens === 'vlans')
+                                || (pathname.startsWith('/inventory/circuits/') && item.lens === 'circuits')
+                                || (pathname.startsWith('/inventory/cables/') && item.lens === 'cabling')
+                                || (pathname.startsWith('/inventory/interfaces/') && item.lens === 'assets')
                               : isWorkspaceItemActive(item, pathname)
                           }
                         />

@@ -6,7 +6,14 @@
 //   shared/syncauthority/authority_gen.go   (whole file)
 //
 // Validation (fails generation and `--check`):
-//   - every kind is an ObjectKind in standards/vocabulary.yaml;
+//   - every kind is an ObjectKind in standards/vocabulary.yaml — or, with
+//     `object: <kind>`, a SYNC KIND that is a subset of that object's table
+//     (a NetBox virtual machine is an asset of the virtual_machine class, a VM
+//     interface a row of `interfaces` on such an asset). A sync kind is not a
+//     vocabulary object (it must not be one: the vocabulary has one name per
+//     concept), its columns are the object's table's, and because conflicts
+//     name it, it must be accepted by sync_conflicts' object_kind CHECK in
+//     scripts/database/schema.sql;
 //   - every field and identity column is a column of the kind's table in
 //     scripts/database/schema.sql (a renamed column must not leave a field the
 //     sync silently never reads);
@@ -45,6 +52,17 @@ export function tableColumns(schema, table) {
   return cols;
 }
 
+// conflictKindChecks are the texts of sync_conflicts' object_kind CHECK, every
+// definition of it (the CREATE TABLE's for a fresh install, the POST-MIGRATIONS
+// re-definition for an upgraded one). Each must name every sync kind
+// (`object:`): a conflict row stores its kind.
+export function conflictKindChecks(schema) {
+  const out = [];
+  const re = /sync_conflicts_object_kind_check CHECK \(([^;]*?)\)\)?[,;\n]/g;
+  for (let m = re.exec(schema); m; m = re.exec(schema)) out.push(m[1]);
+  return out;
+}
+
 export function loadAuthority(root) {
   const errors = [];
   const reg = yaml.parse(fs.readFileSync(path.join(root, 'standards', 'sync-authority.yaml'), 'utf8')) || {};
@@ -59,10 +77,21 @@ export function loadAuthority(root) {
   const seen = new Set();
   for (const k of reg.kinds || []) {
     const where = `kind ${JSON.stringify(k?.kind)}`;
-    if (!tables.has(k?.kind)) { errors.push(`${where}: not an object kind in standards/vocabulary.yaml`); continue; }
+    let object = '';
+    if (k?.object !== undefined) {
+      // A sync kind over another object's table (see the header).
+      if (!COLUMN.test(k.kind || '')) { errors.push(`${where}: not a valid sync kind name`); continue; }
+      if (tables.has(k.kind)) { errors.push(`${where}: is an object kind in standards/vocabulary.yaml; a sync kind with \`object:\` must not be one`); continue; }
+      if (!tables.get(k.object)) { errors.push(`${where}: object ${JSON.stringify(k.object)} is not an object kind with a table in standards/vocabulary.yaml`); continue; }
+      const checks = conflictKindChecks(schema);
+      if (checks.length === 0 || !checks.every((c) => c.includes(`'${k.kind}'`))) {
+        errors.push(`${where}: sync_conflicts_object_kind_check in scripts/database/schema.sql does not accept it (a conflict on it could not be stored)`);
+      }
+      object = k.object;
+    } else if (!tables.has(k?.kind)) { errors.push(`${where}: not an object kind in standards/vocabulary.yaml`); continue; }
     if (seen.has(k.kind)) errors.push(`${where}: listed twice`);
     seen.add(k.kind);
-    const table = tables.get(k.kind);
+    const table = tables.get(object || k.kind);
     const cols = table ? tableColumns(schema, table) : null;
     if (!cols) { errors.push(`${where}: table ${table} not found in scripts/database/schema.sql`); continue; }
     if (!NETBOX_ENDPOINT.test(k.netbox || '')) errors.push(`${where}: netbox endpoint ${JSON.stringify(k.netbox)} (module/object)`);
@@ -89,7 +118,7 @@ export function loadAuthority(root) {
       fields.push({ field, authority });
     }
     if (fields.length === 0) errors.push(`${where}: no fields`);
-    kinds.push({ kind: k.kind, netbox: k.netbox, identity, order: k.order, fields });
+    kinds.push({ kind: k.kind, object, netbox: k.netbox, identity, order: k.order, fields });
   }
   if (errors.length) throw new Error(errors.join('\n'));
   kinds.sort((a, b) => a.order - b.order || a.kind.localeCompare(b.kind));
@@ -119,7 +148,8 @@ export function emitGo(d) {
   lines.push('var kinds = []KindSpec{');
   for (const k of d.kinds) {
     lines.push('\t{');
-    lines.push(`\t\tKind: dcim.ObjectKind(${q(k.kind)}), NetBox: ${q(k.netbox)}, Order: ${k.order},`);
+    const object = k.object ? ` Object: dcim.ObjectKind(${q(k.object)}),` : '';
+    lines.push(`\t\tKind: dcim.ObjectKind(${q(k.kind)}), NetBox: ${q(k.netbox)}, Order: ${k.order},${object}`);
     lines.push(`\t\tIdentity: []string{${k.identity.map(q).join(', ')}},`);
     lines.push('\t\tFields: []FieldSpec{');
     for (const f of k.fields) lines.push(`\t\t\t{Field: ${q(f.field)}, Authority: ${authorityConst(f.authority)}},`);

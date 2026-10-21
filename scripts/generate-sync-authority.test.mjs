@@ -75,6 +75,13 @@ describe('generate-sync-authority', () => {
     ['a cable end not declared computed', sub('    computed: [a_terminations, b_terminations]\n', ''), /identity column "a_terminations" is not a column of cables/],
     ['a computed name that is a real column', sub('computed: [a_terminations, b_terminations]', 'computed: [a_terminations, b_terminations, label]'), /computed name "label" is a column of cables/],
     ['a computed name nothing uses', sub('computed: [a_terminations, b_terminations]', 'computed: [a_terminations, b_terminations, c_terminations]'), /computed name "c_terminations" is neither/],
+    // NetBox VM sync: a sync kind (`object:`) is a subset of another object's
+    // table — its columns are that table's, it is not a vocabulary kind, and
+    // its object must be one with a table.
+    ['a sync kind over a field its object lacks', sub('      vcpus: observed\n', '      vcpu_count: observed\n'), /kind "virtual_machine": field "vcpu_count" is not a column of assets/],
+    ['a sync kind without its object', sub('  - kind: virtual_machine\n    object: asset\n', '  - kind: virtual_machine\n'), /kind "virtual_machine": not an object kind/],
+    ['a sync kind over an object with no table', sub('    object: asset\n', '    object: assets_view\n'), /object "assets_view" is not an object kind with a table/],
+    ['a sync kind that is a vocabulary kind', sub('  - kind: virtual_disk\n    netbox', '  - kind: virtual_disk\n    object: asset\n    netbox'), /a sync kind with `object:` must not be one/],
   ];
   for (const [name, fn, msg] of refusals) {
     it(`refuses ${name}`, () => {
@@ -86,6 +93,22 @@ describe('generate-sync-authority', () => {
       assert.notEqual(run(d, '--check').status, 0, `${name} under --check`);
     });
   }
+
+  it('refuses a sync kind the sync_conflicts object_kind CHECK does not accept, in either definition', () => {
+    const full = "ARRAY['virtual_machine'::text, 'vm_interface'::text]";
+    const cut = "ARRAY['virtual_machine'::text]";
+    for (const [where, marker] of [
+      ['the fresh-install CREATE TABLE', `    CONSTRAINT sync_conflicts_object_kind_check CHECK (object_kind = ANY (public.dcim_object_kinds() || ${full})),`],
+      ['the POST-MIGRATIONS re-definition', `ADD CONSTRAINT sync_conflicts_object_kind_check CHECK (object_kind = ANY (public.dcim_object_kinds() || ${full}));`],
+    ]) {
+      const d = tree();
+      assert.equal(run(d).status, 0);
+      edit(d, 'scripts/database/schema.sql', sub(marker, marker.replace(full, cut)));
+      const r = run(d);
+      assert.notEqual(r.status, 0, where);
+      assert.match(r.stderr, /kind "vm_interface": sync_conflicts_object_kind_check .* does not accept it/, where);
+    }
+  });
 
   it('refuses a field whose column was renamed in the schema', () => {
     const d = tree();

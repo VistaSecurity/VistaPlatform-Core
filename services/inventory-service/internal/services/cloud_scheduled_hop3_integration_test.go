@@ -22,6 +22,7 @@ package services
 // Skips unless TEST_DATABASE_URL is set.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -108,7 +109,7 @@ func TestIntegration_CloudScheduledPipeline_Hop3_EnforceAdmissionEstablishesAndM
 			}
 			// The pipeline import: inventory classifies and evaluates the
 			// tenant's rules itself ( WP3).
-			report, err := svc.IngestPipelineFindingsReport(tenant, findings)
+			report, err := svc.IngestPipelineFindingsReport(context.Background(), tenant, findings)
 			if err != nil {
 				t.Fatalf("run %d: IngestPipelineFindingsReport: %v", runIndex, err)
 			}

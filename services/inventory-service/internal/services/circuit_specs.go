@@ -80,6 +80,11 @@ func terminationFilter(v string, n int) (string, any, error) {
 }
 
 func circuitSpecs() []*ipamSpec {
+	// DCIM gap 10's virtual circuits follow the eight (virtual_circuit_specs.go).
+	return append(circuitBaseSpecs(), virtualCircuitSpecs()...)
+}
+
+func circuitBaseSpecs() []*ipamSpec {
 	return []*ipamSpec{
 		{
 			Kind: dcim.ObjectKindProvider, Table: "providers", Route: CircuitRouteProviders,

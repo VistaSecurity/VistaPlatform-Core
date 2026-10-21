@@ -56,6 +56,8 @@ type TenantNotificationRule struct {
 	Priority       int         `json:"priority" db:"priority"`
 	CreatedAt      time.Time   `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time   `json:"updated_at" db:"updated_at"`
+	// ChangeFilter is the object_changed condition; nil for every other type.
+	ChangeFilter *ChangeFilter `json:"change_filter,omitempty" db:"change_filter"`
 }
 
 // PlatformNotificationRule represents a platform-wide notification rule
@@ -160,6 +162,8 @@ type CreateRuleRequest struct {
 	DigestWindow   *int        `json:"digest_window,omitempty"`
 	Enabled        bool        `json:"enabled"`
 	Priority       int         `json:"priority"`
+	// ChangeFilter applies to alert_type object_changed only (tenant rules).
+	ChangeFilter *ChangeFilter `json:"change_filter,omitempty"`
 }
 
 // UpdateRuleRequest represents a request to update a notification rule
@@ -173,6 +177,8 @@ type UpdateRuleRequest struct {
 	DigestWindow   *int        `json:"digest_window,omitempty"`
 	Enabled        *bool       `json:"enabled,omitempty"`
 	Priority       *int        `json:"priority,omitempty"`
+	// ChangeFilter, when present, replaces the rule's object_changed condition.
+	ChangeFilter *ChangeFilter `json:"change_filter,omitempty"`
 }
 
 // SendNotificationRequest represents a request to send a notification (internal API)

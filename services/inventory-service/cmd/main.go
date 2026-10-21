@@ -26,6 +26,7 @@ import (
 	seams "github.com/vistasecurity/vistaplatform/shared/ai/seams"
 	sharedconfig "github.com/vistasecurity/vistaplatform/shared/config"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/dcim/changenotify"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/identity"
@@ -239,6 +240,16 @@ func main() {
 		c.Next()
 	})
 	r.Use(auditMiddleware.LogRequest())
+
+	// Inventory change notifications (DCIM gap 5): every change the service
+	// layer records through shared/dcim/changes during a request is noted on a
+	// collector this middleware puts on the context, and once the handler has
+	// returned the committed ones are raised as object_changed. Mounted here,
+	// before any route group, so every recorder call site — the DCIM routes,
+	// the internal sync / import surfaces, posted sightings — is covered. It
+	// raises nothing until the NATS publisher is set below.
+	changeNotifier := changenotify.New(db.DB.DB)
+	r.Use(changeNotifier.Middleware())
 
 	// Health check endpoint (no auth required)
 	r.GET("/health", assetHandler.Health)
@@ -912,6 +923,8 @@ func main() {
 	// IPAM (DCIM BUILD_PLAN row 1.3): prefixes, IP addresses, VLANs, VRFs and
 	// their catalogues, behind ipam.read / ipam.manage. See ipam_routes.go.
 	mountIPAMRoutes(apiv2, rawDB, handlers.NewIPAMHandler(services.NewIPAMService(rawDB)))
+	// An asset's primary IPv4/IPv6 and out-of-band address (the IP Addresses tab).
+	mountAssetPrimaryIPRoutes(apiv2, rawDB, handlers.NewAssetPrimaryIPHandler(services.NewAssetPrimaryIPService(rawDB)))
 	// Interfaces (DCIM BUILD_PLAN row 1.2), behind dcim.read / dcim.manage.
 	// See dcim_interface_routes.go.
 	mountDcimInterfaceRoutes(apiv2, rawDB, handlers.NewInterfaceHandler(services.NewInterfaceService(rawDB)))
@@ -920,7 +933,8 @@ func main() {
 	// types, module types, device roles, platforms, component templates and an
 	// asset's hardware columns, behind dcim.read / dcim.manage. See
 	// dcim_catalogue_routes.go.
-	mountDcimCatalogueRoutes(apiv2, rawDB, handlers.NewCatalogueHandler(services.NewCatalogueService(rawDB)))
+	catalogueService := services.NewCatalogueService(rawDB)
+	mountDcimCatalogueRoutes(apiv2, rawDB, handlers.NewCatalogueHandler(catalogueService))
 	// The asset components beyond interfaces (DCIM BUILD_PLAN row 3.1): console
 	// ports, front/rear ports, device bays, power ports and outlets. See
 	// dcim_component_routes.go.
@@ -929,6 +943,9 @@ func main() {
 	// BUILD_PLAN row 2.4). See dcim_hardware_routes.go.
 	hardware := services.NewHardwareService(rawDB)
 	mountDcimHardwareRoutes(apiv2, rawDB, handlers.NewComponentHandler(hardware), handlers.NewVirtualChassisHandler(hardware))
+	// Spares, stock and RMA (DCIM gap 8): an inventory item's install / remove
+	// / rma transitions and the RMA cases. See dcim_spares_routes.go.
+	mountDcimSparesRoutes(apiv2, rawDB, handlers.NewSparesHandler(services.NewSparesService(rawDB)))
 
 	// Virtualisation (DCIM BUILD_PLAN row 4.2): cluster types, cluster groups,
 	// clusters, virtual disks, cluster hosts and a VM's cluster and resources,
@@ -959,7 +976,7 @@ func main() {
 		BusinessUnits: businessUnitService,
 		Sites:         siteService,
 		Assets:        assetService,
-		Catalogue:     services.NewCatalogueService(rawDB),
+		Catalogue:     catalogueService,
 		Interfaces:    services.NewInterfaceService(rawDB),
 	}), exportTemplateService)
 	// Export templates (DCIM BUILD_PLAN row 5.5): Settings → Export Templates,
@@ -982,6 +999,15 @@ func main() {
 	// Cables, cable terminations and traces (DCIM BUILD_PLAN row 3.2), behind
 	// dcim.read / dcim.manage. See dcim_cable_routes.go.
 	mountDcimCableRoutes(apiv2, rawDB, handlers.NewCableHandler(cableService))
+
+	// The facilities capacity roll-up behind the Facilities dashboard, behind
+	// dcim.read. See dcim_capacity_routes.go.
+	mountDcimCapacityRoutes(apiv2, rawDB, handlers.NewCapacityHandler(services.NewCapacityService(rawDB)))
+
+	// Power panels, power feeds and the per-asset power summary (DCIM
+	// BUILD_PLAN row 6.1), behind dcim.read / dcim.manage. See
+	// dcim_power_routes.go.
+	mountDcimPowerRoutes(apiv2, rawDB, handlers.NewPowerHandler(services.NewPowerService(rawDB)))
 
 	// Health check server (HTTP, port 8080). Answers a static body and never
 	// calls a seam, so it keeps its own short timeout — see
@@ -1042,6 +1068,10 @@ func main() {
 	if natsErr != nil {
 		log.Printf("WARNING: NATS unavailable, will use HTTP fallback for audit job logging: %v", natsErr)
 	}
+	// object_changed goes onto alerts.raise, and over HTTP to
+	// compliance-engine's alert intake when NATS cannot carry it (natsClient
+	// may be nil). Pinned by TestMainMountsTheChangeNotifierBeforeAnyRoute.
+	changeNotifier.SetPublisher(changenotify.FallbackPublisherFromEnv(natsClient))
 	defer func() {
 		if natsClient != nil {
 			natsClient.Close()
@@ -1051,6 +1081,11 @@ func main() {
 	// Start background job for stale asset detection
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// Background work records changes with no request around it; the workers
+	// below open one changenotify.Unit per tenant per pass under this context,
+	// so their changes raise object_changed too. Pinned by
+	// TestMainMountsTheChangeNotifierBeforeAnyRoute.
+	ctx = changenotify.WithNotifier(ctx, changeNotifier)
 
 	staleDetector := jobs.NewStaleAssetDetector(db, bypassDB, lifecycleService)
 	go staleDetector.Start(ctx)
@@ -1137,6 +1172,11 @@ func main() {
 	// proposed cables (DCIM row 3.3, services/cable_resolver.go): after every
 	// sightings batch that files interfaces, and hourly here.
 	go jobs.StartCableResolverWorker(ctx, bypassDB, services.CableResolverTenants, cableIntake)
+
+	// Link device types and platforms to their end-of-life catalogue entry
+	// where exactly one entry fits (services/eol_catalogue_match.go); daily, one
+	// replica at a time. A new or imported row is matched at write time.
+	go jobs.StartEOLCatalogueMatchWorker(ctx, bypassDB, services.EOLMatchTenants, catalogueService)
 
 	// References to a deleted object (tags, journal entries, contacts, images,
 	// scopes, assignments) have no foreign key to cascade them; the daily sweep

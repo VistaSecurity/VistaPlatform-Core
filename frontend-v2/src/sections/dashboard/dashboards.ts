@@ -7,7 +7,7 @@
 // joins this registry against all three consumers so a dashboard cannot exist
 // without a rail entry, and a rail entry cannot point at a route nobody serves.
 //
-// Why four pages rather than four tabs on one: the Dashboard section previously
+// Why separate pages rather than tabs on one: the Dashboard section previously
 // had no sub-nav at all, and the v2 UI pattern puts sub-navigation in the left
 // rail rather than in in-page chrome (see the Findings lenses and the Posture
 // views, both of which hang off the rail). Distinct pathnames also mean the
@@ -57,6 +57,12 @@ export const DASHBOARDS: DashboardEntry[] = [
     label: 'PQC',
     path: '/dashboard/pqc',
     sublabel: 'Post-quantum readiness and the migration worklist',
+  },
+  {
+    key: 'facilities',
+    label: 'Facilities',
+    path: '/dashboard/facilities',
+    sublabel: 'Rack space, port and address capacity, cabling backlog',
   },
 ];
 

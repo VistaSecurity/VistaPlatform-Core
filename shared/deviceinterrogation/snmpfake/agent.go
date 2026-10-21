@@ -94,6 +94,10 @@ func signed(n int64) []byte {
 		raw = append(raw, b)
 	}
 	if len(raw) == 0 {
+		// 0, or -1 (every byte 0xff was skipped as sign extension).
+		if n < 0 {
+			return []byte{0xff}
+		}
 		return []byte{0}
 	}
 	// Keep the sign bit honest.

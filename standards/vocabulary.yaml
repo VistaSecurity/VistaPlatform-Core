@@ -187,7 +187,7 @@ objects:
     phase: 2
     forbidden:
       - { word: room, where: [openapi], after_phase: 2, note: "2 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 2)." }
-      - { word: floor, where: [openapi], after_phase: 2, note: "7 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 2)." }
+      - { word: floor, where: [openapi], after_phase: 2, except: [floor plan, floor x, floor y, floor rotation], note: "7 pre-existing use(s) at phase 0; enforced once the replacement ships (phase 2). A floor plan (DCIM gap 9: a location's grid and a rack's place on it) is not a location named floor." }
   - key: rack_role
     label: Rack Role
     plural: Rack Roles
@@ -293,6 +293,20 @@ objects:
     table: device_bays
     netbox: dcim/device-bay
     phase: 2
+  - key: virtual_device_context
+    label: Virtual Device Context
+    plural: Virtual Device Contexts
+    table: virtual_device_contexts
+    netbox: dcim/virtual-device-context
+    phase: 2
+  # DCIM gap 8: a return-merchandise case for one inventory item (spares,
+  # stock and RMA). NetBox has no counterpart; Device42 tracks RMAs.
+  - key: rma_case
+    label: RMA Case
+    plural: RMA Cases
+    table: rma_cases
+    netbox: null
+    phase: 6
 
   # ---- component templates (row 2.2) ---------------------------------------
   # One table per component kind, keyed by a device type or a module type
@@ -410,6 +424,18 @@ objects:
     table: power_outlets
     netbox: dcim/power-outlet
     phase: 3
+  - key: power_panel
+    label: Power Panel
+    plural: Power Panels
+    table: power_panels
+    netbox: dcim/power-panel
+    phase: 6
+  - key: power_feed
+    label: Power Feed
+    plural: Power Feeds
+    table: power_feeds
+    netbox: dcim/power-feed
+    phase: 6
 
   # ---- cabling ------------------------------------------------------------
   - key: cable
@@ -516,6 +542,20 @@ objects:
     table: vlans
     netbox: ipam/vlan
     phase: 1
+  # DCIM gap 10: an interface's VLAN ID translation (NetBox 4.2), a policy of
+  # local -> remote VID rules.
+  - key: vlan_translation_policy
+    label: VLAN Translation Policy
+    plural: VLAN Translation Policies
+    table: vlan_translation_policies
+    netbox: ipam/vlan-translation-policy
+    phase: 1
+  - key: vlan_translation_rule
+    label: VLAN Translation Rule
+    plural: VLAN Translation Rules
+    table: vlan_translation_rules
+    netbox: ipam/vlan-translation-rule
+    phase: 1
   - key: fhrp_group
     label: FHRP Group
     plural: FHRP Groups
@@ -536,6 +576,13 @@ objects:
     plural: ASNs
     table: asns
     netbox: ipam/asn
+    phase: 1
+  # DCIM gap 10: a block of AS numbers a RIR delegated, and the ASNs free in it.
+  - key: asn_range
+    label: ASN Range
+    plural: ASN Ranges
+    table: asn_ranges
+    netbox: ipam/asn-range
     phase: 1
 
   # ---- circuits -----------------------------------------------------------
@@ -594,6 +641,26 @@ objects:
     plural: Circuit Group Assignments
     table: circuit_group_assignments
     netbox: circuits/circuit-group-assignment
+    phase: 4
+  # DCIM gap 10: a provider network's virtual circuits (NetBox 4.2) — an
+  # overlay (an MPLS L3VPN, an SD-WAN fabric) whose terminations are interfaces.
+  - key: virtual_circuit_type
+    label: Virtual Circuit Type
+    plural: Virtual Circuit Types
+    table: virtual_circuit_types
+    netbox: circuits/virtual-circuit-type
+    phase: 4
+  - key: virtual_circuit
+    label: Virtual Circuit
+    plural: Virtual Circuits
+    table: virtual_circuits
+    netbox: circuits/virtual-circuit
+    phase: 4
+  - key: virtual_circuit_termination
+    label: Virtual Circuit Termination
+    plural: Virtual Circuit Terminations
+    table: virtual_circuit_terminations
+    netbox: circuits/virtual-circuit-termination
     phase: 4
 
   # ---- virtualisation -----------------------------------------------------

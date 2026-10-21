@@ -214,7 +214,7 @@ describe('the neighbourhood view', () => {
     await tick(20);
     expect(byTest('map-edge-menu')).toHaveLength(0);
     expect(byTest('map-trace')).toHaveLength(1);
-    expect(byTest('map-trace-open-cable')[0]?.getAttribute('href')).toBe('/inventory?lens=cabling&cable=cable-1');
+    expect(byTest('map-trace-open-cable')[0]?.getAttribute('href')).toBe('/inventory/cables/cable-1');
   });
 
   it('the side panel offers the same action per relationship (the keyboard route)', async () => {

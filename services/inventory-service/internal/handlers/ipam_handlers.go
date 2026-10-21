@@ -46,6 +46,8 @@ type IPAMStore interface {
 	PrefixDetail(ctx context.Context, tenant, id uuid.UUID, p services.PrefixDetailParams) (*services.PrefixDetail, error)
 	PrefixTree(ctx context.Context, tenant uuid.UUID, vrf *uuid.UUID) ([]*services.PrefixTreeNode, int, error)
 	FindAddress(ctx context.Context, tenant uuid.UUID, addr netip.Addr, vrf *uuid.UUID, allVRFs bool) ([]services.FindResult, error)
+	// AvailableASNs is an ASN range's free numbers (DCIM gap 10).
+	AvailableASNs(ctx context.Context, tenant, rangeID uuid.UUID, limit int) (*services.AvailableASNs, error)
 }
 
 // IPAMHandler serves the IPAM routes.
@@ -272,6 +274,30 @@ func (h *IPAMHandler) PrefixDetail(c *gin.Context) {
 	d, err := h.store.PrefixDetail(c.Request.Context(), tenant, id, services.PrefixDetailParams{
 		AvailableLength: length, AvailableLimit: availLimit, IPLimit: ipLimit,
 	})
+	if err != nil {
+		ipamStoreError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": d})
+}
+
+// AvailableASNs is GET /ipam/asn-ranges/{id}/available-asns?limit=: the
+// first free AS numbers of the range, how many are free and how many of the
+// tenant's ASNs are in it (DCIM gap 10; NetBox's available-asns).
+func (h *IPAMHandler) AvailableASNs(c *gin.Context) {
+	tenant, ok := ipamTenant(c)
+	if !ok {
+		return
+	}
+	id, ok := ipamID(c)
+	if !ok {
+		return
+	}
+	limit, ok := queryInt(c, "limit", 50, 1, 1000)
+	if !ok {
+		return
+	}
+	d, err := h.store.AvailableASNs(c.Request.Context(), tenant, id, limit)
 	if err != nil {
 		ipamStoreError(c, err)
 		return

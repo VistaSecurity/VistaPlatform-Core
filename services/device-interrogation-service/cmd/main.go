@@ -14,6 +14,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/device-interrogation-service/internal/services"
 	shareddatabase "github.com/vistasecurity/vistaplatform/shared/database"
+	"github.com/vistasecurity/vistaplatform/shared/dcim/changenotify"
 	"github.com/vistasecurity/vistaplatform/shared/events"
 	sharedhttp "github.com/vistasecurity/vistaplatform/shared/http"
 	"github.com/vistasecurity/vistaplatform/shared/security/credentials"
@@ -84,6 +85,15 @@ func main() {
 		}
 	}
 	services.SetDiscoveryQueuePublisher(queueNATS)
+
+	// object_changed for the DCIM rows this service writes itself (cloud
+	// enumeration's sites, locations and clusters — services/change_notifier.go):
+	// over NATS, else over HTTP to compliance-engine's alert intake. Installed
+	// before the workers start and before SetupRouter mounts its middleware.
+	// Pinned by TestMainInstallsTheChangeNotifier.
+	changeNotifier := changenotify.New(db)
+	changeNotifier.SetPublisher(changenotify.FallbackPublisherFromEnv(queueNATS))
+	services.SetChangeNotifier(changeNotifier)
 
 	// Initialize services for platform agent worker
 	cloudService := services.NewCloudDiscoveryService(db, bypassDB, cfg.EncryptionMasterKey)

@@ -1,6 +1,6 @@
 # Dashboards
 
-There are four dashboards, in the **Dashboard** section of the left rail:
+There are five dashboards, in the **Dashboard** section of the left rail:
 
 | | |
 |---|---|
@@ -8,8 +8,9 @@ There are four dashboards, in the **Dashboard** section of the left rail:
 | **[Assets](#assets)** | Your configuration items — composition, lifecycle, and how complete the records are. |
 | **[Compliance](#compliance)** | Where you stand against each framework, and how the remediation is moving. |
 | **[PQC](#pqc)** | Post-quantum readiness, and exactly what has to be replaced. |
+| **[Facilities](#facilities)** | Rack space, switch interface and address capacity, and the cabling backlog. |
 
-Overview is unchanged and remains the default. The other three are not summaries of it — each goes deeper into one question than a shared page has room for.
+Overview is unchanged and remains the default. The other four are not summaries of it — each goes deeper into one question than a shared page has room for.
 
 The rule they all follow: **every number links to the list it counted.** If a bar says 40, the page it opens shows those 40 and nothing else. Where a number has no such list — a few breakdowns have no equivalent filter — the row is deliberately not clickable rather than dropping you on an unfiltered page.
 
@@ -126,6 +127,24 @@ Beside it, **Already quantum-safe** lists the families needing no action. AES ap
 
 The gauge reads **—**, not 0%. Readiness is measured over discovered crypto configurations; nothing discovered means nothing to assess, which is a different statement from "none of your cryptography is safe."
 
+## Facilities
+
+**Dashboard → Facilities.** Where there is room, and what is about to run out. It rolls up the utilisation each rack and prefix already carries, so a facilities operator reads one page instead of opening every rack.
+
+Five tiles sit across the top: **free rack space** (U that is neither used nor reserved, summed over every site), **racks over 95%**, **prefixes over 95%**, **planned cables over 90 days**, and **free switch interfaces**. "Over" means strictly more than: a rack at exactly 95% is not over 95%.
+
+Below them:
+
+- **Site capacity** — one row per site with racks, free U (with the reserved U shown beside it), how full it is and how many of its racks are over 95%. Click a column heading to sort; click a site to open the Racks list filtered to it. A tenant with a great many sites sees the fullest 200, and the page says so.
+- **Fullest racks** — the ten most-used racks, each opening its elevation.
+- **Switches with the fewest free interfaces** — the ten switches closest to running out, each opening its Ports tab. An interface counts as free when it is enabled, has no cable and is not marked as connected; virtual and wireless interfaces cannot take a cable and are not counted. Only assets of the Switch class are listed.
+- **Fullest prefixes** — the ten fullest, with their VRF (or **Global**) and size, each opening the prefix's page. The caption also says how many prefixes have **no addresses recorded**: those read 0%, and that is "nothing recorded", not "known to be empty".
+- **Cables by status** and **Oldest planned cables** — live cables by status, how many LLDP / CDP proposals are waiting for approval, how many planned cables are older than 30 and 90 days, and how many declared cables nothing on the network has ever confirmed. Each opens the Cabling list.
+
+A rack with no devices placed yet counts as empty, and a deprecated rack is not counted as capacity.
+
+You need the **dcim.read** permission for this one; without it the page says so instead of showing zeros.
+
 ## When a number cannot be loaded
 
 On every dashboard, a tile that could not fetch its number shows a dash and says "Couldn't load", not a zero.
@@ -134,7 +153,7 @@ This matters more than it looks. Zero is the *most* reassuring thing several of 
 
 ## What you need to see it
 
-Anyone who can view assets can see all four dashboards. The individual tiles link to pages with their own permissions — approving an asset needs **assets.update**, for instance — so a tile may open a page you can read but not act on. See [Roles & Permissions](./roles-and-permissions.md).
+Anyone who can view assets can see the Overview, Assets, Compliance and PQC dashboards. Facilities also needs **dcim.read**. The individual tiles link to pages with their own permissions — approving an asset needs **assets.update**, for instance — so a tile may open a page you can read but not act on. See [Roles & Permissions](./roles-and-permissions.md).
 
 ## See also
 
@@ -143,3 +162,4 @@ Anyone who can view assets can see all four dashboards. The individual tiles lin
 - [Asset Approval](./asset-approval.md) — the queue behind "Pending approval"
 - [Compliance Frameworks](./compliance-frameworks.md) — Inventory Hygiene and the rest
 - [Findings](./findings.md) — what "open" means, and who produces them
+- [Racks](../inventory/racks.md), [Networks](../inventory/networks.md) and [Cabling](../inventory/cabling.md) — the lists the Facilities dashboard opens

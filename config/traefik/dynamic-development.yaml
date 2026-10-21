@@ -808,6 +808,20 @@ http:
       middlewares:
         - deny-internal-plane
       priority: 900
+    deny_internal_v1_compliance_engine_internal:
+      rule: (PathPrefix(`/api/v1/compliance-engine/internal/`) || Path(`/api/v1/compliance-engine/internal`))
+      entryPoints: *a1
+      service: compliance_engine
+      middlewares:
+        - deny-internal-plane
+      priority: 900
+    deny_internal_v2_compliance_engine_internal:
+      rule: (PathPrefix(`/api/v2/compliance-engine/internal/`) || Path(`/api/v2/compliance-engine/internal`))
+      entryPoints: *a1
+      service: compliance_engine
+      middlewares:
+        - deny-internal-plane
+      priority: 900
     deny_internal_route_v1_post_audit_service_activity_logs:
       rule: Method(`POST`) && (Path(`/api/v1/audit-service/activity-logs`) || Path(`/api/v1/audit-service/activity-logs/`))
       entryPoints: *a1

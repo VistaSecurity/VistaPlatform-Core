@@ -1,7 +1,9 @@
 // The rack page (DCIM row 2.5) — `/inventory/racks/:id`. The rack's header
 // (site › location, role, type, status, utilisation), its front and rear
-// elevation with the crypto overlay, drag-to-place, Add device and Unrack,
-// the Reservations panel, Contacts and Images, the Devices table, and the
+// elevation with the crypto overlay or the power overlay (row 6.2),
+// drag-to-place, Add device and Unrack, the Reservations panel, the Power
+// budget card (row 6.2) and the Power feeds card (row 6.1), Contacts and
+// Images, the Devices table, and the
 // rack's Changes and Journal. Reached from the Racks lens, the site page's
 // Racks card and an asset's Placement card ("Open rack", `?asset=` highlights
 // the device).
@@ -20,6 +22,11 @@ import { PanelEmpty, PanelError, PanelLoading } from '../dcim/substrate-states';
 import { imageUrl } from '../dcim/contact-queries';
 import { classLabel } from '../asset-shape';
 import { AddDeviceModal } from './add-device-modal';
+import { RackPowerCard } from '../power/power-cards';
+import { RackPowerBudgetCard } from '../power/rack-power-budget';
+import { useRackPower } from '../power/power-queries';
+import { CAPACITY_CRITICAL, CAPACITY_WARN, fillColor } from '../../dashboard/facilities-dashboard-metrics';
+import { powerOverlayState } from './power-overlay';
 import { ConflictNote } from './placement-card';
 import { RackElevationSvg, elevationSize, rackClassColor, type DeviceWithPosture, type PendingMove } from './rack-elevation';
 import { documentVar, exportFilename, saveBlob, serializeElevation, svgToPng } from './rack-export';
@@ -69,6 +76,22 @@ export function PostureBadge({ device }: { device: DeviceWithPosture }) {
   );
 }
 
+function PowerOverlayLegend({ available }: { available: number | null }) {
+  return (
+    <div data-testid="power-overlay-legend" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', fontSize: 11.5, color: 'var(--app-t2)', marginTop: 10 }}>
+      <span>Each device's declared draw as a share of the rack's {available ? `${available.toLocaleString()} VA` : 'available power (no feed declared)'}:</span>
+      {([[CAPACITY_WARN, 'up to 80%'], [CAPACITY_WARN + 1, 'over 80%'], [CAPACITY_CRITICAL + 1, 'over 95%']] as const).map(([p, label]) => (
+        <span key={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ width: 10, height: 10, borderRadius: 3, background: fillColor(p) }} />{label}
+        </span>
+      ))}
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+        <span style={{ width: 10, height: 10, borderRadius: 3, border: '1.5px dashed var(--app-t3)' }} />Draw not recorded
+      </span>
+    </div>
+  );
+}
+
 function OverlayLegend() {
   return (
     <div data-testid="overlay-legend" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px', fontSize: 11.5, color: 'var(--app-t2)', marginTop: 10 }}>
@@ -100,6 +123,8 @@ export function RackPage() {
   const perms = usePermissions();
   const canManage = perms.hasPermission(MANAGE);
   const [overlay, setOverlay] = useState(true);
+  const [powerOverlay, setPowerOverlay] = useState(false);
+  const power = useRackPower(powerOverlay ? id : undefined);
   const [pending, setPending] = useState<PendingMove | null>(null);
   const [moveError, setMoveError] = useState<Error | null>(null);
   const [adding, setAdding] = useState<{ position?: number; face?: RackFace } | null>(null);
@@ -161,7 +186,10 @@ export function RackPage() {
 
   const el = q.data;
   const rack = el.rack;
-  const devices = el.devices as DeviceWithPosture[];
+  const budgetByAsset = new Map((power.data?.devices ?? []).map((d) => [d.asset_id, d]));
+  const devices = (el.devices as DeviceWithPosture[]).map((d) => (powerOverlay
+    ? { ...d, power: power.data ? powerOverlayState(budgetByAsset.get(d.asset_id), power.data.available_power) : null }
+    : d));
   const typeName = rack.rack_type_id ? types.data?.find((t) => t.id === rack.rack_type_id)?.model : null;
   const util = el.utilization;
   const statusLabel = RACK_STATUSES.find((s) => s.value === rack.operational_status)?.label ?? rack.operational_status;
@@ -171,7 +199,7 @@ export function RackPage() {
   const openAsset = (d: DeviceWithPosture) => {
     // With the overlay on, a block with open findings opens the asset's
     // findings (its risk view); otherwise its overview.
-    const risk = overlay && (d.posture?.open_findings ?? 0) > 0;
+    const risk = overlay && !powerOverlay && (d.posture?.open_findings ?? 0) > 0;
     void navigate(`/inventory/assets/${d.asset_id}${risk ? '/findings' : ''}`);
   };
 
@@ -218,8 +246,12 @@ export function RackPage() {
         </div>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <label data-testid="overlay-toggle" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: 'var(--app-t2)', cursor: 'pointer' }}>
-            <input type="checkbox" checked={overlay} onChange={(e) => setOverlay(e.target.checked)} aria-label="Crypto overlay" />
+            <input type="checkbox" checked={overlay && !powerOverlay} onChange={(e) => { setOverlay(e.target.checked); if (e.target.checked) setPowerOverlay(false); }} aria-label="Crypto overlay" />
             <Icon name="shield-alert" size={13} />Crypto overlay
+          </label>
+          <label data-testid="power-overlay-toggle" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: 'var(--app-t2)', cursor: 'pointer' }}>
+            <input type="checkbox" checked={powerOverlay} onChange={(e) => setPowerOverlay(e.target.checked)} aria-label="Power overlay" />
+            <Icon name="zap" size={13} />Power overlay
           </label>
           <button type="button" className="ui-btn sm" data-testid="export-png" onClick={() => { void doExport('png'); }}><Icon name="download" size={13} />PNG</button>
           <button type="button" className="ui-btn sm" data-testid="export-svg" onClick={() => { void doExport('svg'); }}><Icon name="download" size={13} />SVG</button>
@@ -241,18 +273,23 @@ export function RackPage() {
             </div>
           )}
           <div style={{ overflowX: 'auto' }}>
-            <RackElevationSvg svgRef={svgRef} rack={rack} devices={devices} reservations={el.reservations} overlay={overlay}
+            <RackElevationSvg svgRef={svgRef} rack={rack} devices={devices} reservations={el.reservations} overlay={overlay} powerOverlay={powerOverlay}
               highlight={highlight} canManage={canManage} imageUrl={resolveImage} pending={pending}
               onMove={(d, position, face) => move.mutate({ assetId: d.asset_id, position, face })}
               onOpen={openAsset}
               onEmptyUnit={canManage ? (unit, face) => setAdding({ position: unit, face }) : undefined} />
           </div>
-          {overlay && <OverlayLegend />}
+          {overlay && !powerOverlay && <OverlayLegend />}
+          {powerOverlay && (power.isError
+            ? <div role="alert" data-testid="power-overlay-error" style={{ fontSize: 12, color: 'var(--danger-text)', marginTop: 8 }}>Couldn&apos;t load the power budget for the overlay.</div>
+            : <PowerOverlayLegend available={power.data?.feed_count ? power.data.available_power : null} />)}
           {canManage && <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 8 }}>Drag a device to move it, across to the other face to turn it; arrow keys move a focused device by half a unit.</div>}
         </Card>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
           <ReservationsPanel rackId={rack.id} rackName={rack.name} reservations={el.reservations} />
+          <RackPowerBudgetCard rackId={rack.id} />
+          <RackPowerCard rackId={rack.id} />
           <Card>
             <PermissionGate permission={READ}>
               <SectionLabel icon="users">Contacts</SectionLabel>

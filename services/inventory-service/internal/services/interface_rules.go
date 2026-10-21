@@ -32,55 +32,64 @@ import (
 
 // Interface is one row of `interfaces` as the API returns it.
 type Interface struct {
-	ID                 uuid.UUID      `json:"id"`
-	AssetID            uuid.UUID      `json:"asset_id"`
-	ModuleID           *uuid.UUID     `json:"module_id"`
-	Name               string         `json:"name"`
-	Label              *string        `json:"label"`
-	Type               string         `json:"type"`
-	TypeLabel          string         `json:"type_label"`
-	Enabled            bool           `json:"enabled"`
-	MgmtOnly           bool           `json:"mgmt_only"`
-	MTU                *int           `json:"mtu"`
-	MACAddress         *string        `json:"mac_address"`
-	MACAddresses       []MacAddress   `json:"mac_addresses"`
-	SpeedKbps          *int64         `json:"speed_kbps"`
-	Duplex             *string        `json:"duplex"`
-	Mode               *string        `json:"mode"`
-	UntaggedVLANID     *uuid.UUID     `json:"untagged_vlan_id"`
-	TaggedVLANIDs      []uuid.UUID    `json:"tagged_vlan_ids"`
-	VRFID              *uuid.UUID     `json:"vrf_id"`
-	ParentID           *uuid.UUID     `json:"parent_id"`
-	BridgeID           *uuid.UUID     `json:"bridge_id"`
-	LagID              *uuid.UUID     `json:"lag_id"`
-	RFRole             *string        `json:"rf_role"`
-	RFChannel          *string        `json:"rf_channel"`
-	RFChannelFrequency *float64       `json:"rf_channel_frequency"`
-	RFChannelWidth     *float64       `json:"rf_channel_width"`
-	TxPower            *int           `json:"tx_power"`
-	PoEMode            *string        `json:"poe_mode"`
-	PoEType            *string        `json:"poe_type"`
-	WWN                *string        `json:"wwn"`
-	OperationalStatus  *string        `json:"operational_status"`
-	AdminStatus        *string        `json:"admin_status"`
-	VDCs               []string       `json:"vdcs"`
-	MarkConnected      bool           `json:"mark_connected"`
-	CableID            *uuid.UUID     `json:"cable_id"`
-	CableEnd           *string        `json:"cable_end"`
-	SourceKind         string         `json:"source_kind"`
-	SourceRef          *string        `json:"source_ref"`
-	CustomFields       map[string]any `json:"custom_fields"`
-	Description        *string        `json:"description"`
-	Comments           *string        `json:"comments"`
-	Status             string         `json:"status"`
-	FirstSeenAt        time.Time      `json:"first_seen_at"`
-	LastSeenAt         time.Time      `json:"last_seen_at"`
-	ObservationCount   int            `json:"observation_count"`
-	ApprovedBy         *uuid.UUID     `json:"approved_by"`
-	ApprovedAt         *time.Time     `json:"approved_at"`
-	CreatedAt          time.Time      `json:"created_at"`
-	UpdatedAt          time.Time      `json:"updated_at"`
-	CreatedBy          *uuid.UUID     `json:"created_by"`
+	ID                 uuid.UUID    `json:"id"`
+	AssetID            uuid.UUID    `json:"asset_id"`
+	ModuleID           *uuid.UUID   `json:"module_id"`
+	Name               string       `json:"name"`
+	Label              *string      `json:"label"`
+	Type               string       `json:"type"`
+	TypeLabel          string       `json:"type_label"`
+	Enabled            bool         `json:"enabled"`
+	MgmtOnly           bool         `json:"mgmt_only"`
+	MTU                *int         `json:"mtu"`
+	MACAddress         *string      `json:"mac_address"`
+	MACAddresses       []MacAddress `json:"mac_addresses"`
+	SpeedKbps          *int64       `json:"speed_kbps"`
+	Duplex             *string      `json:"duplex"`
+	Mode               *string      `json:"mode"`
+	UntaggedVLANID     *uuid.UUID   `json:"untagged_vlan_id"`
+	TaggedVLANIDs      []uuid.UUID  `json:"tagged_vlan_ids"`
+	VRFID              *uuid.UUID   `json:"vrf_id"`
+	ParentID           *uuid.UUID   `json:"parent_id"`
+	BridgeID           *uuid.UUID   `json:"bridge_id"`
+	LagID              *uuid.UUID   `json:"lag_id"`
+	RFRole             *string      `json:"rf_role"`
+	RFChannel          *string      `json:"rf_channel"`
+	RFChannelFrequency *float64     `json:"rf_channel_frequency"`
+	RFChannelWidth     *float64     `json:"rf_channel_width"`
+	TxPower            *int         `json:"tx_power"`
+	PoEMode            *string      `json:"poe_mode"`
+	PoEType            *string      `json:"poe_type"`
+	WWN                *string      `json:"wwn"`
+	OperationalStatus  *string      `json:"operational_status"`
+	AdminStatus        *string      `json:"admin_status"`
+	// VDCs is the names of the virtual device contexts the interface belongs
+	// to (row 1.2's field, now read from interface_virtual_device_contexts);
+	// VirtualDeviceContexts and VirtualDeviceContextIDs are the same
+	// membership as {id, name} and as the ids a PATCH sends (DCIM gap 1).
+	VDCs                    []string                  `json:"vdcs"`
+	VirtualDeviceContexts   []VirtualDeviceContextRef `json:"virtual_device_contexts"`
+	VirtualDeviceContextIDs []uuid.UUID               `json:"virtual_device_context_ids"`
+	MarkConnected           bool                      `json:"mark_connected"`
+	CableID                 *uuid.UUID                `json:"cable_id"`
+	CableEnd                *string                   `json:"cable_end"`
+	SourceKind              string                    `json:"source_kind"`
+	SourceRef               *string                   `json:"source_ref"`
+	CustomFields            map[string]any            `json:"custom_fields"`
+	Description             *string                   `json:"description"`
+	Comments                *string                   `json:"comments"`
+	Status                  string                    `json:"status"`
+	FirstSeenAt             time.Time                 `json:"first_seen_at"`
+	LastSeenAt              time.Time                 `json:"last_seen_at"`
+	ObservationCount        int                       `json:"observation_count"`
+	ApprovedBy              *uuid.UUID                `json:"approved_by"`
+	ApprovedAt              *time.Time                `json:"approved_at"`
+	CreatedAt               time.Time                 `json:"created_at"`
+	UpdatedAt               time.Time                 `json:"updated_at"`
+	CreatedBy               *uuid.UUID                `json:"created_by"`
+	// VLANTranslationPolicyID is the interface's VLAN translation policy
+	// (DCIM gap 10; NetBox Interface.vlan_translation_policy).
+	VLANTranslationPolicyID *uuid.UUID `json:"vlan_translation_policy_id"`
 }
 
 // MacAddress is one row of `mac_addresses`.
@@ -95,37 +104,44 @@ type MacAddress struct {
 // is merged onto. Absent nullable fields are nil; a patch that sends `null`
 // clears them.
 type InterfaceInput struct {
-	AssetID            uuid.UUID      `json:"asset_id"`
-	Name               string         `json:"name"`
-	Label              *string        `json:"label"`
-	Type               string         `json:"type"`
-	Enabled            *bool          `json:"enabled"`
-	MgmtOnly           bool           `json:"mgmt_only"`
-	MTU                *int           `json:"mtu"`
-	MACAddress         *string        `json:"mac_address"`
-	MACAddresses       []string       `json:"mac_addresses"`
-	SpeedKbps          *int64         `json:"speed_kbps"`
-	Duplex             *string        `json:"duplex"`
-	Mode               *string        `json:"mode"`
-	UntaggedVLANID     *uuid.UUID     `json:"untagged_vlan_id"`
-	TaggedVLANIDs      []uuid.UUID    `json:"tagged_vlan_ids"`
-	VRFID              *uuid.UUID     `json:"vrf_id"`
-	ParentID           *uuid.UUID     `json:"parent_id"`
-	BridgeID           *uuid.UUID     `json:"bridge_id"`
-	LagID              *uuid.UUID     `json:"lag_id"`
-	RFRole             *string        `json:"rf_role"`
-	RFChannel          *string        `json:"rf_channel"`
-	RFChannelFrequency *float64       `json:"rf_channel_frequency"`
-	RFChannelWidth     *float64       `json:"rf_channel_width"`
-	TxPower            *int           `json:"tx_power"`
-	PoEMode            *string        `json:"poe_mode"`
-	PoEType            *string        `json:"poe_type"`
-	WWN                *string        `json:"wwn"`
-	VDCs               []string       `json:"vdcs"`
-	MarkConnected      bool           `json:"mark_connected"`
-	Description        *string        `json:"description"`
-	Comments           *string        `json:"comments"`
-	CustomFields       map[string]any `json:"custom_fields"`
+	AssetID            uuid.UUID   `json:"asset_id"`
+	Name               string      `json:"name"`
+	Label              *string     `json:"label"`
+	Type               string      `json:"type"`
+	Enabled            *bool       `json:"enabled"`
+	MgmtOnly           bool        `json:"mgmt_only"`
+	MTU                *int        `json:"mtu"`
+	MACAddress         *string     `json:"mac_address"`
+	MACAddresses       []string    `json:"mac_addresses"`
+	SpeedKbps          *int64      `json:"speed_kbps"`
+	Duplex             *string     `json:"duplex"`
+	Mode               *string     `json:"mode"`
+	UntaggedVLANID     *uuid.UUID  `json:"untagged_vlan_id"`
+	TaggedVLANIDs      []uuid.UUID `json:"tagged_vlan_ids"`
+	VRFID              *uuid.UUID  `json:"vrf_id"`
+	ParentID           *uuid.UUID  `json:"parent_id"`
+	BridgeID           *uuid.UUID  `json:"bridge_id"`
+	LagID              *uuid.UUID  `json:"lag_id"`
+	RFRole             *string     `json:"rf_role"`
+	RFChannel          *string     `json:"rf_channel"`
+	RFChannelFrequency *float64    `json:"rf_channel_frequency"`
+	RFChannelWidth     *float64    `json:"rf_channel_width"`
+	TxPower            *int        `json:"tx_power"`
+	PoEMode            *string     `json:"poe_mode"`
+	PoEType            *string     `json:"poe_type"`
+	WWN                *string     `json:"wwn"`
+	// The interface's virtual device contexts (DCIM gap 1): ids of contexts on
+	// the same asset, or — the row 1.2 form — their names in VDCs. A write
+	// names one or the other.
+	VDCs                    []string       `json:"vdcs"`
+	VirtualDeviceContextIDs []uuid.UUID    `json:"virtual_device_context_ids"`
+	MarkConnected           bool           `json:"mark_connected"`
+	Description             *string        `json:"description"`
+	Comments                *string        `json:"comments"`
+	CustomFields            map[string]any `json:"custom_fields"`
+	// The interface's VLAN translation policy (DCIM gap 10), one of the
+	// tenant's vlan_translation_policies; null clears it.
+	VLANTranslationPolicyID *uuid.UUID `json:"vlan_translation_policy_id"`
 }
 
 // InterfaceValidationError is a rule a write broke; the API answers 422 with
@@ -389,8 +405,8 @@ func ifaceInputOf(i Interface) InterfaceInput {
 		TaggedVLANIDs: i.TaggedVLANIDs, VRFID: i.VRFID, ParentID: i.ParentID, BridgeID: i.BridgeID,
 		LagID: i.LagID, RFRole: i.RFRole, RFChannel: i.RFChannel, RFChannelFrequency: i.RFChannelFrequency,
 		RFChannelWidth: i.RFChannelWidth, TxPower: i.TxPower, PoEMode: i.PoEMode, PoEType: i.PoEType,
-		WWN: i.WWN, VDCs: i.VDCs, MarkConnected: i.MarkConnected, Description: i.Description,
-		Comments: i.Comments, CustomFields: i.CustomFields,
+		WWN: i.WWN, VirtualDeviceContextIDs: i.VirtualDeviceContextIDs, MarkConnected: i.MarkConnected, Description: i.Description,
+		Comments: i.Comments, CustomFields: i.CustomFields, VLANTranslationPolicyID: i.VLANTranslationPolicyID,
 	}
 }
 

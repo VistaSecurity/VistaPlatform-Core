@@ -27,6 +27,8 @@ enum:
   - inventory_item_role
   - virtual_chassis
   - device_bay
+  - virtual_device_context
+  - rma_case
   - interface_template
   - console_port_template
   - console_server_port_template
@@ -44,6 +46,8 @@ enum:
   - rear_port
   - power_port
   - power_outlet
+  - power_panel
+  - power_feed
   - cable
   - cable_termination
   - cable_path
@@ -58,9 +62,12 @@ enum:
   - ip_address
   - vlan_group
   - vlan
+  - vlan_translation_policy
+  - vlan_translation_rule
   - fhrp_group
   - fhrp_group_assignment
   - asn
+  - asn_range
   - provider
   - provider_account
   - provider_network
@@ -69,6 +76,9 @@ enum:
   - circuit_termination
   - circuit_group
   - circuit_group_assignment
+  - virtual_circuit_type
+  - virtual_circuit
+  - virtual_circuit_termination
   - cluster_type
   - cluster_group
   - cluster

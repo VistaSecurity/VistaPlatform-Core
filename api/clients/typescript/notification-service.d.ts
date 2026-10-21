@@ -481,6 +481,7 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+            change_filter?: components["schemas"]["ChangeFilter"];
         };
         /** @description CURRENT shape for GET /tenant/channels — a bare array, null when none exist. */
         TenantChannelListResponse: components["schemas"]["TenantNotificationChannel"][] | null;
@@ -518,6 +519,7 @@ export interface components {
             digest_window?: number;
             enabled?: boolean;
             priority?: number;
+            change_filter?: components["schemas"]["ChangeFilter"];
         };
         /** @description Body for PUT /tenant/rules/{id}. All fields optional. */
         UpdateRuleRequest: {
@@ -530,6 +532,22 @@ export interface components {
             digest_window?: number;
             enabled?: boolean;
             priority?: number;
+            change_filter?: components["schemas"]["ChangeFilter"];
+        };
+        /**
+         * @description The condition of an Inventory changes rule (alert_type `object_changed`).
+         *     Empty `object_kinds` / `actions` mean "any". Changes made by discovery
+         *     intake (`intake:*`) or a sync connection (`sync:*`) are routed only when
+         *     `include_intake` / `include_sync` is true. Ignored (stored as null) for
+         *     every other alert type. Only a rule naming `object_changed` routes
+         *     inventory changes; a catch-all rule does not.
+         */
+        ChangeFilter: {
+            /** @description Object kinds from standards/vocabulary.yaml (asset, cable, prefix, rack, site, …). */
+            object_kinds?: string[];
+            actions?: ("create" | "update" | "delete")[];
+            include_intake: boolean;
+            include_sync: boolean;
         };
         /** @description Bare status envelope for delete / test — e.g. `{ "status": "deleted" }`. */
         StatusResponse: {

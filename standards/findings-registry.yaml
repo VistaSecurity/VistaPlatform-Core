@@ -528,6 +528,178 @@ producers:
           A relationship edge references an asset that has been archived or
           deleted. The edge is kept so the history stays readable, but it
           should be resolved.
+      # --- DCIM record quality (DCIM gap 6; seeded controls IH-007 to IH-015).
+      # Each is a statement about the asset's DCIM record — placement,
+      # cabling, interfaces, addressing, commercial lifecycle — raised on the
+      # ASSET so the Inventory Hygiene framework's `finding`-shape
+      # measurements can count it per asset. Every one is evaluated only for
+      # monitored assets and only where the record holds the data the
+      # question is about: a missing warranty date, a device type nobody set
+      # or a port no neighbour reports on is not a violation of anything.
+      - key: not_racked
+        severity_model: fixed
+        default_severity: low
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject} is rack-mountable but not in a rack ({detail})"
+        guidance: >-
+          Open Infrastructure → Racks, open the rack the device is mounted in
+          and place it on the elevation at its unit. If the device is not
+          rack-mounted at all, the device type on the asset's Hardware tab is
+          wrong: choose one with a height of 0 U, or a child device type for a
+          blade in a chassis bay.
+        description: >-
+          A monitored hardware asset has a device type with a height above
+          0 U, is not installed in a parent device's bay, and records no
+          rack. A rack-mountable device with no rack is a device nobody can
+          find on a floor plan.
+      - key: no_rack_position
+        severity_model: fixed
+        default_severity: low
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject} is in rack {detail} but has no position"
+        guidance: >-
+          Open Infrastructure → Racks, open the rack named in the finding and
+          drag the device onto the unit it occupies on the front or rear
+          elevation. Without a position the rack's utilisation and free-space
+          figures cannot count it.
+        description: >-
+          A monitored asset records a rack but no position in it. Devices
+          whose type is 0 U (vertical PDUs, cable managers) and children in a
+          parent's bay have no position by design and are not reported.
+      - key: planned_cable_stale
+        severity_model: fixed
+        default_severity: low
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject} has {detail} planned for more than 90 days"
+        guidance: >-
+          Open the asset's Ports tab and review each planned cable the finding
+          lists: mark it connected once it is installed, or delete it if the
+          work was cancelled. A plan nobody finished makes the port look
+          spoken for when it is free.
+        description: >-
+          A cable whose operational status is planned was created more than
+          90 days ago. Raised on the asset at the cable's A end (the B end
+          when the A end is not an asset, such as a circuit termination); the
+          evidence lists the cables.
+      - key: cable_unconfirmed
+        severity_model: fixed
+        default_severity: medium
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject} has {detail} its neighbours have not confirmed in 30 days"
+        guidance: >-
+          Open the asset's Ports tab and check each cable the finding lists
+          against the port it is on. The device reports LLDP or CDP
+          neighbours, so a connected cable that no neighbour has confirmed is
+          either recorded on the wrong port or leads to a device that does
+          not advertise itself. Correct the cable, or — when the far device
+          genuinely does not speak LLDP or CDP — record a control override
+          with that rationale.
+        description: >-
+          A declared or imported, connected cable on one of the asset's
+          interfaces has existed for 30 days without an LLDP or CDP
+          observation confirming it, while the asset itself has reported
+          neighbour data in the same 30 days. An asset with no neighbour data
+          at all is not reported: absent data is not a contradiction.
+      - key: interface_no_type
+        severity_model: fixed
+        default_severity: low
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject} has {detail} with no type"
+        guidance: >-
+          Open the asset's Interfaces tab and set the type of each interface
+          the finding lists, or apply the asset's device type on the Hardware
+          tab so its interface templates set the types. The type is what
+          cable compatibility, speed reporting and the faceplate drawing read.
+        description: >-
+          An active interface on a monitored asset has the type `other` or
+          no type at all — what a collector records when it could not say
+          what the port is.
+      - key: duplicate_address
+        severity_model: fixed
+        default_severity: high
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject} shares the address {detail} with another asset in the same VRF"
+        guidance: >-
+          Open Infrastructure → Networks, find the address in its prefix and
+          compare the assets it is assigned to. Remove the stale assignment,
+          move one of them into the VRF it really belongs to, or — when the
+          address is shared on purpose — give it the anycast, VIP or
+          first-hop-redundancy role that allows sharing.
+        description: >-
+          Two active addresses with the same host part and the same VRF (or
+          both in the global table) are assigned to interfaces of different
+          monitored assets. Addresses whose role allows sharing (anycast, VIP,
+          VRRP, HSRP, GLBP, CARP) are not reported, as NetBox does not.
+      - key: warranty_expired
+        severity_model: fixed
+        default_severity: medium
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject}'s warranty ended on {detail}"
+        guidance: >-
+          Open the asset's Hardware tab and review the Lifecycle card. Renew
+          the warranty and record the new end date, or plan the replacement
+          and record the decommission date when it leaves service.
+        description: >-
+          The asset's recorded warranty end date is in the past. An asset
+          with no warranty end recorded is not reported: unknown is not
+          expired.
+      - key: past_end_of_support
+        severity_model: fixed
+        default_severity: high
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject} is past end of support ({detail})"
+        guidance: >-
+          Open the asset's Hardware tab; the Lifecycle card shows the end of
+          support and whether it comes from the device type or the platform.
+          Upgrade the platform, replace the hardware, or buy extended support
+          and record it on the device type or platform. An unsupported
+          device receives no further fixes from its vendor.
+        description: >-
+          The asset's effective end of support — the earlier of its device
+          type's and its platform's, each declared or taken from the linked
+          end-of-life catalogue entry — is in the past. Decided by the same
+          rule the Lifecycle card shows; an asset with no date on either is
+          not reported.
+      - key: end_of_support_soon
+        severity_model: fixed
+        default_severity: medium
+        score: 0
+        score_source: fixed
+        subject_types: [asset]
+        feeds_risk: false
+        title_template: "{subject} reaches end of support within 12 months ({detail})"
+        guidance: >-
+          Open the asset's Hardware tab; the Lifecycle card shows the end of
+          support and its source. Schedule the upgrade or replacement now,
+          while it is maintenance rather than an incident.
+        description: >-
+          The asset's effective end of support falls between today and twelve
+          months from today. An asset already past end of support is reported
+          as past_end_of_support instead, not as both.
 
   # --- drift ----------------------------------------------------------------
   - key: drift

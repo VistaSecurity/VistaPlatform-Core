@@ -46,9 +46,13 @@ export async function lookupAsset(name: string): Promise<FarAssetMatch> {
 
 const PORT_ROUTES = [
   ['front_port', 'front-ports'], ['rear_port', 'rear-ports'], ['console_port', 'console-ports'], ['console_server_port', 'console-server-ports'],
+  // Row 6.1: a server's power supply to a PDU outlet.
+  ['power_port', 'power-ports'], ['power_outlet', 'power-outlets'],
 ] as const;
 
-/** Every cable-able port of an asset: interfaces and the four port kinds. */
+/** Every cable-able port of an asset: interfaces, the four port kinds and the
+ *  power ports and outlets (a power feed is not on an asset: connect one from
+ *  the port's Connect). */
 export async function loadFarPorts(assetId: string): Promise<FarPortChoice[] | null> {
   const opts = { params: { path: { id: assetId }, query: { limit: 1000 } } };
   const replies = await Promise.all([

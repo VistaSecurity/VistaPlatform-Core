@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -136,6 +137,19 @@ func (g *PGGraph) CircuitPeer(ctx context.Context, termID uuid.UUID) (Peer, bool
 	return p, true, nil
 }
 
+// OutletPowerPort implements Graph.
+func (g *PGGraph) OutletPowerPort(ctx context.Context, outletID uuid.UUID) (uuid.UUID, bool, error) {
+	var port uuid.NullUUID
+	err := g.tx.QueryRowContext(ctx, `SELECT power_port_id FROM power_outlets WHERE tenant_id = $1 AND id = $2`, g.tenant, outletID).Scan(&port)
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return port.UUID, port.Valid, nil
+}
+
 // pathJSON is what cable_paths.path stores for a path.
 func pathJSON(p *Path) ([]byte, error) {
 	if p.Nodes == nil {
@@ -197,7 +211,16 @@ func Recompute(ctx context.Context, tx *sql.Tx, tenant uuid.UUID, origins []Node
 
 // Through returns the origins of the stored paths that run through any of
 // nodes (GIN on cable_paths.path), plus every node that is itself an origin.
+//
+// A power port in nodes also brings in the power outlets drawing from it: a
+// path that ended at such an outlet (its inlet was uncabled) continues through
+// the port once the port is cabled, and that path does not yet contain the
+// port.
 func Through(ctx context.Context, tx *sql.Tx, tenant uuid.UUID, nodes []Node) ([]Node, error) {
+	nodes, err := withOutletsOfPorts(ctx, tx, tenant, nodes)
+	if err != nil {
+		return nil, err
+	}
 	var out []Node
 	seen := map[Node]bool{}
 	add := func(n Node) {
@@ -233,6 +256,35 @@ func Through(ctx context.Context, tx *sql.Tx, tenant uuid.UUID, nodes []Node) ([
 		}
 	}
 	return out, nil
+}
+
+// withOutletsOfPorts appends to nodes the power outlets whose power_port_id is
+// one of the power ports in nodes.
+func withOutletsOfPorts(ctx context.Context, tx *sql.Tx, tenant uuid.UUID, nodes []Node) ([]Node, error) {
+	var ports []string
+	for _, n := range nodes {
+		if n.Kind == dcim.ObjectKindPowerPort {
+			ports = append(ports, n.ID.String())
+		}
+	}
+	if len(ports) == 0 {
+		return nodes, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM power_outlets WHERE tenant_id = $1 AND power_port_id = ANY($2::uuid[]) ORDER BY id`,
+		tenant, "{"+strings.Join(ports, ",")+"}")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := append([]Node(nil), nodes...)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, N(dcim.ObjectKindPowerOutlet, id))
+	}
+	return out, rows.Err()
 }
 
 // CableNodes returns a cable's node and every termination on it.

@@ -212,6 +212,18 @@ var assetFields = []catalog.FieldInfo{
 	colAs("platform.id", "platform_id", ast.TypeUUID),
 	col("serial", ast.TypeKeyword),
 	col("asset_tag", ast.TypeKeyword),
+	// The commercial lifecycle (DCIM gap 4; QUERY_LANGUAGE §15): the declared
+	// date columns and the seller compare like any timestamp / keyword;
+	// `end_of_support` is the EFFECTIVE date — the earlier of the device
+	// type's and the platform's, each declared or else its linked end-of-life
+	// catalogue entry's eol_date (shared/query/sql AssetEffectiveEndOfSupportSQL).
+	col("purchase_date", ast.TypeTimestamp),
+	col("warranty_end", ast.TypeTimestamp),
+	col("support_contract_end", ast.TypeTimestamp),
+	col("installed_at", ast.TypeTimestamp),
+	col("decommissioned_at", ast.TypeTimestamp),
+	col("vendor", ast.TypeKeyword),
+	derived("end_of_support", "asset.end_of_support", ast.TypeTimestamp),
 	// Virtualisation (DCIM row 4.2): the asset's cluster — a VM's
 	// (assets.cluster_id) or a hypervisor's (cluster_hosts). `cluster`
 	// matches the cluster's name, `cluster.type` its type's name or slug,
@@ -242,6 +254,8 @@ var assetFields = []catalog.FieldInfo{
 	// domain.
 	derived("module_type", "asset.module_type", ast.TypeKeyword),
 	derived("inventory_item.serial", "asset.inventory_item_serial", ast.TypeKeyword),
+	// DCIM gap 8: the stock state of one of the asset's inventory items.
+	enumDerived("inventory_item.stock_state", "asset.inventory_item_stock_state", "installed", "in_stock", "reserved", "rma", "retired"),
 	derived("virtual_chassis", "asset.virtual_chassis", ast.TypeKeyword),
 	col("position", ast.TypeNumber),
 	enumAs("face", "face", "front", "rear"),
@@ -287,10 +301,26 @@ var assetFields = []catalog.FieldInfo{
 	derived("tunnel.pfs_group", "asset.tunnel.pfs_group", ast.TypeNumber),
 	derived("wireless_lan.ssid", "asset.wireless_lan.ssid", ast.TypeKeyword),
 	enumDerived("wireless_lan.auth_type", "asset.wireless_lan.auth_type", "open", "wep", "wpa-personal", "wpa-enterprise"),
+	// Virtual circuits (DCIM gap 10): a virtual circuit the asset's interfaces terminate.
+	derived("virtual_circuit", "asset.virtual_circuit", ast.TypeKeyword),
+	derived("virtual_circuit.cid", "asset.virtual_circuit.cid", ast.TypeKeyword),
+	derived("virtual_circuit.provider", "asset.virtual_circuit.provider", ast.TypeKeyword),
+	enumDerived("virtual_circuit.role", "asset.virtual_circuit.role", "peer", "hub", "spoke"),
 	// Cabling (DCIM row 3.2): the cables on the asset's components.
 	enumDerived("cable.type", "asset.cable.type", "cat3", "cat5", "cat5e", "cat6", "cat6a", "cat7", "cat7a", "cat8", "dac-active", "dac-passive", "mrj21-trunk", "coaxial", "mmf", "mmf-om1", "mmf-om2", "mmf-om3", "mmf-om4", "mmf-om5", "smf", "smf-os1", "smf-os2", "aoc", "usb", "power"),
 	enumDerived("cable.status", "asset.cable.status", "connected", "planned", "decommissioning"),
 	derived("cabled_to", "asset.cabled_to", ast.TypeKeyword),
+	// Power (DCIM row 6.1): the power feeds the asset's power ports reach.
+	enumDerived("power_feed.status", "asset.power_feed.status", "offline", "active", "planned", "failed"),
+	enumDerived("power_feed.type", "asset.power_feed.type", "primary", "redundant"),
+	enumDerived("power_feed.supply", "asset.power_feed.supply", "ac", "dc"),
+	enumDerived("power_feed.phase", "asset.power_feed.phase", "single-phase", "three-phase"),
+	derived("power_feed.voltage", "asset.power_feed.voltage", ast.TypeNumber),
+	derived("power_feed.amperage", "asset.power_feed.amperage", ast.TypeNumber),
+	derived("power_feed.available_power", "asset.power_feed.available_power", ast.TypeNumber),
+	derived("power_feed.panel", "asset.power_feed.panel", ast.TypeKeyword),
+	derived("power_feed.rack", "asset.power_feed.rack", ast.TypeKeyword),
+	derived("power_feed.site", "asset.power_feed.site", ast.TypeKeyword),
 	{
 		Name: "risk", Type: ast.TypeBand,
 		Accessor: ast.Accessor{
@@ -419,6 +449,8 @@ var findingFields = []catalog.FieldInfo{
 		"os_end_of_life", "software_end_of_life", "hardware_end_of_support", "known_vulnerability",
 		"plaintext_management", "default_credentials_exposed", "insecure_service_exposed",
 		"no_owner", "no_class", "no_location", "duplicate_suspected", "stale", "orphan_relationship",
+		"not_racked", "no_rack_position", "planned_cable_stale", "cable_unconfirmed", "interface_no_type",
+		"duplicate_address", "warranty_expired", "past_end_of_support", "end_of_support_soon",
 		"new_class_in_segment", "unexpected_protocol", "port_profile_changed", "new_issuer",
 		"host_key_changed", "cable_drift"),
 	enumAs("subject_type", "subject_type",
@@ -528,6 +560,7 @@ var interfaceFields = []catalog.FieldInfo{
 	enumAs("mode", "mode", "access", "tagged", "tagged-all", "q-in-q"),
 	enumAs("status", "status", "pending", "active", "rejected", "stale", "archived"),
 	enumAs("operational_status", "operational_status", "up", "down", "testing", "unknown"),
+	derived("virtual_device_context", "interface.virtual_device_context", ast.TypeKeyword),
 	col("description", ast.TypeText),
 	col("id", ast.TypeUUID),
 }

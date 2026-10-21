@@ -97,6 +97,7 @@ func (ds *DeliveryService) sendWebhook(config map[string]interface{}, req *model
 	if req.Metadata != nil {
 		payload["metadata"] = req.Metadata
 	}
+	liftChangeFields(payload, req)
 
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
@@ -275,4 +276,32 @@ func (ds *DeliveryService) sendPagerDutyTest(config map[string]interface{}, req 
 			"The test event reached PagerDuty but its automatic resolve failed — resolve the \"Vista Platform test\" incident manually.")
 	}
 	return nil
+}
+
+// ChangeWebhookFields are the fields of an object_changed event that a webhook
+// body carries at the TOP LEVEL (docsv4/core: "Inventory change
+// notifications"), as JSON values — changed_fields an array, actor an object —
+// so a receiver reads body.object_kind rather than digging into metadata.
+// Never the before/after images and never custom-field values: the producer
+// does not send them.
+var ChangeWebhookFields = []string{
+	"object_kind", "object_id", "action", "actor", "source", "request_id",
+	"changed_fields", "object_label", "link",
+}
+
+// liftChangeFields copies an object_changed event's fields to the top level of
+// a webhook payload. A field already in the envelope (event_id, severity, …)
+// is never overwritten.
+func liftChangeFields(payload map[string]interface{}, req *models.SendNotificationRequest) {
+	if req.AlertType != models.ObjectChangedAlertType || req.Metadata == nil {
+		return
+	}
+	for _, k := range ChangeWebhookFields {
+		if _, taken := payload[k]; taken {
+			continue
+		}
+		if v, ok := req.Metadata[k]; ok {
+			payload[k] = v
+		}
+	}
 }

@@ -13,7 +13,8 @@ import type { Asset } from '@vistasecurity/api-contract';
 import { Icon, RiskChip } from '../../components/ui';
 import { ASSETS_PAGE_SIZE, AssetQueryError, useAssetFacets, useAssetsQuery, useOptionalAssetFacet } from './asset-queries';
 import { assetIdentity, assetRisk, classIcon } from './asset-shape';
-import { columnsForClass, gridTemplate, type AssetColumn } from './columns';
+import { gridTemplate, visibleColumns, type AssetColumn } from './columns';
+import { ColumnChooser, useColumnPrefs } from './column-chooser';
 import type { OpenAsset } from './drawers';
 import { FACET_LEVELS, FacetRail } from './facet-rail';
 import { applyFacetChange, queryToFacets, type FacetState } from './facet-query';
@@ -253,7 +254,10 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
   const total = assetsQ.data?.total ?? 0;
   const pages = Math.max(1, Math.ceil(total / ASSETS_PAGE_SIZE));
 
-  const cols = useMemo(() => columnsForClass(read.facets.class), [read.facets.class]);
+  // The class's default columns, with the person's Columns-menu choice on top
+  // (remembered per user for this lens).
+  const columnPrefs = useColumnPrefs('assets');
+  const cols = useMemo(() => visibleColumns(read.facets.class, columnPrefs.overrides), [read.facets.class, columnPrefs.overrides]);
   const grid = useMemo(() => gridTemplate(cols), [cols]);
   const rowGrid = `${SELECT_COL} ${grid}`;
 
@@ -357,6 +361,7 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
         </h2>
         <QueryEditor value={query} onChange={(q) => { onQueryChange(q); onPageChange(1); }} busy={assetsQ.isFetching} />
         <SavedFilters kind="asset" builtins query={query} onApply={(q) => { onQueryChange(q); onPageChange(1); }} />
+        <ColumnChooser classKey={read.facets.class} overrides={columnPrefs.overrides} onChange={columnPrefs.set} onReset={columnPrefs.reset} />
         <span className="mono" style={{ fontSize: 12.5, color: 'var(--app-t3)' }}>
           {assetsQ.isLoading ? 'loading…' : `${total} asset${total === 1 ? '' : 's'}`}
           {assetsQ.isFetching && !assetsQ.isLoading ? ' · refreshing' : ''}
@@ -384,7 +389,7 @@ export function AssetsLens({ query, onQueryChange, page, onPageChange, pendingCo
         </div>
       )}
 
-      <BulkActionBar selection={selection} onChange={setSelection} seen={seen} onScanStarted={feed.record} />
+      <BulkActionBar selection={selection} onChange={setSelection} seen={seen} onScanStarted={feed.record} columns={cols} />
       {(feed.scans.length > 0 || feed.skipped.length > 0) && (
         <div style={{ margin: '0 26px' }}>
           <ActiveScanJobsPanel

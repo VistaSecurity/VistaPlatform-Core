@@ -97,7 +97,7 @@ infrastructure:
 # =============================================================================
 docker_images:
   # Standard Docker Hub images (default for all environments)
-  go_builder: "golang:1.26.9-alpine"   # Multi-stage build stage for all Go services
+  go_builder: "golang:1.26.10-alpine"   # Multi-stage build stage for all Go services
   runtime: "alpine:3.24.2"           # Final runtime stage for all Go services
   node: "node:24.18.1-alpine3.24"             # Node.js services and frontend builds
 
@@ -108,7 +108,7 @@ docker_images:
   # alpine3.23 lags by days-to-weeks (sometimes skipping a patch release). Stay
   # on whichever Alpine track DHI is actively prioritizing to avoid CVE lag.
   dhi:
-    go_builder: "dhi.io/golang:1.26.9-alpine3.24-dev"
+    go_builder: "dhi.io/golang:1.26.10-alpine3.24-dev"
     runtime: "dhi.io/alpine-base:3.24-dev"
     node: "dhi.io/node:24-alpine3.24-dev"
 
@@ -265,6 +265,13 @@ admin_plane:
     # maintenance-service holds no service-to-service route yet; the prefix is
     # denied from day one so one added later is deny-by-default at the edge.
     - /maintenance-service/internal/
+    # POST /alerts/raise — the HTTP rail for the alerts.raise subject, used
+    # when NATS cannot carry an event (shared/dcim/changenotify's
+    # FallbackPublisher, from inventory-service and
+    # device-interrogation-service). HMAC-only with a signed X-Tenant-ID
+    # (handlers.RequireSignedServiceCall); callers reach compliance-engine
+    # through PeerServiceURLAuto, never the edge.
+    - /compliance-engine/internal/
 
   # Internal ROUTES: service-to-service endpoints that do not live under an
   # `/internal/` prefix, so a prefix deny would swallow tenant-facing siblings

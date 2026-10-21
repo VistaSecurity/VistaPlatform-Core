@@ -204,6 +204,21 @@ func (s *AssetService) IngestSightings(ctx context.Context, tenantID uuid.UUID, 
 					log.Printf("[AssetService] internal sightings: %s: %s", label, skipped)
 				}
 			}
+			// The device's measured power sockets (DCIM row 6.2,
+			// power_intake.go), the same way.
+			if (len(sg.PowerPorts) > 0 || len(sg.PowerOutlets) > 0) && tunnelsRecordable(res) {
+				assetID, err := uuid.Parse(res.Asset.ID)
+				if err != nil {
+					return err
+				}
+				pr, err := UpsertObservedPower(ctx, tx, tenantID, assetID, sg.PowerPorts, sg.PowerOutlets, obs.Source, obs.ObservedAt)
+				if err != nil {
+					return fmt.Errorf("recording power sockets: %w", err)
+				}
+				for _, skipped := range pr.Skipped {
+					log.Printf("[AssetService] internal sightings: %s: %s", label, skipped)
+				}
+			}
 			if res.ObservationID == "" {
 				return nil
 			}

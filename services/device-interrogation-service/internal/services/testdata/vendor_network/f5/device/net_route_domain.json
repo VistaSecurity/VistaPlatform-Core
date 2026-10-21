@@ -3,12 +3,14 @@
     {
       "name": "0",
       "fullPath": "/Common/0",
-      "id": 0
+      "id": 0,
+      "vlans": ["/Common/external"]
     },
     {
       "name": "tenant-a",
       "fullPath": "/Common/tenant-a",
-      "id": 2
+      "id": 2,
+      "vlans": ["/Common/internal"]
     }
   ]
 }

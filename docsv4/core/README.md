@@ -51,6 +51,7 @@ The core surfaces, in the order a tenant meets them:
 - [Sites and locations](./inventory/sites.md) — regions, site groups, sites and the locations inside them; placing assets; the site page
 - [Racks and placement](./inventory/racks.md) — racks, rack types and reservations; placing an asset at a unit and face; the placement rules
 - [Cabling](./inventory/cabling.md) — cables, the faceplate, port traces, and LLDP/CDP proposals you approve
+- [Power](./inventory/power.md) — power panels and feeds, power ports and outlets, power cables and their traces to the feed
 - [Circuits](./inventory/circuits.md) — providers, circuits and their terminations
 - [Virtualization](./inventory/virtualization.md) — clusters, hosts, virtual machines and disks
 - [VPN](./inventory/vpn.md) — tunnels and the IKE and IPsec policies behind them
@@ -73,6 +74,7 @@ The core surfaces, in the order a tenant meets them:
 - [Relationships](./features/relationships.md) — how assets are connected, and what breaks if one changes
 - [Interfaces](./inventory/interfaces.md) — an asset's physical and virtual interfaces, LAGs and VLAN modes
 - [Device types](./inventory/device-types.md) — the hardware catalogue, importing from the device-type library, and applying a type's interfaces to an asset
+- [Spares and RMA](./inventory/spares-and-rma.md) — spare parts in stock, installing them, removing parts to stock, and return cases
 - [Findings](./features/findings.md) — what a finding is, who produces them, and what "open" means
 - [Remediation](./features/remediation.md) — Alerts, the ticket Queue, and migration Plans
 

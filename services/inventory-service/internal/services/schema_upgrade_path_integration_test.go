@@ -40,6 +40,7 @@ package services
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -104,6 +105,12 @@ func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
 	currentSchema := mustReadFile(t, filepath.Join(root, "scripts", "database", "schema.sql"))
 	currentSeed := mustReadFile(t, filepath.Join(root, "scripts", "database", "seed.sql"))
 
+	// The shape a FRESH install of the current file has, for step 6.
+	fresh := newScratchDB(t, admin)
+	mustApply(t, fresh, currentSchema, "current schema.sql (fresh install)")
+	mustApply(t, fresh, currentSeed, "current seed.sql (fresh install)")
+	freshShape := tableShape(t, fresh)
+
 	for _, tag := range tags {
 		t.Run(tag, func(t *testing.T) {
 			oldSchema := mustGitShow(t, root, tag, "scripts/database/schema.sql")
@@ -136,6 +143,15 @@ func TestIntegration_Schema_UpgradesFromPriorReleases(t *testing.T) {
 			// 5. An upgrade that silently discards tenant data is not a
 			//    successful upgrade, even though psql exited 0.
 			assertTenantDataSurvived(t, scratch, tenant, tag)
+			assertVDCNamesCarried(t, scratch, tenant, tag)
+			assertInventoryItemCarried(t, scratch, tenant, tag)
+
+			// 6. The upgraded database has the columns and constraints a fresh
+			//    install has. A new column put in its CREATE TABLE but not in
+			//    POST-MIGRATIONS (the two-edit rule) applies cleanly — the
+			//    CREATE TABLE IF NOT EXISTS no-ops — and leaves every upgraded
+			//    install without it; nothing above catches that.
+			assertSameTableShape(t, freshShape, tableShape(t, scratch), tag)
 		})
 	}
 }
@@ -449,6 +465,21 @@ func populateForUpgrade(t *testing.T, db *sql.DB) uuid.UUID {
 			VALUES ($1, $2, 'schema-upgrade.example.test', 'server', 'hardware.computer.server', 'monitoring', NOW(), NOW(), NOW(), NOW())`,
 		assetID, tenant)
 
+	// DCIM gap 1: a 5.0 interface carrying context names in interfaces.vdcs
+	// (row 1.2's text[]); POST-MIGRATIONS carries them into
+	// virtual_device_contexts and the junction (assertVDCNamesCarried).
+	tryExec(t, db, "interfaces", `
+		INSERT INTO interfaces (id, tenant_id, asset_id, name, type, vdcs)
+		VALUES ($1, $2, $3, 'ethernet1/1', '1000base-t', ARRAY['vsys1', 'vsys1', '  ']::text[])`,
+		uuid.New(), tenant, assetID)
+
+	// DCIM gap 8: a 5.0 inventory item (asset_id NOT NULL, no stock columns);
+	// POST-MIGRATIONS gives it quantity 1 and stock_state installed, and the
+	// placement CHECKs it is added under hold (assertInventoryItemCarried).
+	tryExec(t, db, "inventory_items", `
+		INSERT INTO inventory_items (tenant_id, asset_id, name, serial) VALUES ($1, $2, 'PSU0', 'UPG-PSU-0')`,
+		tenant, assetID)
+
 	tryExec(t, db, "crypto_implementations", `
 		INSERT INTO crypto_implementations (id, tenant_id, asset_id, protocol, discovery_method, created_at, updated_at)
 		VALUES ($1,$2,$3,'TLS','passive',NOW(),NOW())`,
@@ -510,4 +541,133 @@ func assertTenantDataSurvived(t *testing.T, db *sql.DB, tenant uuid.UUID, tag st
 		return
 	}
 	t.Logf("upgrade from %s preserved %d assets row(s) for the test tenant", tag, assets)
+}
+
+// assertVDCNamesCarried checks DCIM gap 1's POST-MIGRATIONS: the context names
+// an interface held in interfaces.vdcs became one context on its asset (the
+// duplicate and the blank dropped) with a membership link, and the column was
+// then dropped — the carry-over must run BEFORE the DROP COLUMN, or the names
+// are lost. Skipped when the old release could not take the interface row.
+//
+// Mutation: move the DROP COLUMN above the carry-over block in schema.sql →
+// 0 contexts and 0 memberships; delete the DROP COLUMN → the column remains.
+func assertVDCNamesCarried(t *testing.T, db *sql.DB, tenant uuid.UUID, tag string) {
+	t.Helper()
+	var ifaces int
+	if err := db.QueryRow(`SELECT count(*) FROM interfaces WHERE tenant_id = $1 AND name = 'ethernet1/1'`, tenant).Scan(&ifaces); err != nil || ifaces == 0 {
+		t.Logf("no interface to check after upgrading from %s (%v)", tag, err)
+		return
+	}
+	var contexts, links int
+	var column bool
+	if err := db.QueryRow(`SELECT
+		(SELECT count(*) FROM virtual_device_contexts WHERE tenant_id = $1 AND name = 'vsys1'),
+		(SELECT count(*) FROM interface_virtual_device_contexts j JOIN interfaces i ON i.id = j.interface_id WHERE i.tenant_id = $1 AND i.name = 'ethernet1/1'),
+		EXISTS (SELECT 1 FROM information_schema.columns
+		         WHERE table_schema = 'public' AND table_name = 'interfaces' AND column_name = 'vdcs')`, tenant).Scan(&contexts, &links, &column); err != nil {
+		t.Fatalf("reading the carried contexts after upgrading from %s: %v", tag, err)
+	}
+	if contexts != 1 || links != 1 || column {
+		t.Errorf("after upgrading from %s: %d vsys1 contexts, %d memberships, interfaces.vdcs present=%v; want 1, 1, false",
+			tag, contexts, links, column)
+	}
+}
+
+// assertInventoryItemCarried checks DCIM gap 8's POST-MIGRATIONS: an item from
+// before spares existed is installed, counts one, has no stock location, and
+// asset_id is nullable afterwards. Skipped when the old release could not take
+// the row.
+func assertInventoryItemCarried(t *testing.T, db *sql.DB, tenant uuid.UUID, tag string) {
+	t.Helper()
+	var state string
+	var qty int
+	var loc sql.NullString
+	err := db.QueryRow(`SELECT stock_state, quantity, location_id::text FROM inventory_items WHERE tenant_id = $1 AND serial = 'UPG-PSU-0'`, tenant).
+		Scan(&state, &qty, &loc)
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Logf("no inventory item to check after upgrading from %s", tag)
+		return
+	}
+	if err != nil {
+		t.Fatalf("reading the carried inventory item after upgrading from %s: %v", tag, err)
+	}
+	if state != "installed" || qty != 1 || loc.Valid {
+		t.Errorf("after upgrading from %s the item is %s x%d at %v; want installed x1 at no location", tag, state, qty, loc)
+	}
+	var nullable string
+	if err := db.QueryRow(`SELECT is_nullable FROM information_schema.columns WHERE table_name = 'inventory_items' AND column_name = 'asset_id'`).Scan(&nullable); err != nil || nullable != "YES" {
+		t.Errorf("after upgrading from %s inventory_items.asset_id is_nullable = %q (%v), want YES", tag, nullable, err)
+	}
+}
+
+// tableShape is every public table's columns (in order, with type, nullability
+// and default) and constraints, one line each, for comparing a fresh install
+// with an upgraded one. A column's position is its rank among the table's live
+// columns, not its attnum: a POST-MIGRATIONS DROP COLUMN (interfaces.vdcs)
+// leaves an attnum gap on an upgraded database that a fresh install, which
+// never had the column, does not.
+func tableShape(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query(`
+		SELECT c.relname || ' col ' || row_number() OVER (PARTITION BY a.attrelid ORDER BY a.attnum) || ' ' || a.attname || ' ' || format_type(a.atttypid, a.atttypmod)
+		       || CASE WHEN a.attnotnull THEN ' not null' ELSE '' END
+		       || COALESCE(' default ' || pg_get_expr(d.adbin, d.adrelid), '')
+		  FROM pg_attribute a
+		  JOIN pg_class c ON c.oid = a.attrelid
+		  JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+		  LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		 WHERE c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+		UNION ALL
+		SELECT c.relname || ' con ' || con.conname || ' ' || pg_get_constraintdef(con.oid)
+		  FROM pg_constraint con
+		  JOIN pg_class c ON c.oid = con.conrelid
+		  JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+		 WHERE c.relkind IN ('r', 'p')
+		 ORDER BY 1`)
+	if err != nil {
+		t.Fatalf("reading the table shape: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("reading the table shape: %v", err)
+		}
+		out = append(out, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading the table shape: %v", err)
+	}
+	return out
+}
+
+// assertSameTableShape fails with the lines only one side has.
+func assertSameTableShape(t *testing.T, fresh, upgraded []string, tag string) {
+	t.Helper()
+	inFresh, inUpgraded := map[string]bool{}, map[string]bool{}
+	for _, l := range fresh {
+		inFresh[l] = true
+	}
+	for _, l := range upgraded {
+		inUpgraded[l] = true
+	}
+	var missing, extra []string
+	for _, l := range fresh {
+		if !inUpgraded[l] {
+			missing = append(missing, l)
+		}
+	}
+	for _, l := range upgraded {
+		if !inFresh[l] {
+			extra = append(extra, l)
+		}
+	}
+	if len(missing)+len(extra) > 0 {
+		t.Errorf("a database upgraded from %s does not have a fresh install's table shape — a new column or "+
+			"constraint is in its CREATE TABLE but not in the POST-MIGRATIONS block (CLAUDE.md's two-edit "+
+			"rule), or a POST-MIGRATIONS statement adds something the fresh shape lacks.\n"+
+			"only in a fresh install:\n  %s\nonly after the upgrade:\n  %s",
+			tag, strings.Join(missing, "\n  "), strings.Join(extra, "\n  "))
+	}
 }

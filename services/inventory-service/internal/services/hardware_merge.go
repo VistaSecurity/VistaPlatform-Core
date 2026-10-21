@@ -25,7 +25,11 @@ import (
 //     there already (a colliding child goes with its dropped parent — the
 //     survivor's own child stands);
 //   - an unchassised survivor takes the duplicate's chassis membership (and
-//     mastership, via assetReferrers); the duplicate leaves the chassis.
+//     mastership, via assetReferrers); the duplicate leaves the chassis;
+//   - virtual device contexts (DCIM gap 1) pair by name: the source context's
+//     interface memberships move to the survivor's same-name context and the
+//     source row goes; the rest move, losing an identifier the survivor
+//     already uses (identifiers are unique per asset).
 //
 // Runs after moveMergeComponents, which has already moved the ports a module
 // declared (their module_id still names the source module).
@@ -78,6 +82,32 @@ func moveMergeHardware(ctx context.Context, tx *sqlx.Tx, tenant, from, to uuid.U
 			                   AND d.name = c.name AND d.status <> 'rejected')`},
 		{"drop duplicate items", `DELETE FROM inventory_items WHERE tenant_id = $1 AND id IN (SELECT src_id FROM (` + itemPairs + `) p)`},
 		{"move inventory items", `UPDATE inventory_items SET asset_id = $3 WHERE tenant_id = $1 AND asset_id = $2`},
+		{"re-point memberships of duplicate contexts", `
+			INSERT INTO interface_virtual_device_contexts (tenant_id, interface_id, virtual_device_context_id)
+			SELECT j.tenant_id, j.interface_id, dst.id
+			  FROM interface_virtual_device_contexts j
+			  JOIN virtual_device_contexts src ON src.id = j.virtual_device_context_id
+			  JOIN virtual_device_contexts dst ON dst.tenant_id = src.tenant_id AND dst.asset_id = $3
+			                                  AND dst.name = src.name AND dst.status <> 'rejected'
+			 WHERE src.tenant_id = $1 AND src.asset_id = $2 AND src.status <> 'rejected'
+			ON CONFLICT DO NOTHING`},
+		{"fold contexts", `
+			UPDATE virtual_device_contexts dst SET first_seen_at = LEAST(dst.first_seen_at, src.first_seen_at),
+			       last_seen_at = GREATEST(dst.last_seen_at, src.last_seen_at),
+			       observation_count = dst.observation_count + src.observation_count
+			  FROM virtual_device_contexts src
+			 WHERE src.tenant_id = $1 AND src.asset_id = $2 AND src.status <> 'rejected'
+			   AND dst.tenant_id = $1 AND dst.asset_id = $3 AND dst.status <> 'rejected' AND dst.name = src.name`},
+		{"drop duplicate contexts", `
+			DELETE FROM virtual_device_contexts src USING virtual_device_contexts dst
+			 WHERE src.tenant_id = $1 AND src.asset_id = $2 AND src.status <> 'rejected'
+			   AND dst.tenant_id = $1 AND dst.asset_id = $3 AND dst.status <> 'rejected' AND dst.name = src.name`},
+		{"release colliding context identifiers", `
+			UPDATE virtual_device_contexts src SET identifier = NULL
+			 WHERE src.tenant_id = $1 AND src.asset_id = $2 AND src.identifier IS NOT NULL
+			   AND EXISTS (SELECT 1 FROM virtual_device_contexts dst WHERE dst.tenant_id = $1 AND dst.asset_id = $3
+			               AND dst.identifier = src.identifier AND dst.status <> 'rejected')`},
+		{"move contexts", `UPDATE virtual_device_contexts SET asset_id = $3 WHERE tenant_id = $1 AND asset_id = $2`},
 	}...)
 	for _, s := range steps {
 		if _, err := tx.ExecContext(ctx, s.sql, tenant, from, to); err != nil {

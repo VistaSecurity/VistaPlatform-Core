@@ -43,11 +43,43 @@ type vendorNetwork struct {
 	VLANs      []netVLAN
 	// ARP is the device's ARP table: evidence about OTHER hosts.
 	ARP []netARP
+	// Contexts are the device's virtual device contexts (DCIM gap 1), each
+	// interface naming its own in netIface.Context.
+	Contexts []netContext
+}
+
+// netContext is one virtual device context: its name, and its number where
+// the platform has one (HasID; a Fortinet VDOM has none).
+type netContext struct {
+	Name  string
+	ID    int
+	HasID bool
+	// Description is the operator's display name for the context, "" when the
+	// device gave none.
+	Description string
+}
+
+// addContext records a context once, by name; a later sighting of the same
+// name supplies an identifier the first did not.
+func (n *vendorNetwork) addContext(name string, id int, hasID bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	for i := range n.Contexts {
+		if n.Contexts[i].Name == name {
+			if !n.Contexts[i].HasID && hasID {
+				n.Contexts[i].ID, n.Contexts[i].HasID = id, true
+			}
+			return
+		}
+	}
+	n.Contexts = append(n.Contexts, netContext{Name: name, ID: id, HasID: hasID})
 }
 
 // Empty reports whether nothing was observed.
 func (n *vendorNetwork) Empty() bool {
-	return n == nil || (len(n.Interfaces) == 0 && len(n.Prefixes) == 0 && len(n.VLANs) == 0 && len(n.ARP) == 0)
+	return n == nil || (len(n.Interfaces) == 0 && len(n.Prefixes) == 0 && len(n.VLANs) == 0 && len(n.ARP) == 0 && len(n.Contexts) == 0)
 }
 
 // netIface is one of the device's interfaces.
@@ -74,6 +106,9 @@ type netIface struct {
 	Parent    string
 	LAG       string
 	Addresses []netAddr
+	// Context names the virtual device context that owns the interface, one
+	// of vendorNetwork.Contexts; "" for none or not said.
+	Context string
 }
 
 // netAddr is one address configured on an interface: "198.51.100.2/24"
@@ -116,8 +151,15 @@ const (
 	// maxARPEntries bounds the ARP table taken from one device. A core
 	// router's table is unbounded by anything we control.
 	maxARPEntries = 4096
-	// maxNetNameLen bounds every device-chosen name (interface, VLAN, VRF).
+	// maxNetNameLen bounds every device-chosen name (interface, VLAN, VRF,
+	// virtual device context).
 	maxNetNameLen = 64
+	// maxNetContexts bounds the virtual device contexts taken from one
+	// device; the largest platforms hold a few hundred (vsys, route domains).
+	maxNetContexts = 1024
+	// maxContextIdentifier is the largest context number the platform
+	// records (NetBox's VirtualDeviceContext.identifier is a smallint).
+	maxContextIdentifier = 32767
 )
 
 // boolRef returns a pointer to b.
@@ -327,6 +369,20 @@ func boundName(s string) string {
 	return s
 }
 
+// maxNetDescriptionLen is the bound a context's display name is held to (the
+// description column's).
+const maxNetDescriptionLen = 200
+
+// boundDescription trims an operator-chosen display name and cuts it to
+// maxNetDescriptionLen characters.
+func boundDescription(s string) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > maxNetDescriptionLen {
+		s = strings.TrimSpace(string(r[:maxNetDescriptionLen]))
+	}
+	return s
+}
+
 // setNetwork converts n to the wire form and stores it on the result,
 // bounded, recording a truncation warning for each table cut. endpoint names
 // the command or call the table came from.
@@ -356,6 +412,10 @@ func (r *InterrogateResult) setNetwork(n *vendorNetwork, endpoint string) {
 		r.warnTruncated(endpoint, "ARP table", maxARPEntries)
 		n.ARP = n.ARP[:maxARPEntries]
 	}
+	if len(n.Contexts) > maxNetContexts {
+		r.warnTruncated(endpoint, "Virtual device contexts", maxNetContexts)
+		n.Contexts = n.Contexts[:maxNetContexts]
+	}
 	canon := func(name string) string {
 		if strings.TrimSpace(name) == "" {
 			return ""
@@ -364,11 +424,30 @@ func (r *InterrogateResult) setNetwork(n *vendorNetwork, endpoint string) {
 		return c
 	}
 	out := &NetworkObservation{Vendor: ifnames.NormalizeVendor(n.NameFamily), Producer: n.Producer}
+	// The contexts first, so an interface names only a context the
+	// observation lists (one the table bound cut is named by none).
+	contexts := map[string]bool{}
+	for _, c := range n.Contexts {
+		name := boundName(c.Name)
+		if name == "" || contexts[name] {
+			continue
+		}
+		contexts[name] = true
+		oc := ObservedVirtualDeviceContext{Name: name, Description: boundDescription(c.Description)}
+		if c.HasID && c.ID >= 0 && c.ID <= maxContextIdentifier {
+			id := c.ID
+			oc.Identifier = &id
+		}
+		out.VirtualDeviceContexts = append(out.VirtualDeviceContexts, oc)
+	}
 	for _, ifc := range n.Interfaces {
 		o := ObservedInterface{
 			Name: canon(ifc.Name), Type: ifc.Type, MAC: ifc.MAC, Enabled: ifc.Enabled, OperStatus: ifc.OperStatus,
 			Mode: ifc.Mode, UntaggedVLAN: ifc.UntaggedVLAN, TaggedVLANs: append([]int(nil), ifc.TaggedVLANs...),
 			Parent: canon(ifc.Parent), LAG: canon(ifc.LAG),
+		}
+		if c := boundName(ifc.Context); contexts[c] {
+			o.VirtualDeviceContext = c
 		}
 		if ifc.SpeedKbps > 0 {
 			kbps := ifc.SpeedKbps
@@ -400,6 +479,7 @@ func (r *InterrogateResult) setNetwork(n *vendorNetwork, endpoint string) {
 	if r.Network != nil {
 		out.Tunnels, out.Neighbors = r.Network.Tunnels, r.Network.Neighbors
 		out.InventoryItems, out.Modules, out.VirtualChassis = r.Network.InventoryItems, r.Network.Modules, r.Network.VirtualChassis
+		out.PowerPorts, out.PowerOutlets = r.Network.PowerPorts, r.Network.PowerOutlets
 		if out.ManagementAddress == "" {
 			out.ManagementAddress = r.Network.ManagementAddress
 		}
@@ -449,9 +529,14 @@ func sanitizeNetwork(n *NetworkObservation) {
 		return
 	}
 	text := func(s string) string { return boundName(redact.TextPEM(redact.Text(s))) }
+	for i := range n.VirtualDeviceContexts {
+		n.VirtualDeviceContexts[i].Name = text(n.VirtualDeviceContexts[i].Name)
+		n.VirtualDeviceContexts[i].Description = boundDescription(redact.TextPEM(redact.Text(n.VirtualDeviceContexts[i].Description)))
+	}
 	for i := range n.Interfaces {
 		ifc := &n.Interfaces[i]
 		ifc.Name, ifc.Parent, ifc.LAG = text(ifc.Name), text(ifc.Parent), text(ifc.LAG)
+		ifc.VirtualDeviceContext = text(ifc.VirtualDeviceContext)
 		for j := range ifc.Addresses {
 			ifc.Addresses[j].VRF = text(ifc.Addresses[j].VRF)
 		}
@@ -477,6 +562,13 @@ func sanitizeNetwork(n *NetworkObservation) {
 	}
 	if n.VirtualChassis != nil {
 		n.VirtualChassis.Name = text(n.VirtualChassis.Name)
+	}
+	for i := range n.PowerPorts {
+		n.PowerPorts[i].Name = text(n.PowerPorts[i].Name)
+	}
+	for i := range n.PowerOutlets {
+		o := &n.PowerOutlets[i]
+		o.Name, o.PowerPort = text(o.Name), text(o.PowerPort)
 	}
 	for i := range n.Neighbors {
 		nb := &n.Neighbors[i]

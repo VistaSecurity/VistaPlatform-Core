@@ -1143,6 +1143,8 @@ components:
         updated_at:
           type: string
           format: date-time
+        change_filter:
+          $ref: '#/components/schemas/ChangeFilter'
     TenantChannelListResponse:
       type: [array, 'null']
       description: 'CURRENT shape for GET /tenant/channels — a bare array, null when none exist.'
@@ -1230,6 +1232,8 @@ components:
           type: boolean
         priority:
           type: integer
+        change_filter:
+          $ref: '#/components/schemas/ChangeFilter'
     UpdateRuleRequest:
       type: object
       additionalProperties: false
@@ -1260,6 +1264,36 @@ components:
           type: boolean
         priority:
           type: integer
+        change_filter:
+          $ref: '#/components/schemas/ChangeFilter'
+    ChangeFilter:
+      type: object
+      additionalProperties: false
+      description: |
+        The condition of an Inventory changes rule (alert_type `object_changed`).
+        Empty `object_kinds` / `actions` mean "any". Changes made by discovery
+        intake (`intake:*`) or a sync connection (`sync:*`) are routed only when
+        `include_intake` / `include_sync` is true. Ignored (stored as null) for
+        every other alert type. Only a rule naming `object_changed` routes
+        inventory changes; a catch-all rule does not.
+      required:
+        - include_intake
+        - include_sync
+      properties:
+        object_kinds:
+          type: array
+          description: Object kinds from standards/vocabulary.yaml (asset, cable, prefix, rack, site, …).
+          items:
+            type: string
+        actions:
+          type: array
+          items:
+            type: string
+            enum: [create, update, delete]
+        include_intake:
+          type: boolean
+        include_sync:
+          type: boolean
     StatusResponse:
       type: object
       additionalProperties: false

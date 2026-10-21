@@ -1,6 +1,7 @@
 // The site page (DCIM row 2.1) — `/inventory/sites/:id`. Overview of one site:
 // where it is (address, time zone, coordinates), what it holds (assets,
-// locations, racks, prefixes, VLANs), its locations, its
+// locations, racks, prefixes, VLANs), its locations, its power panels and
+// their feeds (row 6.1), the Floor plan tab (DCIM gap 9, site-floor-plan.tsx), its
 // findings by environment, and its change log and journal. Reached from the
 // Sites lens, an asset's header ("Site › Location") and the Infrastructure
 // sites management page.
@@ -15,6 +16,9 @@ import { ObjectJournal } from '../dcim/object-journal';
 import { PanelEmpty, PanelError, PanelLoading } from '../dcim/substrate-states';
 import { assetsLensHref } from '../builtin-views';
 import { useRacks } from '../racks/racks-queries';
+import { SitePowerCard } from '../power/power-cards';
+import { SiteSparesCard } from '../spares/site-spares-card';
+import { SiteFloorPlan } from './site-floor-plan';
 import { SITE_STATUSES, flattenNodes, useLocations, useSite, useSiteEnvironments, type Site } from './sites-queries';
 
 function Count({ label, value, to, note }: { label: string; value: number; to?: string; note?: string }) {
@@ -40,7 +44,7 @@ export function SitePage() {
   const q = useSite(id);
   const locations = useLocations(id, !!id);
   const envs = useSiteEnvironments(id);
-  const [tab, setTab] = useState<'changes' | 'journal'>('changes');
+  const [tab, setTab] = useState<'floor-plan' | 'changes' | 'journal'>('changes');
 
   const back = (
     <Link to="/inventory?lens=sites" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 12.5, color: 'var(--app-t3)', textDecoration: 'none' }}>
@@ -122,6 +126,10 @@ export function SitePage() {
 
         <SiteRacksCard siteId={site.id} />
 
+        <SitePowerCard siteId={site.id} />
+
+        <SiteSparesCard siteId={site.id} />
+
         <Card>
           <SectionLabel icon="shield-alert">Findings by environment</SectionLabel>
           {envs.isLoading ? <PanelLoading label="Loading…" />
@@ -137,15 +145,16 @@ export function SitePage() {
 
       <Card>
         <div role="tablist" style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--app-border)' }}>
-          {(['changes', 'journal'] as const).map((t) => (
+          {(['floor-plan', 'changes', 'journal'] as const).map((t) => (
             <button key={t} type="button" role="tab" aria-selected={tab === t} className="ui-btn ghost sm"
               style={{ borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent', borderRadius: 0 }} onClick={() => setTab(t)}>
-              {t === 'changes' ? 'Changes' : 'Journal'}
+              {t === 'floor-plan' ? 'Floor plan' : t === 'changes' ? 'Changes' : 'Journal'}
             </button>
           ))}
         </div>
         <div style={{ marginTop: 8 }}>
-          {tab === 'changes' ? <ObjectChanges kind="site" id={site.id} /> : <ObjectJournal kind="site" id={site.id} />}
+          {tab === 'floor-plan' ? <SiteFloorPlan siteId={site.id} />
+            : tab === 'changes' ? <ObjectChanges kind="site" id={site.id} /> : <ObjectJournal kind="site" id={site.id} />}
         </div>
       </Card>
     </div>

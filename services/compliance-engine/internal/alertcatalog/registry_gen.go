@@ -23,11 +23,16 @@ type LadderRung struct {
 }
 
 // Entry is one registry alert type (the catalog row).
+//
+// Lifecycle is "stateful" (a row in the alerts table that opens, dedupes per
+// subject, escalates and resolves) or "event" (a one-shot notification routed
+// once per raise, with no alerts row).
 type Entry struct {
 	ID               string `json:"id"`
 	Track            string `json:"track"`
 	Kind             string `json:"kind"`
 	Status           string `json:"status"`
+	Lifecycle        string `json:"lifecycle"`
 	Source           string `json:"source"`
 	SubjectType      string `json:"subject_type"`
 	SeverityModel    string `json:"severity_model"`
@@ -51,6 +56,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "policy",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "inventory-service",
 		SubjectType:      "certificate",
 		SeverityModel:    "ladder",
@@ -67,6 +73,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "policy",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "compliance-engine",
 		SubjectType:      "control",
 		SeverityModel:    "fixed",
@@ -83,6 +90,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "policy",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "compliance-engine",
 		SubjectType:      "framework",
 		SeverityModel:    "fixed",
@@ -99,6 +107,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "policy",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "compliance-engine",
 		SubjectType:      "framework",
 		SeverityModel:    "fixed",
@@ -115,6 +124,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "policy",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "compliance-engine",
 		SubjectType:      "software_install",
 		SeverityModel:    "ladder",
@@ -136,6 +146,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "policy",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "compliance-engine",
 		SubjectType:      "asset",
 		SeverityModel:    "ladder",
@@ -158,6 +169,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "policy",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "compliance-engine",
 		SubjectType:      "asset",
 		SeverityModel:    "ladder",
@@ -180,6 +192,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "operational",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "sensor-manager",
 		SubjectType:      "sensor",
 		SeverityModel:    "fixed",
@@ -196,6 +209,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "operational",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "device-interrogation-service",
 		SubjectType:      "agent",
 		SeverityModel:    "fixed",
@@ -212,6 +226,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "operational",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "cluster-sensor-service",
 		SubjectType:      "job",
 		SeverityModel:    "fixed",
@@ -228,6 +243,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "operational",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "audit",
 		SubjectType:      "user",
 		SeverityModel:    "fixed",
@@ -244,6 +260,7 @@ var Registry = []Entry{
 		Track:            "tenant",
 		Kind:             "operational",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "auth-service",
 		SubjectType:      "tenant",
 		SeverityModel:    "ladder",
@@ -256,10 +273,28 @@ var Registry = []Entry{
 		Description:      "Asset usage is approaching the plan limit (80% info, 95% high).",
 	},
 	{
+		ID:               "object_changed",
+		Track:            "tenant",
+		Kind:             "operational",
+		Status:           "live",
+		Lifecycle:        "event",
+		Source:           "inventory-service",
+		SubjectType:      "object",
+		SeverityModel:    "fixed",
+		DefaultSeverity:  "info",
+		BaselineDays:     0,
+		BaselinePercent:  0,
+		BaselineSeverity: "",
+		AutoResolve:      "",
+		EnabledByDefault: true,
+		Description:      "An inventory object (an asset, cable, prefix, rack, site, circuit or any other kind) was created, updated or deleted. Delivered only to routing rules that select Inventory changes, filtered there by object kind and action. Changes made by discovery intake and by a sync connection are left out unless the rule includes them.",
+	},
+	{
 		ID:               "service_down",
 		Track:            "platform",
 		Kind:             "operational",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "monitoring",
 		SubjectType:      "service",
 		SeverityModel:    "fixed",
@@ -276,6 +311,7 @@ var Registry = []Entry{
 		Track:            "platform",
 		Kind:             "operational",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "monitoring",
 		SubjectType:      "service",
 		SeverityModel:    "fixed",
@@ -292,6 +328,7 @@ var Registry = []Entry{
 		Track:            "platform",
 		Kind:             "operational",
 		Status:           "live",
+		Lifecycle:        "stateful",
 		Source:           "tenant-health-service",
 		SubjectType:      "tenant",
 		SeverityModel:    "fixed",
@@ -308,6 +345,7 @@ var Registry = []Entry{
 		Track:            "platform",
 		Kind:             "operational",
 		Status:           "planned",
+		Lifecycle:        "stateful",
 		Source:           "notification-service",
 		SubjectType:      "channel",
 		SeverityModel:    "fixed",

@@ -232,6 +232,27 @@ features:
     status: available
     edition: core
     docs: inventory/cabling
+  - id: power_panels_feeds
+    group: discover_inventory
+    name: Power panels, feeds and power cabling
+    summary: Power panels and feeds at each site, power ports and PDU outlets with their draws, and power traces from a server through its PDU to the feed.
+    status: available
+    edition: core
+    docs: inventory/power
+  - id: spares_rma
+    group: discover_inventory
+    name: Spares, stock and RMA
+    summary: Spare parts in stock at site locations with quantities, installs from the shelf into assets, parts removed to stock, and return cases to replacement.
+    status: available
+    edition: core
+    docs: inventory/spares-and-rma
+  - id: rack_power_budget
+    group: discover_inventory
+    name: Rack power budget and PDU collection
+    summary: Each rack's power budget per feed and leg, a power overlay on the elevation, and measured outlet draw and state from APC, Raritan and Eaton PDUs.
+    status: available
+    edition: core
+    docs: inventory/power
   - id: map_physical_cabling
     group: discover_inventory
     name: Physical cabling on the map
@@ -260,6 +281,20 @@ features:
     status: available
     edition: core
     docs: inventory/racks
+  - id: floor_plans
+    group: discover_inventory
+    name: Floor plans
+    summary: A grid floor plan per location with racks dragged into place and coloured by unit or power utilisation.
+    status: available
+    edition: core
+    docs: inventory/sites
+  - id: facilities_dashboard
+    group: discover_inventory
+    name: Facilities dashboard
+    summary: Free rack space per site, fullest racks, switches and prefixes nearing full, and the ageing cabling backlog, each linking to its list.
+    status: available
+    edition: core
+    docs: features/dashboard
   - id: sites_locations
     group: discover_inventory
     name: Sites and locations
@@ -274,6 +309,13 @@ features:
     status: available
     edition: core
     docs: inventory/device-types
+  - id: asset_commercial_lifecycle
+    group: discover_inventory
+    name: Asset commercial lifecycle
+    summary: Purchase, cost, warranty, support contract and install dates per asset, with warranty and end-of-support states from device type and platform dates.
+    status: available
+    edition: core
+    docs: inventory/device-types
   - id: modules_virtual_chassis
     group: discover_inventory
     name: Modules and virtual chassis
@@ -281,6 +323,13 @@ features:
     status: available
     edition: core
     docs: inventory/device-types
+  - id: virtual_device_contexts
+    group: discover_inventory
+    name: Virtual device contexts
+    summary: VDOMs, vsys, VDCs and route domains, discovered from FortiGate, Palo Alto, F5 and Nexus or declared, with the interfaces each owns.
+    status: available
+    edition: core
+    docs: inventory/interfaces
   - id: circuits
     group: discover_inventory
     name: Circuits
@@ -288,6 +337,20 @@ features:
     status: available
     edition: core
     docs: inventory/circuits
+  - id: virtual_circuits
+    group: discover_inventory
+    name: Virtual circuits
+    summary: SD-WAN, MPLS L3VPN and Metro Ethernet overlays on a provider network, with the interfaces that terminate them as peer, hub or spoke.
+    status: available
+    edition: core
+    docs: inventory/circuits
+  - id: vlan_translation_asn_ranges
+    group: discover_inventory
+    name: VLAN translation and ASN ranges
+    summary: VLAN translation policies and rules that interfaces apply, and the ASN ranges a registry delegated, with the numbers still free in each.
+    status: available
+    edition: core
+    docs: inventory/networks
   - id: virtualisation
     group: discover_inventory
     name: Virtualisation
@@ -367,6 +430,13 @@ features:
     status: available
     edition: core
     docs: features/compliance-frameworks
+  - id: dcim_hygiene_controls
+    group: evaluate_prove
+    name: DCIM hygiene controls
+    summary: Inventory Hygiene controls for racking, rack positions, stale planned and unconfirmed cables, untyped interfaces, duplicate addresses, warranty and support.
+    status: available
+    edition: core
+    docs: features/compliance-frameworks
   - id: regulated_frameworks
     group: evaluate_prove
     name: Regulated frameworks
@@ -414,6 +484,13 @@ features:
     docs: features/remediation
 
   # ── Integrations ────────────────────────────────────────────────────────────
+  - id: inventory_change_notifications
+    group: integrations
+    name: Inventory change notifications and webhooks
+    summary: Send inventory changes, filtered by object kind and action, to a webhook, Slack or email through routing rules.
+    status: available
+    edition: core
+    docs: guides/tenant-admin-guide
   - id: cmdb_sync
     group: integrations
     name: CMDB / ITSM sync
@@ -454,6 +531,18 @@ features:
     group: integrations
     name: NetBox sync — ports and cables
     summary: Sync console, patch-panel and power ports and cables with NetBox both ways; far ends not yet here wait, and LLDP proposals sync once approved.
+    status: available
+    edition: enterprise
+  - id: netbox_sync_netbox42_kinds
+    group: integrations
+    name: NetBox sync — virtual circuits, ASN ranges, VLAN translation
+    summary: Sync NetBox 4.2's virtual circuits, ASN ranges and VLAN translation policies both ways, with each interface's policy, under their own switch.
+    status: available
+    edition: enterprise
+  - id: netbox_sync_virtual_machines
+    group: integrations
+    name: NetBox sync — virtual machines
+    summary: Sync NetBox virtual machines, VM interfaces and virtual disks both ways as assets; new VMs pass your approval policy, pending ones never push.
     status: available
     edition: enterprise
   - id: device42_import

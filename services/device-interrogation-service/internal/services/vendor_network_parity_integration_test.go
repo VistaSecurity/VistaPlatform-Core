@@ -23,7 +23,10 @@ package services
 // ciscoNetwork; drop the trunk's TaggedVLANs; drop `ifc.LAG = lagOf[...]` in
 // panNetwork; drop the VDOM → VRF mapping in fortinetNetwork; drop the
 // route-domain split in f5Network; drop the ifnames canonicalisation in
-// ciscoCanonical (Cisco's status and trunk rows then join no interface).
+// ciscoCanonical (Cisco's status and trunk rows then join no interface);
+// drop VirtualDeviceContexts from decodeNetwork / snmpNetworkSighting (DCIM
+// gap 1: the contexts then reach no row, and the interfaces' names alone
+// create them without identifiers).
 //
 // Skips unless TEST_DATABASE_URL is set (run `make test-integration-db`).
 
@@ -211,7 +214,12 @@ func TestIntegration_VendorNetworkParity_PaloAlto(t *testing.T) {
 				{Prefix: "10.30.200.0/24", VRF: "corp", VLAN: 200},
 				{Prefix: "198.51.100.0/24"},
 			},
-			VLANs:      []identitytest.WantVLAN{{VID: 100, Name: "VLAN 100"}, {VID: 200, Name: "VLAN 200"}},
+			VLANs: []identitytest.WantVLAN{{VID: 100, Name: "VLAN 100"}, {VID: 200, Name: "VLAN 200"}},
+			// DCIM gap 1: <vsys> is the context; management is in none.
+			VirtualDeviceContexts: []identitytest.WantVirtualDeviceContext{
+				{Name: "vsys1", Identifier: "1", Interfaces: []string{"Ethernet1/1", "ae1", "ae1.100"}},
+				{Name: "vsys2", Identifier: "2", Interfaces: []string{"ae1.200"}},
+			},
 			PrimaryIP4: "10.30.0.5",
 		},
 	}})
@@ -245,7 +253,13 @@ func TestIntegration_VendorNetworkParity_FortiGate(t *testing.T) {
 				{Prefix: "10.40.50.0/24", VRF: "guest", VLAN: 50},
 				{Prefix: "203.0.113.0/29"},
 			},
-			VLANs:      []identitytest.WantVLAN{{VID: 40, Name: "vlan-users"}, {VID: 50, Name: "vlan-guest"}},
+			VLANs: []identitytest.WantVLAN{{VID: 40, Name: "vlan-users"}, {VID: 50, Name: "vlan-guest"}},
+			// DCIM gap 1: each VDOM is a context, root included; a VDOM has
+			// no identifier.
+			VirtualDeviceContexts: []identitytest.WantVirtualDeviceContext{
+				{Name: "root", Interfaces: []string{"agg1", "port1", "port2", "port3", "vlan-users"}},
+				{Name: "guest", Interfaces: []string{"vlan-guest"}},
+			},
 			PrimaryIP4: "203.0.113.2",
 		},
 	}})
@@ -279,7 +293,14 @@ func TestIntegration_VendorNetworkParity_F5(t *testing.T) {
 				{Prefix: "10.50.31.0/24", VLAN: 301},
 				{Prefix: "198.51.100.0/24", VLAN: 101},
 			},
-			VLANs:      []identitytest.WantVLAN{{VID: 101, Name: "external"}, {VID: 201, Name: "internal"}, {VID: 301, Name: "servers"}},
+			VLANs: []identitytest.WantVLAN{{VID: 101, Name: "external"}, {VID: 201, Name: "internal"}, {VID: 301, Name: "servers"}},
+			// DCIM gap 1: each route domain is a context. external and
+			// internal by the route domains' VLAN lists; servers, in no list,
+			// by its self IP (no %N: route domain 0).
+			VirtualDeviceContexts: []identitytest.WantVirtualDeviceContext{
+				{Name: "0", Identifier: "0", Interfaces: []string{"external", "servers"}},
+				{Name: "tenant-a", Identifier: "2", Interfaces: []string{"internal"}},
+			},
 			PrimaryIP4: "198.51.100.10",
 		},
 	}})

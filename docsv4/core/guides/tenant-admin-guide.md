@@ -443,6 +443,91 @@ alerts; it is how you go beyond that starting point.
 source**, **alert type** and **severity**, and choose a **frequency** —
 immediate, or a digest (hourly / daily / weekly).
 
+### Inventory change notifications
+
+Every create, update and delete of an inventory object — an asset, a cable, a
+prefix, a rack, a site, a circuit or any other kind — is recorded on that
+object's **Changes** tab. A routing rule can also deliver those changes to a
+channel, which is how you push them to a webhook, Slack or email.
+
+To set one up, add a routing rule and choose **Inventory changes** as the
+source. The severity filter is replaced by:
+
+- **Object kinds** — the kinds of object the rule delivers (search the list;
+  none selected means every kind);
+- **Actions** — created, updated, deleted (none selected means all three);
+- **Automatic changes** — changes made by discovery (sensors, agents, imports)
+  and by a sync connection are left out unless you tick **Include changes made
+  by discovery** or **Include changes made by a sync connection**. Those paths
+  can change thousands of objects at a time.
+
+Only a rule that chooses **Inventory changes** delivers them. The seeded
+**Default critical alerts** and **Default activity feed** rules, and any other
+rule for all sources, do not — turning the feature on never floods a channel you
+already have. Inventory changes appear in the alert catalog under **Alert
+Rules** as **Inventory changes**; switching that entry off stops every rule
+delivering them.
+
+Changes made by discovery are included whichever way the data arrived: a
+sensor's or agent's findings that reach the platform over its message bus, a
+cloud discovery run, and the platform's own background passes (LLDP / CDP
+neighbours becoming proposed cables, discovery evidence being re-resolved,
+same-device merges) all count as **changes made by discovery** and are
+delivered when the rule includes them.
+
+A request that changes the same object several times sends **one**
+notification for that object and action, listing every field that changed. A
+change that was rolled back sends nothing. At most 250 objects are announced
+per request; a background pass counts as one request per organization.
+
+If the platform's message bus is unavailable, inventory change notifications
+are still delivered, over a direct service-to-service call instead; a
+notification is lost only when both paths fail, and the platform logs each one
+that is.
+
+A **webhook** delivery carries the change at the top level of the body, next to
+the usual envelope (see the webhook payload format in the
+[notification provider guide](../operate/operations/notification-providers.md)):
+
+```json
+{
+  "event_id": "4f8a4c5e-1d2b-5c3a-9e8f-7a6b5c4d3e2f",
+  "alert_source": "inventory-service",
+  "alert_type": "object_changed",
+  "severity": "info",
+  "title": "Cable updated: CBL-0042",
+  "message": "a.person@example.com updated cable CBL-0042 — changed label, status",
+  "timestamp": "2026-10-20T12:45:00Z",
+  "object_kind": "cable",
+  "object_id": "0b6f6a52-1c1e-4f0a-8b55-2f3f1c6c9a10",
+  "action": "update",
+  "actor": { "user_id": "6a1e0c1b-7a54-4a37-a1c2-1a2b3c4d5e6f", "user_name": "a.person@example.com" },
+  "source": "ui",
+  "request_id": "d2b4c1a0-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "changed_fields": ["label", "status"],
+  "object_label": "CBL-0042",
+  "link": "/inventory/cables/0b6f6a52-1c1e-4f0a-8b55-2f3f1c6c9a10",
+  "metadata": { "...": "the same fields, as before" }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `object_kind` | The kind of object (`asset`, `cable`, `prefix`, `rack`, …). |
+| `object_id` | The object's id. |
+| `action` | `create`, `update` or `delete`. |
+| `actor` | The person who made the change, or `null` when nobody did (discovery, a sync, a scheduled job). |
+| `source` | Where the change came from: `ui`, `api`, `system`, `intake:<producer>` or `sync:<connection>`. |
+| `request_id` | The request that made the change — the same id the object's Changes tab shows. |
+| `changed_fields` | The names of the fields that changed (for a create or delete, every field). |
+| `object_label` | The object's name or label, or `null` when it has none. |
+| `link` | The page to open in the console, relative to it — for example `/inventory/assets/<id>`, `/inventory/cables/<id>`, `/inventory/prefixes/<id>`; assets, racks, sites, clusters, prefixes, VLANs, circuits, cables and interfaces have pages of their own, and an IP or MAC address links to the asset it belongs to. `null` when there is no page to open, including for a deleted object (a deleted interface or address links to its asset). |
+
+The **values** of the changed fields are never sent — not the before and after
+values and not custom-field values, which may hold secrets. Open the object's
+Changes tab to see them. The `event_id` is the same on every retry of the same
+notification, so it de-duplicates as described for webhooks.
+
 ### Alert Rules
 
 This page is the **alert catalog** — the platform's built-in library of stateful

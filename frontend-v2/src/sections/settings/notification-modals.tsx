@@ -13,7 +13,10 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { clients } from '../../lib/clients';
 import { Modal, ModalField, ModalInput, ModalSelect } from '../../components/ui';
-import { alertSourceOptions, fetchAlertCatalogSources } from './alert-sources';
+import {
+  INVENTORY_CHANGES_OPTION, alertSourceOptions, fetchAlertCatalogSources, ruleSelection, ruleSourceLabel, ruleSourceOption,
+} from './alert-sources';
+import { ChangeFilterFields, editableChangeFilter, type ChangeFilter } from './change-filter-fields';
 import {
   WEBHOOK_AUTH_MODES, applyWebhookOptions, generateSigningSecret, initialWebhookOptions, storedHeaderCount,
   webhookModeOf, webhookOptionsError, type WebhookAuthMode, type WebhookOptions,
@@ -312,7 +315,9 @@ function useAlertSources(current: string): string[] {
     queryFn: fetchAlertCatalogSources,
     staleTime: 5 * 60 * 1000,
   });
-  return alertSourceOptions(catalogQ.data ?? [], current);
+  // Inventory changes is its own choice (alert-sources.ts), right after "all".
+  const [all, ...rest] = alertSourceOptions(catalogQ.data ?? [], current === INVENTORY_CHANGES_OPTION ? 'all' : current);
+  return [all, INVENTORY_CHANGES_OPTION, ...rest];
 }
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low'];
@@ -330,8 +335,10 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
   const queryClient = useQueryClient();
   const isEdit = !!rule;
   const [name, setName] = useState(rule?.rule_name ?? '');
-  const [source, setSource] = useState(rule?.alert_source ?? 'all');
+  const [source, setSource] = useState(ruleSourceOption(rule));
   const alertSources = useAlertSources(source);
+  const isInventoryChanges = source === INVENTORY_CHANGES_OPTION;
+  const [changeFilter, setChangeFilter] = useState<ChangeFilter>(editableChangeFilter(rule?.change_filter));
   const [severities, setSeverities] = useState<string[]>(rule?.severity_filter ?? []);
   const [channelIds, setChannelIds] = useState<string[]>(rule?.channel_ids ?? []);
   const [frequency, setFrequency] = useState(rule?.frequency ?? 'immediate');
@@ -341,13 +348,15 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
 
   const mutation = useMutation({
     mutationFn: async () => {
+      const selection = ruleSelection(source);
       const common = {
         rule_name: name.trim(),
-        alert_type: rule?.alert_type,
+        alert_type: isEdit ? rule?.alert_type : selection.alert_type,
         channel_ids: channelIds,
         severity_filter: severities.length ? severities : undefined,
         frequency,
         digest_window: isDigest(frequency) ? Math.max(1, parseInt(digestWindow, 10) || 60) : undefined,
+        change_filter: isInventoryChanges ? changeFilter : undefined,
       };
       if (isEdit) {
         unwrap(await clients.notifications.PUT('/tenant/rules/{id}', {
@@ -356,7 +365,7 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
         }), 'Failed to update the rule');
       } else {
         unwrap(await clients.notifications.POST('/tenant/rules', {
-          body: { ...common, alert_source: source, enabled: true },
+          body: { ...common, alert_source: selection.alert_source, enabled: true },
         }), 'Failed to create the rule');
       }
     },
@@ -393,14 +402,20 @@ export function RuleModal({ rule, channels, open, onClose }: { rule: Rule | null
       </ModalField>
       <ModalField label="Alert source" hint={isEdit ? 'The source cannot be changed after creation.' : 'Which subsystem the events come from.'}>
         <ModalSelect value={source} disabled={isEdit} onChange={(e) => setSource(e.target.value)}>
-          {alertSources.map((s) => <option key={s} value={s}>{s}</option>)}
+          {alertSources.map((s) => <option key={s} value={s}>{ruleSourceLabel(s)}</option>)}
         </ModalSelect>
       </ModalField>
-      <ModalField label="Severity filter" hint="Match only these severities; none selected = all severities.">
-        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-          {SEVERITIES.map((s) => chip(s, severities.includes(s), () => setSeverities(toggle(severities, s))))}
-        </div>
-      </ModalField>
+      {isInventoryChanges ? (
+        // An inventory change has one severity (info), so the severity filter
+        // is replaced by what matters for a change: which objects, which actions.
+        <ChangeFilterFields value={changeFilter} onChange={setChangeFilter} />
+      ) : (
+        <ModalField label="Severity filter" hint="Match only these severities; none selected = all severities.">
+          <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
+            {SEVERITIES.map((s) => chip(s, severities.includes(s), () => setSeverities(toggle(severities, s))))}
+          </div>
+        </ModalField>
+      )}
       <ModalField label="Deliver to" hint={channels.length ? 'Pick at least one connection.' : 'No connections configured yet — add one in Integrations first.'}>
         <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
           {channels.map((c) => chip(c.channel_name, channelIds.includes(c.id), () => setChannelIds(toggle(channelIds, c.id))))}

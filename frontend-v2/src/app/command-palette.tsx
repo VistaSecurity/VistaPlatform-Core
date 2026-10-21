@@ -53,10 +53,10 @@ export type { CommandItem, ResultKind };
  * places, and those are filters of one.
  */
 /**
- * The four dashboards, from the dashboard registry.
+ * The dashboards, from the dashboard registry.
  *
  * Overview keeps the plain label "Dashboard" — it is the bare `/dashboard`
- * route and what someone typing "dash" is looking for — while the three focused
+ * route and what someone typing "dash" is looking for — while the focused
  * pages are prefixed, matching how the palette already prefixes Discovery and
  * Risk & Compliance sub-pages. The sublabel carries the question each page
  * answers, and the palette matches on label AND sublabel, so typing "quantum"

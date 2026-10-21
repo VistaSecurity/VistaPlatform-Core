@@ -38,7 +38,7 @@ function str(v: unknown): string {
 export interface IpamField {
   name: string;
   label: string;
-  kind?: 'text' | 'number' | 'select' | 'bool' | 'textarea' | 'multi';
+  kind?: 'text' | 'number' | 'select' | 'bool' | 'textarea' | 'multi' | 'date';
   options?: { value: string; label: string }[];
   required?: boolean;
   hint?: string;

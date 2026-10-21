@@ -2211,8 +2211,9 @@ var compatibleTerminations = map[ObjectKind][]ObjectKind{
 	ObjectKindConsoleServerPort:  {ObjectKindConsolePort, ObjectKindFrontPort, ObjectKindRearPort},
 	ObjectKindFrontPort:          {ObjectKindCircuitTermination, ObjectKindConsolePort, ObjectKindConsoleServerPort, ObjectKindFrontPort, ObjectKindInterface, ObjectKindRearPort},
 	ObjectKindInterface:          {ObjectKindCircuitTermination, ObjectKindFrontPort, ObjectKindInterface, ObjectKindRearPort},
+	ObjectKindPowerFeed:          {ObjectKindPowerPort},
 	ObjectKindPowerOutlet:        {ObjectKindPowerPort},
-	ObjectKindPowerPort:          {ObjectKindPowerOutlet},
+	ObjectKindPowerPort:          {ObjectKindPowerFeed, ObjectKindPowerOutlet},
 	ObjectKindRearPort:           {ObjectKindCircuitTermination, ObjectKindConsolePort, ObjectKindConsoleServerPort, ObjectKindFrontPort, ObjectKindInterface, ObjectKindRearPort},
 }
 

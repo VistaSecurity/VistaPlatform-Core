@@ -9,7 +9,7 @@ import type { CableTerminationKind, CableIndex } from '../dcim/cable-queries';
 import type { Interface } from '../dcim/interface-queries';
 
 /** The faceplate's port kinds, one row group each, in faceplate order. */
-export const FACEPLATE_KINDS = ['interface', 'console_port', 'console_server_port', 'front_port', 'rear_port'] as const;
+export const FACEPLATE_KINDS = ['interface', 'console_port', 'console_server_port', 'front_port', 'rear_port', 'power_port', 'power_outlet'] as const;
 export type FaceplateKind = (typeof FACEPLATE_KINDS)[number];
 
 export const FACEPLATE_KIND_LABEL: Record<FaceplateKind, string> = {
@@ -18,6 +18,8 @@ export const FACEPLATE_KIND_LABEL: Record<FaceplateKind, string> = {
   console_server_port: 'Console server ports',
   front_port: 'Front ports',
   rear_port: 'Rear ports',
+  power_port: 'Power ports',
+  power_outlet: 'Power outlets',
 };
 
 /** The device type's template route per kind (row 2.2). */
@@ -27,6 +29,8 @@ export const TEMPLATE_ROUTE: Record<FaceplateKind, string> = {
   console_server_port: 'console-server-port-templates',
   front_port: 'front-port-templates',
   rear_port: 'rear-port-templates',
+  power_port: 'power-port-templates',
+  power_outlet: 'power-outlet-templates',
 };
 
 export type PortState = 'up' | 'down' | 'disabled' | 'unknown' | 'passive';

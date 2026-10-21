@@ -6,7 +6,7 @@ package services
 // isolation, one scenario per tenant, against inputs written by hand. That is
 // the right shape for "does IH-003 accept a region as a location" and the wrong
 // shape for the gate, which asks something else: put ONE realistic estate in
-// front of the real reconcile and check that all ten controls and both score
+// front of the real reconcile and check that every control and both score
 // rollups come out right together.
 //
 // The inputs are not hand-written here. They come from `shared/testdb/estate`,
@@ -20,11 +20,13 @@ package services
 //
 // The mutation arm is the reason the gate asks for this at all: skip a producer
 // and its controls must go NOT ASSESSED and the framework score must MOVE.
-// Inventory Hygiene gets BETTER when the hygiene producer stops running — 14
-// becomes 25 — because the two controls that were failing stop being counted
-// at all. That is the three-valued collapse this platform keeps paying for,
-// rendered as a number going up, and it is exactly what the score rollup has to
-// keep visible through `controls_not_assessed` rather than hide.
+// Over IH-001..IH-006 alone, Inventory Hygiene got BETTER when the hygiene
+// producer stopped running — 14 became 25 — because the two controls that were
+// failing stopped being counted at all. That is the three-valued collapse this
+// platform keeps paying for, rendered as a number going up, and it is exactly
+// what the score rollup has to keep visible through `controls_not_assessed`
+// rather than hide. (With the nine DCIM controls both rollups read 25, for
+// different reasons — see the headline test.)
 //
 // Skips without TEST_DATABASE_URL (shared/testdb); `make test-integration-db`.
 
@@ -157,6 +159,18 @@ func TestIntegration_Gate3_InventoryFrameworksScoreTheEstate(t *testing.T) {
 		"web-01's relationship into the archived ghost-01 is an orphan; the finding's subject is the "+
 			"RELATIONSHIP and the control has to reach it through the asset's edges")
 
+	// The DCIM controls (IH-007..IH-015, DCIM gap 6). The estate records no
+	// device types, racks, cables, addresses, warranties or end-of-support
+	// dates, so the live evaluator reads every one NOT ASSESSED — except IH-011,
+	// whose population is every monitored asset, and none has an untyped
+	// interface.
+	for _, control := range []string{"IH-007", "IH-008", "IH-009", "IH-010", "IH-012", "IH-013", "IH-014", "IH-015"} {
+		wantStatus(t, f.status(t, "inventory-hygiene", control), control, "not_assessed",
+			"the estate records nothing this DCIM control judges, and unknown is not compliant")
+	}
+	wantStatus(t, f.status(t, "inventory-hygiene", "IH-011"), "IH-011", "pass",
+		"every monitored asset was assessed by the hygiene producer and none has an untyped interface")
+
 	// --- Lifecycle, control by control.
 	wantStatus(t, f.status(t, "lifecycle", "LC-001"), "LC-001", "fail",
 		"web-01's operating system passed end of life 200 days ago")
@@ -178,9 +192,23 @@ func TestIntegration_Gate3_InventoryFrameworksScoreTheEstate(t *testing.T) {
 
 	hygiene := f.rollup(t, "inventory-hygiene")
 	assertRollup(t, "inventory-hygiene", hygiene, rollup{
-		// One control passes (IH-004, Low, weight 1) out of a total assessed
-		// weight of 7 — IH-001/2/3/6 Low at 1 each and IH-005 Med at 2.
-		Score: intp(14), Total: 6, Passing: 1, Failing: 5, NotAssessed: 0,
+		// IH-001..IH-006: one control passes (IH-004, Low, weight 1) and
+		// IH-001/2/3/6 (Low, 1 each) and IH-005 (Medium, 2) fail. Of the DCIM
+		// controls only IH-011 (Low, 1) is assessed, and it passes: 2 passing
+		// weight over 8 assessed → 25.
+		//
+		// The other eight DCIM controls are NOT ASSESSED, exactly as the live
+		// evaluator reads them above: the estate records no rack, cable,
+		// address, warranty or end-of-support date for them to judge. This
+		// rollup used to read 73 — 10 passing / 0 not assessed — because the
+		// stored fold's scope probe was per SHAPE ("did the hygiene producer
+		// assess any asset?") rather than the measurement's own population
+		// (its subject_where), so every one of those eight scored as a free
+		// pass and an estate with no DCIM records scored HIGHER than one with
+		// them. The probe is now built from the extraction's population
+		// (measurementPopulation), so the two paths agree, and 25 is the honest
+		// number.
+		Score: intp(25), Total: 15, Passing: 2, Failing: 5, NotAssessed: 8,
 	})
 
 	lifecycle := f.rollup(t, "lifecycle")
@@ -204,7 +232,7 @@ func TestIntegration_Gate3_SkippingAProducerTakesItsControlsToNotAssessed(t *tes
 		wantStatus(t, f.status(t, "inventory-hygiene", "IH-001"), "IH-001", "fail", "still read from the asset row")
 		wantStatus(t, f.status(t, "inventory-hygiene", "IH-004"), "IH-004", "pass", "still read from the asset row")
 
-		for _, control := range []string{"IH-005", "IH-006"} {
+		for _, control := range []string{"IH-005", "IH-006", "IH-007", "IH-011", "IH-015"} {
 			res := f.status(t, "inventory-hygiene", control)
 			wantStatus(t, res, control, "not_assessed",
 				"nothing has looked for duplicates or orphan edges on these assets. Reporting PASS here is "+
@@ -217,10 +245,12 @@ func TestIntegration_Gate3_SkippingAProducerTakesItsControlsToNotAssessed(t *tes
 		f.reconcile(t)
 		got := f.rollup(t, "inventory-hygiene")
 		assertRollup(t, "inventory-hygiene (no hygiene producer)", got, rollup{
-			// 1 passing weight over 4 assessed weight. The score went UP from 14
-			// because the two failing controls stopped being counted — which is
-			// why controls_not_assessed has to travel beside it.
-			Score: intp(25), Total: 6, Passing: 1, Failing: 3, NotAssessed: 2,
+			// 1 passing weight over 4 assessed weight: IH-005 and IH-006, which
+			// were failing, stopped being counted — which is why
+			// controls_not_assessed has to travel beside the score.
+			// IH-007..IH-015 count the hygiene producer's findings too, so
+			// they go NOT ASSESSED with IH-005 and IH-006: 2 + 9.
+			Score: intp(25), Total: 15, Passing: 1, Failing: 3, NotAssessed: 11,
 		})
 	})
 

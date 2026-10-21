@@ -133,7 +133,8 @@ func registerDcimIPAMTools(s *mcp.Server, d *Deps) {
 		Name: "vistaplatform_list_interfaces",
 		Description: "List network interfaces, physical and virtual, across the tenant's assets. " +
 			"An Interface belongs to one asset and carries its name, type, speed, enabled state, MAC addresses, " +
-			"LAG and parent links and 802.1Q mode. Filter by asset_id for one device, or by mac_address to find which " +
+			"LAG and parent links, 802.1Q mode and the virtual device contexts (VDOM, vsys, VDC, route domain) it belongs to " +
+			"(`virtual_device_contexts`, by id and name). Filter by asset_id for one device, or by mac_address to find which " +
 			"asset owns a MAC (the same MAC on two assets is a duplicate or a move). Returns `data` (the page) and " +
 			"`pagination.total` (the whole match). To see every interface of ONE asset in natural name order use " +
 			"vistaplatform_get_asset_interfaces. To find who holds an IP address use vistaplatform_find_ip.",
@@ -160,7 +161,8 @@ func registerDcimIPAMTools(s *mcp.Server, d *Deps) {
 		Name: "vistaplatform_get_asset_interfaces",
 		Description: "List one asset's interfaces in natural name order (Gi0/2 before Gi0/10). " +
 			"Use after vistaplatform_get_asset when the question is about a device's ports, its LAG members or " +
-			"its MAC addresses. An unknown asset id returns an empty list, not an error.",
+			"its MAC addresses, or which of the device's virtual device contexts (VDOMs, vsys, VDCs, route domains) each interface " +
+			"belongs to (`virtual_device_contexts`). An unknown asset id returns an empty list, not an error.",
 		Annotations: readOnly("Get an asset's interfaces"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in assetInterfacesInput) (*mcp.CallToolResult, any, error) {
 		return d.run(ctx, req, dcimIPAMPerm, in, func() (any, error) {

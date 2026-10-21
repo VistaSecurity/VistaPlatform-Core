@@ -2,8 +2,9 @@
 // DATA_MODEL §4 `cable_paths`; BUILD_PLAN row 3.2).
 //
 // A path starts at an origin (an interface, console port, console server
-// port, power port, power outlet or circuit termination) and follows NetBox's
-// cable-path algorithm (dcim/models/cables.py CablePath.from_origin):
+// port, power port, power outlet, power feed or circuit termination) and
+// follows NetBox's cable-path algorithm (dcim/models/cables.py
+// CablePath.from_origin):
 //
 //   - From the near-end termination(s), follow their cable(s) to the far-end
 //     terminations.
@@ -18,8 +19,14 @@
 //   - A far-end CIRCUIT termination continues to the circuit's other side. A
 //     peer on a provider network completes the path there; a peer with no
 //     cable ends it; several far-end circuit terminations are a split.
-//   - Any other far end (an interface, console or power endpoint) completes
-//     the path: that is the destination.
+//   - A far-end POWER OUTLET continues upstream through the power port it
+//     draws from (power_outlets.power_port_id: a PDU's outlet is fed by the
+//     PDU's own inlet) when that port is cabled, so a server's power port
+//     traces through its PDU to the power feed (DCIM row 6.1). An outlet with
+//     no inlet, or an uncabled one, completes the path at the outlet, as
+//     NetBox's path does.
+//   - Any other far end (an interface, a console port, a power port or a
+//     power feed) completes the path: that is the destination.
 //   - No cable on the near end ends the path (and an origin with no cable has
 //     no path at all).
 //
@@ -88,7 +95,7 @@ func (n *Node) UnmarshalJSON(b []byte) error {
 var TerminationKinds = []dcim.ObjectKind{
 	dcim.ObjectKindInterface, dcim.ObjectKindFrontPort, dcim.ObjectKindRearPort, dcim.ObjectKindConsolePort,
 	dcim.ObjectKindConsoleServerPort, dcim.ObjectKindCircuitTermination, dcim.ObjectKindPowerPort,
-	dcim.ObjectKindPowerOutlet,
+	dcim.ObjectKindPowerOutlet, dcim.ObjectKindPowerFeed,
 }
 
 // IsTermination reports whether k is a cable termination kind.
@@ -150,6 +157,9 @@ type Graph interface {
 	// CircuitPeer returns the termination on the circuit's other side. ok is
 	// false when the circuit has no other side.
 	CircuitPeer(ctx context.Context, termID uuid.UUID) (peer Peer, ok bool, err error)
+	// OutletPowerPort returns the power port a power outlet draws from (on
+	// the outlet's own asset). ok is false when the outlet names none.
+	OutletPowerPort(ctx context.Context, outletID uuid.UUID) (portID uuid.UUID, ok bool, err error)
 }
 
 // Path is one computed path.
@@ -384,6 +394,29 @@ func Walk(ctx context.Context, g Graph, origin Node) (*Path, error) {
 				return finish(p), nil
 			}
 			terms = []Node{peerNode}
+
+		case dcim.ObjectKindPowerOutlet:
+			// Upstream through the outlet's inlet when it is cabled; any
+			// other case ends here, complete, at the outlet(s).
+			if len(far) == 1 {
+				inlet, ok, err := g.OutletPowerPort(ctx, far[0].ID)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					_, _, cabled, err := g.FarEnd(ctx, N(dcim.ObjectKindPowerPort, inlet))
+					if err != nil {
+						return nil, err
+					}
+					if cabled {
+						terms = []Node{N(dcim.ObjectKindPowerPort, inlet)}
+						continue
+					}
+				}
+			}
+			p.IsComplete = true
+			p.Destinations = far
+			return finish(p), nil
 
 		default:
 			// An endpoint: the path is complete.

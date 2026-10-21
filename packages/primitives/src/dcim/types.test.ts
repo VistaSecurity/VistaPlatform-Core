@@ -121,9 +121,8 @@ describe('DCIM type registries', () => {
       expect(OBJECT_KINDS).toContain(a);
       for (const b of list) expect(cableCompatible(b, a)).toBe(true);
     }
-    expect(cableCompatible('power_outlet', 'power_port')).toBe(true);
-    expect(cableCompatible('power_port', 'power_port')).toBe(false);
-    expect(OBJECT_KINDS).not.toContain('power_feed');
+    expect(cableCompatible('power_feed', 'power_port')).toBe(true);
+    expect(cableCompatible('power_feed', 'power_outlet')).toBe(false);
     expect(cableCompatible('interface', 'interface')).toBe(true);
     expect(cableCompatible('asset', 'interface')).toBe(false);
   });
@@ -180,12 +179,8 @@ describe('DCIM type registries', () => {
     const mine = Object.fromEntries(
       Object.entries(CABLE_COMPATIBLE_TERMINATIONS).map(([a, l]) => [squash(a), l.map(squash).sort()]),
     );
-    // NetBox kinds deferred until power ships (ADR-0010 D9) are not in our registry.
-    const deferred = new Set(['powerfeed']);
     const theirs = Object.fromEntries(
-      Object.entries(snap.compatible_termination_types)
-        .filter(([a]) => !deferred.has(a))
-        .map(([a, l]) => [a, l.filter((k) => !deferred.has(k)).sort()]),
+      Object.entries(snap.compatible_termination_types).map(([a, l]) => [a, [...l].sort()]),
     );
     expect(mine).toEqual(theirs);
   });

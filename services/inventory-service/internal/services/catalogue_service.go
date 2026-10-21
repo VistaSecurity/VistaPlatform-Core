@@ -12,14 +12,21 @@ package services
 // ErrIPAMReadOnly (403) on any write.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 
 	shareddb "github.com/vistasecurity/vistaplatform/shared/database"
 	"github.com/vistasecurity/vistaplatform/shared/dcim"
@@ -248,6 +255,54 @@ type AssetHardware struct {
 	Serial       *string        `json:"serial"`
 	AssetTag     *string        `json:"asset_tag"`
 	Templates    map[string]int `json:"template_counts"`
+	// The commercial lifecycle (DCIM gap 4): the asset's declared commercial
+	// columns, its device type's and platform's end-of-sale / end-of-support /
+	// end-of-life dates each with where it came from, and the computed block.
+	Commercial    models.AssetCommercial `json:"commercial"`
+	DeviceTypeEOS *CatalogueEOS          `json:"device_type_eos"`
+	PlatformEOS   *CatalogueEOS          `json:"platform_eos"`
+	Lifecycle     models.AssetLifecycle  `json:"lifecycle"`
+}
+
+// CatalogueEOS is a device type's or platform's three lifecycle dates. A
+// declared date wins; a NULL one falls back to the linked end-of-life catalogue
+// entry (end_of_support ← eol_date, end_of_life ← extended_support_date; the
+// catalogue has no end-of-sale date).
+type CatalogueEOS struct {
+	EndOfSale    EOSDate          `json:"end_of_sale"`
+	EndOfSupport EOSDate          `json:"end_of_support"`
+	EndOfLife    EOSDate          `json:"end_of_life"`
+	EOLCatalogue *EOLCatalogueRef `json:"eol_catalogue"`
+}
+
+// EOSDate is one lifecycle date and its source: declared, catalogue, or none
+// (Date nil).
+type EOSDate struct {
+	Date   *string `json:"date"`
+	Source string  `json:"source"`
+}
+
+// EOLCatalogueRef summarises an end-of-life catalogue entry.
+type EOLCatalogueRef struct {
+	ID                  uuid.UUID `json:"id"`
+	ProductKind         string    `json:"product_kind"`
+	Vendor              *string   `json:"vendor"`
+	Product             string    `json:"product"`
+	Cycle               string    `json:"cycle"`
+	EOLDate             *string   `json:"eol_date"`
+	ExtendedSupportDate *string   `json:"extended_support_date"`
+}
+
+func eosDate(declared, catalogue sql.NullString) EOSDate {
+	switch {
+	case declared.Valid:
+		v := declared.String
+		return EOSDate{Date: &v, Source: models.EOSSourceDecl}
+	case catalogue.Valid:
+		v := catalogue.String
+		return EOSDate{Date: &v, Source: models.EOSSourceCat}
+	}
+	return EOSDate{Source: models.EOSSourceNone}
 }
 
 // HardwareRef is a referenced catalogue row, summarised.
@@ -337,45 +392,207 @@ func hardwareTx(ctx context.Context, tx *sql.Tx, tenant, asset uuid.UUID) (*Asse
 	if platID.Valid {
 		h.Platform = &HardwareRef{ID: platID.UUID, Name: platName.String, Slug: platSlug.String}
 	}
+	if err := loadHardwareLifecycle(ctx, tx, tenant, asset, h); err != nil {
+		return nil, err
+	}
 	return h, nil
 }
 
-// HardwarePatch is a partial update of an asset's catalogue columns. A field
-// absent from the body is left alone; JSON null (or "") clears it.
-type HardwarePatch map[string]json.RawMessage
-
-var hardwareFields = map[string]string{
-	"device_type_id": "device_types", "device_role_id": "device_roles", "platform_id": "platforms",
-	"serial": "", "asset_tag": "",
+// loadHardwareLifecycle fills the view's commercial columns, the device type's
+// and platform's dates with their sources, and the computed lifecycle block.
+func loadHardwareLifecycle(ctx context.Context, tx *sql.Tx, tenant, asset uuid.UUID, h *AssetHardware) error {
+	var (
+		c        [11]sql.NullString
+		dt, pl   [3]sql.NullString // declared end_of_sale, end_of_support, end_of_life
+		dtE, plE struct {
+			id                    uuid.NullUUID
+			kind, vendor, product sql.NullString
+			cycle, eol, extended  sql.NullString
+		}
+		hasDT, hasPL bool
+	)
+	err := tx.QueryRowContext(ctx, `
+		SELECT a.purchase_date::text, a.warranty_start::text, a.warranty_end::text, a.purchase_cost::text,
+		       a.purchase_currency::text, a.purchase_order, a.vendor, a.support_contract,
+		       a.support_contract_end::text, a.installed_at::text, a.decommissioned_at::text,
+		       dt.id IS NOT NULL, dt.end_of_sale::text, dt.end_of_support::text, dt.end_of_life::text,
+		       dte.id, dte.product_kind, dte.vendor, dte.product, dte.cycle, dte.eol_date::text, dte.extended_support_date::text,
+		       pl.id IS NOT NULL, pl.end_of_sale::text, pl.end_of_support::text, pl.end_of_life::text,
+		       ple.id, ple.product_kind, ple.vendor, ple.product, ple.cycle, ple.eol_date::text, ple.extended_support_date::text
+		  FROM assets a
+		  LEFT JOIN device_types dt ON dt.id = a.device_type_id
+		  LEFT JOIN eol_catalogue dte ON dte.id = dt.eol_catalogue_id
+		  LEFT JOIN platforms pl ON pl.id = a.platform_id
+		  LEFT JOIN eol_catalogue ple ON ple.id = pl.eol_catalogue_id
+		 WHERE a.tenant_id = $1 AND a.id = $2`, tenant, asset).Scan(
+		&c[0], &c[1], &c[2], &c[3], &c[4], &c[5], &c[6], &c[7], &c[8], &c[9], &c[10],
+		&hasDT, &dt[0], &dt[1], &dt[2],
+		&dtE.id, &dtE.kind, &dtE.vendor, &dtE.product, &dtE.cycle, &dtE.eol, &dtE.extended,
+		&hasPL, &pl[0], &pl[1], &pl[2],
+		&plE.id, &plE.kind, &plE.vendor, &plE.product, &plE.cycle, &plE.eol, &plE.extended)
+	if err != nil {
+		return err
+	}
+	h.Commercial = models.AssetCommercial{
+		PurchaseDate: ifaceStrPtr(c[0]), WarrantyStart: ifaceStrPtr(c[1]), WarrantyEnd: ifaceStrPtr(c[2]),
+		PurchaseCurrency: ifaceStrPtr(c[4]), PurchaseOrder: ifaceStrPtr(c[5]), Vendor: ifaceStrPtr(c[6]),
+		SupportContract: ifaceStrPtr(c[7]), SupportContractEnd: ifaceStrPtr(c[8]), InstalledAt: ifaceStrPtr(c[9]),
+		DecommissionedAt: ifaceStrPtr(c[10]),
+	}
+	if c[3].Valid {
+		if f, err := strconv.ParseFloat(c[3].String, 64); err == nil {
+			h.Commercial.PurchaseCost = &f
+		}
+	}
+	build := func(d [3]sql.NullString, id uuid.NullUUID, kind, vendor, product, cycle, eol, extended sql.NullString) *CatalogueEOS {
+		out := &CatalogueEOS{
+			EndOfSale:    eosDate(d[0], sql.NullString{}),
+			EndOfSupport: eosDate(d[1], eol),
+			EndOfLife:    eosDate(d[2], extended),
+		}
+		if id.Valid {
+			out.EOLCatalogue = &EOLCatalogueRef{ID: id.UUID, ProductKind: kind.String, Vendor: ifaceStrPtr(vendor),
+				Product: product.String, Cycle: cycle.String, EOLDate: ifaceStrPtr(eol), ExtendedSupportDate: ifaceStrPtr(extended)}
+		}
+		return out
+	}
+	in := LifecycleInputs{WarrantyEnd: parseISODate(h.Commercial.WarrantyEnd)}
+	if hasDT {
+		h.DeviceTypeEOS = build(dt, dtE.id, dtE.kind, dtE.vendor, dtE.product, dtE.cycle, dtE.eol, dtE.extended)
+		in.DeviceType = EOSCandidate{Declared: parseISODate(ifaceStrPtr(dt[1])), Catalogue: parseISODate(ifaceStrPtr(dtE.eol))}
+	}
+	if hasPL {
+		h.PlatformEOS = build(pl, plE.id, plE.kind, plE.vendor, plE.product, plE.cycle, plE.eol, plE.extended)
+		in.Platform = EOSCandidate{Declared: parseISODate(ifaceStrPtr(pl[1])), Catalogue: parseISODate(ifaceStrPtr(plE.eol))}
+	}
+	h.Lifecycle = ComputeAssetLifecycle(in, lifecycleNow())
+	return nil
 }
 
-// UpdateHardware writes an asset's device type, device role, platform, serial
-// and asset tag. Setting a device type here does NOT instantiate its templates
-// (that is ApplyDeviceType, the explicit "Apply templates" action).
+// HardwarePatch is a partial update of an asset's catalogue and commercial
+// columns. A field absent from the body is left alone; JSON null (or "") clears
+// it.
+type HardwarePatch map[string]json.RawMessage
+
+// hwKind is how a hardware-patch field is validated and cast.
+type hwKind int
+
+const (
+	hwRef       hwKind = iota // a catalogue row id
+	hwShortText               // ≤ 100 characters (serial, asset tag)
+	hwText                    // ≤ 200 characters
+	hwDate                    // YYYY-MM-DD
+	hwMoney                   // non-negative, ≤ 12 integer digits and 2 decimals; string or number
+	hwCurrency                // ISO 4217: three letters, stored upper-case
+)
+
+type hwField struct {
+	table string // for hwRef
+	kind  hwKind
+}
+
+// hardwareFields are the columns PATCH /dcim/assets/{id}/hardware writes: the
+// device catalogue (row 2.2) and the commercial lifecycle (DCIM gap 4).
+var hardwareFields = map[string]hwField{
+	"device_type_id": {"device_types", hwRef}, "device_role_id": {"device_roles", hwRef}, "platform_id": {"platforms", hwRef},
+	"serial": {kind: hwShortText}, "asset_tag": {kind: hwShortText},
+	"purchase_date": {kind: hwDate}, "warranty_start": {kind: hwDate}, "warranty_end": {kind: hwDate},
+	"purchase_cost": {kind: hwMoney}, "purchase_currency": {kind: hwCurrency}, "purchase_order": {kind: hwText},
+	"vendor": {kind: hwText}, "support_contract": {kind: hwText}, "support_contract_end": {kind: hwDate},
+	"installed_at": {kind: hwDate}, "decommissioned_at": {kind: hwDate},
+}
+
+// hardwareFieldOrder is the write and change-record order (and the SELECT in
+// lockAssetHardware).
+var hardwareFieldOrder = []string{
+	"device_type_id", "device_role_id", "platform_id", "serial", "asset_tag",
+	"purchase_date", "warranty_start", "warranty_end", "purchase_cost", "purchase_currency", "purchase_order",
+	"vendor", "support_contract", "support_contract_end", "installed_at", "decommissioned_at",
+}
+
+// CommercialFields are the eleven commercial lifecycle columns, in order.
+func CommercialFields() []string { return append([]string(nil), hardwareFieldOrder[5:]...) }
+
+var moneyPattern = regexp.MustCompile(`^[0-9]{1,12}(\.[0-9]{1,2})?$`)
+
+// parseHardwareValue validates one patch value; nil clears.
+func parseHardwareValue(k string, f hwField, raw json.RawMessage) (any, error) {
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return nil, ipamInvalid("%s is not valid JSON", k)
+	}
+	var str string
+	switch t := v.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		str = strings.TrimSpace(t)
+	case json.Number:
+		if f.kind != hwMoney {
+			return nil, ipamInvalid("%s must be a string or null", k)
+		}
+		str = t.String()
+	default:
+		if f.kind == hwMoney {
+			return nil, ipamInvalid("%s must be a number, a string or null", k)
+		}
+		return nil, ipamInvalid("%s must be a string or null", k)
+	}
+	if str == "" {
+		return nil, nil
+	}
+	switch f.kind {
+	case hwRef:
+		if _, err := uuid.Parse(str); err != nil {
+			return nil, ipamInvalid("%s must be a UUID", k)
+		}
+	case hwShortText:
+		if len(str) > 100 {
+			return nil, ipamInvalid("%s is longer than 100 characters", k)
+		}
+	case hwText:
+		if len(str) > 200 {
+			return nil, ipamInvalid("%s is longer than 200 characters", k)
+		}
+	case hwDate:
+		d, err := time.Parse(isoDate, str)
+		if err != nil {
+			return nil, ipamInvalid("%s must be a date, YYYY-MM-DD", k)
+		}
+		str = d.Format(isoDate)
+	case hwMoney:
+		if !moneyPattern.MatchString(str) {
+			return nil, ipamInvalid("%s must be a non-negative amount with at most two decimals", k)
+		}
+		r, _ := new(big.Rat).SetString(str)
+		str = r.FloatString(2)
+	case hwCurrency:
+		str = strings.ToUpper(str)
+		if len(str) != 3 || strings.Trim(str, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+			return nil, ipamInvalid("%s must be a three-letter ISO 4217 code", k)
+		}
+	}
+	return str, nil
+}
+
+// UpdateHardware writes an asset's device type, device role, platform, serial,
+// asset tag and commercial lifecycle columns. Setting a device type here does
+// NOT instantiate its templates (that is ApplyDeviceType, the explicit "Apply
+// templates" action).
 func (s *CatalogueService) UpdateHardware(ctx context.Context, tenant, asset uuid.UUID, patch HardwarePatch) (*AssetHardware, error) {
 	sets := map[string]any{}
 	for k, raw := range patch {
-		table, ok := hardwareFields[k]
+		f, ok := hardwareFields[k]
 		if !ok {
 			return nil, ipamInvalid("unknown or read-only field %q", k)
 		}
-		var v *string
-		if err := json.Unmarshal(raw, &v); err != nil {
-			return nil, ipamInvalid("%s must be a string or null", k)
+		v, err := parseHardwareValue(k, f, raw)
+		if err != nil {
+			return nil, err
 		}
-		if v == nil || strings.TrimSpace(*v) == "" {
-			sets[k] = nil
-			continue
-		}
-		val := strings.TrimSpace(*v)
-		if table != "" {
-			if _, err := uuid.Parse(val); err != nil {
-				return nil, ipamInvalid("%s must be a UUID", k)
-			}
-		} else if len(val) > 100 {
-			return nil, ipamInvalid("%s is longer than 100 characters", k)
-		}
-		sets[k] = val
+		sets[k] = v
 	}
 	var out *AssetHardware
 	err := shareddb.WithTenantTx(ctx, s.db, tenant, func(tx *sql.Tx) error {
@@ -384,14 +601,17 @@ func (s *CatalogueService) UpdateHardware(ctx context.Context, tenant, asset uui
 			return err
 		}
 		for k, v := range sets {
-			if table := hardwareFields[k]; table != "" && v != nil {
-				if err := visible(ctx, tx, table, v); err != nil {
+			if f := hardwareFields[k]; f.kind == hwRef && v != nil {
+				if err := visible(ctx, tx, f.table, v); err != nil {
 					return err
 				}
 				if k == "device_type_id" && !isHardwarePath(pre.classPath) {
 					return ipamInvalid("a device type applies to hardware-class assets only (this asset is %s)", pre.classPath)
 				}
 			}
+		}
+		if err := checkCommercialOrder(pre, sets); err != nil {
+			return err
 		}
 		if err := writeAssetHardware(ctx, tx, tenant, asset, pre, sets); err != nil {
 			return err
@@ -402,42 +622,71 @@ func (s *CatalogueService) UpdateHardware(ctx context.Context, tenant, asset uui
 	return out, mapIPAMError(err, false)
 }
 
+// checkCommercialOrder refuses a warranty that ends before it starts, or a
+// decommission before the installation, on the row as it will be after the
+// patch. ISO dates compare as strings.
+func checkCommercialOrder(pre assetHardwareRow, sets map[string]any) error {
+	val := func(k string) string {
+		v, ok := sets[k]
+		if !ok {
+			v = pre.values[k]
+		}
+		if v == nil {
+			return ""
+		}
+		return fmt.Sprint(v)
+	}
+	for _, pair := range [][2]string{{"warranty_start", "warranty_end"}, {"installed_at", "decommissioned_at"}} {
+		a, b := val(pair[0]), val(pair[1])
+		if a != "" && b != "" && b < a {
+			return ipamInvalid("%s (%s) is before %s (%s)", pair[1], b, pair[0], a)
+		}
+	}
+	return nil
+}
+
 type assetHardwareRow struct {
 	classPath string
 	values    map[string]any
 }
 
 func lockAssetHardware(ctx context.Context, tx *sql.Tx, tenant, asset uuid.UUID) (assetHardwareRow, error) {
-	var (
-		r              = assetHardwareRow{values: map[string]any{}}
-		dt, role, plat uuid.NullUUID
-		serial, tag    sql.NullString
-	)
-	err := tx.QueryRowContext(ctx, `
-		SELECT class_path, device_type_id, device_role_id, platform_id, serial, asset_tag
-		  FROM assets WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`, tenant, asset).Scan(
-		&r.classPath, &dt, &role, &plat, &serial, &tag)
+	r := assetHardwareRow{values: map[string]any{}}
+	cols := make([]string, len(hardwareFieldOrder))
+	vals := make([]sql.NullString, len(hardwareFieldOrder))
+	dest := []any{&r.classPath}
+	for i, k := range hardwareFieldOrder {
+		cols[i] = k + "::text"
+		dest = append(dest, &vals[i])
+	}
+	err := tx.QueryRowContext(ctx, `SELECT class_path, `+strings.Join(cols, ", ")+`
+		  FROM assets WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`, tenant, asset).Scan(dest...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrCatalogueAssetNotFound
 	}
 	if err != nil {
 		return r, err
 	}
-	str := func(u uuid.NullUUID) any {
-		if !u.Valid {
-			return nil
+	for i, k := range hardwareFieldOrder {
+		if vals[i].Valid {
+			r.values[k] = vals[i].String
+		} else {
+			r.values[k] = nil
 		}
-		return u.UUID.String()
 	}
-	ns := func(s sql.NullString) any {
-		if !s.Valid {
-			return nil
-		}
-		return s.String
-	}
-	r.values["device_type_id"], r.values["device_role_id"], r.values["platform_id"] = str(dt), str(role), str(plat)
-	r.values["serial"], r.values["asset_tag"] = ns(serial), ns(tag)
 	return r, nil
+}
+
+func (f hwField) cast() string {
+	switch f.kind {
+	case hwRef:
+		return "::uuid"
+	case hwDate:
+		return "::date"
+	case hwMoney:
+		return "::numeric"
+	}
+	return ""
 }
 
 // writeAssetHardware writes the changed columns and records ONE asset change
@@ -449,17 +698,13 @@ func writeAssetHardware(ctx context.Context, tx *sql.Tx, tenant, asset uuid.UUID
 		before  = map[string]any{}
 		after   = map[string]any{}
 	)
-	for _, k := range []string{"device_type_id", "device_role_id", "platform_id", "serial", "asset_tag"} {
+	for _, k := range hardwareFieldOrder {
 		v, ok := sets[k]
 		if !ok || fmt.Sprint(v) == fmt.Sprint(pre.values[k]) {
 			continue
 		}
 		args = append(args, v)
-		cast := ""
-		if hardwareFields[k] != "" {
-			cast = "::uuid"
-		}
-		clauses = append(clauses, fmt.Sprintf("%s = $%d%s", k, len(args), cast))
+		clauses = append(clauses, fmt.Sprintf("%s = $%d%s", k, len(args), hardwareFields[k].cast()))
 		before[k], after[k] = pre.values[k], v
 	}
 	if len(clauses) == 0 {

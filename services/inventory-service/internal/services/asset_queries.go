@@ -106,7 +106,8 @@ func (s *AssetService) GetAssets(tenantID uuid.UUID, filters models.AssetFilters
 				         WHERE ci3.asset_id = a.id AND ci3.deleted_at IS NULL
 				           AND ci3.protocol IS NOT NULL
 				         GROUP BY ci3.protocol) p
-			), '[]'::jsonb)::text AS protocol_summary
+			), '[]'::jsonb)::text AS protocol_summary,
+			` + assetLifecycleSQL + ` AS lifecycle
 		FROM assets a
 		LEFT JOIN prefixes pfx ON pfx.tenant_id = a.tenant_id AND pfx.id = a.prefix_id
 		WHERE ` + where
@@ -219,7 +220,7 @@ func assetIDs(assets []models.Asset) []uuid.UUID {
 func scanAssetListRow(rows *sqlx.Rows) (*models.Asset, error) {
 	var asset models.Asset
 	var certCount, cfgCount sql.NullInt64
-	var protocolSummaryText string
+	var protocolSummaryText, lifecycleText string
 	var tagsText, metadataText, attributesText string
 	var assessedBy pq.StringArray
 	if err := rows.Scan(
@@ -232,11 +233,12 @@ func scanAssetListRow(rows *sqlx.Rows) (*models.Asset, error) {
 		&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
 		&asset.DeletedAt, &asset.LocationID, &asset.PrefixID, &asset.Prefix,
 		&asset.Site, &asset.Location, &asset.Rack, &asset.Region, &asset.Zone,
-		&certCount, &cfgCount, &protocolSummaryText,
+		&certCount, &cfgCount, &protocolSummaryText, &lifecycleText,
 	); err != nil {
 		return nil, fmt.Errorf("failed to scan asset: %w", err)
 	}
 	asset.RiskAssessedBy = []string(assessedBy)
+	applyAssetLifecycle(&asset, lifecycleText)
 	unmarshalJSONInto(attributesText, &asset.Attributes)
 	unmarshalJSONInto(tagsText, &asset.Tags)
 	unmarshalJSONInto(metadataText, &asset.Metadata)
@@ -290,13 +292,14 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at,
 			a.location_id, a.prefix_id, pfx.prefix::text AS prefix,
-			` + assetSiteSQL + `, ` + assetLocationSQL + `, ` + assetRackSQL + `, a.region, a.zone, a.custom_fields::text
+			` + assetSiteSQL + `, ` + assetLocationSQL + `, ` + assetRackSQL + `, a.region, a.zone, a.custom_fields::text,
+			` + assetLifecycleSQL + `
 		FROM assets a
 		LEFT JOIN prefixes pfx ON pfx.tenant_id = a.tenant_id AND pfx.id = a.prefix_id
 		WHERE a.id = $1 AND a.tenant_id = $2 AND a.deleted_at IS NULL
 	`
 	var asset models.Asset
-	var tagsText, metadataText, attributesText, customFieldsText string
+	var tagsText, metadataText, attributesText, customFieldsText, lifecycleText string
 	var operatingSystem *string
 	var assessedBy pq.StringArray
 	// RLS-scoped read over assets / prefixes — wrapped in WithTenantTx.
@@ -312,7 +315,7 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 			&asset.RiskScore, &assessedBy,
 			&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
 			&asset.DeletedAt, &asset.LocationID, &asset.PrefixID, &asset.Prefix,
-			&asset.Site, &asset.Location, &asset.Rack, &asset.Region, &asset.Zone, &customFieldsText,
+			&asset.Site, &asset.Location, &asset.Rack, &asset.Region, &asset.Zone, &customFieldsText, &lifecycleText,
 		)
 	}); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -321,6 +324,7 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 		return nil, fmt.Errorf("failed to get asset: %w", err)
 	}
 	asset.RiskAssessedBy = []string(assessedBy)
+	applyAssetLifecycle(&asset, lifecycleText)
 	asset.CustomFields = map[string]interface{}{}
 	if customFieldsText != "" {
 		_ = json.Unmarshal([]byte(customFieldsText), &asset.CustomFields)

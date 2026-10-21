@@ -86,3 +86,36 @@ it('success: a manager adds a platform naming its manufacturer', async () => {
   expect(api.POST.mock.calls[0][0]).toBe('/dcim/platforms');
   expect((api.POST.mock.calls[0][1] as { body: unknown }).body).toMatchObject({ name: 'IOS-XE', manufacturer_id: 'm1' });
 });
+
+// DCIM gap 4: a platform carries the three lifecycle dates and links an `os`
+// end-of-life catalogue entry (the picker asks for os entries only).
+it('success: a new platform records its end of support and its end-of-life catalogue entry', async () => {
+  const entry = { id: 'e9', product_kind: 'os', vendor: 'Acme', product: 'AcmeOS', cycle: '9', eol_date: '2031-01-01', extended_support_date: null };
+  api.GET.mockImplementation(async (path: string, init?: { params?: { query?: Record<string, unknown> } }) => {
+    if (path === '/dcim/manufacturers') return { data: { data: MFRS, pagination: { total: 2 } } };
+    if (path === '/dcim/eol-catalogue') {
+      expect(init?.params?.query?.product_kind).toBe('os');
+      return { data: { data: [entry] } };
+    }
+    return { data: { data: [], pagination: { total: 0 } } };
+  });
+  api.POST.mockResolvedValue({ data: { data: { id: 'p1', name: 'AcmeOS' } } });
+  await render(['dcim.read', 'dcim.manage'], PlatformsPage);
+  await act(async () => { btn(/Add platform/)!.click(); });
+  const set = (sel: string, v: string) => {
+    const el = document.querySelector(sel) as HTMLInputElement | HTMLSelectElement;
+    const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(el, v);
+    el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }));
+  };
+  const picker = () => document.querySelector('select[aria-label="End-of-life catalogue entry"]') as HTMLSelectElement;
+  await vi.waitFor(() => expect([...picker().options].map((o) => o.value)).toContain('e9'));
+  await act(async () => {
+    set('input[aria-label="Name"]', 'AcmeOS');
+    set('input[aria-label="End of life"]', '2032-06-30');
+    set('select[aria-label="End-of-life catalogue entry"]', 'e9');
+  });
+  await act(async () => { (document.querySelector('[data-testid="catalogue-save"]') as HTMLButtonElement).click(); });
+  await vi.waitFor(() => expect(api.POST).toHaveBeenCalledTimes(1));
+  expect((api.POST.mock.calls[0][1] as { body: unknown }).body).toMatchObject({ name: 'AcmeOS', end_of_life: '2032-06-30', eol_catalogue_id: 'e9', end_of_support: null });
+});

@@ -1,6 +1,6 @@
 // The asset faceplate (DCIM BUILD_PLAN row 3.4; ADR-0010 D10): the asset's
-// interfaces — and its console, console server, front and rear ports in their
-// own rows — drawn as ports in the device type's template order, wrapping at
+// interfaces — and its console, console server, front and rear ports, and
+// (row 6.1) its power ports and outlets, in their own rows — drawn as ports in the device type's template order, wrapping at
 // 24 per row (a 48-port switch is two rows). Each port shows its link state
 // (border), whether it is cabled (a dot; a proposed or planned cable dashed),
 // and, with the crypto overlay on (the default), a tint from the weakest crypto
@@ -66,6 +66,8 @@ export function useFaceplatePorts(asset: Pick<Asset, 'id'>) {
     console_server_port: useAssetPorts(asset.id, 'console-server-ports'),
     front_port: useAssetPorts(asset.id, 'front-ports'),
     rear_port: useAssetPorts(asset.id, 'rear-ports'),
+    power_port: useAssetPorts(asset.id, 'power-ports'),
+    power_outlet: useAssetPorts(asset.id, 'power-outlets'),
   };
   const hardware = useAssetHardware(asset.id);
   const templates = useTemplateOrder(hardware.data?.device_type?.id);
@@ -82,7 +84,7 @@ export function useFaceplatePorts(asset: Pick<Asset, 'id'>) {
         state: interfaceState(i), cableId: i.cable_id, markConnected: i.mark_connected,
       })), t.interface),
     });
-    for (const k of ['console_port', 'console_server_port', 'front_port', 'rear_port'] as const) {
+    for (const k of ['console_port', 'console_server_port', 'front_port', 'rear_port', 'power_port', 'power_outlet'] as const) {
       const rows = (lists[k].data?.rows ?? []) as { id: string; name: string; label: string | null; type: string | null; cable_id: string | null; mark_connected: boolean }[];
       out.push({
         kind: k,
@@ -92,7 +94,8 @@ export function useFaceplatePorts(asset: Pick<Asset, 'id'>) {
       });
     }
     return out.filter((g) => g.ports.length > 0);
-  }, [ifaces.data, lists.console_port.data, lists.console_server_port.data, lists.front_port.data, lists.rear_port.data, templates.data]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ifaces.data, lists.console_port.data, lists.console_server_port.data, lists.front_port.data, lists.rear_port.data, lists.power_port.data, lists.power_outlet.data, templates.data]);
   const hidden = (ifaces.data?.rows ?? []).filter((i) => !isPhysicalInterface(i.type)).length;
   return { groups, hidden, isLoading, error: failed?.error ?? null, refetch: () => { void ifaces.refetch(); for (const l of Object.values(lists)) void l.refetch(); } };
 }

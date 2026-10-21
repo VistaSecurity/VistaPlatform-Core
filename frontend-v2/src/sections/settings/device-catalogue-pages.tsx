@@ -8,10 +8,10 @@ import { useState, type ReactNode } from 'react';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { Icon } from '../../components/ui';
 import { PanelEmpty, PanelError, PanelLoading } from '../inventory/dcim/substrate-states';
-import { CatalogueDeleteModal, CatalogueFormModal, type CatalogueField } from '../inventory/dcim/catalogue-form';
+import { CatalogueDeleteModal, CatalogueFormModal, eosFields, eosInitial, type CatalogueField } from '../inventory/dcim/catalogue-form';
 import {
-  isPlatformRow, useCatalogueList, useCatalogueWrite,
-  type CatalogueRoute, type CatalogueRows, type Manufacturer,
+  isPlatformRow, useCatalogueList, useCatalogueWrite, useEOLCatalogue,
+  type CatalogueRoute, type CatalogueRows, type EOLCatalogueRef, type Manufacturer,
 } from '../inventory/dcim/catalogue-queries';
 import { SPage, SSection, STable, STableRow, STag, type STableCol } from './kit';
 import type { SettingsNavItem } from './nav';
@@ -25,7 +25,8 @@ interface TableConfig<R extends CatalogueRoute> {
   desc: string;
   cols: STableCol[];
   cells: (row: CatalogueRows[R], manufacturerName: (id: string | null | undefined) => string) => ReactNode[];
-  fields: (manufacturers: Manufacturer[]) => CatalogueField[];
+  /** `eol` is the end-of-life catalogue picker's state, for the kinds that link to it (platforms). */
+  fields: (manufacturers: Manufacturer[], eol: { entries: EOLCatalogueRef[]; loading: boolean; current?: string | null; source?: string | null }) => CatalogueField[];
   initial: (row: CatalogueRows[R]) => Record<string, unknown>;
 }
 
@@ -40,6 +41,8 @@ function CatalogueTable<R extends CatalogueRoute>({ c }: { c: TableConfig<R> }) 
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<CatalogueRows[R] | null>(null);
   const [deleting, setDeleting] = useState<CatalogueRows[R] | null>(null);
+  const eolQ = useEOLCatalogue('os', needsManufacturers && (adding || editing !== null));
+  const eol = (current?: string | null, source?: string | null) => ({ entries: eolQ.data ?? [], loading: eolQ.isLoading, current, source });
   const cols = [...c.cols, ACTIONS_COL];
   const mfrName = (id: string | null | undefined) => (id ? (mfrs.data?.rows ?? []).find((m) => m.id === id)?.name ?? '—' : '—');
   const rows = list.data?.rows ?? [];
@@ -81,11 +84,11 @@ function CatalogueTable<R extends CatalogueRoute>({ c }: { c: TableConfig<R> }) 
         )}
       </div>
       {adding && (
-        <CatalogueFormModal title={`Add ${c.noun}`} editing={false} fields={c.fields(mfrs.data?.rows ?? [])}
+        <CatalogueFormModal title={`Add ${c.noun}`} editing={false} fields={c.fields(mfrs.data?.rows ?? [], eol())}
           onSubmit={(body) => write.create.mutateAsync(body)} onClose={() => setAdding(false)} />
       )}
       {editing && (
-        <CatalogueFormModal title={`Edit ${name(editing)}`} editing fields={c.fields(mfrs.data?.rows ?? [])} initial={c.initial(editing)}
+        <CatalogueFormModal title={`Edit ${name(editing)}`} editing fields={c.fields(mfrs.data?.rows ?? [], eol((editing as { eol_catalogue_id?: string | null }).eol_catalogue_id, (editing as { eol_link_source?: string | null }).eol_link_source))} initial={c.initial(editing)}
           onSubmit={(body) => write.update.mutateAsync({ id: (editing as { id: string }).id, body })} onClose={() => setEditing(null)} />
       )}
       {deleting && (
@@ -131,12 +134,13 @@ export const PLATFORMS: TableConfig<'platforms'> = {
   desc: 'The operating system or firmware family a device runs — IOS-XE, Junos, FortiOS, Ubuntu.',
   cols: [{ label: 'Name', w: '1.4fr' }, { label: 'Slug', w: '1fr' }, { label: 'Manufacturer', w: '1fr' }],
   cells: (p, mfrName) => [p.name, <span key="s" className="mono">{p.slug}</span>, mfrName(p.manufacturer_id)],
-  fields: (mfrs) => [
+  fields: (mfrs, eol) => [
     { name: 'name', label: 'Name', required: true }, slugField,
     { name: 'manufacturer_id', label: 'Manufacturer', kind: 'select', options: [{ value: '', label: 'None' }, ...mfrs.map((m) => ({ value: m.id, label: m.name }))] },
     { name: 'description', label: 'Description' },
+    ...eosFields(eol.entries, eol.current, eol.loading, eol.source),
   ],
-  initial: (p) => ({ name: p.name, slug: p.slug, manufacturer_id: p.manufacturer_id ?? '', description: p.description ?? '' }),
+  initial: (p) => ({ name: p.name, slug: p.slug, manufacturer_id: p.manufacturer_id ?? '', description: p.description ?? '', ...eosInitial(p) }),
 };
 
 export function ManufacturersPage({ meta }: { meta: SettingsNavItem }) {

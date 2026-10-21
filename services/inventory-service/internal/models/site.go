@@ -162,6 +162,11 @@ type Location struct {
 	// Path is "Site / Floor / Room" (public.location_path).
 	Path       string `json:"path"`
 	AssetCount int    `json:"asset_count"`
+	// The floor plan (DCIM gap 9): width (x) by depth (y) in FloorPlanUnit
+	// ("m" or "ft"); all three nil when the location has none.
+	FloorPlanWidth *float64 `json:"floor_plan_width"`
+	FloorPlanDepth *float64 `json:"floor_plan_depth"`
+	FloorPlanUnit  *string  `json:"floor_plan_unit"`
 }
 
 // presence records which JSON keys a patch carried, so `"x": null` (clear) and
@@ -262,7 +267,12 @@ type LocationInput struct {
 	BusinessUnitID    *uuid.UUID `json:"business_unit_id"`
 	Description       *string    `json:"description"`
 	Comments          *string    `json:"comments"`
-	Set               presence   `json:"-"`
+	// The floor plan (DCIM gap 9): set all three, or null all three to
+	// remove the plan.
+	FloorPlanWidth *float64 `json:"floor_plan_width"`
+	FloorPlanDepth *float64 `json:"floor_plan_depth"`
+	FloorPlanUnit  *string  `json:"floor_plan_unit"`
+	Set            presence `json:"-"`
 }
 
 // Has reports whether the payload carried key.

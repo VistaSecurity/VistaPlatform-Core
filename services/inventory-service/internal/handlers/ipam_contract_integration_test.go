@@ -38,6 +38,7 @@ func TestIntegration_IPAMContract_ResponsesConform(t *testing.T) {
 	h := NewIPAMHandler(services.NewIPAMService(app))
 	g.GET("/find", h.Find)
 	g.GET("/prefixes/tree", h.PrefixTree)
+	g.GET("/asn-ranges/:id/available-asns", h.AvailableASNs)
 	for _, rt := range services.IPAMRoutes() {
 		g.GET("/"+rt, h.List(rt))
 		g.POST("/"+rt, h.Create(rt))
@@ -97,10 +98,19 @@ func TestIntegration_IPAMContract_ResponsesConform(t *testing.T) {
 	post("ip-addresses", "IpAddress", fmt.Sprintf(`{"address":"10.70.0.1/24","vrf_id":%q,"assigned_kind":"interface","assigned_id":%q}`, vrf["id"], ifaceID))
 	post("fhrp-group-assignments", "FhrpGroupAssignment", fmt.Sprintf(`{"group_id":%q,"interface_id":%q}`, fg["id"], ifaceID))
 	post("asns", "Asn", fmt.Sprintf(`{"asn":65010,"rir_id":%q}`, arin))
+	// DCIM gap 10: an ASN range around that ASN, a VLAN translation policy
+	// with a rule, applied to the interface.
+	rng := post("asn-ranges", "AsnRange", fmt.Sprintf(`{"name":"Private 16-bit","rir_id":%q,"start":65008,"end":65012}`, arin))
+	vtp := post("vlan-translation-policies", "VlanTranslationPolicy", `{"name":"customer-a"}`)
+	post("vlan-translation-rules", "VlanTranslationRule", fmt.Sprintf(`{"policy_id":%q,"local_vid":100,"remote_vid":2100}`, vtp["id"]))
+	if _, err := owner.Exec(`UPDATE interfaces SET vlan_translation_policy_id = $1 WHERE id = $2`, vtp["id"], ifaceID); err != nil {
+		t.Fatal(err)
+	}
 
 	schemaOf := map[string]string{"rirs": "Rir", "aggregates": "Aggregate", "vrfs": "Vrf", "route-targets": "RouteTarget",
 		"prefix-roles": "PrefixRole", "prefixes": "Prefix", "ip-ranges": "IpRange", "ip-addresses": "IpAddress",
-		"vlan-groups": "VlanGroup", "vlans": "Vlan", "fhrp-groups": "FhrpGroup", "fhrp-group-assignments": "FhrpGroupAssignment", "asns": "Asn"}
+		"vlan-groups": "VlanGroup", "vlans": "Vlan", "fhrp-groups": "FhrpGroup", "fhrp-group-assignments": "FhrpGroupAssignment", "asns": "Asn",
+		"asn-ranges": "AsnRange", "vlan-translation-policies": "VlanTranslationPolicy", "vlan-translation-rules": "VlanTranslationRule"}
 	for _, rt := range services.IPAMRoutes() {
 		w := do(r, http.MethodGet, base+rt+"?limit=100", nil)
 		if w.Code != http.StatusOK {
@@ -132,6 +142,23 @@ func TestIntegration_IPAMContract_ResponsesConform(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"prefixes":["10.70.0.0/24"]`) {
 		t.Fatalf("the VLAN list does not carry its prefixes: %s", w.Body.String())
 	}
+	// The ASN range's list row counts the ASN in it; its free numbers skip it.
+	w = do(r, http.MethodGet, base+"asn-ranges", nil)
+	if !strings.Contains(w.Body.String(), `"asn_count":1`) || !strings.Contains(w.Body.String(), `"available_count":4`) {
+		t.Fatalf("the ASN range list does not count its ASNs: %s", w.Body.String())
+	}
+	w = do(r, http.MethodGet, base+"asn-ranges/"+fmt.Sprint(rng["id"])+"/available-asns?limit=3", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("available ASNs: %d %s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "AvailableAsnsResponse", w.Body.Bytes())
+	if !strings.Contains(w.Body.String(), `"asns":[65008,65009,65011]`) || !strings.Contains(w.Body.String(), `"available":4`) {
+		t.Fatalf("available ASNs body: %s", w.Body.String())
+	}
+	w = do(r, http.MethodGet, base+"vlan-translation-policies", nil)
+	if !strings.Contains(w.Body.String(), `"local_vid":100`) || !strings.Contains(w.Body.String(), `"interface_count":1`) {
+		t.Fatalf("the policy list does not carry its rules and interfaces: %s", w.Body.String())
+	}
 	w = do(r, http.MethodGet, base+"find?address=10.70.0.5", nil)
 	sv.assertConforms(t, "IpamFindResponse", w.Body.Bytes())
 	if !strings.Contains(w.Body.String(), `"vrf_name":"blue"`) {
@@ -149,6 +176,10 @@ func TestIntegration_IPAMContract_ResponsesConform(t *testing.T) {
 		{http.MethodDelete, base + "vrfs/" + fmt.Sprint(vrf["id"]), "", http.StatusConflict},
 		{http.MethodPatch, base + "rirs/" + arin, `{"name":"x"}`, http.StatusForbidden},
 		{http.MethodGet, base + "find?address=bogus", "", http.StatusBadRequest},
+		{http.MethodPost, base + "asn-ranges", fmt.Sprintf(`{"name":"backwards","rir_id":%q,"start":65020,"end":65010}`, arin), http.StatusBadRequest},
+		{http.MethodPost, base + "vlan-translation-rules", fmt.Sprintf(`{"policy_id":%q,"local_vid":100,"remote_vid":2200}`, vtp["id"]), http.StatusConflict},
+		{http.MethodPost, base + "vlan-translation-rules", fmt.Sprintf(`{"policy_id":%q,"local_vid":101,"remote_vid":2100}`, vtp["id"]), http.StatusConflict},
+		{http.MethodGet, base + "asn-ranges/" + uuid.NewString() + "/available-asns", "", http.StatusNotFound},
 	} {
 		var body *strings.Reader
 		if c.body != "" {

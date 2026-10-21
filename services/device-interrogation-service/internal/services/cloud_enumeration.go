@@ -377,7 +377,25 @@ type CloudDiscoveryResult struct {
 // DiscoverResourceEvidence runs the requested provider collectors, preserving
 // retained outcomes and persistence failures for both job and single-resource
 // callers. Account-wide compute enumeration belongs to DiscoverResources.
+//
+// It is one change-notification unit (ChangeUnit): the sites, locations and
+// clusters a run writes raise object_changed once committed.
 func (s *CloudDiscoveryService) DiscoverResourceEvidence(
+	ctx context.Context,
+	tenantID, integrationID uuid.UUID,
+	cloudProvider string,
+	resourceTypes, regions, resourceGroups []string,
+) (*CloudDiscoveryResult, error) {
+	var out *CloudDiscoveryResult
+	err := ChangeUnit(ctx, func(ctx context.Context) error {
+		var err error
+		out, err = s.discoverResourceEvidence(ctx, tenantID, integrationID, cloudProvider, resourceTypes, regions, resourceGroups)
+		return err
+	})
+	return out, err
+}
+
+func (s *CloudDiscoveryService) discoverResourceEvidence(
 	ctx context.Context,
 	tenantID, integrationID uuid.UUID,
 	cloudProvider string,
@@ -431,7 +449,20 @@ func (s *CloudDiscoveryService) DiscoverResourceEvidence(
 // collectors and the enumeration listings alike, one selection
 // (asset-inventory ADR-0009 D3) — and finally the run's lifecycle evidence:
 // the provider's terminal states and the listings it completed (D6).
+//
+// It is one change-notification unit (ChangeUnit), like
+// DiscoverResourceEvidence, which it encloses.
 func (s *CloudDiscoveryService) DiscoverResources(ctx context.Context, tenantID, integrationID uuid.UUID, cloudProvider string, resourceTypes, regions, resourceGroups []string) (*CloudDiscoveryResult, error) {
+	var out *CloudDiscoveryResult
+	err := ChangeUnit(ctx, func(ctx context.Context) error {
+		var err error
+		out, err = s.discoverResources(ctx, tenantID, integrationID, cloudProvider, resourceTypes, regions, resourceGroups)
+		return err
+	})
+	return out, err
+}
+
+func (s *CloudDiscoveryService) discoverResources(ctx context.Context, tenantID, integrationID uuid.UUID, cloudProvider string, resourceTypes, regions, resourceGroups []string) (*CloudDiscoveryResult, error) {
 	// One run, one account sync, one scope and one rule cache for both halves.
 	ctx = s.beginCloudRun(ctx, tenantID, integrationID, cloudProvider)
 	if cloudProvider == "aws" && len(regions) == 0 {

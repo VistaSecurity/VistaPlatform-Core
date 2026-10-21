@@ -207,6 +207,10 @@ var (
 	wirelessAuthTypeValues = []string{"open", "wep", "wpa-personal", "wpa-enterprise"}
 )
 
+// virtualCircuitRoleValues is `virtual_circuit_terminations_role_check` (DCIM
+// gap 10; NetBox VirtualCircuitTerminationRoleChoices).
+var virtualCircuitRoleValues = []string{"peer", "hub", "spoke"}
+
 // tunnelEncapsulationValues is `tunnels_encapsulation_check` (DCIM row 4.3).
 var tunnelEncapsulationValues = []string{"ipsec-transport", "ipsec-tunnel", "ip-ip", "gre", "wireguard", "l2tp", "pptp", "openvpn"}
 
@@ -227,3 +231,17 @@ func cableStatusValues() []string {
 	}
 	return out
 }
+
+// The power-feed choice sets (NetBox 4.3 PowerFeed*Choices; DCIM row 6.1).
+// Not in standards/netbox-choices.v4.3.5.json; the schema CHECKs on
+// power_feeds hold the same lists (schema_parity_test.go).
+var (
+	powerFeedStatusValues = []string{"offline", "active", "planned", "failed"}
+	powerFeedTypeValues   = []string{"primary", "redundant"}
+	powerFeedSupplyValues = []string{"ac", "dc"}
+	powerFeedPhaseValues  = []string{"single-phase", "three-phase"}
+)
+
+// The inventory item stock states (DCIM gap 8; inventory_items_stock_state_check,
+// schema_parity_test.go). Device42-style stock, so not a NetBox choice set.
+var inventoryItemStockStateValues = []string{"installed", "in_stock", "reserved", "rma", "retired"}

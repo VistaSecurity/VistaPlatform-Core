@@ -81,6 +81,8 @@ var dcimEngineKinds = map[dcim.ObjectKind]bool{
 	dcim.ObjectKindModuleType: true, dcim.ObjectKindDeviceRole: true, dcim.ObjectKindPlatform: true,
 	dcim.ObjectKindModuleBay: true, dcim.ObjectKindModule: true, dcim.ObjectKindInventoryItemRole: true,
 	dcim.ObjectKindInventoryItem: true, dcim.ObjectKindVirtualChassis: true,
+	// DCIM gap 1: a device's virtual device contexts.
+	dcim.ObjectKindVirtualDeviceContext: true,
 }
 
 // dcimSiteKinds are the row 2.6 kinds SiteService owns.

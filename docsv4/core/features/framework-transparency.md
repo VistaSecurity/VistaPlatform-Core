@@ -69,9 +69,11 @@ Hovering a **Not assessed** result tells you which of four situations applies:
 - **No measurements configured** — the control exists in the framework but nobody
   has written the rule that measures it yet. Common in a framework still being
   authored, or in a Custom Policy you are part-way through.
-- **Nothing in scope to check** — the rule is fine, but you have no matching
-  inventory. A control about SSH host keys is not assessed if the platform has
-  not discovered any SSH services yet.
+- **Nothing in scope to check** — the rule is fine, but nothing in your
+  inventory is in the control's population: the assets it is about. A control
+  about SSH host keys is not assessed if the platform has not discovered any SSH
+  services yet; a rack-position control is not assessed if no asset is in a
+  rack, even though you have assets.
 - **Not evaluated yet** — the control is new, or its rule was changed, and your
   inventory has not been re-evaluated against it yet. Re-evaluation is queued
   automatically when a framework's rules change; the control moves to PASS or
@@ -88,7 +90,9 @@ a half-written framework used to score 100%.
 
 A framework's score covers **assessed controls only** — the ones that came back
 PASS or FAIL. Not-assessed controls are left out of both the numerator and the
-denominator, so they neither reward nor punish you.
+denominator, so they neither reward nor punish you. Within a control, only the
+assets in its population count: an asset the control is not about can neither
+pass nor fail it, so it cannot lift the score either.
 
 Each assessed control counts according to its severity, so that failing something
 critical costs more than failing something minor:

@@ -42,6 +42,12 @@ func withSubstrate(cols ...ipamCol) []ipamCol {
 var nonUniqueRoles = []string{"anycast", "vip", "vrrp", "hsrp", "glbp", "carp"}
 
 func ipamSpecs() []*ipamSpec {
+	// DCIM gap 10's ASN ranges and VLAN translation follow the thirteen
+	// (ipam_parity_specs.go).
+	return append(ipamBaseSpecs(), ipamParitySpecs()...)
+}
+
+func ipamBaseSpecs() []*ipamSpec {
 	return []*ipamSpec{
 		{
 			Kind: dcim.ObjectKindRir, Table: "rirs", Route: "rirs", Catalogue: true,
@@ -339,6 +345,7 @@ func ipAddressSpec() *ipamSpec {
 			{Param: "dns_name", Column: "dns_name", Type: colText},
 			{Param: "mac_address", Column: "mac_address", Type: colMAC},
 			{Param: "parent", Custom: parentFilter("t.host")},
+			{Param: "asset_id", Custom: assetHeldFilter},
 		},
 		Search: []string{"address", "dns_name", "description"},
 		Order:  "COALESCE(t.vrf_id, '" + zeroUUID + "'::uuid), family(t.address), t.host, t.id",
@@ -347,17 +354,34 @@ func ipAddressSpec() *ipamSpec {
 		// out-of-band address — the same order ipam_find.go uses.
 		ListSelect: `to_jsonb(t) || jsonb_build_object('asset', COALESCE(
 		    (SELECT jsonb_build_object('id', a.id,
-		        'name', COALESCE(a.display_name, a.hostname, host(a.primary_address), a.id::text))
+		        'name', COALESCE(a.display_name, a.hostname, host(a.primary_address), a.id::text),
+		        'is_primary_ip4', COALESCE(a.primary_ip4_id = t.id, false), 'is_primary_ip6', COALESCE(a.primary_ip6_id = t.id, false), 'is_oob_ip', COALESCE(a.oob_ip_id = t.id, false))
 		       FROM public.interfaces i JOIN public.assets a ON a.tenant_id = i.tenant_id AND a.id = i.asset_id
 		      WHERE t.assigned_kind = 'interface' AND i.tenant_id = t.tenant_id AND i.id = t.assigned_id
 		        AND a.deleted_at IS NULL),
 		    (SELECT jsonb_build_object('id', a.id,
-		        'name', COALESCE(a.display_name, a.hostname, host(a.primary_address), a.id::text))
+		        'name', COALESCE(a.display_name, a.hostname, host(a.primary_address), a.id::text),
+		        'is_primary_ip4', COALESCE(a.primary_ip4_id = t.id, false), 'is_primary_ip6', COALESCE(a.primary_ip6_id = t.id, false), 'is_oob_ip', COALESCE(a.oob_ip_id = t.id, false))
 		       FROM public.assets a WHERE a.tenant_id = t.tenant_id AND a.deleted_at IS NULL
 		        AND (a.primary_ip4_id = t.id OR a.primary_ip6_id = t.id OR a.oob_ip_id = t.id) LIMIT 1)))`,
 		Prepare:    prepareIPAddress,
 		AfterWrite: refreshAfterAddressWrite,
 	}
+}
+
+// assetHeldFilter keeps the addresses one asset holds (?asset_id=<uuid>):
+// those assigned to one of its interfaces, plus any it names as its primary
+// IPv4, primary IPv6 or out-of-band address — the same two ways ListSelect's
+// "asset" attribution resolves. Tenant isolation is the row-level policy's.
+func assetHeldFilter(v string, n int) (string, any, error) {
+	id, err := uuid.Parse(v)
+	if err != nil {
+		return "", nil, ipamInvalid("asset_id must be a UUID")
+	}
+	return fmt.Sprintf(`(EXISTS (SELECT 1 FROM public.interfaces fi WHERE fi.tenant_id = t.tenant_id AND fi.asset_id = $%d::uuid
+	        AND t.assigned_kind = 'interface' AND t.assigned_id = fi.id)
+	      OR EXISTS (SELECT 1 FROM public.assets fa WHERE fa.tenant_id = t.tenant_id AND fa.id = $%d::uuid AND fa.deleted_at IS NULL
+	        AND (fa.primary_ip4_id = t.id OR fa.primary_ip6_id = t.id OR fa.oob_ip_id = t.id)))`, n, n), id.String(), nil
 }
 
 // parentFilter keeps rows whose address expression lies inside a prefix

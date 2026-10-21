@@ -145,6 +145,9 @@ const (
 	// RaiseSuppressed means the tenant has this alert type switched off in the
 	// catalog, so nothing was written and nothing was notified.
 	RaiseSuppressed RaiseOutcome = "suppressed"
+	// RaiseNotified means the type has lifecycle "event" (a one-shot
+	// notification): it was routed once and no alerts row was written.
+	RaiseNotified RaiseOutcome = "notified"
 )
 
 // Raise opens or escalates the open alert for (tenant, type, subject), honouring
@@ -210,6 +213,17 @@ func (s *AlertEngineService) raise(ctx context.Context, ev events.AlertRaiseEven
 		log.Printf("[AlertEngine] Raise suppressed: tenant=%s type=%s disabled in alert catalog",
 			ev.TenantID, ev.AlertType)
 		return RaiseSuppressed, nil
+	}
+
+	// An EVENT type (alert-registry `lifecycle: event`, e.g. object_changed) is
+	// something that happened, not a condition that holds: there is nothing to
+	// keep open, escalate or resolve. Writing a stateful row would dedupe every
+	// later raise for the same subject into a silent touch — the second change
+	// to a cable would never reach anyone. So it is routed once, through the
+	// same notification rails, and leaves no alerts row behind.
+	if entry, ok := alertcatalog.Get(ev.AlertType); ok && entry.Lifecycle == alertcatalog.LifecycleEvent {
+		s.deliverNotification(eventNotificationEvent(ev, severity))
+		return RaiseNotified, nil
 	}
 
 	outcome := RaiseTouched
@@ -942,7 +956,41 @@ func alertNotificationEvent(tenantID uuid.UUID, source, alertType, severity, tit
 // fails, the same way audit-service and monitoring-service do.
 func (s *AlertEngineService) publishAlertNotification(tenantID uuid.UUID, source, alertType, severity, title, message string,
 	alertID uuid.UUID, transition string, metadata map[string]interface{}) {
-	notif := alertNotificationEvent(tenantID, source, alertType, severity, title, message, alertID, transition, metadata)
+	s.deliverNotification(alertNotificationEvent(tenantID, source, alertType, severity, title, message, alertID, transition, metadata))
+}
+
+// eventNotificationEvent builds the notification for an EVENT-lifecycle raise.
+// There is no alert row, so there is no alert_id: the transition is "event" and
+// the producer's event id becomes the notification's, so a NATS redelivery of
+// the same raise reaches a webhook receiver with the same X-Vista-Event-Id.
+func eventNotificationEvent(ev events.AlertRaiseEvent, severity string) events.NotificationEvent {
+	md := map[string]interface{}{"alert_transition": "event"}
+	for k, v := range ev.Metadata {
+		if _, exists := md[k]; !exists {
+			md[k] = v
+		}
+	}
+	id := ev.EventID
+	if id == uuid.Nil {
+		id = uuid.New()
+	}
+	return events.NotificationEvent{
+		EventID:     id,
+		TenantID:    ev.TenantID,
+		AlertSource: ev.Source,
+		AlertType:   ev.AlertType,
+		Severity:    severity,
+		Title:       ev.Title,
+		Message:     ev.Message,
+		Timestamp:   time.Now(),
+		Metadata:    md,
+	}
+}
+
+// deliverNotification puts one notification on notifications.send, falling
+// back to the signed HTTP POST (see publishAlertNotification).
+func (s *AlertEngineService) deliverNotification(notif events.NotificationEvent) {
+	alertID, _ := notif.Metadata["alert_id"].(string)
 	if s.natsClient != nil && s.natsClient.IsConnected() {
 		if err := events.PublishJSON(s.natsClient, events.SubjectNotificationsSend, notif); err == nil {
 			return
@@ -955,7 +1003,7 @@ func (s *AlertEngineService) publishAlertNotification(tenantID uuid.UUID, source
 		// Both rails are down. Log loudly: this alert transition reached nobody
 		// and, because fan-out is open/escalate-only, will not be retried.
 		log.Printf("[AlertEngine] ALERT NOTIFICATION LOST — NATS and HTTP both failed (alert=%s type=%s tenant=%s): %v",
-			alertID, alertType, tenantID, err)
+			alertID, notif.AlertType, notif.TenantID, err)
 	}
 }
 

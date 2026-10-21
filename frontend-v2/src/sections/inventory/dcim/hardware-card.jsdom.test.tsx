@@ -20,6 +20,12 @@ const HW = {
   device_role: { id: 'r1', name: 'Switch', slug: 'switch', color: '4caf50' },
   platform: null, serial: 'FOC1234X0YZ', asset_tag: null,
   template_counts: { 'interface-templates': 51, 'console-port-templates': 2, 'module-bay-templates': 6 },
+  commercial: {
+    purchase_date: null, warranty_start: null, warranty_end: null, purchase_cost: null, purchase_currency: null, purchase_order: null,
+    vendor: null, support_contract: null, support_contract_end: null, installed_at: null, decommissioned_at: null,
+  },
+  device_type_eos: null, platform_eos: null,
+  lifecycle: { warranty_state: 'unknown' as const, eos_state: 'unknown' as const, effective_end_of_support: null, source: 'none' as const, subject: null },
 };
 const EMPTY = { ...HW, device_type: null, manufacturer: null, device_role: null, serial: null, template_counts: {} };
 

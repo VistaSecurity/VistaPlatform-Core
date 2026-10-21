@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { PermissionProvider } from '@vistasecurity/primitives/rbac';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RacksLens, racksCsvRows } from './racks-lens';
+import { fillColor } from '../../dashboard/facilities-dashboard-metrics';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 type ApiCall = (path: string, opts?: { params?: { path?: Record<string, string>; query?: Record<string, unknown> }; body?: unknown }) => Promise<unknown>;
@@ -108,8 +109,17 @@ it('filters: the site from the URL and the role/status selects reach the API', a
   expect(racksQuery()).toMatchObject({ site_id: 'ams', operational_status: 'planned' });
 });
 
+it('power (row 6.2): the budget share in the capacity colour; a rack no feed serves says so, never 0 %', async () => {
+  serve([rack('r12', 'R12', { power_utilization: { feed_count: 2, available_power: 10566, allocated_draw: 9600, utilization: 90.9, measured_draw: null } }), RACKS[1]]);
+  await render();
+  const cells = [...host.querySelectorAll('[data-testid="rack-power-cell"]')];
+  expect(cells.map((c) => c.textContent)).toEqual(['90.9%', 'no feed']);
+  expect((cells[0] as HTMLElement).style.color).toBe(fillColor(90.9));
+  expect(cells[0].getAttribute('title')).toBe('9600 W of 10566 VA on 2 feeds');
+});
+
 it('CSV rows carry what the list shows', () => {
   const rows = racksCsvRows(RACKS as never, (id) => (id === 'bu1' ? 'Platform' : ''));
-  expect(rows[0]).toEqual(['R12', null, 'AMS-1', 'Row 3', 'Network', 'Active', 42, 12, 28.6, 9, 'Platform', 'r12']);
+  expect(rows[0]).toEqual(['R12', null, 'AMS-1', 'Row 3', 'Network', 'Active', 42, 12, 28.6, '', 9, 'Platform', 'r12']);
   expect(rows[1].slice(3, 5)).toEqual(['', '']);
 });

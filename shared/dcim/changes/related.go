@@ -74,6 +74,15 @@ func DeriveRelated(ctx context.Context, tx DBTX, row Row) (dcim.ObjectKind, uuid
 		if o := id("object_id"); ok && o != uuid.Nil {
 			return k, o, true
 		}
+	case dcim.ObjectKindAsset:
+		return "", uuid.Nil, false
+	}
+	// Every other component that lives on an asset — a virtual device context,
+	// a console/front/rear/power port, a power outlet, a module bay, a device
+	// bay, a cable termination — carries the asset in its image. Without this
+	// a context change never reached the asset's Changes tab.
+	if a := id("asset_id"); a != uuid.Nil {
+		return dcim.ObjectKindAsset, a, true
 	}
 	return "", uuid.Nil, false
 }

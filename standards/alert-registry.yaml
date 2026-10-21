@@ -16,6 +16,11 @@
 #                     frameworks) | operational (detector-owned parameters)
 #   status            live (detector active) | planned (catalog entry shown
 #                     greyed; detector not yet wired)
+#   lifecycle         stateful (default: a row in the alerts table that opens,
+#                     dedupes per subject, escalates and resolves) | event (a
+#                     one-shot notification routed once per raise, with no
+#                     alerts row — for things that happened rather than
+#                     conditions that hold; requires severity_model: fixed)
 #   source            producing service (alert_source on the rails)
 #   subject_type      what one alert instance is about
 #   severity_model    ladder (escalates through rungs) | fixed
@@ -262,6 +267,33 @@ alert_types:
     auto_resolve: usage drops below the lowest rung
     enabled_by_default: true
     description: Asset usage is approaching the plan limit (80% info, 95% high).
+
+  # `object_changed` is the one EVENT type: an inventory object was created,
+  # updated or deleted. A change is something that happened, not a condition
+  # that holds, so there is nothing to keep open, escalate or resolve — each
+  # raise is routed once through the tenant's routing rules and no alerts row
+  # is written (a stateful row would dedupe every later change to the same
+  # object into a silent touch). The producer is the inventory-service change
+  # notifier, which reads the committed object_changes rows of a request
+  # (shared/dcim/changes) and raises at most one event per object and action.
+  # Only a routing rule that names this type routes it; a catch-all rule does
+  # not, so turning the feature on never floods an existing channel.
+  - id: object_changed
+    track: tenant
+    kind: operational
+    status: live
+    lifecycle: event
+    source: inventory-service
+    subject_type: object
+    severity_model: fixed
+    default_severity: info
+    enabled_by_default: true
+    description: >-
+      An inventory object (an asset, cable, prefix, rack, site, circuit or any
+      other kind) was created, updated or deleted. Delivered only to routing
+      rules that select Inventory changes, filtered there by object kind and
+      action. Changes made by discovery intake and by a sync connection are
+      left out unless the rule includes them.
 
   # --- platform track -------------------------------------------------------
   - id: service_down

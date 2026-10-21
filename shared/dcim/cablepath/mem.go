@@ -21,6 +21,7 @@ type MemGraph struct {
 	positions map[uuid.UUID]int
 	byRear    map[uuid.UUID]map[int][]uuid.UUID
 	circuits  map[uuid.UUID]memPeer
+	inlets    map[uuid.UUID]uuid.UUID // power outlet -> the power port it draws from
 }
 
 type frontMap struct {
@@ -38,7 +39,7 @@ func NewMemGraph() *MemGraph {
 	return &MemGraph{
 		cables: map[uuid.UUID]Cable{}, ends: map[Node]Link{}, members: map[uuid.UUID]map[string][]Node{},
 		front: map[uuid.UUID]frontMap{}, positions: map[uuid.UUID]int{}, byRear: map[uuid.UUID]map[int][]uuid.UUID{},
-		circuits: map[uuid.UUID]memPeer{},
+		circuits: map[uuid.UUID]memPeer{}, inlets: map[uuid.UUID]uuid.UUID{},
 	}
 }
 
@@ -97,6 +98,15 @@ func (g *MemGraph) AddCircuit(a, z uuid.UUID, providerNetworkZ *uuid.UUID) {
 	if a != uuid.Nil {
 		g.circuits[a] = memPeer{}
 	}
+}
+
+// SetOutletPowerPort declares the power port a power outlet draws from.
+func (g *MemGraph) SetOutletPowerPort(outlet, port uuid.UUID) { g.inlets[outlet] = port }
+
+// OutletPowerPort implements Graph.
+func (g *MemGraph) OutletPowerPort(_ context.Context, outletID uuid.UUID) (uuid.UUID, bool, error) {
+	p, ok := g.inlets[outletID]
+	return p, ok, nil
 }
 
 // Cable implements Graph.

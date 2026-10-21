@@ -19,6 +19,7 @@ import { INVENTORY_LENSES } from '../lenses';
 import { SECTIONS } from '../../../app/nav';
 import { RackPage } from './rack-page';
 import { UNIT_PX, spanY } from './rack-geometry';
+import { fillColor } from '../../dashboard/facilities-dashboard-metrics';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 type ApiCall = (path: string, opts?: { params?: { path?: Record<string, string>; query?: Record<string, unknown> }; body?: unknown }) => Promise<unknown>;
@@ -49,10 +50,13 @@ const elevation = (over: Record<string, unknown> = {}) => ({
   utilization: { used_units: 3, total_units: 42, utilization: 7.1, refreshed_at: '' }, ...over,
 });
 
+const NO_BUDGET = { rack_id: 'r12', feed_count: 0, available_power: 0, allocated_draw: 0, maximum_draw: 0, utilization: null, measured_draw: null, feeds: [], devices: [] };
+
 function serve(el: unknown, extra: Record<string, unknown> = {}) {
   api.GET.mockImplementation(async (path: string) => {
     if (path === '/dcim/racks/{id}/elevation') return { data: { data: el }, response: { status: 200 } };
     if (path in extra) return { data: extra[path], response: { status: 200 } };
+    if (path === '/dcim/racks/{id}/power') return { data: { data: NO_BUDGET }, response: { status: 200 } };
     return { data: { data: [], changes: [], journal_entries: [], entries: [], total: 0, pagination: {} }, response: { status: 200 } };
   });
 }
@@ -135,6 +139,9 @@ describe('states', () => {
     expect(host.querySelector('[data-testid="reservation-row"]')?.textContent).toContain('Future PDU');
     expect(host.querySelector('[data-testid="rack-contacts"]')).not.toBeNull();
     expect(host.querySelector('[data-testid="rack-images"]')).not.toBeNull();
+    // Row 6.1: the rack's Power feeds card; row 6.2: its Power budget card.
+    expect(host.querySelector('[data-testid="rack-power"]')).not.toBeNull();
+    expect(host.querySelector('[data-testid="rack-power-budget"]')).not.toBeNull();
   });
 });
 
@@ -165,6 +172,54 @@ describe('crypto overlay', () => {
     await render();
     const call = api.GET.mock.calls.find((c) => c[0] === '/dcim/racks/{id}/elevation')!;
     expect(call[1]?.params).toEqual({ path: { id: 'r12' }, query: { include: 'posture' } });
+  });
+});
+
+describe('power overlay (row 6.2)', () => {
+  const BUDGET = {
+    rack_id: 'r12', feed_count: 1, available_power: 2000, allocated_draw: 1700, maximum_draw: 0, utilization: 85, measured_draw: null, feeds: [],
+    devices: [
+      { asset_id: 'sw', power_port_count: 2, allocated_draw: 1700, maximum_draw: null, measured_draw: 1450, share: 85 },
+      { asset_id: 'srv', power_port_count: 2, allocated_draw: null, maximum_draw: null, measured_draw: null, share: null },
+    ],
+  };
+  const toggle = () => host.querySelector('[aria-label="Power overlay"]') as HTMLInputElement;
+  it('tints each device by its share of the rack\'s available power; an undeclared draw is dashed, never 0 W; the crypto overlay goes off', async () => {
+    serve(elevation(), { '/dcim/racks/{id}/power': { data: BUDGET } });
+    await render();
+    expect(block('sw', 'front').getAttribute('data-power-kind')).toBe('');
+    await act(async () => { toggle().click(); });
+    await flush(); await flush();
+    expect(api.GET.mock.calls.some(([p]) => p === '/dcim/racks/{id}/power')).toBe(true);
+    const sw = block('sw', 'front');
+    expect(sw.getAttribute('data-power-kind')).toBe('share');
+    expect(sw.getAttribute('data-power-color')).toBe(fillColor(85));
+    expect(sw.querySelector('[data-testid="rack-power-tint"]')?.getAttribute('fill')).toBe(fillColor(85));
+    expect(sw.querySelector('title')?.textContent).toContain('1700 W allocated · 85% of the rack\'s 2000 VA · 1450 W measured');
+    const srv = block('srv', 'rear');
+    expect(srv.getAttribute('data-power-kind')).toBe('unrecorded');
+    expect(srv.querySelector('[data-testid="rack-power-tint"]')).toBeNull();
+    expect(srv.querySelector('title')?.textContent).toContain('Draw not recorded');
+    // One overlay at a time: the crypto tint, badges and legend are gone.
+    expect(sw.getAttribute('data-overlay-kind')).toBe('');
+    expect(sw.querySelector('[data-testid="rack-overlay-tint"]')).toBeNull();
+    expect((host.querySelector('[aria-label="Crypto overlay"]') as HTMLInputElement).checked).toBe(false);
+    expect(host.querySelector('[data-testid="overlay-legend"]')).toBeNull();
+    expect(host.querySelector('[data-testid="power-overlay-legend"]')?.textContent).toContain('2,000 VA');
+  });
+  it('loading draws no tint; an error says so instead of tinting nothing', async () => {
+    serve(elevation());
+    api.GET.mockImplementation(async (path: string) => {
+      if (path === '/dcim/racks/{id}/elevation') return { data: { data: elevation() }, response: { status: 200 } };
+      if (path === '/dcim/racks/{id}/power') return { data: undefined, error: { error: { message: 'down' } }, response: { status: 500 } };
+      return { data: { data: [], changes: [], journal_entries: [], entries: [], total: 0, pagination: {} }, response: { status: 200 } };
+    });
+    await render();
+    await act(async () => { toggle().click(); });
+    await flush(); await flush();
+    expect(host.querySelector('[data-testid="power-overlay-error"]')?.textContent).toContain("Couldn't load the power budget");
+    expect(block('sw', 'front').getAttribute('data-power-kind')).toBe('unknown');
+    expect(block('sw', 'front').querySelector('[data-testid="rack-power-tint"]')).toBeNull();
   });
 });
 

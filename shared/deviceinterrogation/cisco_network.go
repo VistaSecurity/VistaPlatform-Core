@@ -30,6 +30,12 @@ import (
 // And `show ip arp` (`show arp` on IOS-XR and ASA) for the ARP evidence. Every
 // command was already guarded by the closed list in cisco_commands_test.go;
 // the two new ones are added there.
+//
+// On NX-OS only, `show vdc membership` (DCIM gap 1): each virtual device
+// context's id and name and the interfaces allocated to it. Read are the
+// `vdc_id: N vdc_name: X interfaces:` headers and the interface names under
+// them; VDC 0 is the pool of unallocated ports, not a context. Asked of NX-OS
+// alone: no other Cisco OS has VDCs, and IOS would answer with an error.
 
 // ciscoIfDetail is what `show interfaces` says about one interface beyond the
 // states, MAC and address the existing parser reads.
@@ -52,7 +58,61 @@ var (
 	ciscoDot1QRE     = regexp.MustCompile(`(?i)^Encapsulation 802\.1Q Virtual LAN, Vlan ID\s+(\d+)`)
 	ciscoBWKbpsRE    = regexp.MustCompile(`(?i)\bBW (\d+) Kbit`)
 	ciscoStatusHdrRE = regexp.MustCompile(`^Port\s+Name\s+Status\s+Vlan\s+Duplex\s+Speed\s+Type`)
+	ciscoVDCHeaderRE = regexp.MustCompile(`^\s*vdc_id:\s*(\d+)\s+vdc_name:\s*(\S+)\s+interfaces:\s*(.*)$`)
+	ciscoVDCPortRE   = regexp.MustCompile(`^[A-Za-z][A-Za-z-]*\d+(?:/\d+)*(?:\.\d+)?$`)
 )
+
+// ciscoVDC is one virtual device context of `show vdc membership`.
+type ciscoVDC struct {
+	id    int
+	name  string
+	ports []string // canonical names
+}
+
+// ciscoParseVDCMembership reads `show vdc membership`: each context's header
+// and the interface names listed under it (a breakout port's `(b)` flag
+// dropped). VDC 0 (the unallocated ports) is skipped; a token that is not an
+// interface name ends nothing and is ignored.
+func ciscoParseVDCMembership(output string) []ciscoVDC {
+	var (
+		out []ciscoVDC
+		cur *ciscoVDC
+	)
+	ports := func(text string) {
+		if cur == nil {
+			return
+		}
+		for _, f := range strings.Fields(text) {
+			f = strings.TrimSuffix(f, "(b)")
+			if !ciscoVDCPortRE.MatchString(f) {
+				continue
+			}
+			cur.ports = append(cur.ports, ciscoCanonical(f))
+		}
+	}
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if m := ciscoVDCHeaderRE.FindStringSubmatch(line); m != nil {
+			id, err := strconv.Atoi(m[1])
+			if err != nil || id < 1 || id > maxContextIdentifier {
+				cur = nil
+				continue
+			}
+			out = append(out, ciscoVDC{id: id, name: m[2]})
+			cur = &out[len(out)-1]
+			ports(m[3])
+			continue
+		}
+		if strings.TrimSpace(line) == "" || (line[0] != ' ' && line[0] != '\t') {
+			if strings.TrimSpace(line) != "" {
+				cur = nil
+			}
+			continue
+		}
+		ports(line)
+	}
+	return out
+}
 
 // ciscoParseInterfaceDetails reads the posture half of `show interfaces`,
 // keyed by canonical interface name. Only lines whose prefix is one of the
@@ -285,6 +345,10 @@ type ciscoNetworkInputs struct {
 	interfacesTrunk  string
 	vlanBrief        string
 	arp              []map[string]interface{}
+	// osName picks the per-platform commands; vdcMembership is
+	// `show vdc membership` (NX-OS only).
+	osName        string
+	vdcMembership string
 }
 
 // ciscoNetwork builds the network observation from the parsed command outputs.
@@ -399,6 +463,18 @@ func ciscoNetwork(in ciscoNetworkInputs) *vendorNetwork {
 	}
 	n.Prefixes = connectedPrefixes(n.Interfaces)
 	n.ARP = arpFromNeighbors(in.arp, ownMACs, ownAddrs, "")
+	vdcOf := map[string]string{}
+	for _, v := range ciscoParseVDCMembership(in.vdcMembership) {
+		n.addContext(v.name, v.id, true)
+		for _, p := range v.ports {
+			if _, taken := vdcOf[p]; !taken {
+				vdcOf[p] = v.name
+			}
+		}
+	}
+	for i := range n.Interfaces {
+		n.Interfaces[i].Context = vdcOf[n.Interfaces[i].Name]
+	}
 	return n
 }
 
@@ -446,6 +522,11 @@ func ciscoCollectNetwork(ctx context.Context, result *InterrogateResult, run cis
 	}
 	if out, ok := ciscoRun(ctx, result, run, "show interfaces trunk", "Trunk native and allowed VLANs not collected"); ok {
 		in.interfacesTrunk = out
+	}
+	if in.osName == "NX-OS" {
+		if out, ok := ciscoRun(ctx, result, run, "show vdc membership", "Virtual device contexts not collected"); ok {
+			in.vdcMembership = out
+		}
 	}
 	result.setNetwork(ciscoNetwork(in), "show interfaces")
 }

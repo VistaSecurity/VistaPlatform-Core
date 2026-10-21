@@ -48,6 +48,8 @@ var assetChildTables = map[string]bool{
 	"device_bays": true, "power_ports": true, "power_outlets": true,
 	// DCIM row 2.4: moved by moveMergeHardware with same-name collision rules.
 	"module_bays": true, "modules": true, "inventory_items": true,
+	// DCIM gap 1: moved by moveMergeHardware with a same-name collision rule.
+	"virtual_device_contexts": true,
 }
 
 var fkPattern = regexp.MustCompile(

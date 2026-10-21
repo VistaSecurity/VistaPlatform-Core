@@ -50,5 +50,6 @@ export function InfrastructureCatalogPage() {
     { label: 'Device Roles', description: 'The function each physical or virtual device performs.', icon: 'tag', to: '/inventory/manage/device-roles' },
     { label: 'Platforms (OS)', description: 'Operating-system and firmware families used by devices.', icon: 'cpu', to: '/inventory/manage/platforms' },
     { label: 'Config Contexts', description: 'Weighted configuration data applied to matching infrastructure.', icon: 'braces', to: '/inventory/manage/config-contexts' },
+    { label: 'Spares & RMA', description: 'Spare parts in stock, installs from the shelf, and units out for RMA.', icon: 'package', to: '/inventory/manage/spares' },
   ]} />;
 }

@@ -49,12 +49,40 @@ type NetworkObservation struct {
 	InventoryItems []ObservedInventoryItem `json:"inventory_items,omitempty"`
 	Modules        []ObservedModule        `json:"modules,omitempty"`
 	VirtualChassis *ObservedVirtualChassis `json:"virtual_chassis,omitempty"`
+	// VirtualDeviceContexts are the logical devices the device is partitioned
+	// into (DCIM gap 1): a Fortinet VDOM, a Palo Alto vsys, an F5 route
+	// domain, a Cisco Nexus VDC. Each interface names its own in
+	// ObservedInterface.VirtualDeviceContext.
+	VirtualDeviceContexts []ObservedVirtualDeviceContext `json:"virtual_device_contexts,omitempty"`
+	// PowerPorts and PowerOutlets are what a PDU collector measured of the
+	// device's power sockets (DCIM row 6.2, power_observation.go), filed by
+	// inventory-service beside the hardware.
+	PowerPorts   []ObservedPowerPort   `json:"power_ports,omitempty"`
+	PowerOutlets []ObservedPowerOutlet `json:"power_outlets,omitempty"`
+}
+
+// HasPower reports whether the observation carries any power socket.
+func (n *NetworkObservation) HasPower() bool {
+	return n != nil && (len(n.PowerPorts) > 0 || len(n.PowerOutlets) > 0)
+}
+
+// ObservedVirtualDeviceContext mirrors identity.ObservedVirtualDeviceContext:
+// a context's name and, where the platform numbers its contexts (a vsys, a
+// route domain, a VDC; a VDOM has none), its identifier. Nothing else of the
+// vendor's context object is carried.
+type ObservedVirtualDeviceContext struct {
+	Name       string `json:"name"`
+	Identifier *int   `json:"identifier,omitempty"`
+	// Description is the operator's display name for the context, where the
+	// platform has one (a Palo Alto vsys's display-name); nothing else of the
+	// vendor's context object is carried.
+	Description string `json:"description,omitempty"`
 }
 
 // Empty reports whether there is nothing to record.
 func (n *NetworkObservation) Empty() bool {
 	return n == nil || (len(n.Interfaces) == 0 && len(n.VLANs) == 0 && len(n.Prefixes) == 0 && len(n.ARP) == 0 && len(n.Tunnels) == 0 &&
-		len(n.Neighbors) == 0 && !n.HasHardware())
+		len(n.Neighbors) == 0 && len(n.VirtualDeviceContexts) == 0 && !n.HasHardware() && !n.HasPower())
 }
 
 // HasHardware reports whether the observation carries any hardware.
@@ -97,6 +125,10 @@ type ObservedInterface struct {
 	// items; the vendor-CLI collectors that produce this type set neither.
 	RFRole string   `json:"rf_role,omitempty"`
 	SSIDs  []string `json:"ssids,omitempty"`
+	// VirtualDeviceContext names the context that owns the interface (DCIM
+	// gap 1), one of NetworkObservation.VirtualDeviceContexts; "" for none or
+	// not said.
+	VirtualDeviceContext string `json:"virtual_device_context,omitempty"`
 }
 
 // ObservedAddress mirrors identity.ObservedAddress. Assignment is the string

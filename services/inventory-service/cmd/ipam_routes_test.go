@@ -75,6 +75,11 @@ func (s *stubIPAM) FindAddress(ctx context.Context, _ uuid.UUID, _ netip.Addr, _
 	return []services.FindResult{}, nil
 }
 
+func (s *stubIPAM) AvailableASNs(ctx context.Context, _, _ uuid.UUID, _ int) (*services.AvailableASNs, error) {
+	s.note(ctx)
+	return &services.AvailableASNs{}, nil
+}
+
 func ipamRouter(t *testing.T, store *stubIPAM, perms ...string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -99,6 +104,8 @@ func ipamRoutes() []ipamRoute {
 	out := []ipamRoute{
 		{http.MethodGet, base + "/find?address=10.0.0.5", "", false, http.StatusOK},
 		{http.MethodGet, base + "/prefixes/tree?vrf=global", "", false, http.StatusOK},
+		// DCIM gap 10: an ASN range's free numbers.
+		{http.MethodGet, base + "/asn-ranges/" + uuid.NewString() + "/available-asns?limit=5", "", false, http.StatusOK},
 	}
 	for _, r := range services.IPAMRoutes() {
 		one := base + "/" + r + "/" + uuid.NewString()
@@ -125,8 +132,8 @@ func serveIPAM(r http.Handler, rt ipamRoute) *httptest.ResponseRecorder {
 
 func TestIPAMRoutes_Gates(t *testing.T) {
 	routes := ipamRoutes()
-	if len(routes) != 2+5*13 {
-		t.Fatalf("expected 13 IPAM objects × 5 routes + find + tree, got %d routes", len(routes))
+	if len(routes) != 3+5*16 {
+		t.Fatalf("expected 16 IPAM objects × 5 routes + find + tree + available ASNs, got %d routes", len(routes))
 	}
 	for _, rt := range routes {
 		name := rt.method + " " + rt.path

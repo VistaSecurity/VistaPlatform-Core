@@ -14,8 +14,9 @@ package handlers
 //	PATCH  /{device|module}-types/{id}/{kind}-templates/{template_id}   dcim.manage
 //	DELETE /{device|module}-types/{id}/{kind}-templates/{template_id}   dcim.manage
 //	GET    /assets/{id}/hardware             dcim.read    the asset's Hardware card
-//	PATCH  /assets/{id}/hardware             dcim.manage  device type, role, platform, serial, asset tag
+//	PATCH  /assets/{id}/hardware             dcim.manage  device type, role, platform, serial, asset tag, commercial lifecycle
 //	POST   /assets/{id}/device-type          dcim.manage  assign a type and instantiate its templates
+//	GET    /eol-catalogue                    dcim.read    end-of-life catalogue entries a type or platform may link to
 //	POST   /device-types/import              dcim.manage  import device-type library YAML as the tenant's own types
 //
 // {object} is manufacturers, device-types, module-types, device-roles,
@@ -53,6 +54,7 @@ type CatalogueStore interface {
 	UpdateHardware(ctx context.Context, tenant, asset uuid.UUID, patch services.HardwarePatch) (*services.AssetHardware, error)
 	ApplyDeviceType(ctx context.Context, tenant, asset, deviceType uuid.UUID) (*services.ApplyDeviceTypeResult, error)
 	ImportDeviceTypes(ctx context.Context, tenant uuid.UUID, data []byte) ([]services.ImportedDeviceType, error)
+	EOLCatalogueEntries(ctx context.Context, tenant uuid.UUID, kind, q string, limit int) ([]services.EOLCatalogueRef, error)
 }
 
 // CatalogueHandler serves the catalogue routes.
@@ -329,6 +331,27 @@ func (h *CatalogueHandler) Hardware(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": hw})
+}
+
+// EOLCatalogue is GET /dcim/eol-catalogue?product_kind=hardware|os&q=&limit=:
+// the end-of-life catalogue entries a device type (hardware) or platform (os)
+// may be linked to (DCIM gap 4).
+func (h *CatalogueHandler) EOLCatalogue(c *gin.Context) {
+	tenant, ok := ipamTenant(c)
+	if !ok {
+		return
+	}
+	limit, _, err := sharedapi.ParseLimitOffsetStrict(c, 200, ipamMaxLimit)
+	if err != nil {
+		ipamError(c, http.StatusBadRequest, "invalid_pagination", err.Error())
+		return
+	}
+	rows, err := h.store.EOLCatalogueEntries(c.Request.Context(), tenant, c.Query("product_kind"), c.Query("q"), limit)
+	if err != nil {
+		ipamStoreError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": rows})
 }
 
 // UpdateHardware is PATCH /dcim/assets/{id}/hardware.

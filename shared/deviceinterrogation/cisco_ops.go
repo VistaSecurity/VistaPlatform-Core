@@ -146,7 +146,7 @@ func ciscoCollectOps(ctx context.Context, result *InterrogateResult, run ciscoRu
 	// No longer the net.interfaces / net.vlans facts: they are read here and
 	// handed to the platform as result.Network (cisco_network.go), which the
 	// identity engine writes as interfaces, IP addresses, prefixes and VLANs.
-	network := ciscoNetworkInputs{}
+	network := ciscoNetworkInputs{osName: osName}
 	if out, ok := ciscoRun(ctx, result, run, "show interfaces", "Interface state and speed not collected"); ok {
 		network.interfaces = out
 		network.merged = ciscoParseInterfaces(out)

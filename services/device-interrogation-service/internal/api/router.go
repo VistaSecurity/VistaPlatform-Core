@@ -60,6 +60,11 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 	// route when the route is registered, so a route added above this line
 	// would be unguarded.
 	router.Use(sharedhttp.AgentListenerGuard)
+	// Before any route, like the guard: the sites, locations and clusters a
+	// request writes (an integration's cloud-account sync) raise
+	// object_changed once committed. cmd/main.go installs the notifier before
+	// calling SetupRouter; without one this passes every request through.
+	router.Use(services.ChangeNotifier().Middleware())
 
 	// Health check endpoint
 	router.GET("/health", healthCheck)

@@ -43,4 +43,6 @@ func registerSiteRoutes(g gin.IRoutes, rawDB *sql.DB, h *handlers.SiteHandler) {
 	g.POST("/inventory-service/dcim/locations", actor, write, h.CreateLocation)
 	g.PUT("/inventory-service/dcim/locations/:id", actor, write, h.UpdateLocation)
 	g.DELETE("/inventory-service/dcim/locations/:id", actor, write, h.DeleteLocation)
+	// A location's floor plan and the racks on it (DCIM gap 9).
+	g.GET("/inventory-service/dcim/locations/:id/floor-plan", actor, read, h.GetLocationFloorPlan)
 }

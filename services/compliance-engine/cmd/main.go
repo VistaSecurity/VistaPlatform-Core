@@ -254,6 +254,12 @@ func main() {
 
 	// API routes (service namespace must be compliance-engine per standards)
 	api := router.Group("/api/v1")
+	// The HTTP rail for alerts.raise (HMAC-only, internal prefix): a producer
+	// whose NATS publish failed posts the event here instead. Its own group on
+	// api, so the compliance group's JWT gate does not apply and a user token
+	// does not pass its HMAC gate.
+	// TestMainMountsTheInternalAlertIntake pins this line.
+	handlers.RegisterInternalAlertIntake(api, os.Getenv("INTERNAL_AUTH_SECRET"), alertEngine)
 	compliance := api.Group("/compliance-engine")
 
 	// Apply authentication middleware to all compliance routes

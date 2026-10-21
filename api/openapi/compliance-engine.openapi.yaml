@@ -142,6 +142,11 @@ tags:
       Platform-track stateful alerts (service_down, tenant_health_degraded, …)
       raised under the sentinel platform tenant. Platform-admin only, read-only
       here. UI consumer: admin-ui-v2 System Health → Alerts.
+  - name: internal-alerts
+    description: >
+      Service-to-service only: the HTTP rail for the alerts.raise subject.
+      HMAC-signed, denied at the edge. Caller: shared/dcim/changenotify's
+      FallbackPublisher (inventory-service, device-interrogation-service).
 
 paths:
   /plans:
@@ -3196,8 +3201,53 @@ paths:
         - "Omitting `preference_rung` (or sending it as `null`/`{}`) clears the tenant's preference rung, falling the ladder back to the registry baseline."
         - "Success returns `{ \"status\": \"updated\" }`, not the updated catalog entry — callers refetch `GET /alert-catalog` to see the new effective ladder."
 
+  /internal/alerts/raise:
+    post:
+      operationId: raiseAlertInternal
+      tags: [internal-alerts]
+      summary: Raise one alert over HTTP (internal; the fallback for alerts.raise)
+      description: |
+        The HTTP rail for the `alerts.raise` NATS subject: a producer whose
+        publish failed posts the same event here, and it is raised exactly as
+        the subscriber would raise it (`AlertEngineService.Raise` — never the
+        policy-rung path). An event-lifecycle type such as `object_changed` is
+        routed once to the notification rails and leaves no alerts row.
+
+        HMAC-signed service calls only, naming the tenant in the signed
+        `X-Tenant-ID` header; the event's `tenant_id` must be that tenant (an
+        omitted one is taken from the header). Denied at the edge.
+      parameters:
+        - $ref: "#/components/parameters/ServiceTenantHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AlertRaiseEvent"
+      responses:
+        "202":
+          description: The event was raised; `outcome` says what the engine did with it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AlertIntakeResponse"
+        "400":
+          $ref: "#/components/responses/LegacyBadRequest"
+        "401":
+          $ref: "#/components/responses/LegacyUnauthorized"
+        "500":
+          $ref: "#/components/responses/LegacyServerError"
+
 components:
   parameters:
+    ServiceTenantHeader:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      description: The one tenant this internal call is for. Covered by the HMAC signature, so it cannot be changed after signing.
+      schema:
+        type: string
+        format: uuid
     AlertId:
       name: id
       in: path
@@ -3512,6 +3562,34 @@ components:
             $ref: "#/components/schemas/LegacyErrorWithDetails"
 
   schemas:
+    AlertRaiseEvent:
+      type: object
+      description: >
+        One `alerts.raise` event (shared/events.AlertRaiseEvent), the same JSON
+        the NATS subject carries.
+      required: [alert_type, severity]
+      properties:
+        event_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        alert_type: { type: string, description: "A standards/alert-registry.yaml id." }
+        source: { type: string }
+        subject_type: { type: string }
+        subject_id: { type: [string, "null"], format: uuid }
+        subject_label: { type: string }
+        severity: { type: string, enum: [info, low, medium, high, critical] }
+        title: { type: string }
+        message: { type: string }
+        metadata: { type: [object, "null"], additionalProperties: true }
+        timestamp: { type: string, format: date-time }
+    AlertIntakeResponse:
+      type: object
+      additionalProperties: false
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          enum: [opened, escalated, touched, suppressed, notified]
+          description: What the engine did with the event.
     SeamProvenance:
       type: object
       additionalProperties: false
@@ -6601,6 +6679,7 @@ components:
         - track
         - kind
         - status
+        - lifecycle
         - source
         - subject_type
         - severity_model
@@ -6622,6 +6701,13 @@ components:
         status:
           type: string
           description: live / planned.
+        lifecycle:
+          type: string
+          enum: [stateful, event]
+          description: >
+            stateful — one row in the alerts table per subject that opens,
+            escalates and resolves; event — a one-shot notification routed once
+            per raise with no alerts row (object_changed).
         source:
           type: string
           description: Which service raises this alert type.
