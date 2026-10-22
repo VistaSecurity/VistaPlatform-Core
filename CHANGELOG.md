@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [5.1.0-rc.3] - 2026-10-21
+## [5.1.0] - 2026-10-21
 
 **Version 5.1.0 completes the DCIM model and is a security and platform-maintenance
 release.** It adds virtual device contexts, power panels, feeds and PDU collection, floor
