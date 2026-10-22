@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-10-21T09:46:57Z",
-  "generated_date": "2026-10-21",
+  "generated_at": "2026-10-22T09:46:24Z",
+  "generated_date": "2026-10-22",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/39579319223",
+  "run_url": "https://github.com/bob-vistasecurity/VistaPlatform/actions/runs/39757718655",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -33,7 +33,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -50,7 +50,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "usr/bin/caddy"
         }
       ]
@@ -67,7 +67,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -84,7 +84,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -101,7 +101,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -118,7 +118,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -135,7 +135,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -152,7 +152,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -169,7 +169,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -186,7 +186,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -221,7 +221,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         },
         {
@@ -230,7 +230,7 @@
           "package": "stdlib",
           "installed": "v1.26.4",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "usr/local/bin/cosign"
         },
         {
@@ -239,7 +239,7 @@
           "package": "stdlib",
           "installed": "v1.26.8",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "usr/local/bin/helm"
         },
         {
@@ -670,7 +670,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -687,7 +687,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -704,7 +704,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -721,7 +721,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -738,7 +738,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -755,7 +755,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "app/main"
         }
       ]
@@ -772,7 +772,7 @@
           "package": "stdlib",
           "installed": "v1.26.9",
           "fixed": "1.26.10, 1.27.3",
-          "title": "golang: crypto/x509: Go: crypto/x509: mitigation for security concerns with a specific Certificate Authority",
+          "title": "crypto/x509: golang: crypto/x509: Man-in-the-middle attacks via untrusted intermediate certificates",
           "target": "usr/bin/caddy"
         }
       ]
