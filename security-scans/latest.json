@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-10-23T10:55:08Z",
-  "generated_date": "2026-10-23",
+  "generated_at": "2026-10-24T09:15:10Z",
+  "generated_date": "2026-10-24",
   "registry": "ghcr.io/vistasecurity",
   "tag": "latest",
-  "run_url": "https://github.com/VistaSecurity/VistaPlatform/actions/runs/39933544747",
+  "run_url": "https://github.com/VistaSecurity/VistaPlatform/actions/runs/40081056057",
   "scanner": "trivy",
   "scope": {
     "severities": [
@@ -13,13 +13,15 @@
     "ignore_unfixed": true
   },
   "totals": {
-    "images_expected": 18,
+    "images_expected": 19,
     "images_scanned": 18,
-    "images_not_scanned": 0,
+    "images_not_scanned": 1,
     "critical": 0,
     "high": 24
   },
-  "not_scanned": [],
+  "not_scanned": [
+    "schema"
+  ],
   "images": [
     {
       "image": "admin-service",
