@@ -49,6 +49,15 @@
 #   where it is unique across assets and carries its own source, confidence
 #   and first/last-seen. Two homes for one value is the reconciliation bug of
 #   ADR-0002 D4 written into the schema.
+# * `crypto_bearing: true` marks a class whose instances carry cryptography by
+#   their nature (a key store, a secret store, a VPN gateway, a TLS-terminating
+#   edge). Absent means false. It decides one thing: an unscored instance with
+#   no crypto measured reads "Not assessed" rather than "No crypto observed",
+#   because seeing no crypto on a KMS key is a gap in what we measured, not an
+#   answer about the key (shared/cryptosurface). Subclasses inherit it by
+#   class path. Mark generously: an over-marked class reads "Not assessed",
+#   which is visible; an under-marked one reads "No crypto observed", which
+#   is false and silent.
 # * `identifier_precedence` is an ordered subset of `identifier_kinds` below
 #   (ADR-0002 D3), highest-confidence first. An EMPTY list means the class has
 #   no independent identity at all — nothing can identify it, so every
@@ -413,6 +422,7 @@ classes:
     cmdb_ci_type: null
     cyclonedx_type: device
     legacy_asset_type: appliance
+    crypto_bearing: true
     identifier_precedence:
       [serial_number, cmdb_sys_id, ssh_host_key_fingerprint, mac_address,
        fqdn, hostname, ip_address]
@@ -893,6 +903,7 @@ classes:
     cmdb_ci_type: null
     cyclonedx_type: platform
     legacy_asset_type: service
+    crypto_bearing: true
     identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
     # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
     # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
@@ -958,6 +969,7 @@ classes:
     cmdb_ci_type: null
     cyclonedx_type: application
     legacy_asset_type: service
+    crypto_bearing: true
     identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
     # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
     # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
@@ -983,6 +995,7 @@ classes:
     cmdb_ci_type: null
     cyclonedx_type: platform
     legacy_asset_type: service
+    crypto_bearing: true
     identifier_precedence: [cloud_resource_id, cmdb_sys_id, fqdn]
     # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
     # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'
@@ -1090,6 +1103,7 @@ classes:
     cmdb_ci_type: null
     cyclonedx_type: data
     legacy_asset_type: service
+    crypto_bearing: true
     identifier_precedence: [cloud_resource_id, cmdb_sys_id]
     # Provider type → class (ADR-0009 D2): the ONE mapping, generated into
     # shared/assetclass/cloud_types_gen.go. `aliases` are the collectors'

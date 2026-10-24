@@ -1074,8 +1074,13 @@ func becomesDiscoveryRow(deviceType string) bool {
 // keeps them out of sensor_discoveries: if they ever reach the fallback branch
 // again, their honest shape is still "at rest, no protocol", never TLS:443.
 var atRestDeviceTypes = map[string]bool{
-	"aws_s3_bucket":         true,
-	"aws_rds_instance":      true,
+	"aws_s3_bucket":    true,
+	"aws_rds_instance": true,
+	// An AWS secret is enumerated (its asset is written by cloud_enumeration.go)
+	// AND states its at-rest encryption, so it is the one enumerated kind that
+	// also becomes a discovery row: protocol-less, at_rest, resolving to the
+	// same asset by its cloud_resource_id (awsSecretAtRestMetadata).
+	DeviceTypeAWSSecret:     true,
 	"aws_kms":               true,
 	"azure_storage_account": true,
 	"azure_sql_database":    true,

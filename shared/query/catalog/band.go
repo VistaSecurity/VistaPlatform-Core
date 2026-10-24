@@ -1,6 +1,10 @@
 package catalog
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/vistasecurity/vistaplatform/shared/query/ast"
+)
 
 // BandLadder supplies the score→label ladder a band-typed field is compared
 // through (§5.5).
@@ -28,6 +32,29 @@ type Band struct {
 // `risk:not_assessed` is a different set. Only a band field whose accessor
 // names an AssessedBy column accepts it.
 const NotAssessed = "not_assessed"
+
+// NoCryptoObserved is the second coverage pseudo-band, accepted only by a band
+// field whose accessor names a Surface. It is an unscored row with no
+// cryptographic surface on record (shared/cryptosurface); `not_assessed` on
+// such a field is then the unscored rows that DO show one. The two partition
+// the unscored set, so `risk:not_assessed or risk:no_crypto_observed` is what
+// `risk:not_assessed` meant before the split.
+const NoCryptoObserved = "no_crypto_observed"
+
+// IsCoveragePseudoBand reports whether a literal is one of the two values that
+// test coverage rather than compare against the ladder.
+func IsCoveragePseudoBand(v string) bool {
+	return strings.EqualFold(v, NotAssessed) || strings.EqualFold(v, NoCryptoObserved)
+}
+
+// BandLabelsFor is BandLabels with exactly the pseudo-bands a field accepts.
+func BandLabelsFor(l BandLadder, a ast.Accessor) []string {
+	out := BandLabels(l, a.AssessedBy != "")
+	if a.AssessedBy != "" && a.Surface != "" {
+		out = append(out, NoCryptoObserved)
+	}
+	return out
+}
 
 // BandLabels returns the ladder's labels, highest-first, plus not_assessed when
 // the field supports it. Used for error messages and autocomplete.

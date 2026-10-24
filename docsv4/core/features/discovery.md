@@ -38,7 +38,7 @@ ever scanned that way. See [Automatic Active Scanning](./active-scanning.md).
 **Observation rest period.** A passive sensor does not re-send the same
 observation on every connection it sees; it rests for **one hour** between
 repeats of the same sighting. Change it as **Dedup TTL** (in minutes) on one
-sensor's **Control** tab, or for every sensor under **Sensor defaults** on
+sensor's **Settings** tab, or for every sensor under **Sensor defaults** on
 Discovery → Sensors & Agents; the sensor applies the new value at its next
 check-in. Through the API it is `dedup_ttl_minutes`. See
 [Agent and sensor settings](./agent-and-sensor-settings.md).

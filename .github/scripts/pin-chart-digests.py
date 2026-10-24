@@ -3,7 +3,7 @@
 
 Reads digest fragments produced by the build-images job (one JSON file per
 image with {name, image, digest}) and rewrites values.yaml so each backend,
-frontend, and gateway entry has an `image.digest` set. The chart's image
+frontend and the schema image entry has an `image.digest` set. The chart's image
 helper prefers digest over tag when both are present.
 
 Usage:
@@ -84,6 +84,16 @@ def main() -> int:
                 if "image" not in entry:
                     entry["image"] = {}
                 entry["image"]["digest"] = digests[image_name]
+
+    # The schema image (the SQL the Jobs apply), reached through
+    # schemaMigration.sqlImage rather than the backends map.
+    if "schema" in digests:
+        sm = values.setdefault("schemaMigration", {})
+        if "sqlImage" not in sm:
+            sm["sqlImage"] = {}
+        sm["sqlImage"]["digest"] = digests["schema"]
+    else:
+        print("WARNING: no digest for the schema image", file=sys.stderr)
 
     # Note: gateway uses upstream traefik image, not pinned by this pipeline.
 

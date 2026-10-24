@@ -255,6 +255,25 @@ describe('assetRisk', () => {
     expect(r.label).toBe('72');
   });
 
+  it('reads an unscored asset with crypto_surface=false as NO CRYPTO OBSERVED', () => {
+    const r = assetRisk({ risk_score: 0, risk_assessed_by: [], crypto_surface: false });
+    expect(r.assessed).toBe(false);
+    expect(r.noCryptoObserved).toBe(true);
+    expect(r.title).toMatch(/no crypto observed/i);
+  });
+
+  it('reads an absent crypto_surface as NOT assessed — "no crypto" is never the default', () => {
+    for (const surface of [undefined, null, true]) {
+      const r = assetRisk({ risk_score: 0, risk_assessed_by: [], crypto_surface: surface });
+      expect(r.noCryptoObserved, String(surface)).toBe(false);
+      expect(r.title).toMatch(/not assessed/i);
+    }
+  });
+
+  it('never calls a SCORED asset "no crypto observed", whatever its surface', () => {
+    expect(assetRisk({ risk_score: 0, risk_assessed_by: ['eol'], crypto_surface: false }).noCryptoObserved).toBe(false);
+  });
+
   it('ignores blank entries in risk_assessed_by', () => {
     expect(assetRisk({ risk_score: 0, risk_assessed_by: ['', '  '] }).assessed).toBe(false);
   });

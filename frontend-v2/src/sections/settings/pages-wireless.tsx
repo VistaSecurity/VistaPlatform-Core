@@ -7,6 +7,10 @@
 // A pre-shared key is never entered, shown or stored: the form has a checkbox
 // saying one exists. Links are created by discovery or the API (they join two
 // interfaces by id); here they can be edited and deleted.
+//
+// A discovered LAN or link that no approved access point reports stays
+// pending (an approved AP's LANs follow it to active on their own); its row
+// carries the Pending tag and, for wireless.manage, an Approve button.
 import { useState, type ReactNode } from 'react';
 import { PermissionGate, TENANT_PERMISSIONS } from '@vistasecurity/primitives/rbac';
 import { Icon } from '../../components/ui';
@@ -16,12 +20,15 @@ import {
   useIpamList, type IpamRoute, type IpamRows, type WirelessLan, type WirelessLanGroup, type WirelessLink,
 } from '../inventory/ipam/ipam-queries';
 import { IpamDeleteModal, IpamFormModal, type IpamField } from '../inventory/ipam/ipam-ui';
+import { ApproveButton } from '../inventory/ipam/prefix-panel';
 import { SPage, SSection, STable, STableRow, STag, type STableCol } from './kit';
 import type { SettingsNavItem } from './nav';
 
 type WirelessRoute = Extract<IpamRoute, `wireless-${string}`>;
 
 const ACTIONS_COL: STableCol = { label: '', w: '80px', align: 'right' };
+// Wide enough for the Pending tag and Approve beside the edit controls.
+const ACTIONS_COL_PENDING: STableCol = { ...ACTIONS_COL, w: '200px' };
 
 const select = (labels: Record<string, string>, none: string) => [
   { value: '', label: none },
@@ -53,13 +60,14 @@ function WirelessSection<R extends WirelessRoute>({ s }: { s: Section<R> }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<IpamRows[R] | null>(null);
   const [deleting, setDeleting] = useState<IpamRows[R] | null>(null);
-  const cols = [...s.cols, ACTIONS_COL];
+  const rows = q.data?.rows ?? [];
+  const anyPending = rows.some((row) => (row as { status?: string }).status === 'pending');
+  const cols = [...s.cols, anyPending ? ACTIONS_COL_PENDING : ACTIONS_COL];
   const groupRows = groups.data?.rows ?? [];
   const ctx: Ctx = {
     groups: groupRows,
     groupName: (id) => (id ? groupRows.find((g) => g.id === id)?.name ?? '—' : '—'),
   };
-  const rows = q.data?.rows ?? [];
   return (
     <SSection title={s.title} desc={s.desc} action={s.addable === false ? undefined : (
       <PermissionGate permission={TENANT_PERMISSIONS.wireless.manage}>
@@ -79,6 +87,9 @@ function WirelessSection<R extends WirelessRoute>({ s }: { s: Section<R> }) {
                   ...s.cells(row, ctx),
                   <span key="a" style={{ display: 'inline-flex', gap: 2, alignItems: 'center' }}>
                     {r.status === 'pending' && <STag>Pending</STag>}
+                    {r.status === 'pending' && (s.route === 'wireless-lans' || s.route === 'wireless-links') && (
+                      <ApproveButton route={s.route} id={r.id} permission={TENANT_PERMISSIONS.wireless.manage} label={s.name(row)} />
+                    )}
                     <PermissionGate permission={TENANT_PERMISSIONS.wireless.manage}>
                       <button type="button" className="ui-btn sm ghost" title="Edit" aria-label={`Edit ${s.name(row)}`} onClick={() => setEditing(row)}><Icon name="sliders-horizontal" size={13} /></button>
                       <button type="button" className="ui-btn sm ghost" title="Delete" aria-label={`Delete ${s.name(row)}`} style={{ color: 'var(--danger-text)' }} onClick={() => setDeleting(row)}><Icon name="x" size={13} /></button>

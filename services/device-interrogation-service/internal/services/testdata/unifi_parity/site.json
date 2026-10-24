@@ -734,6 +734,8 @@
    "is_wired": false,
    "ap_mac": "f4:92:bf:30:00:01",
    "essid": "Guest",
+   "radio": "na",
+   "radio_proto": "ac",
    "vlan": 30,
    "network": "Guest",
    "last_seen": 1760500003,

@@ -43,7 +43,7 @@ func schemaKinds(t *testing.T, rel string) []string {
 }
 
 func TestSchemaObjectKindList_EqualsGeneratedList(t *testing.T) {
-	for _, rel := range []string{"scripts/database/schema.sql", "charts/vistaplatform/files/schema/schema.sql"} {
+	for _, rel := range []string{"scripts/database/schema.sql"} {
 		got := schemaKinds(t, rel)
 		in := map[string]bool{}
 		for _, k := range got {

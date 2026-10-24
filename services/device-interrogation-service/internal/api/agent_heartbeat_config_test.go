@@ -39,7 +39,7 @@ func TestIntegration_AgentHeartbeatCarriesTheConfigExchange(t *testing.T) {
 	r.POST("/agents/:id/heartbeat", func(c *gin.Context) {
 		c.Set("tenantID", tenant)
 		c.Next()
-	}, agentHeartbeatHandler(admin, admin, nil))
+	}, agentHeartbeatHandler(admin, admin, nil, nil))
 
 	post := func(body string) map[string]any {
 		t.Helper()

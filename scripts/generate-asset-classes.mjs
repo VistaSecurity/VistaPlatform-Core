@@ -114,6 +114,9 @@ function load() {
       if (seenKind.has(kind)) fail(`${c.key}: identifier kind listed twice: ${kind}`);
       seenKind.add(kind);
     }
+    if ('crypto_bearing' in c && typeof c.crypto_bearing !== 'boolean') {
+      fail(`${c.key}: crypto_bearing must be true or false`);
+    }
     validateSchema(c, attrTypes);
     byKey.set(c.key, c);
   }
@@ -255,6 +258,7 @@ function load() {
     cyclonedxType: c.cyclonedx_type,
     identifierPrecedence: c.identifier_precedence,
     legacyAssetType: c.legacy_asset_type,
+    cryptoBearing: c.crypto_bearing === true,
     schema: effective.get(c.key),
   }));
 
@@ -571,7 +575,7 @@ function emitGo(rows, identifierKinds, cyclonedxTypes, legacyTypes) {
 		CMDBCIType:           ${goStr(r.cmdbCIType)},
 		CycloneDXType:        ${goStr(r.cyclonedxType)},
 		IdentifierPrecedence: ${goStrSlice(r.identifierPrecedence)},
-		LegacyAssetType:      ${goStr(r.legacyAssetType)},
+		LegacyAssetType:      ${goStr(r.legacyAssetType)},${r.cryptoBearing ? '\n\t\tCryptoBearing:        true,' : ''}
 	},`).join('\n');
 
   return `// ${HEADER_LINES.join('\n// ')}
@@ -637,6 +641,12 @@ type Class struct {
 	// LegacyAssetType maps the class onto the public.asset_type enum value the
 	// pre-ADR-0002 model used. Reference only.
 	LegacyAssetType string \`json:"legacy_asset_type"\`
+	// CryptoBearing marks a class whose instances carry cryptography by their
+	// nature — a key store, a VPN gateway, a TLS-terminating edge. An instance
+	// with no crypto measured reads "Not assessed", never "No crypto
+	// observed": having seen none on such a thing is a gap in what we
+	// measured, not an answer about it (shared/cryptosurface).
+	CryptoBearing bool \`json:"crypto_bearing,omitempty"\`
 }
 
 // All is the fixed class hierarchy, in registry order. A parent always

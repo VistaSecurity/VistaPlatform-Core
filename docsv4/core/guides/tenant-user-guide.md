@@ -159,8 +159,9 @@ score with how many checks pass, fail, and were not assessed.
 
 A strip of clickable tiles, prioritized across every section: **Critical
 findings** (all producers), **High-risk assets**, **Certs expiring** within 30
-days, **Unscored assets**, **Not PQC-ready**, **Not yet assessed**, and **Overdue
-tickets**. Each opens the filtered list behind it.
+days, **Not assessed** (assets with crypto on record that nothing has scored yet),
+**Not PQC-ready**, **Not yet assessed**, and **Overdue tickets**. Each opens the
+filtered list behind it.
 
 ### The lifecycle, end to end
 
@@ -296,23 +297,32 @@ keep trying to check in and logging rejections.
 
 #### The sensor drawer
 
-Click any sensor row to open its drawer. Four tabs (a platform-managed sensor
-shows the first two only):
+Click any sensor or discovery agent row to open its drawer. Sensors and agents
+share one layout — **Overview · Discoveries · Health · Jobs · Logs · Settings** —
+and each shows the tabs it supports: an agent has no Discoveries tab, and a
+platform-managed sensor shows the first two only.
 
 - **Overview** — status, last heartbeat, reporting interval, version, address,
   deployment (connected or air-gapped), uptime, monitored interfaces, and the
   sensor's certificate with its serial, issue and expiry dates.
 - **Discoveries** — what this sensor has found: protocol, destination, port,
   confidence, timestamp.
-- **Health** — current metrics plus a **History** chart over a range you choose.
+- **Health** — opens with a **Connection** block on both: online or offline,
+  last heartbeat, version, and whether the device has taken its settings. A
+  sensor then shows current metrics plus a **History** chart over a range you choose.
   If the sensor reports them, a **Host observations** block shows **Hosts seen**,
   **Shed**, and **Accumulating now**: devices seen on the wire without connecting
   to them, each of which becomes a pending asset in Approvals. A non-zero *Shed*
   count means the network is busier than the sensor is sized for — that is
   actionable, not cosmetic.
-- **Control** — **Send command** queues a typed command with an optional JSON
-  payload, and **Command history** shows every command sent, its lifecycle and
-  its response.
+  An agent shows its recent job outcomes and its last host inventory instead.
+- **Jobs** — the last 10 jobs, one line each with a status. Click one to see its
+  timing, payload and reply. A sensor can also **Send a command** here.
+- **Logs** — **Fetch logs** asks the device for its recent log lines and shows
+  them as text once it checks in, with credentials masked.
+- **Settings** — the managed settings, their change history and **Restart**. A
+  sensor's also holds its network interfaces, description, tags and reporting
+  interval.
 
 Full reference: [Sensor Registration & Management](../features/SENSOR_REGISTRATION.md).
 
@@ -1347,7 +1357,16 @@ before assuming the score is wrong.
 **"A risk score reads 0."**
 Zero means **not assessed** — nothing resolved against the algorithm catalogue and
 no size or lifecycle rule fired. It is not a claim that the thing is safe. The
-**Unscored assets** tile on the Dashboard lists these.
+**Not assessed** tile on the Dashboard lists these.
+
+**"The Dashboard says some assets have no crypto observed."**
+They are assets with nothing cryptographic on record: no crypto configuration,
+no encrypted store, no TLS, SSH or IPsec endpoint, and not a key or secret
+store. A phone or smart plug that a sensor saw only on the local network is the
+usual case. There was nothing to assess, so the **Cryptographic Posture** ring shows them as
+their own grey slice, apart from **Not assessed**. If you expected crypto on one,
+it usually means no sensor could see its traffic and no scan reached an open
+port on it.
 
 **"My saved views will not load."**
 The menu says so and offers a retry; your views have not been deleted. If the

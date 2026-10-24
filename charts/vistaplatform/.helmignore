@@ -1,0 +1,5 @@
+# The SQL never ships in the chart (#2731): it is in the schema release image.
+# A stale local copy must not be packaged either.
+files/schema/*.sql
+files/ee/frameworks-regulated.sql
+files/ee/frameworks-regulated.sql.sig

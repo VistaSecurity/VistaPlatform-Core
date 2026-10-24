@@ -145,7 +145,7 @@ nothing on macOS, and [Npcap](https://npcap.com/) on Windows.
 A sensor only sees traffic that passes the network card it's listening on.
 Plugged into a **mirror or SPAN port** on a switch, it sees that whole prefix.
 On a single server it sees that server's own connections, which is still enough
-for a first look. In the sensor's **Control** tab you choose which network
+for a first look. In the sensor's **Settings** tab you choose which network
 interfaces it monitors.
 
 ### Check that it connected
@@ -284,7 +284,7 @@ know was there within the first few minutes.
 |---|---|
 | Discovery ran but Inventory is empty | The assets are waiting in **Discovery → Approvals** (step 6). |
 | The sensor never reaches *Connected* | The sensor machine can't reach the platform address in the install command, or the registration code expired or was already used. Register again to get a new code. |
-| The sensor is connected but finds nothing | It's listening on an interface that doesn't carry the traffic. Open its **Control** tab and use **Detect** to choose the right network interface. |
+| The sensor is connected but finds nothing | It's listening on an interface that doesn't carry the traffic. Open its **Settings** tab and use **Detect** to choose the right network interface. |
 | **Add device** fails | The message names the reason: credentials, certificate trust or reachability. Tick **Skip TLS verification** for a self-signed management certificate. |
 | A cloud run is partly collected | A resource type was denied. The job's detail shows the provider's error and which permission to add. |
 

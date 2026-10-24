@@ -41,7 +41,6 @@ func TestSchemaDeclaresAssetsPrimaryKeyBeforeItsCompositeFKs(t *testing.T) {
 
 	for _, rel := range []string{
 		"scripts/database/schema.sql",
-		"charts/vistaplatform/files/schema/schema.sql",
 	} {
 		t.Run(rel, func(t *testing.T) {
 			body, err := os.ReadFile(filepath.Join(repoRoot, rel))
@@ -123,7 +122,6 @@ func TestSchemaNamesNoRetiredTable(t *testing.T) {
 
 	for _, rel := range []string{
 		"scripts/database/schema.sql",
-		"charts/vistaplatform/files/schema/schema.sql",
 	} {
 		t.Run(rel, func(t *testing.T) {
 			body, err := os.ReadFile(filepath.Join(repoRoot, rel))

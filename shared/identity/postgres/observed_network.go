@@ -9,7 +9,10 @@ package postgres
 //   - VLANs (`vlans`, global: no group, no site) and prefixes (`prefixes`),
 //     with UpsertObservedPrefix's semantics: a new row is `measured` and
 //     `pending`; an existing one gets its measured columns refreshed and a
-//     declared column only where nobody has said (COALESCE);
+//     declared column only where nobody has said (COALESCE). A VLAN's status
+//     follows the observing asset instead, as its interfaces' does: an
+//     approved device's VLANs are `active`, and a measured one still
+//     `pending` (or `stale`) is promoted when an approved device reports it;
 //   - each interface by (asset, canonical name), with
 //     interface_service.UpsertObserved's semantics: a new interface carries
 //     the observation's source kind (`measured` from a collector, `declared` /
@@ -159,15 +162,27 @@ func (w *networkWriter) vlansOf(n identity.ObservedNetwork) error {
 
 func defaultVLANName(vid int) string { return fmt.Sprintf("VLAN %d", vid) }
 
+// followedStatus is the lifecycle status of an existing row the observed asset
+// reports and that follows it (a VLAN, a wireless LAN): a measured row still
+// `pending`, or gone `stale`, takes the asset's status when the asset is
+// approved, as its interfaces do. A declared or imported row, and a person's
+// decision (active, rejected, archived), are never moved.
+func (w *networkWriter) followedStatus(sourceKind, status string) string {
+	if sourceKind == string(identity.SourceMeasured) && w.status == "active" && (status == "pending" || status == "stale") {
+		return w.status
+	}
+	return status
+}
+
 func (w *networkWriter) vlan(vid int, name string) (uuid.UUID, error) {
 	var (
-		id         uuid.UUID
-		cur, srcKd string
+		id                 uuid.UUID
+		cur, srcKd, status string
 	)
 	err := w.tx.QueryRowContext(w.ctx, `
-		SELECT id, name, source_kind FROM public.vlans
+		SELECT id, name, source_kind, status FROM public.vlans
 		 WHERE tenant_id = $1 AND vid = $2 AND group_id IS NULL AND site_id IS NULL AND status <> 'rejected'
-		 ORDER BY created_at, id LIMIT 1 FOR UPDATE`, w.tenant, vid).Scan(&id, &cur, &srcKd)
+		 ORDER BY created_at, id LIMIT 1 FOR UPDATE`, w.tenant, vid).Scan(&id, &cur, &srcKd, &status)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		id = uuid.New()
@@ -177,13 +192,13 @@ func (w *networkWriter) vlan(vid int, name string) (uuid.UUID, error) {
 		if _, err := w.tx.ExecContext(w.ctx, `
 			INSERT INTO public.vlans (id, tenant_id, vid, name, source_kind, source_ref, status,
 			                          first_seen_at, last_seen_at, observation_count)
-			VALUES ($1, $2, $3, $4, 'measured', NULLIF($5, ''), 'pending', $6, $6, 1)`,
-			id, w.tenant, vid, name, w.src.Ref, w.at); err != nil {
+			VALUES ($1, $2, $3, $4, 'measured', NULLIF($5, ''), $6, $7, $7, 1)`,
+			id, w.tenant, vid, name, w.src.Ref, w.status, w.at); err != nil {
 			return uuid.Nil, fmt.Errorf("identity/postgres: create vlan %d: %w", vid, err)
 		}
 		w.res.VLANsCreated++
 		return id, w.record(dcim.ObjectKindVlan, id, changes.ActionCreate, nil,
-			map[string]any{"vid": vid, "name": name, "source_kind": "measured", "status": "pending"})
+			map[string]any{"vid": vid, "name": name, "source_kind": "measured", "status": w.status})
 	case err != nil:
 		return uuid.Nil, fmt.Errorf("identity/postgres: read vlan %d: %w", vid, err)
 	}
@@ -193,16 +208,24 @@ func (w *networkWriter) vlan(vid int, name string) (uuid.UUID, error) {
 	if name != "" && srcKd != "declared" && cur == defaultVLANName(vid) {
 		newName = name
 	}
+	newStatus := w.followedStatus(srcKd, status)
 	if _, err := w.tx.ExecContext(w.ctx, `
 		UPDATE public.vlans
-		   SET name = $3, last_seen_at = GREATEST(coalesce(last_seen_at, $4), $4), first_seen_at = coalesce(first_seen_at, $4),
+		   SET name = $3, status = $5, last_seen_at = GREATEST(coalesce(last_seen_at, $4), $4), first_seen_at = coalesce(first_seen_at, $4),
 		       observation_count = observation_count + 1, updated_at = now()
-		 WHERE tenant_id = $1 AND id = $2`, w.tenant, id, newName, w.at); err != nil {
+		 WHERE tenant_id = $1 AND id = $2`, w.tenant, id, newName, w.at, newStatus); err != nil {
 		return uuid.Nil, fmt.Errorf("identity/postgres: refresh vlan %d: %w", vid, err)
 	}
 	w.res.VLANsUpdated++
+	pre, post := map[string]any{}, map[string]any{}
 	if newName != cur {
-		return id, w.record(dcim.ObjectKindVlan, id, changes.ActionUpdate, map[string]any{"name": cur}, map[string]any{"name": newName})
+		pre["name"], post["name"] = cur, newName
+	}
+	if newStatus != status {
+		pre["status"], post["status"] = status, newStatus
+	}
+	if len(post) > 0 {
+		return id, w.record(dcim.ObjectKindVlan, id, changes.ActionUpdate, pre, post)
 	}
 	return id, nil
 }

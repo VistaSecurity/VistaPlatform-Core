@@ -19,6 +19,9 @@ func TestCryptoKinds_ExcludesTheWirelessKindAndKeepsTheRest(t *testing.T) {
 	if has[findings.KindWeakWirelessAuth] {
 		t.Fatal("the crypto pass sweeps weak_wireless_auth: it would resolve what the wireless pass raised")
 	}
+	if has[findings.KindUnencryptedAtRest] {
+		t.Fatal("the crypto pass sweeps unencrypted_at_rest: it would resolve what the at-rest pass raised, every night")
+	}
 	for _, k := range []string{findings.KindWeakConfiguration, findings.KindWeakCertificate, findings.KindPQCVulnerable} {
 		if !has[k] {
 			t.Errorf("the crypto pass no longer sweeps %s", k)

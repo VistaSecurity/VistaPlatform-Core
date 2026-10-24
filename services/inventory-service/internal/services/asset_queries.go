@@ -16,6 +16,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/cryptosurface"
 )
 
 // The proposal owns conflict state; a cached boolean on assets would become
@@ -80,7 +81,7 @@ func (s *AssetService) GetAssets(tenantID uuid.UUID, filters models.AssetFilters
 			a.class_key, a.class_path, a.class_source_kind, a.class_source_ref, a.class_confidence,
 			a.attributes::text, a.environment, ` + assetBusinessUnitSQL + `, a.owner_email, a.support_group,
 			a.description, a.tags::text, a.metadata::text, a.asset_ownership, a.asset_status,
-			a.stale_status, a.risk_score, a.risk_assessed_by,
+			a.stale_status, a.risk_score, a.risk_assessed_by, ` + cryptosurface.Inline("a") + ` AS crypto_surface,
 			a.identity_status, ` + assetIdentityConflictSQL + `,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at,
@@ -228,7 +229,7 @@ func scanAssetListRow(rows *sqlx.Rows) (*models.Asset, error) {
 		&asset.ClassKey, &asset.ClassPath, &asset.ClassSourceKind, &asset.ClassSourceRef, &asset.ClassConfidence,
 		&attributesText, &asset.Environment, &asset.BusinessUnit, &asset.OwnerEmail, &asset.SupportGroup,
 		&asset.Description, &tagsText, &metadataText, &asset.AssetOwnership, &asset.AssetStatus,
-		&asset.StaleStatus, &asset.RiskScore, &assessedBy,
+		&asset.StaleStatus, &asset.RiskScore, &assessedBy, &asset.CryptoSurface,
 		&asset.IdentityStatus, &asset.HasIdentityConflict,
 		&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
 		&asset.DeletedAt, &asset.LocationID, &asset.PrefixID, &asset.Prefix,
@@ -288,7 +289,7 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 			a.asset_ownership, a.asset_status, a.stale_status,
 			a.identity_status, ` + assetIdentityConflictSQL + `,
 			a.discovery_method, a.confidence_score,
-			a.risk_score, a.risk_assessed_by,
+			a.risk_score, a.risk_assessed_by, ` + cryptosurface.Inline("a") + ` AS crypto_surface,
 			a.first_discovered_at, a.last_seen_at,
 			a.created_at, a.updated_at, a.deleted_at,
 			a.location_id, a.prefix_id, pfx.prefix::text AS prefix,
@@ -312,7 +313,7 @@ func (s *AssetService) GetAssetByID(tenantID, assetID uuid.UUID) (*models.Asset,
 			&asset.AssetOwnership, &asset.AssetStatus, &asset.StaleStatus,
 			&asset.IdentityStatus, &asset.HasIdentityConflict,
 			&asset.DiscoveryMethod, &asset.ConfidenceScore,
-			&asset.RiskScore, &assessedBy,
+			&asset.RiskScore, &assessedBy, &asset.CryptoSurface,
 			&asset.FirstDiscoveredAt, &asset.LastSeenAt, &asset.CreatedAt, &asset.UpdatedAt,
 			&asset.DeletedAt, &asset.LocationID, &asset.PrefixID, &asset.Prefix,
 			&asset.Site, &asset.Location, &asset.Rack, &asset.Region, &asset.Zone, &customFieldsText, &lifecycleText,
@@ -560,8 +561,15 @@ func (s *AssetService) GetRiskSummary(tenantID uuid.UUID) (*models.RiskSummary, 
 			-- assessed clean. Every band below is guarded by it, so a tenant
 			-- that has never been scanned reports its assets as unknown rather
 			-- than as informational — and the tile finally agrees with the rail.
+			--
+			-- surface splits the unassessed set (shared/cryptosurface, the
+			-- same SQL the risk facet and risk:not_assessed compile): an
+			-- ARP-only phone has nothing for a crypto producer to judge, and
+			-- calling it "not assessed" said we had skipped work there was
+			-- never any of.
 			SELECT a.id, a.risk_score AS score,
-			       COALESCE(array_length(a.risk_assessed_by, 1), 0) > 0 AS assessed
+			       COALESCE(array_length(a.risk_assessed_by, 1), 0) > 0 AS assessed,
+			       `+cryptosurface.Inline("a")+` AS surface
 			FROM assets a
 			WHERE a.tenant_id = $1 AND a.deleted_at IS NULL AND a.asset_status = 'monitoring'
 		)
@@ -576,6 +584,8 @@ func (s *AssetService) GetRiskSummary(tenantID uuid.UUID) (*models.RiskSummary, 
 			(SELECT COUNT(*) FROM asset_risk WHERE assessed AND (%s)) AS low_risk,
 			(SELECT COUNT(*) FROM asset_risk WHERE assessed AND (%s)) AS informational,
 			(SELECT COUNT(*) FROM asset_risk WHERE NOT assessed) AS unknown_risk,
+			(SELECT COUNT(*) FROM asset_risk WHERE NOT assessed AND surface) AS not_assessed,
+			(SELECT COUNT(*) FROM asset_risk WHERE NOT assessed AND NOT surface) AS no_crypto_observed,
 			(SELECT COUNT(*) FROM crypto_implementations ci
 			   JOIN assets a ON a.tenant_id = ci.tenant_id AND a.id = ci.asset_id
 			  WHERE ci.tenant_id = $1 AND ci.deleted_at IS NULL AND a.deleted_at IS NULL
@@ -593,7 +603,8 @@ func (s *AssetService) GetRiskSummary(tenantID uuid.UUID) (*models.RiskSummary, 
 	if err := database.WithTenantTx(context.Background(), s.db, tenantID, func(tx *sqlx.Tx) error {
 		return tx.QueryRow(query, tenantID).Scan(
 			&summary.TotalAssets, &summary.TotalCrypto, &summary.HighRisk, &summary.MediumRisk,
-			&summary.LowRisk, &summary.Informational, &summary.UnknownRisk, &summary.CriticalFindings,
+			&summary.LowRisk, &summary.Informational, &summary.UnknownRisk,
+			&summary.NotAssessed, &summary.NoCryptoObserved, &summary.CriticalFindings,
 		)
 	}); err != nil {
 		log.Printf("[ERROR] GetRiskSummary - Query failed: %v, tenantID: %v", err, tenantID)

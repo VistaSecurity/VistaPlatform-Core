@@ -398,6 +398,17 @@ func (h *JobHandlers) ListJobs(c *gin.Context) {
 		pageSize = 20
 	}
 
+	// agent_id narrows the list to one device agent's jobs (the agent drawer's
+	// job history). Validated here so a malformed value is a 400, not a 500
+	// from the uuid-typed column.
+	agentFilter := c.Query("agent_id")
+	if agentFilter != "" {
+		if _, err := uuid.Parse(agentFilter); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid agent_id"})
+			return
+		}
+	}
+
 	f := JobListFilters{
 		Page:     page,
 		PageSize: pageSize,
@@ -406,6 +417,7 @@ func (h *JobHandlers) ListJobs(c *gin.Context) {
 		// `asset_id` is the current name; `device_id` is accepted for one release.
 		DeviceID:      firstQuery(c, "asset_id", "device_id"),
 		IntegrationID: c.Query("integration_id"),
+		AgentID:       agentFilter,
 	}
 
 	jobs, total, err := h.store.ListJobs(c.Request.Context(), tenantID, f)

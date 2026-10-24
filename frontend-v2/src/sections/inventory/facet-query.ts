@@ -93,7 +93,7 @@ export const FACET_LABEL: Readonly<Record<FacetKey, string>> = {
  * tenant, and folding it into "Informational" is the exact dishonesty the
  * platform's score-0 convention exists to prevent.
  */
-export const RISK_BANDS = ['critical', 'high', 'medium', 'low', 'informational', 'not_assessed'] as const;
+export const RISK_BANDS = ['critical', 'high', 'medium', 'low', 'informational', 'not_assessed', 'no_crypto_observed'] as const;
 export const RISK_BAND_LABEL: Readonly<Record<string, string>> = {
   critical: 'Critical',
   high: 'High',
@@ -101,6 +101,7 @@ export const RISK_BAND_LABEL: Readonly<Record<string, string>> = {
   low: 'Low',
   informational: 'Informational',
   not_assessed: 'Not assessed',
+  no_crypto_observed: 'No crypto observed',
 };
 
 /** The provenance facet's values — the four `class_source_kind`s. */

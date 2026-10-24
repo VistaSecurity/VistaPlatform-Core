@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.2.0-rc.1] - 2026-10-24
+
+**Version 5.2.0 makes the Enterprise chart installable again and separates "nothing to
+assess" from "not yet assessed".** The 5.1.0 Enterprise chart could not be installed: `helm
+install` failed before creating any object with `Secret "sh.helm.release.v1.vista.v1" is
+invalid: data: Too long`, because the schema and seed SQL sat twice in Helm's 1 MiB release
+record. That SQL now ships in a release image. Dashboard → Cryptographic Posture now
+separates assets on which nothing cryptographic was observed from those still waiting to be
+scored. At-rest encryption is scored, and cloud KMS keys and Secrets Manager secrets are
+assessed. Sensors and discovery agents share one panel layout with Jobs and Logs tabs,
+discovered wireless networks follow their access point's approval, and active scans now
+measure devices that speak only legacy TLS. Both product lines are cut from the same commit:
+`v5.2.0` (commercial) and `core-v5.2.0` (Core). Upgrade from 5.1.0 or 5.0.0.
+
+### Upgrading
+
+Back up PostgreSQL before upgrading, as always. The database schema is unchanged from 5.1.0,
+and the seed adds one algorithms-catalogue row. The SQL now ships in a new release image,
+`schema` (`ghcr.io/vistasecurity/schema` for Core, `docker.io/vistasecurity/schema` for
+Enterprise and MSP), and the `schema-migration` and `seed-data` Jobs copy it from that image
+in an init container; the chart carries only the schema's hash. A mirrored or air-gapped
+registry needs this image alongside the others. The Enterprise content bundle ships inside
+the Enterprise schema image and is still verified against the key the chart carries before
+it is applied; a chart pointed at a Core schema image fails in the Job's init container
+rather than seeding nothing. After the upgrade, the `<release>-seed-NN` ConfigMaps that 5.1.0
+created as hooks are no longer managed and can be deleted.
+
+`risk:not_assessed` now matches only assets with cryptography that has not yet been scored;
+saved queries that used it to mean "every unscored asset" should use
+`risk:not_assessed or risk:no_crypto_observed`. TLS endpoints that earlier releases recorded on
+port 8443 for every UniFi-managed device are not refreshed again and turn `stale` after 30
+days.
+
+The full per-change list is in
+[`docsv4/core/releases/5.2.0.md`](docsv4/core/releases/5.2.0.md).
+
+### Verify
+
+Core images and chart:
+
+```bash
+cosign verify ghcr.io/vistasecurity/auth-service:v5.2.0 \
+  --certificate-identity-regexp '^https://github\.com/VistaSecurity/VistaPlatform-Core/\.github/workflows/release-core\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+To verify the Core chart, substitute
+`oci://ghcr.io/vistasecurity/vistaplatform:5.2.0`. Enterprise and MSP releases use the
+commercial release workflow identity printed by `helm install`.
+
+<!-- release-notes-end -->
+
 ## [5.1.0] - 2026-10-21
 
 **Version 5.1.0 completes the DCIM model and is a security and platform-maintenance

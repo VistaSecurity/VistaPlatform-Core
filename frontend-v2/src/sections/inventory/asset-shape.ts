@@ -88,6 +88,9 @@ export interface AssetLike {
   risk_score?: unknown;
   risk_level?: string | null;
   risk_assessed_by?: string[] | null;
+  /** Whether a crypto surface is on record (shared/cryptosurface). Only an
+   *  explicit `false` means "no crypto observed"; absent reads "not assessed". */
+  crypto_surface?: boolean | null;
   certificate_count?: unknown;
   crypto_implementation_count?: unknown;
   protocol_summary?: { protocol: string; count: number; max_risk_score: number }[] | null;
@@ -291,6 +294,9 @@ export interface AssetRiskView {
   score: number;
   level: string;
   assessed: boolean;
+  /** Unscored AND nothing cryptographic on record — nothing for a producer
+   *  to judge. Only true on an explicit `crypto_surface: false`. */
+  noCryptoObserved: boolean;
   assessedBy: string[];
   label: string;
   title: string;
@@ -302,15 +308,19 @@ export function assetRisk(a: AssetLike): AssetRiskView {
   // one looked even on a payload that omitted the array (an older list row).
   const assessed = assessedBy.length > 0 || score > 0;
   const level = assessed ? (clean(a.risk_level) || riskLevelFromScore(score)) : 'Informational';
+  const noCryptoObserved = !assessed && a.crypto_surface === false;
   return {
     score,
     level,
     assessed,
+    noCryptoObserved,
     assessedBy,
     label: assessed ? String(score) : '—',
     title: assessed
       ? `Risk score ${score} · ${level}${assessedBy.length > 0 ? ` · assessed by ${assessedBy.join(', ')}` : ''}`
-      : 'Not assessed — no producer has evaluated this asset',
+      : noCryptoObserved
+        ? 'No crypto observed — nothing cryptographic is on record for this asset, so there was nothing to assess'
+        : 'Not assessed — crypto is on record for this asset and no producer has evaluated it',
   };
 }
 

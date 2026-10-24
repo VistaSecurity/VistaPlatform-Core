@@ -51,6 +51,10 @@ type JobListFilters struct {
 	JobType       string
 	DeviceID      string
 	IntegrationID string
+	// AgentID narrows the tenant list to the jobs one device agent was
+	// assigned (device_jobs.agent_id), for the agent drawer's job history.
+	// Validated as a UUID by the handler. Ignored by ListAdminJobs.
+	AgentID string
 	// TenantID optionally narrows the cross-tenant admin roll-up to one tenant
 	// (operator scope). Empty = all tenants. Ignored by the tenant-scoped ListJobs
 	// (that path already filters by the context tenant).
@@ -121,6 +125,12 @@ func (r *jobRepository) ListJobs(ctx context.Context, tenantID uuid.UUID, f JobL
 		query += " AND dj.integration_id = $" + strconv.Itoa(argNum)
 		countQuery += " AND integration_id = $" + strconv.Itoa(argNum)
 		args = append(args, f.IntegrationID)
+		argNum++
+	}
+	if f.AgentID != "" {
+		query += " AND dj.agent_id = $" + strconv.Itoa(argNum)
+		countQuery += " AND agent_id = $" + strconv.Itoa(argNum)
+		args = append(args, f.AgentID)
 		argNum++
 	}
 

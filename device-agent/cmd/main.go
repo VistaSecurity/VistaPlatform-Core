@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
 	"net"
@@ -130,6 +131,9 @@ func main() {
 	} else {
 		log.SetFlags(log.LstdFlags)
 	}
+	// Keep the recent lines in memory as well as on stderr, so the console's
+	// Logs tab can ask for them (shared/agentlogs).
+	log.SetOutput(io.MultiWriter(os.Stderr, agentLogRing))
 
 	log.Printf("🚀 Starting Vista Platform Device Agent v%s", Version)
 	log.Printf("Platform: %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -364,6 +368,7 @@ func newDeviceAgent(cfg *config.Config, configPath string, apiClient *api.Outbou
 	agent.applier.SetLocal(localValues(cfg))
 	apiClient.SetConfigApplier(agent.applier)
 	apiClient.SetRestartHandler(newRestartCoordinator(time.Now(), exitForRestart).onRequest)
+	apiClient.SetLogSource(agentLogRing)
 
 	return agent
 }

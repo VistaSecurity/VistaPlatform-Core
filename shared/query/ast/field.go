@@ -146,6 +146,12 @@ type Accessor struct {
 	// AssessedBy is the column proving a band field was assessed at all. Only
 	// a band field with one set accepts the `not_assessed` value (§5.2).
 	AssessedBy string
+	// Surface names the test that splits an UNSCORED row in two (only
+	// "crypto", shared/cryptosurface, exists). A band field with one set also
+	// accepts `no_crypto_observed`, and its `not_assessed` narrows to the rows
+	// that DO show a surface — "something is there and nobody judged it"
+	// rather than "nothing judged it, and there was nothing to judge".
+	Surface string
 }
 
 // FieldRef is a field as it appears in the AST. The parser fills Segments,

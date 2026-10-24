@@ -18,7 +18,7 @@ import type { Analysis } from './analyse';
 import { analyse } from './analyse';
 import type { FieldType } from './ast';
 import type { BandLadder, Catalog, FieldInfo } from './catalog';
-import { NOT_ASSESSED, bandLabels, findTarget, operatorsFor } from './catalog';
+import { NOT_ASSESSED, NO_CRYPTO_OBSERVED, bandLabelsFor, findTarget, operatorsFor } from './catalog';
 import { levenshtein } from './errors';
 import { ANY_REL, COLLECTIONS, REL_KEYWORD } from './vocabulary';
 
@@ -335,15 +335,15 @@ function valueCompletions(a: Analysis, cat: Catalog, opts: SuggestOptions): Comp
       // after `>=` would write a query the validator then refuses — autocomplete
       // teaching the user a rule that is not the rule.
       const ordering = op === '<' || op === '<=' || op === '>' || op === '>=';
-      const coverage = (f.accessor.assessedBy ?? '') !== '' && !ordering;
-      for (const label of bandLabels(opts.ladder, coverage)) {
+      for (const label of bandLabelsFor(opts.ladder, f.accessor, !ordering)) {
         const score = match(written, label);
         if (score === 0) continue;
         out.push({
           text: label,
           kind: 'value',
           score: score * 10 + 1,
-          ...(label === NOT_ASSESSED ? { detail: 'nobody has scored it' } : {}),
+          ...(label === NOT_ASSESSED ? { detail: 'crypto seen, nobody has scored it' } : {}),
+          ...(label === NO_CRYPTO_OBSERVED ? { detail: 'nobody scored it, no crypto on record' } : {}),
         });
       }
       break;

@@ -13094,6 +13094,8 @@ export interface components {
             /** @description The producers that have evaluated this asset. Empty means nothing has, which is not the same as "nothing found". */
             risk_assessed_by: string[];
             risk_level: string;
+            /** @description Whether the asset shows a cryptographic surface (shared/cryptosurface): a crypto configuration, an at-rest encryption record, an endpoint speaking a crypto protocol, or a crypto-bearing class. It splits an UNSCORED asset in two — true is "Not assessed" (something is there and nobody judged it), false is "No crypto observed". Omitted by readers that do not project it; a client must then read the asset as "Not assessed", never as having no crypto. */
+            crypto_surface?: boolean;
             /** @description Every identifier observed for the asset (ADR-0002 D3), strongest first. Present on the single-asset read; omitted from list rows. */
             identifiers?: components["schemas"]["AssetIdentifier"][];
             /** @description The asset's network faces. An asset may have none — an at-rest cloud resource genuinely has nothing to connect to. */
@@ -14856,6 +14858,8 @@ export interface components {
          * @description Aggregate asset-risk counts (models.RiskSummary), over `monitoring` assets.
          *
          *     `informational` and `unknown_risk` are DIFFERENT answers and the bands are mutually exclusive: informational is score 0 with a producer in `risk_assessed_by` (somebody looked and found nothing), unknown_risk is score 0 with none (NOBODY HAS LOOKED). They used to be one number, so a tenant that had never been scanned read as clean.
+         *
+         *     `unknown_risk` is split in two, `not_assessed` + `no_crypto_observed`, by whether the asset shows a crypto surface. high + medium + low + informational + unknown_risk = total_assets still holds.
          */
         RiskSummary: {
             total_assets: number;
@@ -14864,8 +14868,12 @@ export interface components {
             low_risk: number;
             /** @description Scored 0 by at least one producer — assessed, and clean. */
             informational: number;
-            /** @description NOT ASSESSED — no producer has scored this asset at all. */
+            /** @description Unscored — no producer has scored this asset at all. Always not_assessed + no_crypto_observed. */
             unknown_risk: number;
+            /** @description Unscored, and a crypto surface is on record — something is there and nobody has judged it. */
+            not_assessed: number;
+            /** @description Unscored, and no crypto surface is on record — nothing for a crypto producer to judge. */
+            no_crypto_observed: number;
             total_crypto: number;
             critical_findings: number;
         };

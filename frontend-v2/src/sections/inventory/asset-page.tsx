@@ -368,12 +368,22 @@ function OverviewTab({ asset }: { asset: Asset }) {
               // The load-bearing state. An unassessed asset is NOT a low-risk
               // one, and a grey gauge with "0" beside it would say the opposite
               // of what we know — which is nothing.
-              <>
-                <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--app-t2)' }}>Not assessed</div>
-                <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 3, lineHeight: 1.5, maxWidth: 260 }}>
-                  No producer has evaluated this asset. That is not the same as “no risk found” — nothing has looked yet.
-                </div>
-              </>
+              risk.noCryptoObserved ? (
+                <>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--app-t2)' }}>No crypto observed</div>
+                  <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 3, lineHeight: 1.5, maxWidth: 260 }}>
+                    Nothing cryptographic is on record for this asset — no crypto configuration, encrypted store or
+                    TLS/SSH/IPsec endpoint — so there was nothing to assess. That is what we saw, not proof there is none.
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--app-t2)' }}>Not assessed</div>
+                  <div style={{ fontSize: 11.5, color: 'var(--app-t3)', marginTop: 3, lineHeight: 1.5, maxWidth: 260 }}>
+                    Crypto is on record for this asset and no producer has evaluated it. That is not the same as “no risk found” — nothing has looked yet.
+                  </div>
+                </>
+              )
             )}
           </div>
         </div>

@@ -6,15 +6,14 @@ runs on again.
 
 **Where:** Discovery → Sensors & Agents.
 
-- **One sensor:** click its row, then the **Control** tab.
-- **One discovery agent:** click its row, then the **Settings** tab.
+- **One sensor or discovery agent:** click its row, then the **Settings** tab.
 - **The whole fleet:** **Sensor defaults** or **Agent defaults**, on the page
   header. They are two separate sets — a sensor and an agent share almost no
   settings, so one combined dialog would be half-irrelevant whichever fleet you
   came for.
 
 Platform sensors run in the cluster rather than on your network and are not
-configured here; they have no Control tab.
+configured here; they have no Settings tab.
 
 ## How a setting gets its value
 
@@ -142,7 +141,7 @@ as an internal service on 9443, list it here and sensors decode the TLS
 handshakes they see on it: certificates, versions and cipher suites, exactly as
 on 443.
 
-**Where:** a sensor's **Control** tab for that sensor alone, or **Sensor
+**Where:** a sensor's **Settings** tab for that sensor alone, or **Sensor
 defaults** for every sensor that has no list of its own. Type a port and press
 **Add** (several at once, separated by commas or spaces, also works), remove one
 with its **×**, then **Save**.
@@ -159,8 +158,8 @@ with its **×**, then **Save**.
 - **It needs a restart.** A saved list shows **Pending restart** on the sensor
   until the sensor restarts (or its network interfaces are changed, which reopens
   the capture) and reports the new list in effect; then the setting reads **In
-  effect on this sensor**. Restart a sensor from its Control tab, under **Send
-  command** → **restart**.
+  effect on this sensor**. Restart a sensor from its Settings tab, under
+  **Restart**.
 - **Each port adds a little capture load**, because the sensor admits and
   inspects more of the traffic it sees. List the ports you use, not ranges of
   guesses.
@@ -221,16 +220,14 @@ which is worth knowing because they behave differently.
 **A discovery agent:** its **Settings** tab, where **Restart** records a
 *request*. The agent restarts at its next check-in.
 
-**A sensor:** its **Control** tab, under **Send command** — choose **restart**
-and send it. This is the sensor's existing command channel, which predates this
-feature; the command is queued and the sensor collects it on its next
-heartbeat.
+**A sensor:** its **Settings** tab, where **Restart** queues a restart command on
+the sensor's existing command channel, which predates this feature. The sensor
+collects it on its next heartbeat, and it shows in the sensor's **Jobs** tab.
 
 **A restart is an exit.** The device stops and its service manager starts it
 again — systemd, a Windows service, a container runtime. If somebody launched it
 by hand rather than installing it as a service, restarting **stops it**, and it
-stays stopped. The agent's Restart control says so before you confirm; the
-sensor's command form does not, so it is worth knowing before you send one.
+stays stopped. Both Restart controls say so before you confirm.
 
 For an **agent**, asking twice is the same as asking once: the platform records
 *when* you asked, and the agent restarts if it has been running since before

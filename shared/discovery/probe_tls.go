@@ -6,9 +6,12 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/vistasecurity/vistaplatform/shared/certificates"
@@ -49,6 +52,69 @@ func probeTLSConn(ctx context.Context, p *Prober, conn net.Conn, hostname string
 		kex.measureSupport(res, redial, p.timeout)
 	}
 	return res, nil
+}
+
+// measuringMinTLSVersion is the oldest version a measuring handshake offers.
+// crypto/tls's client default floor is TLS 1.2, so without it a TLS 1.0/1.1-only
+// server answers with a hello our side rejects and nothing is recorded — the
+// very endpoints the weak-protocol rules exist to score.
+const measuringMinTLSVersion = tls.VersionTLS10
+
+// measuringCipherSuites is every TLS 1.0–1.2 suite crypto/tls implements,
+// insecure ones included. Since Go 1.22 the client default omits RSA key
+// exchange (and 3DES), and an embedded broker that offers only RSA-kex and
+// DHE suites (crypto/tls has no DHE) then closes the connection on us. The
+// order is irrelevant: crypto/tls sends its own preference order with the
+// insecure suites last, so a server that honours the client's order still
+// picks what it picked before. TLS 1.3 suites are not configurable.
+var measuringCipherSuites = func() []uint16 {
+	var ids []uint16
+	for _, s := range tls.CipherSuites() {
+		ids = append(ids, s.ID)
+	}
+	for _, s := range tls.InsecureCipherSuites() {
+		ids = append(ids, s.ID)
+	}
+	return ids
+}()
+
+// TLSHandshakeErrorClass names, from a bounded set, why a measuring handshake
+// failed without the server's alert to say so: "protocol_version",
+// "cipher_suite", "timeout", "reset", "eof", "alert" (some other alert the
+// server sent), "not_tls" (the reply was not a TLS record) or "other". It is
+// recorded beside the tls-attempt-failed note so a port that answered but
+// would not negotiate says why; the raw error text is not kept.
+func TLSHandshakeErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	if alert, ok := remoteTLSAlert(err); ok {
+		switch alert {
+		case "protocol version":
+			return "protocol_version"
+		case "handshake failure", "insufficient security":
+			return "cipher_suite"
+		}
+		return "alert"
+	}
+	var netErr net.Error
+	switch {
+	case strings.Contains(msg, "unsupported protocol version"):
+		return "protocol_version"
+	case strings.Contains(msg, "cipher suite"):
+		return "cipher_suite"
+	case strings.Contains(msg, "does not look like a TLS handshake"):
+		return "not_tls"
+	case errors.Is(err, os.ErrDeadlineExceeded), errors.Is(err, context.DeadlineExceeded),
+		errors.As(err, &netErr) && netErr.Timeout():
+		return "timeout"
+	case errors.Is(err, syscall.ECONNRESET), strings.Contains(msg, "connection reset"):
+		return "reset"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "eof"
+	}
+	return "other"
 }
 
 // tlsKexFollowUp is what the key-exchange support handshakes need from a
@@ -124,6 +190,11 @@ func handshakeTLSConn(ctx context.Context, p *Prober, conn net.Conn, hostname st
 	tlsConfig := &tls.Config{
 		ServerName:         hostname,
 		InsecureSkipVerify: true, //nolint:gosec // intentional — discovery requires seeing all certs
+		// Measuring, not trusting: offer every version and suite crypto/tls
+		// can speak, so a legacy endpoint negotiates and its weakness is
+		// recorded instead of the handshake failing on our side.
+		MinVersion:   measuringMinTLSVersion,
+		CipherSuites: measuringCipherSuites,
 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			clientCertRequested.Store(true)
 			return &tls.Certificate{}, nil

@@ -3,6 +3,7 @@ package deviceinterrogation
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -499,79 +500,51 @@ func TestUnifiDeviceObservations_SkipsDevicesWithNoIdentifier(t *testing.T) {
 	}
 }
 
-// The metadata allowlist is what keeps the ~120-field device object out of
-// asset metadata. Widening it for the ops set must not have widened it into the
-// nested tables, which are read for facts and edges instead.
-func TestConvertDeviceToAsset_AllowlistStaysScalar(t *testing.T) {
-	c := &unifiClient{}
-	asset := c.convertDeviceToAsset(unifiSwitchFixture(), "default")
-
-	assertNoPoison(t, "unifi device metadata", asset)
-
-	allowed := map[string]bool{
-		// derived keys convertDeviceToAsset adds by hand
-		"mac_address": true, "firmware_version": true, "device_type": true,
-		"site_id": true, "source": true,
-	}
-	for _, field := range unifiDeviceInventoryFields {
-		allowed[field] = true
-	}
-	for key := range asset.Metadata {
-		if !allowed[key] {
-			t.Errorf("metadata key %q is on neither the allowlist nor the derived list", key)
-		}
-	}
-	for _, table := range unifiDeviceStructuredFields {
-		if _, present := asset.Metadata[table]; present {
-			t.Errorf("nested table %q was copied into metadata; it is read for facts, not stored raw", table)
-		}
-	}
-	if asset.Metadata["uptime"] != float64(1234567) {
-		t.Errorf("uptime was not kept by the widened allowlist: %#v", asset.Metadata["uptime"])
-	}
-}
-
-func TestConvertDeviceToAsset_DisplayNameNotPromotedToHostname(t *testing.T) {
-	c := &unifiClient{}
-
-	// unifiSwitchFixture's "name" is "Office Switch" — a controller display
-	// name with a space, exactly what a tenant sees in the UniFi UI (and the
-	// shape of a real-world name like "U6+ Living Room" or "Back Porch #1").
-	// It must never become the asset's Hostname: the identity layer treats
-	// Hostname as a DNS name and rejects a value with a space, silently
-	// losing the identifier and flooding the log with the reject on every
-	// interrogation run.
-	spaced := c.convertDeviceToAsset(unifiSwitchFixture(), "default")
-	if spaced.Hostname != "" {
-		t.Errorf("Hostname = %q, want empty — a display name with a space is not a DNS name", spaced.Hostname)
-	}
-	if spaced.Metadata["name"] != "Office Switch" {
-		t.Errorf("display name was not preserved in Metadata for the UI: %#v", spaced.Metadata["name"])
-	}
-
-	// DNS syntax does not turn a controller alias into hostname evidence.
-	dnsSafe := unifiSwitchFixture()
-	dnsSafe["name"] = "office-switch-1"
-	valid := c.convertDeviceToAsset(dnsSafe, "default")
-	if valid.Hostname != "" {
-		t.Fatalf("DNS-shaped alias promoted: %q", valid.Hostname)
-	}
-	dnsSafe["hostname"] = "actual-switch"
-	valid = c.convertDeviceToAsset(dnsSafe, "default")
-	if valid.Hostname != "actual-switch" {
-		t.Fatalf("explicit hostname lost: %q", valid.Hostname)
-	}
-	if valid.Metadata["name"] != "office-switch-1" {
-		t.Errorf("display name was not preserved in Metadata: %#v", valid.Metadata["name"])
-	}
-}
-
 func TestUnifiManagementProtocol(t *testing.T) {
 	if proto, plaintext := unifiManagementProtocol("https://unifi.example.net:8443"); proto != "https" || plaintext {
 		t.Errorf("https controller reported as %q plaintext=%v", proto, plaintext)
 	}
 	if proto, plaintext := unifiManagementProtocol("http://192.0.2.1:8080"); proto != "http" || !plaintext {
 		t.Errorf("a controller reached over plain HTTP must be recorded as plaintext, got %q plaintext=%v", proto, plaintext)
+	}
+}
+
+// A wireless client's interface item says it is a station on the SSID it
+// joined, typed by the 802.11 generation it associated with (else its band);
+// a wired client's, a client the controller does not say is wireless, and a
+// randomised-MAC client's do not.
+func TestUnifiClientInterface_WirelessStation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		client map[string]interface{}
+		want   map[string]interface{} // the station keys; nil for none
+	}{
+		{"wifi 6", map[string]interface{}{"mac": "28:6b:b4:b0:1b:99", "is_wired": false, "essid": "Home", "radio": "na", "radio_proto": "ax"},
+			map[string]interface{}{"rf_role": "station", "ssids": []string{"Home"}, "type": "ieee802.11ax"}},
+		{"band only", map[string]interface{}{"mac": "28:6b:b4:b0:1b:99", "is_wired": false, "essid": "Home", "radio": "ng"},
+			map[string]interface{}{"rf_role": "station", "ssids": []string{"Home"}, "type": "ieee802.11n"}},
+		{"no radio", map[string]interface{}{"mac": "28:6b:b4:b0:1b:99", "is_wired": false, "essid": "Home"},
+			map[string]interface{}{"rf_role": "station", "ssids": []string{"Home"}}},
+		{"wired", map[string]interface{}{"mac": "28:6b:b4:b0:1b:99", "is_wired": true, "essid": "Home", "radio_proto": "ax"}, nil},
+		{"unsaid", map[string]interface{}{"mac": "28:6b:b4:b0:1b:99", "essid": "Home"}, nil},
+		{"randomised MAC", map[string]interface{}{"mac": "da:a1:19:00:00:02", "ip": "192.0.2.9", "is_wired": false, "essid": "Home"}, nil},
+	} {
+		got := unifiClientInterface(tc.client)
+		station := map[string]interface{}{}
+		for _, k := range []string{"rf_role", "ssids", "type"} {
+			if v, ok := got[k]; ok {
+				station[k] = v
+			}
+		}
+		if tc.want == nil {
+			if len(station) != 0 {
+				t.Errorf("%s: station keys %v, want none", tc.name, station)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(station, tc.want) {
+			t.Errorf("%s: station keys %v, want %v", tc.name, station, tc.want)
+		}
 	}
 }
 
@@ -770,14 +743,6 @@ func TestUnifiDeviceSubject_CarriesWANAddressesAndNothingElseOfTheWAN(t *testing
 		t.Fatalf("gateway subject addresses = %v, want %v", addresses, want)
 	}
 
-	c := &unifiClient{}
-	asset := c.convertDeviceToAsset(unifiGatewayFixture(), "default")
-	assertNoPoison(t, "unifi gateway metadata", asset)
-	for _, table := range unifiWANTables {
-		if _, present := asset.Metadata[table]; present {
-			t.Errorf("WAN object %q was copied into metadata", table)
-		}
-	}
 }
 
 // A WAN that is down reports no address (or the unspecified one); it adds no

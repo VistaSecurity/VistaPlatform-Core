@@ -3,7 +3,7 @@
 // "Additional TLS ports" ( WP5), MOUNTED where a person reaches it:
 // Discovery → Sensors & Agents → Sensor defaults (the fleet dialog, against a
 // stubbed sensor-manager), and the same SettingsPanel the sensor drawer's
-// Control tab renders, in device scope, for the states only a device has —
+// Settings tab renders, in device scope, for the states only a device has —
 // pending restart and applied.
 //
 // The setting is not special-cased by key: the panel renders the platform's
@@ -240,7 +240,7 @@ describe('Additional TLS ports in the sensor fleet defaults', () => {
   });
 });
 
-describe('Additional TLS ports on one sensor (Control tab panel)', () => {
+describe('Additional TLS ports on one sensor (Settings tab panel)', () => {
   async function mountDevice(status: Parameters<typeof SettingsPanel>[0]['status']) {
     await act(async () => {
       root.render(

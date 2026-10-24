@@ -106,9 +106,11 @@ type stubJobStore struct {
 	adminTotal  int
 	adminErr    error
 	adminFilter JobListFilters // captures the filter passed to ListAdminJobs
+	listFilter  JobListFilters // captures the filter passed to ListJobs
 }
 
-func (s *stubJobStore) ListJobs(context.Context, uuid.UUID, JobListFilters) ([]InterrogationJob, int, error) {
+func (s *stubJobStore) ListJobs(_ context.Context, _ uuid.UUID, f JobListFilters) ([]InterrogationJob, int, error) {
+	s.listFilter = f
 	return s.list, s.total, s.listErr
 }
 func (s *stubJobStore) ListAdminJobs(_ context.Context, f JobListFilters) ([]AdminInterrogationJob, int, error) {
@@ -223,6 +225,32 @@ func TestContract_ListJobs_200(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 	sv.assertConforms(t, "JobListResponse", w.Body.Bytes())
+}
+
+// The agent drawer's job history reads GET /jobs?agent_id=<id>. The filter must
+// reach the store — a handler that parsed the param and dropped it would list
+// every job in the tenant under one agent's name — and a malformed id is a 400
+// rather than a 500 from the uuid-typed column.
+func TestContract_ListJobs_AgentFilter(t *testing.T) {
+	sv := loadSpec(t)
+	store := &stubJobStore{list: []InterrogationJob{sampleJob()}, total: 1}
+	eng := newJobEngine(store)
+	w := do(eng, http.MethodGet, base+"/jobs?agent_id="+aUUID+"&page_size=10", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	sv.assertConforms(t, "JobListResponse", w.Body.Bytes())
+	if store.listFilter.AgentID != aUUID {
+		t.Fatalf("AgentID filter = %q, want %q", store.listFilter.AgentID, aUUID)
+	}
+	if store.listFilter.PageSize != 10 {
+		t.Fatalf("PageSize = %d, want 10", store.listFilter.PageSize)
+	}
+
+	w = do(eng, http.MethodGet, base+"/jobs?agent_id=not-a-uuid", nil)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed agent_id: status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
 }
 
 func TestContract_GetJobStats_200(t *testing.T) {

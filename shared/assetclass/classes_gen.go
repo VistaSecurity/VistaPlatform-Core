@@ -114,6 +114,12 @@ type Class struct {
 	// LegacyAssetType maps the class onto the public.asset_type enum value the
 	// pre-ADR-0002 model used. Reference only.
 	LegacyAssetType string `json:"legacy_asset_type"`
+	// CryptoBearing marks a class whose instances carry cryptography by their
+	// nature — a key store, a VPN gateway, a TLS-terminating edge. An instance
+	// with no crypto measured reads "Not assessed", never "No crypto
+	// observed": having seen none on such a thing is a gap in what we
+	// measured, not an answer about it (shared/cryptosurface).
+	CryptoBearing bool `json:"crypto_bearing,omitempty"`
 }
 
 // All is the fixed class hierarchy, in registry order. A parent always
@@ -272,6 +278,7 @@ var All = []Class{
 		CycloneDXType:        "device",
 		IdentifierPrecedence: []string{"serial_number", "cmdb_sys_id", "ssh_host_key_fingerprint", "mac_address", "fqdn", "hostname", "ip_address"},
 		LegacyAssetType:      "appliance",
+		CryptoBearing:        true,
 	},
 	{
 		Key:                  "storage_device",
@@ -481,6 +488,7 @@ var All = []Class{
 		CycloneDXType:        "platform",
 		IdentifierPrecedence: []string{"cloud_resource_id", "cmdb_sys_id", "fqdn"},
 		LegacyAssetType:      "service",
+		CryptoBearing:        true,
 	},
 	{
 		Key:                  "cloud_load_balancer",
@@ -503,6 +511,7 @@ var All = []Class{
 		CycloneDXType:        "application",
 		IdentifierPrecedence: []string{"cloud_resource_id", "cmdb_sys_id", "fqdn"},
 		LegacyAssetType:      "service",
+		CryptoBearing:        true,
 	},
 	{
 		Key:                  "cdn_distribution",
@@ -514,6 +523,7 @@ var All = []Class{
 		CycloneDXType:        "platform",
 		IdentifierPrecedence: []string{"cloud_resource_id", "cmdb_sys_id", "fqdn"},
 		LegacyAssetType:      "service",
+		CryptoBearing:        true,
 	},
 	{
 		Key:                  "serverless_function",
@@ -547,6 +557,7 @@ var All = []Class{
 		CycloneDXType:        "data",
 		IdentifierPrecedence: []string{"cloud_resource_id", "cmdb_sys_id"},
 		LegacyAssetType:      "service",
+		CryptoBearing:        true,
 	},
 	{
 		Key:                  "dns_zone",

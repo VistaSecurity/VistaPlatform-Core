@@ -189,49 +189,6 @@ func TestRegistryGet_ScrubsInterrogatorOutput(t *testing.T) {
 	}
 }
 
-// convertDeviceToAsset must project onto the allowlist, not copy the raw
-// controller object. Regression guard for the original leak.
-func TestConvertDeviceToAsset_ProjectsOntoAllowlist(t *testing.T) {
-	c := &unifiClient{}
-	raw := map[string]interface{}{
-		"name":        "AC LR",
-		"ip":          "192.0.2.250",
-		"mac":         "78:8a:20:4b:ee:40",
-		"model":       "U7LR",
-		"type":        "uap",
-		"version":     "6.6.77.15402",
-		"x_authkey":   "6c44255cfd1ae2c09ea2c20aa79538cd",
-		"x_vwirekey":  "1d103488353fc6333c2ece3bdedea41a",
-		"syslog_key":  "d3ea2b95ba06686b91f0fbe2ca3d1079",
-		"x_aes_gcm":   true,
-		"radio_table": []interface{}{map[string]interface{}{"name": "wifi0"}},
-	}
-
-	asset := c.convertDeviceToAsset(raw, "default")
-
-	for _, dropped := range []string{"x_authkey", "x_vwirekey", "syslog_key", "radio_table"} {
-		if _, present := asset.Metadata[dropped]; present {
-			t.Errorf("field %q was collected; it is not on the inventory allowlist", dropped)
-		}
-	}
-	// "AC LR" is the controller's DISPLAY name — a label, not a hostname (it
-	// has a space). It must survive in Metadata for the UI but must NOT become
-	// asset.Hostname: the identity layer treats Hostname as a DNS name and
-	// rejects a value with a space, which is exactly the reject this test used
-	// to require. Identity is not lost — the IP address still identifies the
-	// device — see TestConvertDeviceToAsset_DisplayNameNotPromotedToHostname
-	// (unifi_ops_test.go) for the dedicated regression test.
-	if asset.Hostname != "" || asset.IPAddress != "192.0.2.250" {
-		t.Errorf("identity lost: %+v", asset)
-	}
-	if asset.Metadata["name"] != "AC LR" {
-		t.Errorf("display name was not preserved in Metadata: %#v", asset.Metadata["name"])
-	}
-	if asset.Metadata["model"] != "U7LR" || asset.Metadata["firmware_version"] != "6.6.77.15402" {
-		t.Errorf("inventory fields lost: %#v", asset.Metadata)
-	}
-}
-
 // Sanitize reaches an asset's ServiceHints — and takes only PEM private keys
 // out of it.
 //

@@ -609,10 +609,18 @@ func (p *CryptoProducer) read(ctx context.Context, tenantID uuid.UUID) ([]config
 		// this claims coverage of are the assets the finding actually raises — an endpoint that moved to another host takes its
 		// keys with it, in both readers.
 		//
-		// A key linked to NO configuration belongs to no asset: a finding on it
-		// could not be reached from any asset, could not raise anyone's risk and
-		// could not be counted by the has_findings facet, exactly as for an
-		// unlinked certificate above. Those keys are read by nothing here.
+		// A cloud KMS key is used by no configuration, so it has a second branch:
+		// the Key Store asset that names the same provider resource id, through
+		// findings.CloudKeyAssetSQL — again the fragment AssetSubjects' key path
+		// splices, so the Key Store this covers is the one the finding raises.
+		// Without it the key (AES-256, catalogue-resolved, measurable) was read
+		// by nothing and its Key Store stayed "not assessed".
+		//
+		// A key linked to NO configuration and named by no Key Store belongs to
+		// no asset: a finding on it could not be reached from any asset, could
+		// not raise anyone's risk and could not be counted by the has_findings
+		// facet, exactly as for an unlinked certificate above. Those keys are
+		// read by nothing here.
 		//
 		// Only the key's own catalogue row is consulted — never its material,
 		// which this table has never held (key_producer.go stores fingerprint,
@@ -628,6 +636,12 @@ func (p *CryptoProducer) read(ctx context.Context, tenantID uuid.UUID) ([]config
 			      JOIN assets a ON a.tenant_id = ci.tenant_id
 			           AND a.id = ` + findings.ConfigurationAssetSQL("ci", "e") + `
 			           AND a.deleted_at IS NULL AND a.asset_status <> 'archived'
+			    UNION
+			    SELECT ck.id, ka.id
+			      FROM keys ck
+			      JOIN assets ka ON ka.tenant_id = $1 AND ` + findings.CloudKeyAssetSQL("ck", "ka", findings.QuoteLiteral) + `
+			           AND ka.deleted_at IS NULL AND ka.asset_status <> 'archived'
+			     WHERE ck.tenant_id = $1
 			)
 			SELECT k.id,
 			       array_agg(DISTINCT reachable.asset_id::text),
@@ -1340,8 +1354,12 @@ var cryptoKinds = func() []string {
 }()
 
 // sweptByAnotherPass are `crypto` kinds a different pass owns: row 4.4's
-// WirelessAuthProducer raises and sweeps weak_wireless_auth.
-var sweptByAnotherPass = map[string]bool{findings.KindWeakWirelessAuth: true}
+// WirelessAuthProducer raises and sweeps weak_wireless_auth, and the
+// AtRestProducer unencrypted_at_rest.
+var sweptByAnotherPass = map[string]bool{
+	findings.KindWeakWirelessAuth:  true,
+	findings.KindUnencryptedAtRest: true,
+}
 
 // severityForScore bands a score and spells the band the way
 // findings_severity_check does.

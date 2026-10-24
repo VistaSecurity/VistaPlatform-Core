@@ -15,12 +15,14 @@ import { isOrdering, walk } from './ast';
 import type { BandLadder, Catalog, ResolveError, Target } from './catalog';
 import {
   COLLECTION_TARGET,
-  NOT_ASSESSED,
+  NO_CRYPTO_OBSERVED,
   bandIndex,
   bandLabels,
+  bandLabelsFor,
   fieldNames,
   findTarget,
   inAllowed,
+  isCoveragePseudoBand,
   knownType,
   matchAllowed,
   operatorAllowed,
@@ -648,14 +650,26 @@ class Validator {
   private band(tgt: Target, f: FieldRef, lit: Literal, op: Op): void {
     const ladder = this.opts.ladder;
     if (ladder === undefined) return;
-    if (lit.value.toLowerCase() === NOT_ASSESSED) {
+    if (isCoveragePseudoBand(lit.value)) {
+      const pseudo = lit.value.toLowerCase();
       if ((f.accessor.assessedBy ?? '') === '') {
         this.add(
           newError(
             'unknown_value',
             lit.span,
-            `${q(f.text)} does not record who assessed it, so ${q(NOT_ASSESSED)} has no meaning for it`,
+            `${q(f.text)} does not record who assessed it, so ${q(pseudo)} has no meaning for it`,
             `bands: ${bandLabels(ladder, false).join(', ')}`,
+          ),
+        );
+        return;
+      }
+      if (pseudo === NO_CRYPTO_OBSERVED && (f.accessor.surface ?? '') === '') {
+        this.add(
+          newError(
+            'unknown_value',
+            lit.span,
+            `${q(f.text)} records no crypto surface, so ${q(pseudo)} has no meaning for it`,
+            `bands: ${bandLabelsFor(ladder, f.accessor).join(', ')}`,
           ),
         );
         return;
@@ -670,8 +684,8 @@ class Validator {
           newError(
             'operator_not_allowed',
             lit.span,
-            `${q(NOT_ASSESSED)} is not a rung of the ladder, so it cannot be used with ${q(op)}`,
-            `write ${f.text}:${NOT_ASSESSED}, or order against a band: ${bandLabels(ladder, false).join(', ')}`,
+            `${q(pseudo)} is not a rung of the ladder, so it cannot be used with ${q(op)}`,
+            `write ${f.text}:${pseudo}, or order against a band: ${bandLabels(ladder, false).join(', ')}`,
           ),
         );
       }
@@ -681,7 +695,7 @@ class Validator {
     let e = newError(
       'type_mismatch',
       lit.span,
-      `${q(f.text)} is a band (${bandLabels(ladder, (f.accessor.assessedBy ?? '') !== '').join(', ')})`,
+      `${q(f.text)} is a band (${bandLabelsFor(ladder, f.accessor).join(', ')})`,
     );
     if (parseNumber(lit.value) !== null) {
       const numeric = this.numericTwin(tgt, f);
@@ -689,7 +703,7 @@ class Validator {
         e = withSuggestion(e, `for the numeric score use ${q(`${numeric} >= ${lit.value}`)}`);
       }
     } else {
-      const near = nearestValue(lit.value, bandLabels(ladder, true));
+      const near = nearestValue(lit.value, bandLabelsFor(ladder, f.accessor));
       if (near !== null) e = withSuggestion(e, `did you mean ${q(near)}?`);
     }
     this.add(e);

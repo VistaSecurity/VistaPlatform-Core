@@ -433,6 +433,9 @@ func (id *identifier) probeThenObserve(ctx context.Context, conn net.Conn, relea
 			return obs
 		}
 		obs.Notes = strings.ToLower(protocol) + "-attempt-failed"
+		if err != nil && isTLSProtocol(protocol) {
+			obs.Metadata["tls_handshake_error"] = TLSHandshakeErrorClass(err)
+		}
 		return obs
 	}
 	if kex != nil && !id.suspect {

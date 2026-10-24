@@ -131,6 +131,13 @@ type Asset struct {
 	RiskScore      int      `json:"risk_score" db:"risk_score"`
 	RiskAssessedBy []string `json:"risk_assessed_by" db:"risk_assessed_by"`
 	RiskLevel      string   `json:"risk_level"`
+	// CryptoSurface splits an UNSCORED asset in two (shared/cryptosurface):
+	// true means a crypto surface is on record and nobody has judged it — "Not
+	// assessed"; false means there is none — "No crypto observed". A pointer
+	// so a reader that did not project it OMITS it: an absent value must read
+	// as "Not assessed", never as a false "no crypto", which a plain bool's
+	// zero value would claim for every asset a new reader marshals.
+	CryptoSurface *bool `json:"crypto_surface,omitempty"`
 
 	// Identifiers and Endpoints are the asset's children. They are loaded by the
 	// paths that need them rather than by every list query.
@@ -339,7 +346,18 @@ type RiskSummary struct {
 	// three-valued-logic flattening this platform has made sixty times, in the
 	// summary the dashboard hero reads. The risk FACET has always split them,
 	// which is why the tile and the rail disagreed.
-	UnknownRisk      int `json:"unknown_risk" db:"unknown_risk"`
+	//
+	// It stays the WHOLE unscored set, for the readers that sum the bands to
+	// total_assets (the posture snapshot, the e2e and RC checks). NotAssessed
+	// and NoCryptoObserved partition it, and are what a reader shows.
+	UnknownRisk int `json:"unknown_risk" db:"unknown_risk"`
+	// NotAssessed is the part of UnknownRisk with a crypto surface on record
+	// (shared/cryptosurface): something is there and nobody has judged it.
+	NotAssessed int `json:"not_assessed" db:"not_assessed"`
+	// NoCryptoObserved is the rest of UnknownRisk: unscored, with no crypto
+	// configuration, at-rest encryption record, crypto-protocol endpoint or
+	// crypto-bearing class — nothing for a crypto producer to judge.
+	NoCryptoObserved int `json:"no_crypto_observed" db:"no_crypto_observed"`
 	TotalCrypto      int `json:"total_crypto" db:"total_crypto"`
 	CriticalFindings int `json:"critical_findings" db:"critical_findings"`
 }

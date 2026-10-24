@@ -39,7 +39,7 @@ func TestIntegration_AgentHeartbeatAdoptsTheAgentsOwnStartingPosition(t *testing
 	r.POST("/agents/:id/heartbeat", func(c *gin.Context) {
 		c.Set("tenantID", tenant)
 		c.Next()
-	}, agentHeartbeatHandler(admin, admin, nil))
+	}, agentHeartbeatHandler(admin, admin, nil, nil))
 
 	post := func(body string) map[string]any {
 		t.Helper()

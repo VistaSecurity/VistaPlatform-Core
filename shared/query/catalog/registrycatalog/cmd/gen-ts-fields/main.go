@@ -298,6 +298,7 @@ func renderAccessor(a ast.Accessor) string {
 		{"labelColumn", a.LabelColumn},
 		{"sortColumn", a.SortColumn},
 		{"assessedBy", a.AssessedBy},
+		{"surface", a.Surface},
 	} {
 		if kv.value != "" {
 			parts = append(parts, kv.name+": "+tsStr(kv.value))

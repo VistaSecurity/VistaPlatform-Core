@@ -12,10 +12,14 @@ package services
 //     keys are different postures and must not collapse into "encrypted: true".
 
 import (
+	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
+	"github.com/vistasecurity/vistaplatform/shared/findings"
 )
 
 func s3Finding(extra map[string]interface{}) IngestFinding {
@@ -276,5 +280,57 @@ func TestUpsertCryptoApplicationSQL_ConflictsOnNaturalKey(t *testing.T) {
 	}
 	if !strings.Contains(upsertCryptoApplicationSQL, "first_discovered_at = LEAST(crypto_applications.first_discovered_at,EXCLUDED.first_discovered_at)") {
 		t.Error("the upsert must preserve the earliest actual observation")
+	}
+}
+
+// A Secrets Manager secret reaches the at-rest table through the same
+// projection as a bucket. Its asset was recorded by cloud enumeration under
+// cloud_resource_id, so that — not arn — is where its identifier is, and an
+// identifier-less finding is skipped (the blank-key rule), which would
+// silently leave every secret unassessed.
+func TestAtRestPosture_SecretsManagerSecret(t *testing.T) {
+	arn := "arn:aws:secretsmanager:us-east-1:111122223333:secret:prod/db-AbCdEf"
+	secret := func(encType, kms string) IngestFinding {
+		host := "prod/db"
+		return IngestFinding{Hostname: &host, RawData: map[string]interface{}{
+			"resource_type": "secretsmanager", "cloud_resource_id": arn, "region": "us-east-1",
+			"encrypted": true, "encryption_determined": true, "encryption_type": encType,
+			"algorithm": "AES-256", "kms_key_id": kms,
+		}}
+	}
+	p, ok := atRestPostureFromFinding(secret("aws-managed-kms", ""))
+	if !ok {
+		t.Fatal("a Secrets Manager secret is not projected as an at-rest resource")
+	}
+	if p.ResourceType != "other" || p.ResourceIdentifier != arn {
+		t.Errorf("resource_type=%q identifier=%q, want other and the cloud_resource_id", p.ResourceType, p.ResourceIdentifier)
+	}
+	if !p.Determined || !p.Encrypted || p.KeyManager != keyManagerProvider || p.riskScore() != atRestRiskProviderKey {
+		t.Errorf("AWS-managed key: determined=%v encrypted=%v key_manager=%q score=%d", p.Determined, p.Encrypted, p.KeyManager, p.riskScore())
+	}
+	c, _ := atRestPostureFromFinding(secret("customer-managed-kms", "arn:aws:kms:us-east-1:111122223333:key/1234"))
+	if c.KeyManager != keyManagerCustomer || c.riskScore() != atRestRiskCustomerKey {
+		t.Errorf("customer key: key_manager=%q score=%d", c.KeyManager, c.riskScore())
+	}
+}
+
+// The producer scores crypto/unencrypted_at_rest by the AT-REST-PLAINTEXT
+// catalogue row, and this file's ladder scores an unencrypted record at
+// ingest. They are one opinion and must stay one number.
+func TestAtRestUnencryptedScore_MatchesTheCatalogueRow(t *testing.T) {
+	raw, err := os.ReadFile("../../../../scripts/database/seed.sql")
+	if err != nil {
+		t.Fatalf("read seed.sql: %v", err)
+	}
+	m := regexp.MustCompile(`\('AT-REST-PLAINTEXT',.*?'(?:weak|acceptable|strong|recommended)', '[a-z_-]+', (\d+), ARRAY`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatal("seed.sql has no AT-REST-PLAINTEXT algorithms row; the at-rest producer would score nothing")
+	}
+	if got, _ := strconv.Atoi(string(m[1])); got != atRestRiskUnencrypted {
+		t.Errorf("AT-REST-PLAINTEXT risk_score = %d, the at-rest ladder's unencrypted rung = %d", got, atRestRiskUnencrypted)
+	}
+	k, ok := findings.Get(findings.ProducerCrypto, findings.KindUnencryptedAtRest)
+	if !ok || !k.FeedsRisk || k.ScoreSource != "catalogue" {
+		t.Errorf("crypto/unencrypted_at_rest = %+v, want registered, feeding risk, scored from the catalogue", k)
 	}
 }

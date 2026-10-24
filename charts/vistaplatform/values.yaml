@@ -1427,6 +1427,15 @@ maintenance:
 # no completion marker, so seed-data and each backend's wait-for-schema init
 # container wait only for the public.tenants table to exist instead.
 #
+# The SQL is not in the chart. It ships in the release image
+# <registry>/<repoPrefix>/schema:<appVersion> (schema.sql, seed.sql and, in the
+# licensed build, the signed Enterprise content bundle); the schema-migration
+# and seed-data Jobs copy it out of that image in an init container. The chart
+# carries only the sha256 of schema.sql, and the Job refuses an image whose
+# schema hashes differently — so the schema image must be the one of this
+# release. (Helm keeps every chart file and the rendered manifest in a 1 MiB
+# release Secret; ~2 MB of SQL in both made 5.1.0 uninstallable.)
+#
 # With enabled=false and serviceRls.enabled=true (the default) the rls-roles Job
 # still runs: your own schema must already have created the two roles named by
 # serviceRls.roleApp (NOLOGIN NOBYPASSRLS) and serviceRls.roleBypass (NOLOGIN
@@ -1436,9 +1445,21 @@ maintenance:
 # yourself, which creates all of it.
 schemaMigration:
   enabled: true
+  # psql / pg_isready for the Jobs and every backend's wait-for-schema init container.
   image:
     repository: postgres
     tag: "17-alpine"
+  # The schema image. Each field falls back to the product images' setting
+  # (image.registry, image.repoPrefix, image.tag or the chart's appVersion);
+  # digest wins over tag. The published commercial chart pins the digest here
+  # like it does for every backend; a Harbor rehearsal blanks it
+  # (schemaMigration.sqlImage.digest: "").
+  sqlImage:
+    registry: ""
+    repoPrefix: ""
+    repository: schema
+    tag: ""
+    digest: ""
 
 # Seed data Job. Runs scripts/database/seed.sql after schema-migration on every
 # install and upgrade. Inserts platform roles, the initial platform admin user,
@@ -1446,10 +1467,9 @@ schemaMigration:
 # fully idempotent (ON CONFLICT DO NOTHING / DO UPDATE) so upgrades are safe.
 # Disable only if you manage seed data entirely outside of Helm.
 #
-# The chart packages seed.sql from scripts/database/seed.sql
-# (scripts/stage-chart-sql.sh); it is NOT committed in files/schema/. Rendering
-# or installing from a bare checkout with seedData.enabled=true fails with a
-# message saying so, rather than seeding nothing (no platform admin).
+# seed.sql comes from the schema image (schemaMigration.sqlImage), never from
+# the chart; the Job fails in its init container if the image has none, rather
+# than seeding nothing (no platform admin).
 #
 # seed.sql seeds SIX compliance frameworks, all free: best-practices,
 # pqc-readiness, cert-hygiene and the three cert-expiry frameworks. The five
@@ -1467,11 +1487,13 @@ seedData:
 enterprise:
   # Regulated compliance-framework content bundle.
   #
-  # WHAT IT IS: a signed SQL bundle, shipped inside the chart, holding the five
-  # regulated frameworks Enterprise customers license — SOC 2 Type 2,
-  # PCI-DSS 4.0, ISO/IEC 27001:2022, NIST CSF 1.1 and IEC 62351-3, with their
-  # controls and measurement rules. It is applied by the seed-data Job right
-  # after seed.sql, under `psql -v ON_ERROR_STOP=1`.
+  # WHAT IT IS: a signed SQL bundle, shipped inside the licensed schema image
+  # (schemaMigration.sqlImage), holding the five regulated frameworks
+  # Enterprise customers license — SOC 2 Type 2, PCI-DSS 4.0, ISO/IEC
+  # 27001:2022, NIST CSF 1.1 and IEC 62351-3, with their controls and
+  # measurement rules. It is applied by the seed-data Job right after
+  # seed.sql, under `psql -v ON_ERROR_STOP=1`. The chart carries the public
+  # key the bundle must verify against.
   #
   # WHY A BUNDLE AND NOT A HOSTED FEED: it is revocable by non-renewal,
   # versioned with the release, works air-gapped, and needs no service running.
@@ -1484,9 +1506,10 @@ enterprise:
   # Turning this OFF later removes nothing: frameworks already in the database
   # stay, they simply stop being refreshed on upgrade.
   #
-  # Only enable this on a licensed deployment. On a Core chart (or any chart
-  # packaged without the bundle files) enabling it fails at `helm template`
-  # time with an explicit message rather than silently seeding nothing.
+  # Only enable this on a licensed deployment. On a Core chart (packaged without
+  # the verification key) enabling it fails at `helm template` time with an
+  # explicit message, and on a Core schema image (no bundle) the seed-data Job
+  # fails in its init container — rather than silently seeding nothing.
   contentBundle:
     enabled: false
 

@@ -133,6 +133,8 @@ const modal = read('./agent-fleet-defaults-modal.tsx');
 const sensorModal = read('./sensor-fleet-defaults-modal.tsx');
 const sensorDrawer = read('./sensor-detail-drawer.tsx');
 const panel = read('./settings-panel.tsx');
+const runtime = read('./runtime-drawer.tsx');
+const agentJobQueries = read('./agent-job-queries.ts');
 
 // The stripper's own guard. Review of showed the block regex swallowing
 // live code behind a comment opener hidden in a string, and — because `read`
@@ -392,10 +394,15 @@ describe('restart is reachable and honest', () => {
   it('warns that an unsupervised agent stops, BEFORE the click', () => {
     // The one way this disappoints. An operator should meet it while they can
     // still change their mind, so the words live in the confirm step rather
-    // than in the success message.
+    // than in the success message. The control is shared with the sensor
+    // drawer (runtime-drawer.tsx): the agent supplies the caveat, and the
+    // control must render it inside the confirm step.
     const control = drawer.slice(drawer.indexOf('function RestartSection'));
-    const confirmBlock = control.slice(control.indexOf('{confirming &&'), control.indexOf('{restart.isSuccess'));
-    expect(confirmBlock).toMatch(/stop instead of restarting/i);
+    const caveat = regionFrom(control, 'caveat=', '\n');
+    expect(caveat).toMatch(/stop instead of restarting/i);
+    expect(control).not.toMatch(/successNote=[^\n]*stop instead/i);
+    const confirmBlock = regionFrom(runtime, '{confirming && (', ')}');
+    expect(confirmBlock).toMatch(/\{caveat\}/);
   });
 });
 
@@ -410,16 +417,18 @@ describe('sensor settings are reachable', () => {
     expect(sensorDrawer).toMatch(/scope="device"/);
   });
 
-  it("the sensor's Control TAB renders the settings section", () => {
+  it("the sensor's Settings TAB renders the settings section", () => {
     // Anchored to the tab, not to the file. The section is its own component,
-    // so deleting <SensorSettingsSection/> from ControlTab leaves the panel,
+    // so deleting <SensorSettingsSection/> from SettingsTab leaves the panel,
     // the queries and the scope all present in the file and the settings
     // unreachable — which is exactly what the first version of this test
     // missed when I mutated it.
-    // ControlTab's body, bounded by its own closing brace rather than by a
+    // SettingsTab's body, bounded by its own closing brace rather than by a
     // byte count that a comment can push an anchor out of.
-    const controlTab = regionFrom(sensorDrawer, 'function ControlTab', '\n}');
-    expect(controlTab).toMatch(/<SensorSettingsSection\b/);
+    const settingsTab = regionFrom(sensorDrawer, 'function SettingsTab', '\n}');
+    expect(settingsTab).toMatch(/<SensorSettingsSection\b/);
+    // And the drawer renders that tab.
+    expect(sensorDrawer).toMatch(/tab === 'settings' && !isPlatform && <SettingsTab\b/);
   });
 
   it('the sensor drawer passes the version block to the panel', () => {
@@ -548,5 +557,48 @@ describe('each runtime talks to its own service', () => {
     expect(agentQueries).toMatch(/clients\.devices\.PUT\('\/agents\/\{id\}\/config'/);
     expect(agentQueries).toMatch(/return saveResultFrom\(data\)/);
     expect(agentQueries).not.toMatch(/clients\.sensors\./);
+  });
+});
+
+// One frame for both runtimes: the two drawers drifted apart once, and the
+// fix is only real while both keep rendering the shared pieces.
+describe('sensor and agent drawers share one frame', () => {
+  for (const [name, src] of [['sensor drawer', sensorDrawer], ['agent drawer', drawer]] as const) {
+    it(`the ${name} renders the shared frame, Health opening and job history`, () => {
+      expect(src).toMatch(/<RuntimeDrawer\b/);
+      expect(src).toMatch(/<ConnectionHealth\b/);
+      expect(src).toMatch(/<JobHistoryList\b/);
+      expect(src).toMatch(/<RestartControl\b/);
+    });
+  }
+
+  it("the agent's Jobs tab reads its own jobs, not the tenant's", () => {
+    // Without agent_id the list endpoint returns every job in the tenant, and
+    // the drawer would show them all under this agent's name.
+    expect(agentJobQueries).toMatch(/query: \{ agent_id: agentId,/);
+    expect(drawer).toMatch(/tab === 'jobs' && <AgentJobs\b/);
+    expect(drawer).toMatch(/useAgentJobs\(agentId\)/);
+  });
+
+  it('the job history is capped and expands one row at a time', () => {
+    expect(runtime).toMatch(/const shown = jobs\.slice\(0, limit\)/);
+    expect(runtime).toMatch(/aria-expanded=\{isOpen\}/);
+    expect(runtime).toMatch(/\{isOpen && \(/);
+  });
+
+  it('the sensor renders exported logs as text in the Logs tab', () => {
+    expect(sensorDrawer).toMatch(/tab === 'logs' && !isPlatform && <LogsTab\b/);
+    expect(sensorDrawer).toMatch(/command_type: 'export_logs', payload: \{ lines: lineCount \}/);
+    expect(runtime).toMatch(/\{state\.lines\.join\('\\n'\)\}/);
+    expect(sensorDrawer).toMatch(/<LogExportPanel\b/);
+  });
+
+  it('the agent has a Logs tab on the same panel, wired to its own endpoints', () => {
+    expect(drawer).toMatch(/const AGENT_TABS: readonly RuntimeTabKey\[\] = \[[^\]]*'logs'/);
+    expect(drawer).toMatch(/tab === 'logs' && <AgentLogs\b/);
+    expect(drawer).toMatch(/<LogExportPanel\b/);
+    expect(drawer).toMatch(/onFetch=\{\(\) => request\.mutate\(lineCount\)\}/);
+    expect(agentJobQueries).toMatch(/GET\('\/agents\/\{id\}\/logs'/);
+    expect(agentJobQueries).toMatch(/POST\('\/agents\/\{id\}\/logs\/request'/);
   });
 });

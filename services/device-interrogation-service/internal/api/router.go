@@ -137,6 +137,11 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 	integrationHandlers := handlers.NewIntegrationHandlers(db, bypassDB, encryptionKey)
 	jobHandlers := handlers.NewJobHandlers(db, bypassDB)
 	adminQueuesHandler := handlers.NewAdminQueuesHandler(natsClient)
+	// Log export for discovery agents (the agent drawer's Logs tab): the
+	// tenant asks, the agent collects the request from its heartbeat answer
+	// and uploads its recent lines. Redis-held with an expiry — see
+	// handlers/agent_logs.go.
+	agentLogs := handlers.NewAgentLogsHandler(db, redis)
 
 	deviceInterrogationGroup := v1.Group("/device-interrogation-service")
 
@@ -166,7 +171,10 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 		// the agent submits data or changes its identity, stay audited.
 		agentRoutes.GET(agentOutbound, "/:id/jobs", auditmiddleware.Skip(), getAgentJobsHandler(db, bypassDB, redis))
 		agentRoutes.POST(agentOutbound, "/:id/results", submitAgentResultsHandler(db, bypassDB, redis))
-		agentRoutes.POST(agentOutbound, "/:id/heartbeat", auditmiddleware.Skip(), agentHeartbeatHandler(db, bypassDB, redis))
+		agentRoutes.POST(agentOutbound, "/:id/heartbeat", auditmiddleware.Skip(), agentHeartbeatHandler(db, bypassDB, redis, agentLogs))
+		// The agent's reply to a log request. Audited: the agent is submitting
+		// data, not polling.
+		agentRoutes.POST(agentOutbound, "/:id/logs", agentLogs.Upload)
 		// Autonomous pre-expiry cert renewal. Under AgentAuth like the
 		// rest of the outbound surface — mirrors sensor-manager's rotate route.
 		agentRoutes.POST(agentOutbound, "/:id/certificates/rotate", rotateAgentCertificateHandler(db, bypassDB))
@@ -283,6 +291,12 @@ func SetupRouter(cfg *config.Config, db, bypassDB *sql.DB, redis *redis.Client) 
 			// the operator most likely to ask "why is this on" is the one who
 			// cannot change it.
 			agents.GET("/:id/config/history", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsRead), agentConfig.GetAgentConfigHistory)
+			// Log export mirrors the sensor's: reading what came back is
+			// sensors.read, and asking an agent to send its logs is
+			// sensors.update — the permission sensor-manager requires to queue
+			// a sensor's export_logs command.
+			agents.GET("/:id/logs", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsRead), agentLogs.GetLogs)
+			agents.POST("/:id/logs/request", sharedrbac.RequireTenantPermission(db, rbac.PermissionSensorsUpdate), agentLogs.RequestLogs)
 		}
 
 		// Cloud discovery routes — these actively run discovery/interrogation.
@@ -656,7 +670,7 @@ func submitAgentResultsHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.Ha
 	}
 }
 
-func agentHeartbeatHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.HandlerFunc {
+func agentHeartbeatHandler(db, bypassDB *sql.DB, redis *redis.Client, agentLogs *handlers.AgentLogsHandler) gin.HandlerFunc {
 	agentService := services.NewAgentService(db, bypassDB, redis)
 	return func(c *gin.Context) {
 		idStr := c.Param("id")
@@ -675,6 +689,9 @@ func agentHeartbeatHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.Handle
 			Version    string                           `json:"version"`
 			IPAddress  string                           `json:"ip_address"`
 			Interfaces []sharednetwork.InterfaceAddress `json:"interfaces"`
+			// LogExport is the agent saying its build can send its logs.
+			// Absent on an older agent, which is then never handed a request.
+			LogExport bool `json:"log_export"`
 			handlers.AgentReport
 		}
 		_ = c.ShouldBindJSON(&beat)
@@ -704,6 +721,12 @@ func agentHeartbeatHandler(db, bypassDB *sql.DB, redis *redis.Client) gin.Handle
 				log.Printf("agent config exchange failed for agent %s: %v", agentID, err)
 			} else {
 				resp["config"] = payload
+			}
+			// A pending log request, if any, rides the same answer.
+			if agentLogs != nil {
+				if req := agentLogs.OnHeartbeat(c.Request.Context(), tenantID, agentID, beat.LogExport); req != nil {
+					resp["logs_request"] = req
+				}
 			}
 		}
 		c.JSON(http.StatusOK, resp)

@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { check, defaultOptions, newRegistryCatalog, CVSS_LADDER, withLadder } from '@vistasecurity/primitives/query';
 import {
   DASHBOARD_CRITICAL_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_HIGH_RISK_QUERY,
-  DASHBOARD_UNSCORED_ASSETS_ROUTE, DASHBOARD_UNSCORED_QUERY,
-  getDashboardPqcMetric, getDiscoveryFleetMetric, isAgentRow,
+  DASHBOARD_UNSCORED_ASSETS_ROUTE, DASHBOARD_UNSCORED_QUERY, DASHBOARD_NO_CRYPTO_QUERY,
+  getDashboardPqcMetric, getDiscoveryFleetMetric, isAgentRow, unscoredSplit,
 } from './dashboard-metrics';
 import { readFileSync } from 'node:fs';
 import { FINDINGS_SUBJECT_LENS, isFindingsLens } from '../findings/lenses';
@@ -141,10 +141,11 @@ describe('dashboard risk tiles link to what they counted (gate1 C7)', () => {
     // "Unscored" is the ABSENCE of a score, which the language spells
     // `not_assessed` — never "low".
     expect(queryToFacets(DASHBOARD_UNSCORED_QUERY).facets.risk).toEqual(['not_assessed']);
+    expect(queryToFacets(DASHBOARD_NO_CRYPTO_QUERY).facets.risk).toEqual(['no_crypto_observed']);
   });
 
   it('writes a query the server would accept', () => {
-    for (const q of [DASHBOARD_HIGH_RISK_QUERY, DASHBOARD_UNSCORED_QUERY]) {
+    for (const q of [DASHBOARD_HIGH_RISK_QUERY, DASHBOARD_UNSCORED_QUERY, DASHBOARD_NO_CRYPTO_QUERY]) {
       const res = check(q, 'asset', CATALOG, OPTIONS);
       expect(res.ok, `invalid query: ${q} — ${res.ok ? '' : res.errors.map((e) => e.message).join('; ')}`).toBe(true);
     }
@@ -153,6 +154,21 @@ describe('dashboard risk tiles link to what they counted (gate1 C7)', () => {
   it('URL-encodes the query so the parentheses survive the address bar', () => {
     const parsed = new URLSearchParams(DASHBOARD_HIGH_RISK_ASSETS_ROUTE.split('?')[1]);
     expect(parsed.get('query')).toBe(DASHBOARD_HIGH_RISK_QUERY);
+  });
+});
+
+describe('unscoredSplit', () => {
+  it('reads the two halves the summary sends', () => {
+    expect(unscoredSplit({ unknown_risk: 80, not_assessed: 11, no_crypto_observed: 69 }))
+      .toEqual({ notAssessed: 11, noCryptoObserved: 69 });
+  });
+
+  it('reads EVERY unscored asset as not assessed when the service predates the split', () => {
+    // "No crypto" is a claim; "not assessed" is not. A missing half must never
+    // default to 0 not-assessed and quietly move every asset out of the ring.
+    expect(unscoredSplit({ unknown_risk: 78 })).toEqual({ notAssessed: 78, noCryptoObserved: 0 });
+    expect(unscoredSplit({ unknown_risk: 78, not_assessed: 9 })).toEqual({ notAssessed: 78, noCryptoObserved: 0 });
+    expect(unscoredSplit(undefined)).toEqual({ notAssessed: 0, noCryptoObserved: 0 });
   });
 });
 

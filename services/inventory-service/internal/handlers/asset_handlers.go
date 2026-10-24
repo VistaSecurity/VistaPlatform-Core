@@ -961,7 +961,10 @@ func (h *AssetHandler) EnrichAllAssets(c *gin.Context) {
 	}
 	updated, err := h.assetService.EnrichAllAssets(tenantUUID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to enrich assets"})
+		// Logged: this answered 500 on every commercial install for a scan
+		// error that no log line named, so the only evidence was the access
+		// log's status code.
+		h.writeAssetError(c, "EnrichAllAssets", "Asset not found", "Failed to enrich assets", err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"updated": updated})

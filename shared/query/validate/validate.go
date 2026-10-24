@@ -521,11 +521,18 @@ func (v *validator) literal(tgt catalog.Target, f ast.FieldRef, lit ast.Literal,
 // band checks a band label against the ladder, and not_assessed against the
 // field's coverage column (§5.2) and the operator it was written with.
 func (v *validator) band(tgt catalog.Target, f ast.FieldRef, lit ast.Literal, op ast.Op) {
-	if strings.EqualFold(lit.Value, catalog.NotAssessed) {
+	if catalog.IsCoveragePseudoBand(lit.Value) {
+		pseudo := strings.ToLower(lit.Value)
 		if f.Accessor.AssessedBy == "" {
 			v.add(queryerr.New(queryerr.CodeUnknownValue, lit.Sp,
-				"%q does not record who assessed it, so %q has no meaning for it", f.Text, catalog.NotAssessed).
+				"%q does not record who assessed it, so %q has no meaning for it", f.Text, pseudo).
 				WithSuggestion("bands: %s", strings.Join(catalog.BandLabels(v.opts.Ladder, false), ", ")))
+			return
+		}
+		if pseudo == catalog.NoCryptoObserved && f.Accessor.Surface == "" {
+			v.add(queryerr.New(queryerr.CodeUnknownValue, lit.Sp,
+				"%q records no crypto surface, so %q has no meaning for it", f.Text, pseudo).
+				WithSuggestion("bands: %s", strings.Join(catalog.BandLabelsFor(v.opts.Ladder, f.Accessor), ", ")))
 			return
 		}
 		// not_assessed is NOT a rung of the ladder — it is the absence of a
@@ -537,9 +544,9 @@ func (v *validator) band(tgt catalog.Target, f ast.FieldRef, lit ast.Literal, op
 		// here, where the error can say what to write instead.
 		if op != ast.OpColon && op != ast.OpEq && op != ast.OpNe {
 			v.add(queryerr.New(queryerr.CodeOperatorNotAllowed, lit.Sp,
-				"%q is not a rung of the ladder, so it cannot be used with %q", catalog.NotAssessed, op).
+				"%q is not a rung of the ladder, so it cannot be used with %q", pseudo, op).
 				WithSuggestion("write %s:%s, or order against a band: %s",
-					f.Text, catalog.NotAssessed,
+					f.Text, pseudo,
 					strings.Join(catalog.BandLabels(v.opts.Ladder, false), ", ")))
 		}
 		return
@@ -549,12 +556,12 @@ func (v *validator) band(tgt catalog.Target, f ast.FieldRef, lit ast.Literal, op
 	}
 	e := queryerr.New(queryerr.CodeTypeMismatch, lit.Sp,
 		"%q is a band (%s)", f.Text,
-		strings.Join(catalog.BandLabels(v.opts.Ladder, f.Accessor.AssessedBy != ""), ", "))
+		strings.Join(catalog.BandLabelsFor(v.opts.Ladder, f.Accessor), ", "))
 	if _, isNum := ast.ParseNumber(lit.Value); isNum {
 		if numeric, ok := v.numericTwin(tgt, f); ok {
 			e = e.WithSuggestion("for the numeric score use %q", numeric+" "+string(ast.OpGte)+" "+lit.Value)
 		}
-	} else if near, ok := queryerr.NearestValue(lit.Value, catalog.BandLabels(v.opts.Ladder, true)); ok {
+	} else if near, ok := queryerr.NearestValue(lit.Value, catalog.BandLabelsFor(v.opts.Ladder, f.Accessor)); ok {
 		e = e.WithSuggestion("did you mean %q?", near)
 	}
 	v.add(e)

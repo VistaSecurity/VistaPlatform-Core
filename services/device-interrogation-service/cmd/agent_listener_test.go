@@ -46,6 +46,7 @@ var wantAgentRoutes = []string{
 	"GET /api/v1/device-interrogation-service/agents/:id/jobs",                 // device-agent/internal/api/client.go GetNextJob
 	"POST /api/v1/device-interrogation-service/agents/:id/results",             // client.go SubmitResult (and ReportJobError)
 	"POST /api/v1/device-interrogation-service/agents/:id/heartbeat",           // client.go SendHeartbeat (desired config + restart ride its response)
+	"POST /api/v1/device-interrogation-service/agents/:id/logs",                // client.go SendLogs (the reply to a log request from the heartbeat answer)
 	"POST /api/v1/device-interrogation-service/agents/:id/certificates/rotate", // device-agent/internal/api/certificate_rotation.go RotateCertificate
 }
 

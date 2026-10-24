@@ -310,6 +310,9 @@ type Observation struct {
 	// interfaces once the sighting resolved to an asset.
 	WirelessLANs  []ObservedWirelessLAN  `json:"wireless_lans,omitempty"`
 	WirelessLinks []ObservedWirelessLink `json:"wireless_links,omitempty"`
+	// WirelessStations are the asset's own client radios and the wireless
+	// LANs they joined, normalised by [Intake]; recorded with the interfaces.
+	WirelessStations []ObservedWirelessStation `json:"wireless_stations,omitempty"`
 	// VirtualDeviceContexts are the device's virtual device contexts (DCIM
 	// gap 1), normalised by [Intake]; recorded with the interfaces.
 	VirtualDeviceContexts []ObservedVirtualDeviceContext `json:"virtual_device_contexts,omitempty"`

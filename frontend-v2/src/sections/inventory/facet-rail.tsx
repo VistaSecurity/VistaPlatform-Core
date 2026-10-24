@@ -418,7 +418,12 @@ export function FacetRail({ facets, data, certTrust, extra, unparsed = false, on
         ))}
         {facets.risk.includes('not_assessed') && (
           <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 5, lineHeight: 1.45 }}>
-            “Not assessed” is the absence of a score, not a low one — no producer has evaluated these assets.
+            “Not assessed” is the absence of a score, not a low one — crypto is on record and no producer has evaluated it.
+          </div>
+        )}
+        {facets.risk.includes('no_crypto_observed') && (
+          <div style={{ fontSize: 11, color: 'var(--app-t3)', marginTop: 5, lineHeight: 1.45 }}>
+            “No crypto observed” means nothing cryptographic is on record for these assets, so there was nothing to assess.
           </div>
         )}
         {levelFailed(data, 'risk') && <LevelFailed onRetry={onRetry} />}

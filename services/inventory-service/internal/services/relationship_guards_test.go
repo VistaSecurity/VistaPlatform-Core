@@ -61,15 +61,14 @@ func relGuardsRead(t *testing.T, root, rel string) string {
 // The vocabulary is read out of shared/identity rather than restated, so the
 // guard cannot drift from the thing it guards.
 //
-// Mutation check: add a HistoryAction without adding it to either schema copy's
-// asset_history_action_check list, or delete a value from one copy, and this fails.
+// Mutation check: add a HistoryAction without adding it to the schema's
+// asset_history_action_check list, or delete a value from it, and this fails.
 func TestSchemaAssetHistoryActionsCoverTheGoVocabulary(t *testing.T) {
 	root := relGuardsRepoRoot(t)
 	actions := goHistoryActions(t, root)
 
 	for _, rel := range []string{
 		"scripts/database/schema.sql",
-		"charts/vistaplatform/files/schema/schema.sql",
 	} {
 		t.Run(rel, func(t *testing.T) {
 			sql := relGuardsRead(t, root, rel)

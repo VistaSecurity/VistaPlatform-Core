@@ -154,6 +154,11 @@ export interface Accessor {
   sortColumn?: string;
   /** The column proving a band field was assessed at all (§5.2). */
   assessedBy?: string;
+  /** The test that splits an unscored row in two (only `crypto`,
+   *  shared/cryptosurface). A band field with one also accepts
+   *  `no_crypto_observed`, and its `not_assessed` narrows to the rows that DO
+   *  show a crypto surface. */
+  surface?: string;
 }
 
 /**

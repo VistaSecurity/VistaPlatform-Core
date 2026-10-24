@@ -211,7 +211,6 @@ func TestProjectionAllowlists_NameNoSecretFields(t *testing.T) {
 		"fortinetSystemStatusFields":  fortinetSystemStatusFields,
 		"f5SystemVersionFields":       f5SystemVersionFields,
 		"f5HardwareFields":            f5HardwareFields,
-		"unifiDeviceInventoryFields":  unifiDeviceInventoryFields,
 		"unifiDeviceStructuredFields": unifiDeviceStructuredFields,
 		"unifiPortFields":             unifiPortFields,
 		"unifiEthernetFields":         unifiEthernetFields,
@@ -222,12 +221,14 @@ func TestProjectionAllowlists_NameNoSecretFields(t *testing.T) {
 		"httpCertificateFields":       httpCertificateFields,
 	}
 
-	// A walker that checks nothing passes vacuously.
+	// A walker that checks nothing passes vacuously. (15 since the UniFi
+	// managed-device converter and its allowlist were deleted: a managed device
+	// is not a crypto asset.)
 	total := 0
 	for _, fields := range allowlists {
 		total += len(fields)
 	}
-	if len(allowlists) < 16 || total < 60 {
+	if len(allowlists) < 15 || total < 60 {
 		t.Fatalf("only %d allowlists / %d field names were checked; the test has stopped covering the package", len(allowlists), total)
 	}
 

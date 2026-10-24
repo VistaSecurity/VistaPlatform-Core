@@ -1,5 +1,7 @@
 package findings
 
+import "strings"
+
 // Subject resolution: which findings are "on" an asset.
 //
 // A finding names its subject with `(subject_type, subject_id)` and the subject
@@ -99,6 +101,53 @@ func ConfigurationAssetSQL(ciAlias, endpointAlias string) string {
 	return "COALESCE(" + endpointAlias + ".asset_id, " + ciAlias + ".asset_id)"
 }
 
+// CloudKeyAssetSQL is the ONE join condition between a cloud KMS key in the
+// `keys` table and the Key Store asset that describes the same provider key,
+// given an alias for `keys`, an alias for `assets`, and `value`, which turns a
+// constant into the SQL that stands for it (a bound placeholder, or
+// QuoteLiteral).
+//
+// A cloud KMS key reaches inventory twice — as a `keys` row (UpsertCloudKeys)
+// and as an endpoint-less `key_store` asset (cloud_key_store_assets.go) — and
+// the two are not linked: `keys` has no asset column and a KMS key is used by
+// no crypto configuration, so the implementation_keys path never reaches it.
+// What they DO share is the provider's resource id: the key's `external_ref`
+// is the ARN / resource id, and the asset carries the same string as
+// `attributes->>'cloud_resource_id'` (kmsKeyStoreAttributes). Only keys the
+// cloud-KMS ingest wrote (`provenance` cloud-kms[:<provider>]) are joined, so
+// no other kind of key can be matched to a cloud asset by a string it happens
+// to share.
+//
+// The asset's class is deliberately NOT in the condition: a person who
+// reclassifies the Key Store does not stop it describing the same provider key.
+// Nor is the tenant, for the reason no other path here names one: every reader
+// runs inside a tenant transaction and RLS scopes both tables. The RLS qual is
+// also what prunes the tenant-partitioned `assets` here (EXPLAIN shows 7 of 8
+// partitions removed at executor start); a reader that splices this into its
+// own JOIN, as the crypto producer does, adds `<asset>.tenant_id` itself.
+//
+// Exported and spliced by both readers — the `crypto` producer's key coverage
+// and AssetSubjects' key path — for the reason ConfigurationAssetSQL is: the
+// coverage row and the finding must name the same asset.
+func CloudKeyAssetSQL(keyAlias, assetAlias string, value func(string) string) string {
+	return keyAlias + ".provenance LIKE " + value(CloudKeyProvenancePattern) +
+		" AND " + assetAlias + ".attributes->>" + value(CloudResourceIDAttribute) + " = " + keyAlias + ".external_ref"
+}
+
+// CloudKeyProvenancePattern matches the `keys.provenance` the cloud-KMS ingest
+// writes: "cloud-kms", or "cloud-kms:<provider>".
+const CloudKeyProvenancePattern = "cloud-kms%"
+
+// CloudResourceIDAttribute is the asset attribute carrying a cloud resource's
+// provider id (an ARN, a Key Vault key id, a Cloud KMS resource name).
+const CloudResourceIDAttribute = "cloud_resource_id"
+
+// QuoteLiteral renders a constant as a SQL string literal, for a caller that
+// composes static SQL and has no parameter binder.
+func QuoteLiteral(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", "''") + "'"
+}
+
 // AssetSubject is one subject type a finding may carry that belongs to an asset,
 // with the SQL that resolves it back to that asset.
 type AssetSubject struct {
@@ -154,6 +203,10 @@ type AssetSubject struct {
 // rollup — a row nothing leads to, which is the failure this file was written
 // to stop.
 //
+// A cloud KMS key has a second path, because no configuration uses it: it is
+// reached from the Key Store asset that names the same provider resource id
+// (CloudKeyAssetSQL). The two branches are one subject path, UNIONed.
+//
 // # Why the configuration and certificate paths LEFT JOIN the endpoint
 //
 // They were inner joins on `crypto_implementations.endpoint_id`, which is
@@ -166,6 +219,13 @@ type AssetSubject struct {
 // is one (a configuration whose endpoint moved to another asset follows the
 // endpoint) and falls back to the roll-up target where there is not.
 func AssetSubjects(assetAlias string, uniq func(prefix string) string) []AssetSubject {
+	return AssetSubjectsWith(assetAlias, uniq, QuoteLiteral)
+}
+
+// AssetSubjectsWith is AssetSubjects for a caller that binds values: `value`
+// turns each constant a path compares against into the SQL that stands for it.
+// The query-language builder binds every value it emits, these included.
+func AssetSubjectsWith(assetAlias string, uniq func(prefix string) string, value func(string) string) []AssetSubject {
 	e := uniq("e")
 	ci := uniq("ci")
 	e2 := uniq("e")
@@ -179,6 +239,10 @@ func AssetSubjects(assetAlias string, uniq func(prefix string) string) []AssetSu
 	ik := uniq("ik")
 	ci3 := uniq("ci")
 	e4 := uniq("e")
+	// Minted after every existing alias, for the reason the key path itself is
+	// appended last: nothing that already exists is renumbered.
+	k2 := uniq("k")
+	ka := uniq("ka")
 
 	return []AssetSubject{
 		{Type: SubjectAsset, Self: true},
@@ -223,13 +287,23 @@ func AssetSubjects(assetAlias string, uniq func(prefix string) string) []AssetSu
 		// the relationship path landed in the same merge, keeping relationship
 		// where it already was and putting key behind it meant only the new
 		// branch was added to the existing SQL, not a renumbering of all of it.
+		//
+		// The second branch is a cloud KMS key, which no configuration uses: it
+		// reaches its Key Store asset through the provider's resource id
+		// (CloudKeyAssetSQL). It re-reads `assets` by id rather than the
+		// caller's alias's columns, because callers pass an alias that is not
+		// always a full assets row (rack posture's `dev` CTE carries only
+		// tenant_id and id) — every path here reads only `<asset>.id`.
 		{
 			Type: SubjectKey,
 			IDs: "SELECT " + k + ".id FROM keys " + k +
 				" JOIN implementation_keys " + ik + " ON " + ik + ".key_id = " + k + ".id" +
 				" JOIN crypto_implementations " + ci3 + " ON " + ci3 + ".id = " + ik + ".implementation_id" +
 				" LEFT JOIN asset_endpoints " + e4 + " ON " + e4 + ".id = " + ci3 + ".endpoint_id" +
-				" WHERE " + ConfigurationAssetSQL(ci3, e4) + " = " + assetAlias + ".id",
+				" WHERE " + ConfigurationAssetSQL(ci3, e4) + " = " + assetAlias + ".id" +
+				" UNION SELECT " + k2 + ".id FROM keys " + k2 +
+				" JOIN assets " + ka + " ON " + CloudKeyAssetSQL(k2, ka, value) +
+				" WHERE " + ka + ".id = " + assetAlias + ".id",
 		},
 	}
 }
@@ -237,13 +311,14 @@ func AssetSubjects(assetAlias string, uniq func(prefix string) string) []AssetSu
 // AssetSubjectClause is AssetSubjects rendered as one OR-ed boolean over a
 // findings alias, for a caller that has no parameter binder of its own.
 //
-// `subjectTypeSQL` turns a subject-type value into the SQL that stands for it —
-// a placeholder from the caller's binder, or a quoted literal. It is a callback
+// `subjectTypeSQL` turns a subject-type value — or any other constant a path
+// compares against (AssetSubjectsWith) — into the SQL that stands for it: a
+// placeholder from the caller's binder, or a quoted literal. It is a callback
 // rather than a plain literal so the query-language builder, which binds every
 // value it emits, can keep doing that.
 func AssetSubjectClause(findingAlias, assetAlias string, uniq func(prefix string) string, subjectTypeSQL func(string) string) string {
 	parts := make([]string, 0, 7)
-	for _, s := range AssetSubjects(assetAlias, uniq) {
+	for _, s := range AssetSubjectsWith(assetAlias, uniq, subjectTypeSQL) {
 		if s.Self {
 			parts = append(parts, "("+findingAlias+".subject_type = "+subjectTypeSQL(s.Type)+
 				" AND "+findingAlias+".subject_id = "+assetAlias+".id)")

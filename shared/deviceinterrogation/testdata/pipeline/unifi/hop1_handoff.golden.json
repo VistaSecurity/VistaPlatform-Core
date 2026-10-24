@@ -163,48 +163,6 @@
     },
     {
       "protocol": "TLS",
-      "dest_ip": "192.0.2.11",
-      "port": 8443,
-      "confidence": 0.95,
-      "hostname": null,
-      "source_ip": null,
-      "metadata": {
-        "cipher_suite": "",
-        "device_id": "{{DEVICE_ASSET_ID}}",
-        "device_job_id": "{{DEVICE_JOB_ID}}",
-        "discovery_method": "device_interrogation",
-        "mac_address": "78:8a:20:4b:ee:41",
-        "source_asset_id": "{{DEVICE_ASSET_ID}}",
-        "source_device_id": "{{DEVICE_ASSET_ID}}",
-        "unmeasured_components": [
-          "protocol_version"
-        ],
-        "version": ""
-      }
-    },
-    {
-      "protocol": "TLS",
-      "dest_ip": "192.0.2.12",
-      "port": 8443,
-      "confidence": 0.95,
-      "hostname": null,
-      "source_ip": null,
-      "metadata": {
-        "cipher_suite": "",
-        "device_id": "{{DEVICE_ASSET_ID}}",
-        "device_job_id": "{{DEVICE_JOB_ID}}",
-        "discovery_method": "device_interrogation",
-        "mac_address": "78:8a:20:4b:ee:52",
-        "source_asset_id": "{{DEVICE_ASSET_ID}}",
-        "source_device_id": "{{DEVICE_ASSET_ID}}",
-        "unmeasured_components": [
-          "protocol_version"
-        ],
-        "version": ""
-      }
-    },
-    {
-      "protocol": "TLS",
       "dest_ip": "{{APPLIANCE_IP}}",
       "port": "{{APPLIANCE_PORT}}",
       "confidence": 0.95,

@@ -88,7 +88,10 @@ you want one proposer's work, and a curated rule's id works there too.
 matches neither the predicate nor its opposite. `risk_score >= 70` and
 `not risk_score >= 70` together do **not** cover your whole inventory — what is
 left over is exactly the things nobody has looked at. That residue is the point;
-it is what tells you where your coverage gaps are.
+it is what tells you where your coverage gaps are. Risk splits it in two:
+`risk:not_assessed` is an asset with crypto on record that nobody has scored,
+and `risk:no_crypto_observed` is an unscored asset with nothing cryptographic on
+record, so there was nothing to score.
 
 **`:` is forgiving, `=` is exact.** `hostname:web` finds anything containing
 "web", case-insensitively. `hostname="Web01"` matches that name and nothing

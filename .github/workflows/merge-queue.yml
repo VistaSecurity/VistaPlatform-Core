@@ -1,0 +1,179 @@
+name: Merge Queue
+
+# One lane. A PR labelled `queue` is built into a CANDIDATE — main with the PR
+# merged in as a merge commit, first parent main — the gates are dispatched
+# onto that exact commit and waited for, and only a green candidate is pushed
+# to main. The tested bits are the bits that land. Candidates are serialised
+# by the concurrency group, so the second of two labelled PRs is built on top
+# of the first one's landing, and a push to main that happened meanwhile makes
+# the landing non-fast-forward and the candidate is rebuilt by re-queueing.
+#
+# Why this exists (CI_MERGE_FLOW_PLAN.md Phase 3): two merges that passed every
+# gate damaged main — a stale-base branch that deleted newer PRs' files, and a
+# verify-then-merge shell chain that merged after its checks had failed. Here
+# the verdict and the landing are one job under one `set -e`, and the
+# stale-base guard runs on the candidate.
+#
+# Landing needs a token whose pushes trigger workflows (the job token's do
+# not raise push events): the `vista-merge-queue` GitHub App, via the secrets
+# MERGE_QUEUE_APP_ID / MERGE_QUEUE_APP_PRIVATE_KEY. Without them the queue
+# runs in DRY mode: it builds and verifies the candidate, reports the verdict
+# on the PR, labels `queue-verified`, and leaves the landing to
+# `gh pr merge <n> --merge`.
+#
+# Who may enqueue: the labeller (or dispatcher) must be in QUEUE_ALLOWED_ACTORS;
+# anyone else gets `queue-refused`. Labels the queue writes: queue-conflict,
+# queue-refused, queue-failed, queue-verified. It always removes `queue`.
+#
+# Guard: scripts/test-merge-queue-workflow.mjs (`make merge-queue-workflow-test`).
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to queue
+        required: true
+        type: string
+
+concurrency:
+  group: merge-queue
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # push the candidate branch (and main, with the App token)
+  pull-requests: write   # labels + verdict comments
+  actions: write         # dispatch the gate workflows onto the candidate
+
+env:
+  # Who may enqueue, as a repository Actions variable (Settings → Secrets and
+  # variables → Actions → Variables): the owner's admin login, the working
+  # login, and the agent App. A variable, not a literal: this file ships in
+  # the public export, whose leak gate refuses the private logins, and the
+  # repository owner is an organization, which is never a `github.actor`.
+  QUEUE_ALLOWED_ACTORS: ${{ vars.QUEUE_ALLOWED_ACTORS || 'woody9k vista-agent[bot]' }}
+  HAS_APP: ${{ secrets.MERGE_QUEUE_APP_ID != '' && secrets.MERGE_QUEUE_APP_PRIVATE_KEY != '' }}
+
+jobs:
+  queue:
+    name: Merge queue
+    # Only the `queue` label, only same-repo PRs, or a manual dispatch.
+    if: >-
+      (github.event_name == 'pull_request'
+        && github.event.label.name == 'queue'
+        && github.event.pull_request.head.repo.full_name == github.repository)
+      || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number || inputs.pr_number }}
+      ACTOR: ${{ github.actor }}
+    steps:
+      - name: Enqueuer allowlist
+        run: |
+          case " $QUEUE_ALLOWED_ACTORS " in
+            *" $ACTOR "*) echo "queued by $ACTOR" ;;
+            *)
+              gh pr edit "$PR" --remove-label queue --add-label queue-refused || true
+              gh pr comment "$PR" --body "Merge queue: refused — \`$ACTOR\` is not allowed to enqueue (allowed: $QUEUE_ALLOWED_ACTORS)."
+              echo "::error::merge-queue: $ACTOR may not enqueue"
+              exit 1 ;;
+          esac
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Build candidate (main + PR as a merge commit)
+        id: cand
+        run: |
+          set +e
+          ./scripts/merge/queue-candidate.sh "$PR" > "$RUNNER_TEMP/cand.out" 2> "$RUNNER_TEMP/cand.err"
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/cand.err" >&2
+          case "$rc" in
+            0) cat "$RUNNER_TEMP/cand.out" >> "$GITHUB_OUTPUT" ;;
+            3) gh pr edit "$PR" --remove-label queue --add-label queue-conflict || true
+               gh pr comment "$PR" --body "$(printf 'Merge queue: **conflicts with main**, not landed.\n\n```\n%s\n```\nMerge main into the branch, resolve, push, then re-label `queue`.' "$(cat "$RUNNER_TEMP/cand.err")")"
+               exit 1 ;;
+            4) gh pr edit "$PR" --remove-label queue --add-label queue-refused || true
+               gh pr comment "$PR" --body "$(printf 'Merge queue: refused.\n\n```\n%s\n```' "$(cat "$RUNNER_TEMP/cand.err")")"
+               exit 1 ;;
+            *) exit "$rc" ;;
+          esac
+
+      - name: Merge safety (stale-base guard on the candidate)
+        env:
+          HEAD_SHA: ${{ steps.cand.outputs.head_sha }}
+        run: |
+          PR_BODY="$(gh pr view "$PR" --json body -q .body)"
+          export PR_BODY
+          ./scripts/merge/stale-base-guard.sh origin/main "$HEAD_SHA"
+
+      - name: Push candidate branch
+        run: git push -f origin "HEAD:refs/heads/mq/$PR"
+
+      - name: Dispatch the gates onto the candidate and wait
+        id: verify
+        run: |
+          set +e
+          ./scripts/merge/queue-verify.sh "mq/$PR" | tee "$RUNNER_TEMP/verdict.tsv"
+          rc=${PIPESTATUS[0]}
+          set -e
+          {
+            echo 'runs<<EOF'
+            awk -F'\t' '{printf "- %s: **%s** %s\n", $1, $2, $3}' "$RUNNER_TEMP/verdict.tsv"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      # ── Landing ────────────────────────────────────────────────────────────
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349  # v2.2.2
+        id: app
+        if: env.HAS_APP == 'true'
+        with:
+          app-id: ${{ secrets.MERGE_QUEUE_APP_ID }}
+          private-key: ${{ secrets.MERGE_QUEUE_APP_PRIVATE_KEY }}
+
+      - name: Land on main
+        if: env.HAS_APP == 'true'
+        env:
+          LAND_TOKEN: ${{ steps.app.outputs.token }}
+          CANDIDATE: ${{ steps.cand.outputs.candidate_sha }}
+          RUNS: ${{ steps.verify.outputs.runs }}
+        run: |
+          # Fast-forward only: if main moved since the candidate was built,
+          # this is refused and the PR must be re-queued against the new main.
+          # actions/checkout stores the JOB token as an http.extraheader in the
+          # repo's git config, and git sends that explicit Authorization header
+          # in preference to credentials in the URL — the first landing attempt
+          # reached the ruleset as github-actions[bot], not as the App, and the
+          # App's bypass never applied. Blank the header for this push so the
+          # App token is what GitHub sees.
+          git -c "http.https://github.com/.extraheader=" push "https://x-access-token:${LAND_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "${CANDIDATE}:refs/heads/main"
+          gh pr edit "$PR" --remove-label queue || true
+          gh pr comment "$PR" --body "$(printf 'Merge queue: **landed** as %s (main fast-forwarded to the verified candidate).\n\nGates on the candidate:\n%s' "$CANDIDATE" "$RUNS")"
+          git push origin --delete "mq/$PR" || true
+
+      - name: Verdict (dry mode — no landing token configured)
+        if: env.HAS_APP != 'true'
+        env:
+          CANDIDATE: ${{ steps.cand.outputs.candidate_sha }}
+          RUNS: ${{ steps.verify.outputs.runs }}
+        run: |
+          gh pr edit "$PR" --remove-label queue --add-label queue-verified || true
+          gh pr comment "$PR" --body "$(printf 'Merge queue (dry mode): candidate %s is **verified**.\n\nGates on the candidate:\n%s\n\nNo `vista-merge-queue` App token is configured, so the queue did not push to main. Land with `gh pr merge %s --merge` (same tree while main is unchanged).' "$CANDIDATE" "$RUNS" "$PR")"
+          git push origin --delete "mq/$PR" || true
+
+      - name: Report failure
+        if: failure()
+        env:
+          RUNS: ${{ steps.verify.outputs.runs }}
+        run: |
+          gh pr edit "$PR" --remove-label queue --add-label queue-failed || true
+          gh pr comment "$PR" --body "$(printf 'Merge queue: **not landed** — a step failed. Run: %s/%s/actions/runs/%s\n\nGates on the candidate (if dispatched):\n%s' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "${RUNS:-(none)}")" || true
+          git push origin --delete "mq/$PR" 2>/dev/null || true

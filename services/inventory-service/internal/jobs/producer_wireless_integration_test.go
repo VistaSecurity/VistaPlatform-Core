@@ -13,7 +13,9 @@ import (
 // Drive the production scheduler's tenant pass (DCIM row 4.4): an access point
 // serving a TKIP wireless LAN gets a crypto/weak_wireless_auth finding whose
 // score and severity come from the catalogue row the LAN points at; moving the
-// LAN to AES resolves it; a LAN whose cipher is `auto` raises nothing.
+// LAN to AES resolves it; a LAN whose cipher is `auto` raises nothing; a
+// client whose radio joined the weak LAN (rf_role station) is not an access
+// point and gets no finding.
 //
 // Mutations (each red, then restored green):
 //   - delete the `j.wireless.Run` block from FindingProducerJob.runTenant ->
@@ -21,14 +23,16 @@ import (
 //   - in WirelessAuthProducer.Run, skip the Sweep -> the finding stays ACTIVE
 //     after the LAN is fixed;
 //   - judge by `auth_cipher = 'tkip'` instead of the catalogue strength and
-//     edit the WIFI-TKIP row to `acceptable` -> the finding wrongly stays.
+//     edit the WIFI-TKIP row to `acceptable` -> the finding wrongly stays;
+//   - drop the `rf_role IS DISTINCT FROM 'station'` join condition -> the
+//     client gets a finding.
 func TestIntegration_FindingProducerJob_RaisesWeakWirelessAuth(t *testing.T) {
 	owner := testdb.Connect(t)
 	testdb.ApplySchemaAndSeed(t, owner)
 	app := testdb.ConnectAsAppRole(t, owner)
 	tenant := testdb.NewTenant(t, owner)
 
-	asset, iface, lan, auto := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	asset, iface, lan, auto, client := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	exec := func(q string, args ...any) {
 		t.Helper()
 		if _, err := owner.Exec(q, args...); err != nil {
@@ -41,6 +45,8 @@ func TestIntegration_FindingProducerJob_RaisesWeakWirelessAuth(t *testing.T) {
 	exec(`INSERT INTO wireless_lans(id,tenant_id,ssid,auth_type,auth_cipher,source_kind,status)
 	      VALUES($1,$2,'Negotiated','wpa-personal','auto','measured','active')`, auto, tenant)
 	exec(`INSERT INTO interfaces(id,tenant_id,asset_id,name,type,wireless_lan_ids) VALUES($1,$2,$3,'ra0','ieee802.11n',ARRAY[$4::uuid,$5::uuid])`, iface, tenant, asset, lan, auto)
+	exec(`INSERT INTO assets(id,tenant_id,hostname,display_name,class_key,class_path,asset_status) VALUES($1,$2,'oven','Oven','switch','hardware.network.switch','monitoring')`, client, tenant)
+	exec(`INSERT INTO interfaces(tenant_id,asset_id,name,type,rf_role,wireless_lan_ids) VALUES($1,$2,'observed-1','ieee802.11ax','station',ARRAY[$3::uuid])`, tenant, client, lan)
 
 	job, err := NewFindingProducerJob(app, owner)
 	if err != nil {
@@ -71,6 +77,10 @@ func TestIntegration_FindingProducerJob_RaisesWeakWirelessAuth(t *testing.T) {
 	}
 	if !strings.Contains(summary, "Legacy") || strings.Contains(summary, "Negotiated") {
 		t.Errorf("summary %q should name the weak SSID and not the unassessed one", summary)
+	}
+	var onClient int
+	if err := owner.QueryRow(`SELECT count(*) FROM findings WHERE tenant_id = $1 AND kind = 'weak_wireless_auth' AND subject_id = $2`, tenant, client).Scan(&onClient); err != nil || onClient != 0 {
+		t.Errorf("%d weak_wireless_auth findings on a client that joined the LAN (%v), want 0", onClient, err)
 	}
 	var riskOnAsset int
 	if err := owner.QueryRow(`SELECT risk_score FROM assets WHERE tenant_id=$1 AND id=$2`, tenant, asset).Scan(&riskOnAsset); err != nil || riskOnAsset != 90 {

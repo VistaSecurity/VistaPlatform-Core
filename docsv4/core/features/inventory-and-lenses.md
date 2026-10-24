@@ -55,7 +55,8 @@ Beneath the class tree: **Risk**, **Status**, **Provenance**, **Environment**, *
 
 Two of them deserve a note, because both are about the difference between "we looked and found nothing" and "nobody looked":
 
-- **Risk → Not assessed** finds assets no producer has scored. That is not a low risk — it is the absence of a risk assessment, and on a fresh tenant it is usually the most useful slice on the page.
+- **Risk → Not assessed** finds assets that have something cryptographic on record — a crypto configuration, an encrypted store, a TLS, SSH or IPsec endpoint, or a key or secret store — that no producer has scored yet. That is not a low risk — it is the absence of a risk assessment, and on a fresh tenant it is usually the most useful slice on the page.
+- **Risk → No crypto observed** finds unscored assets with nothing cryptographic on record at all, such as a phone seen only on the local network or a cloud security group. There was nothing to assess. It describes what Vista Platform saw, not a guarantee that the device uses no cryptography.
 - **Findings → No open findings** finds assets that *were* assessed and came back clean. If you want the ones nobody has looked at, that is Risk → Not assessed, not this.
 
 ### The query box
@@ -276,7 +277,7 @@ Outbound connections your assets make to **external** endpoints — SaaS provide
 ### Data Protection
 
 At-rest encryption posture across every resource that stores data — object
-stores, managed databases. It is a *property* lens rather than a family of
+stores, managed databases, and AWS Secrets Manager secrets. It is a *property* lens rather than a family of
 things: the question is "is this data protected, and by whose key?", and the
 answer is the same shape whether the resource is a bucket or a database.
 
@@ -288,7 +289,14 @@ read as either verdict. Filters for resource type, assessment and risk sit in th
 toolbar.
 
 An empty lens means nothing has been inventoried, not that everything is
-encrypted. Object stores and databases arrive here from a cloud discovery.
+encrypted. Object stores, databases and secrets arrive here from a cloud discovery.
+
+The nightly risk pass reads this lens too. A resource whose data is **not
+encrypted** raises a Critical **Unencrypted at rest** finding on its asset. An
+encrypted resource raises nothing, whoever holds the key — key custody is shown
+here, not scored as risk. A resource whose encryption could not be read (for
+example, the scan was denied permission) raises nothing and its asset stays
+**Not assessed** on the Dashboard rather than being counted as clean.
 
 **Use it when** you are answering "is our data encrypted at rest, and who holds
 the keys?" — for a questionnaire, an audit, or your own peace of mind.

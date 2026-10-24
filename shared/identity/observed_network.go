@@ -172,6 +172,21 @@ type ObservedWirelessLink struct {
 	Status string `json:"status,omitempty"`
 }
 
+// ObservedWirelessStation is the observed asset's own client radio joined to a
+// wireless LAN, as the infrastructure it joined through reported it (a
+// controller's client list): the MAC the radio uses and the SSID. The engine
+// finds the asset's interface holding that MAC, makes it a `station` on the
+// LAN, and types it Type while it is still `other`. A station is not a link:
+// NetBox records a client's association as its interface's wireless LANs, and
+// a wireless link is a point-to-point bridge between two radios.
+type ObservedWirelessStation struct {
+	MAC  string `json:"mac"`
+	SSID string `json:"ssid"`
+	// Type is the 802.11 interface type the radio joined with; empty, or a
+	// value the registry does not hold, leaves the stored type.
+	Type string `json:"type,omitempty"`
+}
+
 // ObservedPrefix is a prefix a collector measured: a controller's network, a
 // cloud subnet, a router's connected route. A host's own view of the subnet
 // its address sits in is NOT a prefix measurement (the device-agent's host
@@ -219,6 +234,9 @@ type ObservedNetwork struct {
 	// point-to-point links (row 4.4).
 	WirelessLANs  []ObservedWirelessLAN
 	WirelessLinks []ObservedWirelessLink
+	// WirelessStations are the asset's own client radios and the LANs they
+	// joined.
+	WirelessStations []ObservedWirelessStation
 	// VirtualDeviceContexts are the device's contexts (DCIM gap 1); the
 	// interfaces name theirs.
 	VirtualDeviceContexts []ObservedVirtualDeviceContext
@@ -230,7 +248,8 @@ type ObservedNetwork struct {
 // Empty reports whether there is nothing to record.
 func (n ObservedNetwork) Empty() bool {
 	return len(n.Interfaces) == 0 && len(n.Prefixes) == 0 && len(n.VLANs) == 0 &&
-		len(n.WirelessLANs) == 0 && len(n.WirelessLinks) == 0 && len(n.VirtualDeviceContexts) == 0
+		len(n.WirelessLANs) == 0 && len(n.WirelessLinks) == 0 && len(n.WirelessStations) == 0 &&
+		len(n.VirtualDeviceContexts) == 0
 }
 
 // ObservedNetworkResult is what one recording did, for logs and tests.
@@ -310,8 +329,8 @@ func recordsObservedNetwork(res Resolution) bool {
 // recordObservedNetwork hands the posture half of obs to the repository.
 func (e *Engine) recordObservedNetwork(ctx context.Context, obs Observation, res Resolution) error {
 	n := ObservedNetwork{Interfaces: obs.Interfaces, Prefixes: obs.Prefixes, VLANs: obs.VLANs,
-		WirelessLANs: obs.WirelessLANs, WirelessLinks: obs.WirelessLinks, VirtualDeviceContexts: obs.VirtualDeviceContexts,
-		Source: obs.Source, ObservedAt: obs.ObservedAt}
+		WirelessLANs: obs.WirelessLANs, WirelessLinks: obs.WirelessLinks, WirelessStations: obs.WirelessStations,
+		VirtualDeviceContexts: obs.VirtualDeviceContexts, Source: obs.Source, ObservedAt: obs.ObservedAt}
 	if n.Empty() || !recordsObservedNetwork(res) {
 		return nil
 	}
@@ -642,6 +661,35 @@ func NormalizeObservedWireless(lans []ObservedWirelessLAN, links []ObservedWirel
 		outK = append(outK, o)
 	}
 	return outL, outK, dropped
+}
+
+// NormalizeObservedWirelessStations canonicalises stations: the MAC as an
+// identifier, a 1-32 byte SSID, a registry interface type or none. One
+// station per MAC (the first); a station missing either end is dropped and
+// reported.
+func NormalizeObservedWirelessStations(stations []ObservedWirelessStation) ([]ObservedWirelessStation, []string) {
+	var (
+		out     []ObservedWirelessStation
+		dropped []string
+	)
+	seen := map[string]bool{}
+	for _, raw := range stations {
+		o := raw
+		o.MAC = normalizedMAC(o.MAC)
+		if o.MAC == "" || o.SSID == "" || len(o.SSID) > 32 {
+			dropped = append(dropped, fmt.Sprintf("wireless station %q on %q: a MAC and a 1-32 byte SSID are required", raw.MAC, raw.SSID))
+			continue
+		}
+		if _, ok := dcim.ParseInterfaceType(o.Type); !ok {
+			o.Type = ""
+		}
+		if seen[o.MAC] {
+			continue
+		}
+		seen[o.MAC] = true
+		out = append(out, o)
+	}
+	return out, dropped
 }
 
 // maxContextName and maxContextIdentifier are the virtual_device_contexts

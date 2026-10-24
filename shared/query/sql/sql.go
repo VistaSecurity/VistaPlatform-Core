@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vistasecurity/vistaplatform/shared/cryptosurface"
 	"github.com/vistasecurity/vistaplatform/shared/query/ast"
 	"github.com/vistasecurity/vistaplatform/shared/query/catalog"
 	"github.com/vistasecurity/vistaplatform/shared/query/queryerr"
@@ -156,6 +157,9 @@ func (b *builder) param(v any) string {
 	b.args = append(b.args, v)
 	return "$" + strconv.Itoa(b.opts.ParamStart+len(b.args)-1)
 }
+
+// bindText is param for a string, in the shape cryptosurface.Bind wants.
+func (b *builder) bindText(v string) string { return b.param(v) }
 
 func (b *builder) fail(sp ast.Span, format string, args ...any) string {
 	b.errs = b.errs.Add(queryerr.New(queryerr.CodeUntranslatable, sp, format, args...))
@@ -680,10 +684,10 @@ func (b *builder) bandComparison(e expr, f ast.FieldRef, op ast.Op, lit ast.Lite
 	if b.opts.Ladder == nil {
 		return b.fail(sp, "no band ladder was supplied, so %q cannot be compared", f.Text)
 	}
-	if strings.EqualFold(lit.Value, catalog.NotAssessed) {
-		// not_assessed IS the coverage test, so it is the one form that must
-		// not be guarded by it.
-		return b.notAssessed(e, f, op, sp)
+	if catalog.IsCoveragePseudoBand(lit.Value) {
+		// The pseudo-bands ARE the coverage test, so they are the one form
+		// that must not be guarded by it.
+		return b.notAssessed(e, f, op, lit, sp)
 	}
 	if op.Ordering() {
 		return b.assessedGuard(e, f, b.bandOrdering(e, op, lit, sp))
@@ -830,11 +834,28 @@ func (b *builder) bandRangeClause(e expr, f ast.FieldRef, lo, hi int) string {
 
 // notAssessed is the §5.2 rule made explicit: not_assessed means the coverage
 // array is empty, which is a different set from "scored zero".
-func (b *builder) notAssessed(e expr, f ast.FieldRef, op ast.Op, sp ast.Span) string {
+//
+// On a field with a Surface the unscored set is split by shared/cryptosurface:
+// not_assessed keeps the rows that show a surface, no_crypto_observed takes
+// the rest. Both sides are plain booleans (EXISTS and column tests, never
+// NULL), so `!=` is a safe NOT.
+func (b *builder) notAssessed(e expr, f ast.FieldRef, op ast.Op, lit ast.Literal, sp ast.Span) string {
+	pseudo := strings.ToLower(lit.Value)
 	if f.Accessor.AssessedBy == "" {
-		return b.fail(sp, "field %q records no coverage, so not_assessed has no meaning", f.Text)
+		return b.fail(sp, "field %q records no coverage, so %s has no meaning", f.Text, pseudo)
 	}
 	clause := "(coalesce(array_length(" + e.sibling(f.Accessor.AssessedBy) + ", 1), 0) = 0)"
+	switch {
+	case f.Accessor.Surface == "" && pseudo == catalog.NoCryptoObserved:
+		return b.fail(sp, "field %q records no crypto surface, so %s has no meaning", f.Text, pseudo)
+	case f.Accessor.Surface == "":
+	case f.Accessor.Surface != "crypto":
+		return b.fail(sp, "field %q names surface %q, which has no SQL shape", f.Text, f.Accessor.Surface)
+	case pseudo == catalog.NoCryptoObserved:
+		clause = "(" + clause + " AND NOT " + cryptosurface.SQL(e.alias, b.bindText) + ")"
+	default:
+		clause = "(" + clause + " AND " + cryptosurface.SQL(e.alias, b.bindText) + ")"
+	}
 	if op == ast.OpNe {
 		return "NOT " + clause
 	}

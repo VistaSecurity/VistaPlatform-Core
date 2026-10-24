@@ -132,6 +132,15 @@ func TestIntegration_QuerySemanticsOverRealRows(t *testing.T) {
 	unscored := insertAsset(t, db, tenant, "unscored", 0, nil)
 	assessed := insertAsset(t, db, tenant, "assessed-clean", 0, []string{"crypto"})
 	scoredHigh := insertAsset(t, db, tenant, "scored-high", 80, []string{"crypto"})
+	// Unscored too, but with a crypto surface on record (a TLS endpoint), so
+	// it is the not_assessed half of the split and `unscored` the
+	// no_crypto_observed half (§16).
+	unscoredTLS := insertAsset(t, db, tenant, "unscored-tls", 0, nil)
+	if _, err := db.Exec(`
+		INSERT INTO asset_endpoints (tenant_id, asset_id, address, port, transport, protocol, status)
+		VALUES ($1, $2, '192.0.2.44', 443, 'tcp', 'TLS', 'active')`, tenant, unscoredTLS); err != nil {
+		t.Fatalf("insert TLS endpoint: %v", err)
+	}
 
 	t.Run("S1 a band term and its negation both exclude an unassessed asset", func(t *testing.T) {
 		below := matchIDs(t, db, tenant, "risk < high")
@@ -154,12 +163,20 @@ func TestIntegration_QuerySemanticsOverRealRows(t *testing.T) {
 	t.Run("S1 informational and not_assessed are different sets", func(t *testing.T) {
 		informational := matchIDs(t, db, tenant, "risk:informational")
 		notAssessed := matchIDs(t, db, tenant, "risk:not_assessed")
+		noCrypto := matchIDs(t, db, tenant, "risk:no_crypto_observed")
+		either := matchIDs(t, db, tenant, "risk:not_assessed or risk:no_crypto_observed")
 
-		if !informational[assessed] || informational[unscored] {
+		if !informational[assessed] || informational[unscored] || informational[unscoredTLS] {
 			t.Error("`risk:informational` is `assessed and scored zero` (§5.2)")
 		}
-		if !notAssessed[unscored] || notAssessed[assessed] {
-			t.Error("`risk:not_assessed` is `nobody scored it` (§5.2)")
+		if !notAssessed[unscoredTLS] || notAssessed[unscored] || notAssessed[assessed] {
+			t.Error("`risk:not_assessed` is `nobody scored it, and it shows a crypto surface` (§5.2, §16)")
+		}
+		if !noCrypto[unscored] || noCrypto[unscoredTLS] || noCrypto[assessed] {
+			t.Error("`risk:no_crypto_observed` is `nobody scored it, and no crypto surface is on record` (§16)")
+		}
+		if !either[unscored] || !either[unscoredTLS] || either[assessed] || either[scoredHigh] {
+			t.Error("the two pseudo-bands together are every unscored asset and nothing else (§16)")
 		}
 	})
 

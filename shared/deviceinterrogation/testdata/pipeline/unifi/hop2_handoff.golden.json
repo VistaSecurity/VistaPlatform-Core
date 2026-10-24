@@ -1,6 +1,6 @@
 {
   "vendor": "unifi",
-  "input_sha256": "8aa7f76ccc158c70988505bb5a1d4f47eb18dfc315a349c73372512391078768",
+  "input_sha256": "64dd493a0b823831f387dbe510c2020c80f7068687f73595c6c614d7e30490c9",
   "imports": [
     {
       "findings": [
@@ -47,72 +47,6 @@
         },
         {
           "asset_type": "server",
-          "cipher_suite": "",
-          "hash_algorithm": null,
-          "hostname": null,
-          "ip_address": "192.0.2.11",
-          "key_exchange_algorithm": null,
-          "key_size": null,
-          "port": 8443,
-          "protocol": "TLS",
-          "protocol_version": "",
-          "raw_data": {
-            "batch_id": "{{BATCH_ID}}",
-            "cipher_suite": "",
-            "confidence": 0.95,
-            "device_id": "{{DEVICE_ASSET_ID}}",
-            "device_job_id": "{{DEVICE_JOB_ID}}",
-            "discovery_id": "{{DISCOVERY_ID:1}}",
-            "discovery_method": "device_interrogation",
-            "mac_address": "78:8a:20:4b:ee:41",
-            "pqc_kex_detected": false,
-            "sensor_id": "{{SENSOR_ID}}",
-            "source": "device_interrogation",
-            "source_asset_id": "{{DEVICE_ASSET_ID}}",
-            "source_device_id": "{{DEVICE_ASSET_ID}}",
-            "timestamp": "{{TIMESTAMP}}",
-            "unmeasured_components": [
-              "protocol_version"
-            ],
-            "version": ""
-          },
-          "source_sensor_id": "{{SENSOR_ID}}"
-        },
-        {
-          "asset_type": "server",
-          "cipher_suite": "",
-          "hash_algorithm": null,
-          "hostname": null,
-          "ip_address": "192.0.2.12",
-          "key_exchange_algorithm": null,
-          "key_size": null,
-          "port": 8443,
-          "protocol": "TLS",
-          "protocol_version": "",
-          "raw_data": {
-            "batch_id": "{{BATCH_ID}}",
-            "cipher_suite": "",
-            "confidence": 0.95,
-            "device_id": "{{DEVICE_ASSET_ID}}",
-            "device_job_id": "{{DEVICE_JOB_ID}}",
-            "discovery_id": "{{DISCOVERY_ID:2}}",
-            "discovery_method": "device_interrogation",
-            "mac_address": "78:8a:20:4b:ee:52",
-            "pqc_kex_detected": false,
-            "sensor_id": "{{SENSOR_ID}}",
-            "source": "device_interrogation",
-            "source_asset_id": "{{DEVICE_ASSET_ID}}",
-            "source_device_id": "{{DEVICE_ASSET_ID}}",
-            "timestamp": "{{TIMESTAMP}}",
-            "unmeasured_components": [
-              "protocol_version"
-            ],
-            "version": ""
-          },
-          "source_sensor_id": "{{SENSOR_ID}}"
-        },
-        {
-          "asset_type": "server",
           "cipher_suite": "TLS_AES_128_GCM_SHA256",
           "hash_algorithm": null,
           "hostname": "192.0.2.225",
@@ -154,7 +88,7 @@
             "dest_hostname_source_kind": "measured",
             "device_id": "{{DEVICE_ASSET_ID}}",
             "device_job_id": "{{DEVICE_JOB_ID}}",
-            "discovery_id": "{{DISCOVERY_ID:3}}",
+            "discovery_id": "{{DISCOVERY_ID:1}}",
             "discovery_method": "device_interrogation",
             "key_exchange_algorithm": "X25519MLKEM768",
             "key_size": 256,
@@ -195,7 +129,7 @@
             "dest_hostname_source_kind": "measured",
             "device_id": "{{DEVICE_ASSET_ID}}",
             "device_job_id": "{{DEVICE_JOB_ID}}",
-            "discovery_id": "{{DISCOVERY_ID:4}}",
+            "discovery_id": "{{DISCOVERY_ID:2}}",
             "discovery_method": "device_interrogation",
             "hash_algorithm": "BLAKE2s",
             "key_exchange_algorithm": "Curve25519",
@@ -228,18 +162,6 @@
     },
     {
       "row": 2,
-      "approval_status": "pending",
-      "processed": true,
-      "forwarded": "import"
-    },
-    {
-      "row": 3,
-      "approval_status": "pending",
-      "processed": true,
-      "forwarded": "import"
-    },
-    {
-      "row": 4,
       "approval_status": "pending",
       "processed": true,
       "forwarded": "import"

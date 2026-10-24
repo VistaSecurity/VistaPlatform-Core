@@ -21,6 +21,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/device-agent/internal/models"
 	// Aliased: the device-agent has its own `certificates` package, above.
 	"github.com/vistasecurity/vistaplatform/shared/agentconfig"
+	"github.com/vistasecurity/vistaplatform/shared/agentlogs"
 	sharedcerts "github.com/vistasecurity/vistaplatform/shared/certificates"
 	di "github.com/vistasecurity/vistaplatform/shared/deviceinterrogation"
 	"github.com/vistasecurity/vistaplatform/shared/httpclient"
@@ -46,6 +47,14 @@ type OutboundClient struct {
 	// heartbeat that carries one. An age, not a timestamp: see
 	// agentconfig.ShouldRestart on why two clocks must not be compared.
 	restart func(requestAge time.Duration)
+	// logs is this agent's recent log lines, sent when the platform's heartbeat
+	// answer carries a log request. Nil in an agent built without it, which
+	// then neither claims the capability nor reads a request.
+	logs *agentlogs.Ring
+	// lastLogRequest is the id of the request already answered, so a request
+	// still pending on the next beat (its clearing raced the beat) is not sent
+	// twice. Only SendHeartbeat touches it, from the heartbeat loop.
+	lastLogRequest string
 }
 
 // ConfigApplier is the slice of desiredstate.Applier the client needs. An
@@ -74,6 +83,10 @@ func (c *OutboundClient) SetConfigApplier(a ConfigApplier) { c.configApplier = a
 // to restart, receiving how long ago it was asked. Nil means an agent that
 // ignores restart requests, which is what an older build does anyway.
 func (c *OutboundClient) SetRestartHandler(f func(requestAge time.Duration)) { c.restart = f }
+
+// SetLogSource wires the buffer of recent log lines this agent sends when the
+// console asks for its logs.
+func (c *OutboundClient) SetLogSource(r *agentlogs.Ring) { c.logs = r }
 
 // SetAgentVersion records the running binary's version for liveness reporting.
 func (c *OutboundClient) SetAgentVersion(v string) { c.agentVersion = v }
@@ -435,6 +448,11 @@ func (c *OutboundClient) SendHeartbeat() error {
 		"ip_address": primaryIP,
 		"interfaces": sharednetwork.HostAddresses(primaryIP),
 	}
+	// Tells the platform this build can send its logs, so the console can
+	// tell an older agent from one that has simply not checked in yet.
+	if c.logs != nil {
+		reqBody["log_export"] = true
+	}
 
 	// The desired-state exchange. What this agent is actually running
 	// goes UP; what it should be running comes back in the response. Reported
@@ -487,9 +505,10 @@ func (c *OutboundClient) SendHeartbeat() error {
 	// not send one, and the agent keeps whatever it already has rather than
 	// reverting to its file. A malformed one is logged and ignored for the same
 	// reason: a bad answer must not cost the agent its liveness reporting.
-	if c.configApplier != nil {
+	if c.configApplier != nil || c.logs != nil {
 		var answer struct {
-			Config *agentconfig.ExchangePayload `json:"config"`
+			Config      *agentconfig.ExchangePayload `json:"config"`
+			LogsRequest *agentlogs.Request           `json:"logs_request"`
 		}
 		// Bounded: the body is parsed on every beat, and an agent must not be
 		// made to buffer an unbounded response by whatever it is pointed at.
@@ -501,18 +520,89 @@ func (c *OutboundClient) SendHeartbeat() error {
 			// about once a minute for the life of the process.
 		case err != nil:
 			log.Printf("⚠️  Could not read the configuration from the heartbeat response: %v", err)
-		case answer.Config != nil:
-			c.configApplier.Apply(answer.Config.Revision, answer.Config.Values)
-			// A restart is decided here rather than inside the applier: it is
-			// not a setting, and the applier's job is to make values true, not
-			// to end the process.
-			if c.restart != nil {
-				c.restart(time.Duration(answer.Config.RestartRequestAgeSeconds) * time.Second)
+		default:
+			if c.configApplier != nil && answer.Config != nil {
+				c.configApplier.Apply(answer.Config.Revision, answer.Config.Values)
+				// A restart is decided here rather than inside the applier: it
+				// is not a setting, and the applier's job is to make values
+				// true, not to end the process.
+				if c.restart != nil {
+					c.restart(time.Duration(answer.Config.RestartRequestAgeSeconds) * time.Second)
+				}
+			}
+			if c.logs != nil && answer.LogsRequest != nil && answer.LogsRequest.ID != c.lastLogRequest {
+				c.answerLogRequest(*answer.LogsRequest)
 			}
 		}
 	}
 
 	return nil
+}
+
+// answerLogRequest sends this agent's recent log lines in reply to req. A
+// failure is logged and does not fail the heartbeat; the request is retried on
+// the next beat unless the platform refused it as no longer current.
+func (c *OutboundClient) answerLogRequest(req agentlogs.Request) {
+	c.lastLogRequest = req.ID
+	err := c.SendLogs(req)
+	var status *LogUploadStatusError
+	switch {
+	case err == nil:
+		log.Printf("📤 Sent recent log lines to the console (request %s)", req.ID)
+	case errors.As(err, &status) && status.StatusCode == http.StatusConflict:
+		// Replaced by a newer request, which the next beat will carry.
+		log.Printf("⚠️  Log request %s is no longer current; not retrying", req.ID)
+	default:
+		c.lastLogRequest = ""
+		log.Printf("⚠️  Could not send log lines to the console: %v", err)
+	}
+}
+
+// SendLogs uploads the last req.Lines log lines, redacted, for req.
+func (c *OutboundClient) SendLogs(req agentlogs.Request) error {
+	if c.agentID == uuid.Nil {
+		return fmt.Errorf("agent not registered")
+	}
+	if c.logs == nil {
+		return fmt.Errorf("no log source")
+	}
+	n := agentlogs.ClampLines(req.Lines)
+	// Cleaned BEFORE it leaves the host: a credential in a log line must not
+	// cross the network. The platform cleans again as a backstop.
+	upload := agentlogs.Upload{RequestID: req.ID, Lines: agentlogs.Clean(c.logs.Tail(n), n)}
+	jsonData, err := json.Marshal(upload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal logs: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/v1/device-interrogation-service/agents/%s/logs", c.baseURL, c.agentID.String())
+	httpReq, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("failed to send logs: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &LogUploadStatusError{StatusCode: resp.StatusCode, Body: string(body)}
+	}
+	return nil
+}
+
+// LogUploadStatusError is a non-200 answer to a log upload. A 409 means the
+// request was replaced or has expired.
+type LogUploadStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *LogUploadStatusError) Error() string {
+	return fmt.Sprintf("log upload refused: %s (status: %d)", e.Body, e.StatusCode)
 }
 
 // registrationPlatform returns OS for device_agents.platform (linux, windows, darwin, etc.).

@@ -178,14 +178,17 @@ func (c *unifiClient) interrogate(ctx context.Context) (*InterrogateResult, erro
 		result.warn(c.apiPrefix+"/api/s/"+site+"/stat/device", err, "Managed devices and their topology not collected")
 		devices = nil
 	}
-	for _, device := range devices {
-		asset := c.convertDeviceToAsset(device, site)
-		if asset.Hostname != "" || asset.IPAddress != "" {
-			result.Assets = append(result.Assets, asset)
-		}
-	}
-
-	// Synthetic management-interface TLS asset for the controller itself.
+	// A managed device is NOT a crypto asset. The controller's device list says
+	// a device exists, not that it listens for TLS anywhere: no handshake was
+	// made with it, so any protocol or port claimed here would be invented.
+	// This used to emit TLS:8443 for every device (adopted or not, connected or
+	// not), which ingest recorded as a measured endpoint and a crypto
+	// configuration with an unmeasured protocol_version. The devices reach
+	// inventory through their subject-bound sightings (unifiEmitSiteObservations
+	// below); a TLS listener on one is recorded when something probes it.
+	//
+	// The controller's own management interface is different: we have just
+	// spoken HTTPS to it, and getManagementInterfaceAsset probes it.
 	result.Assets = append(result.Assets, c.getManagementInterfaceAsset())
 
 	// VPN networks (site-to-site IPsec / OpenVPN, WireGuard / OpenVPN / L2TP
@@ -524,100 +527,6 @@ func (c *unifiClient) getSettings(ctx context.Context, site string) ([]map[strin
 		return []map[string]interface{}{}, nil
 	}
 	return resp.Data, nil
-}
-
-// unifiDeviceInventoryFields is the allowlist of `stat/device` fields we keep.
-//
-// The controller's device object carries ~120 fields, including x_authkey,
-// x_vwirekey, syslog_key and the mesh PSK. We copied the whole thing into asset
-// metadata, so every interrogation persisted those keys. We inventory
-// cryptographic posture, not key material, and none of the omitted fields feed
-// any downstream consumer — so the fix is to stop collecting them rather than to
-// scrub them afterwards. Sanitize (redact.go) remains as a backstop.
-//
-// Add a field here only if something actually reads it.
-//
-// Widened for the ops set (ADR-0004 D1 item 1) with the SCALAR fields below the
-// first group. The nested tables that widening also needs — uplink, port_table,
-// ethernet_table, lldp_table — are deliberately NOT here: they are read through
-// unifiDeviceStructuredFields (unifi_ops.go), which projects each entry onto its
-// own allowlist and emits facts and edges. Adding one here instead would copy a
-// 40-field vendor object per port into asset metadata, which is the original
-// leak one level down.
-var unifiDeviceInventoryFields = []string{
-	"name",         // display name
-	"ip",           // management address
-	"mac",          // hardware identity
-	"model",        // hardware model
-	"type",         // uap / usw / ugw / udm
-	"version",      // firmware version
-	"serial",       // hardware serial
-	"adopted",      // controller-managed or not
-	"state",        // connection state
-	"board_rev",    // hardware revision
-	"model_in_eol", // end-of-life signal — real posture input
-	"model_in_lts",
-	"architecture",
-	"kernel_version",
-
-	// --- ops set (ADR-0004 D1) ---
-	"uptime", // seconds since boot → net.uptime_seconds; a patching signal
-}
-
-// convertDeviceToAsset converts a UniFi managed device to a CryptoAsset,
-// projecting the raw controller response onto unifiDeviceInventoryFields.
-func (c *unifiClient) convertDeviceToAsset(device map[string]interface{}, site string) CryptoAsset {
-	metadata := make(map[string]interface{}, len(unifiDeviceInventoryFields)+4)
-	for _, field := range unifiDeviceInventoryFields {
-		if v, ok := device[field]; ok && v != nil {
-			metadata[field] = v
-		}
-	}
-
-	asset := CryptoAsset{
-		Protocol: "TLS",
-		Port:     8443, // Default UniFi management port
-		Metadata: metadata,
-	}
-
-	// The controller alias stays display context even when it looks like DNS.
-	// A separate hostname field is the actual device hostname evidence.
-	if hostname, ok := device["hostname"].(string); ok {
-		asset.Hostname = canonicalHostnameOrEmpty(hostname)
-	}
-	if ip, ok := device["ip"].(string); ok {
-		asset.IPAddress = ip
-	}
-	if mac, ok := device["mac"].(string); ok {
-		asset.Metadata["mac_address"] = mac
-	}
-	if model, ok := device["model"].(string); ok {
-		asset.Metadata["model"] = model
-	}
-	if version, ok := device["version"].(string); ok {
-		asset.Metadata["firmware_version"] = version
-	}
-	if deviceType, ok := device["type"].(string); ok {
-		asset.Metadata["device_type"] = deviceType
-	}
-
-	// Management interface IP fallback.
-	if configNetwork, ok := device["config_network"].(map[string]interface{}); ok {
-		if ip, ok := configNetwork["ip"].(string); ok && asset.IPAddress == "" {
-			asset.IPAddress = ip
-		}
-	}
-
-	// NOTE ( item 2): the former copies hardcoded ProtocolVersion to
-	// "TLS 1.2" here, but this comes from the controller's device inventory —
-	// the real negotiated TLS version of each managed device is unknown at this
-	// point. Leaving ProtocolVersion unset rather than fabricating a default.
-	// (Safe: this is a synthetic inventory record, not an observed handshake.)
-
-	asset.Metadata["site_id"] = site
-	asset.Metadata["source"] = "unifi_device"
-
-	return asset
 }
 
 // getManagementInterfaceAsset returns an asset for the controller's management

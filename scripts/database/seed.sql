@@ -1353,6 +1353,16 @@ INSERT INTO algorithms (code, category, name, description, strength, deprecation
 ('WIFI-OPEN', 'symmetric', 'Open Wi-Fi (no encryption)', 'An open wireless LAN applies no link-layer encryption or authentication: every frame is readable by anyone in range.', 'weak', 'obsolete', 90, ARRAY['WIFI-CCMP'], 'Require WPA2/WPA3, or Enhanced Open (OWE) for a guest network that must stay password-free.', '{"NIST": "not-approved", "PCI-DSS": "non-compliant"}'::jsonb, true, 'none', 'other')
 ON CONFLICT (code) DO NOTHING;
 
+-- Data at rest with no encryption (crypto/unencrypted_at_rest). A cloud storage
+-- or database resource that reports its data unencrypted is scored by THIS
+-- row, not by Go code: the at-rest producer reads its risk_score, so edit the
+-- row to change how risky unencrypted storage is. 90 matches the at-rest
+-- ladder's unencrypted rung (atRestRiskUnencrypted) that crypto_applications
+-- rows are scored with at ingest; a unit test holds the two together.
+INSERT INTO algorithms (code, category, name, description, strength, deprecation_status, risk_score, recommended_alternatives, migration_guidance, compliance_mappings, is_standard, algorithm_family, primitive) VALUES
+('AT-REST-PLAINTEXT', 'symmetric', 'Unencrypted data at rest', 'A storage or database resource that stores its data without encryption at rest: anyone with access to the underlying media, snapshots or backups can read it.', 'weak', 'obsolete', 90, ARRAY['AES256'], 'Enable encryption at rest on the resource (default bucket encryption, database storage encryption). Prefer a customer-managed key where you must control who can decrypt.', '{"NIST": "not-approved", "PCI-DSS": "non-compliant"}'::jsonb, true, 'none', 'other')
+ON CONFLICT (code) DO NOTHING;
+
 -- SSH MAC algorithms (RFC 4253 s6.4 name-lists "mac_algorithms_*").
 -- Categorised as 'hash' because that is the crypto_implementation_algorithms
 -- role SSH integrity maps onto (the table's algorithm_type CHECK has no 'mac'

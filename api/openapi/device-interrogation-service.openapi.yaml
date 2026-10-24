@@ -658,6 +658,94 @@ paths:
           $ref: '#/components/responses/LegacyNotFound'
         '500':
           $ref: '#/components/responses/LegacyServerError'
+  /agents/{id}/logs:
+    get:
+      operationId: getAgentLogs
+      tags:
+      - agents
+      summary: The latest log lines this agent sent, and any request still waiting
+      description: |
+        The console's Logs tab for a discovery agent. An operator asks with
+        `POST /agents/{id}/logs/request`; the request rides the agent's next
+        heartbeat answer and the agent uploads its recent lines, redacted on the
+        agent and again on the platform. Requests expire after an hour and
+        exports after a day: log lines are diagnostic material and are not kept.
+
+        `supported` is whether this agent's last heartbeat, within the past 15
+        minutes, said its build can send logs. It is false for an older build
+        and for an agent that has not checked in lately.
+
+        Gated at SensorsRead.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: The agent's UUID.
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The agent's log export state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentLogsView'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
+  /agents/{id}/logs/request:
+    post:
+      operationId: requestAgentLogs
+      tags:
+      - agents
+      summary: Ask one agent to send its recent log lines at its next check-in
+      description: |
+        Records a request the agent collects from its next heartbeat answer.
+        Asking again replaces a pending request. `lines` is clamped to
+        1–1000; omitted or zero asks for 200.
+
+        Gated at SensorsUpdate — the permission sensor-manager requires to queue
+        a sensor's `export_logs` command.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        description: The agent's UUID.
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                lines:
+                  type: integer
+                  minimum: 0
+      responses:
+        '202':
+          description: The request was recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentLogRequestAccepted'
+        '400':
+          $ref: '#/components/responses/LegacyBadRequest'
+        '404':
+          $ref: '#/components/responses/LegacyNotFound'
+        '500':
+          $ref: '#/components/responses/LegacyServerError'
+        '503':
+          $ref: '#/components/responses/LegacyServiceUnavailable'
   /agents/{id}/config/history:
     get:
       operationId: getAgentConfigHistory
@@ -1359,6 +1447,8 @@ paths:
         Returns a paginated page of jobs. Filters (status[], job_type, asset_id,
         integration_id) are accepted as query params; page / page_size paginate.
         `device_id` is still accepted as a deprecated alias of `asset_id`.
+        `agent_id` narrows the page to the jobs assigned to one device agent
+        (the agent drawer's job history); a malformed id is a 400.
       parameters:
       - name: page
         in: query
@@ -1373,6 +1463,13 @@ paths:
           type: integer
           minimum: 1
           maximum: 100
+      - name: agent_id
+        in: query
+        required: false
+        description: Only jobs assigned to this device agent (device_jobs.agent_id).
+        schema:
+          type: string
+          format: uuid
       responses:
         '200':
           description: A page of interrogation jobs.
@@ -1870,6 +1967,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/LegacyError'
+    LegacyServiceUnavailable:
+      description: A dependency the operation needs is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LegacyError'
     LegacyIntegrationNameTaken:
       description: The caller already has a live integration of this type with this name. Names are unique per tenant.
       content:
@@ -1877,6 +1980,64 @@ components:
           schema:
             $ref: '#/components/schemas/LegacyError'
   schemas:
+    AgentLogRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - lines
+      - requested_at
+      properties:
+        id:
+          type: string
+          description: Ties the agent's upload to this request; an upload for any other id is refused.
+        lines:
+          type: integer
+        requested_at:
+          type: string
+          format: date-time
+    AgentLogExport:
+      type: object
+      additionalProperties: false
+      required:
+      - request_id
+      - lines
+      - line_count
+      - received_at
+      properties:
+        request_id:
+          type: string
+        lines:
+          type: array
+          nullable: true
+          items:
+            type: string
+          description: Oldest first, redacted, each cut to 2000 bytes.
+        line_count:
+          type: integer
+        received_at:
+          type: string
+          format: date-time
+    AgentLogsView:
+      type: object
+      additionalProperties: false
+      required:
+      - supported
+      properties:
+        supported:
+          type: boolean
+        request:
+          $ref: '#/components/schemas/AgentLogRequest'
+        export:
+          $ref: '#/components/schemas/AgentLogExport'
+    AgentLogRequestAccepted:
+      type: object
+      additionalProperties: false
+      required:
+      - request
+      properties:
+        request:
+          $ref: '#/components/schemas/AgentLogRequest'
     RestartRequestAccepted:
       type: object
       required:

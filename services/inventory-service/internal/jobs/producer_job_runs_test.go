@@ -33,6 +33,7 @@ var producerCalls = map[string]string{
 	"hygiene":  "j.hygiene.Run(ctx, tenantID)",
 	"drift":    "j.drift.Run(ctx, tenantID)",
 	"wireless": "j.wireless.Run(ctx, tenantID)",
+	"atRest":   "j.atRest.Run(ctx, tenantID)",
 }
 
 func producerJobSource(t *testing.T) string {

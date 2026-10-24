@@ -100,9 +100,12 @@ export const DASHBOARD_CRITICAL_FINDINGS_ROUTE = findingsSeverityRoute('critical
 // writes, so the destination opens with the matching facets already ticked and
 // the user can widen it from there. `high_risk` is the ≥ High band, which
 // includes Critical; `unknown_risk` is the absence of a score, which the
-// language spells `not_assessed` (never "low").
+// language splits by crypto surface (shared/cryptosurface): `not_assessed` is
+// "crypto is there and nobody has judged it", `no_crypto_observed` is "nothing
+// cryptographic on record, so nothing to judge" (never "low").
 export const DASHBOARD_HIGH_RISK_QUERY = 'risk:(critical or high)';
 export const DASHBOARD_UNSCORED_QUERY = 'risk:not_assessed';
+export const DASHBOARD_NO_CRYPTO_QUERY = 'risk:no_crypto_observed';
 
 /** `/inventory?lens=assets` with a query, URL-encoded once, in one place. */
 export function inventoryQueryRoute(query: string): string {
@@ -111,6 +114,24 @@ export function inventoryQueryRoute(query: string): string {
 
 export const DASHBOARD_HIGH_RISK_ASSETS_ROUTE = inventoryQueryRoute(DASHBOARD_HIGH_RISK_QUERY);
 export const DASHBOARD_UNSCORED_ASSETS_ROUTE = inventoryQueryRoute(DASHBOARD_UNSCORED_QUERY);
+export const DASHBOARD_NO_CRYPTO_ASSETS_ROUTE = inventoryQueryRoute(DASHBOARD_NO_CRYPTO_QUERY);
+
+/**
+ * The unscored set, split. `not_assessed` + `no_crypto_observed` partition
+ * `unknown_risk`; a summary from a service that predates the split carries
+ * neither, and then EVERY unscored asset reads "not assessed" — the honest
+ * direction to fail in, since "no crypto" is a claim and "not assessed" is not.
+ */
+export function unscoredSplit(s: { unknown_risk?: number; not_assessed?: number; no_crypto_observed?: number } | null | undefined): {
+  notAssessed: number;
+  noCryptoObserved: number;
+} {
+  const unknown = s?.unknown_risk ?? 0;
+  if (typeof s?.not_assessed !== 'number' || typeof s?.no_crypto_observed !== 'number') {
+    return { notAssessed: unknown, noCryptoObserved: 0 };
+  }
+  return { notAssessed: s.not_assessed, noCryptoObserved: s.no_crypto_observed };
+}
 
 export function getDashboardPqcMetric(progress: PqcProgressRollup | null | undefined): DashboardPqcMetric {
   const adoptionPercent = Math.round(progress?.pqc_percentage ?? 0);

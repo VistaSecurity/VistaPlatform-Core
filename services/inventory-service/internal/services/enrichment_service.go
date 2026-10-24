@@ -27,12 +27,18 @@ func (s *AssetService) EnrichAllAssets(tenantID uuid.UUID) (updated int, err err
 	// One prefix read for the whole walk.
 	prefixes := s.newImportPrefixes(tenantID)
 	for {
+		// Every field is `db`-tagged: sqlx otherwise matches a column by the
+		// field's lowercased Go name, and the commercial build is garbled,
+		// which renames untagged fields — the Core binary scanned this fine
+		// while the obfuscated one failed every call with "missing
+		// destination name ip" before reading a row (see
+		// sqlx_scan_struct_tags_test.go).
 		var batch []struct {
-			AssetID    uuid.UUID     `db:"asset_id"`
-			EndpointID uuid.NullUUID `db:"endpoint_id"`
-			IP         sql.NullString
-			Hostname   sql.NullString
-			Port       sql.NullInt64
+			AssetID    uuid.UUID      `db:"asset_id"`
+			EndpointID uuid.NullUUID  `db:"endpoint_id"`
+			IP         sql.NullString `db:"ip"`
+			Hostname   sql.NullString `db:"hostname"`
+			Port       sql.NullInt64  `db:"port"`
 		}
 		// RLS-scoped read over assets + asset_endpoints. Scoped per batch (not
 		// around the whole loop) so the prefix enrichment /

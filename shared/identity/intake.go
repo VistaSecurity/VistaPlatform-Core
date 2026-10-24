@@ -316,6 +316,11 @@ type Sighting struct {
 	// interfaces once the sighting resolved to an asset.
 	WirelessLANs  []ObservedWirelessLAN  `json:"wireless_lans,omitempty"`
 	WirelessLinks []ObservedWirelessLink `json:"wireless_links,omitempty"`
+	// WirelessStations are the device's own client radios and the wireless
+	// LANs they joined, as the infrastructure they joined through reported
+	// them (a controller's client list). Each names its radio by MAC, which
+	// must also be among Identifiers or an interface's MAC to be found.
+	WirelessStations []ObservedWirelessStation `json:"wireless_stations,omitempty"`
 	// VirtualDeviceContexts are the device's virtual device contexts (DCIM
 	// gap 1, observed_network.go); each interface names its own. Recorded
 	// with the interfaces once the sighting resolved to an asset.
@@ -699,6 +704,9 @@ func (in *Intake) assess(ctx context.Context, s Sighting, admission AdmissionEvi
 	var droppedWireless []string
 	s.WirelessLANs, s.WirelessLinks, droppedWireless = NormalizeObservedWireless(s.WirelessLANs, s.WirelessLinks)
 	dropped = append(dropped, droppedWireless...)
+	var droppedStations []string
+	s.WirelessStations, droppedStations = NormalizeObservedWirelessStations(s.WirelessStations)
+	dropped = append(dropped, droppedStations...)
 	var droppedContexts []string
 	s.VirtualDeviceContexts, s.Interfaces, droppedContexts = NormalizeObservedVirtualDeviceContexts(s.VirtualDeviceContexts, s.Interfaces)
 	dropped = append(dropped, droppedContexts...)
@@ -744,6 +752,7 @@ func (in *Intake) assess(ctx context.Context, s Sighting, admission AdmissionEvi
 			Cluster:               cluster,
 			WirelessLANs:          s.WirelessLANs,
 			WirelessLinks:         s.WirelessLinks,
+			WirelessStations:      s.WirelessStations,
 			VirtualDeviceContexts: s.VirtualDeviceContexts,
 			ManagementAddress:     managementAddress(s),
 		},

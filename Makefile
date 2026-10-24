@@ -74,6 +74,7 @@ scripts-deps: $(SCRIPTS_NPM_STAMP)
 
 .PHONY:
 .PHONY:
+.PHONY: chart-release-record-size-test build-dist-schema
 .PHONY: generate generate-docker-compose generate-k8s-ingress cluster-suspend cluster-resume cluster-status verify-generated verify-db-files \
 	sign-content-bundle verify-content-bundle stage-content-bundle unstage-content-bundle \
 	build-catalog-bundle
@@ -355,11 +356,19 @@ _ALL_SVCS = auth-service inventory-service compliance-engine cbom-service \
 # (build-and-swap, ADR-0013).
 _ALL_UIS = web-ui admin-ui
 
-# Full commercial release-image set (20 total: 18 backends, one of them
-# Enterprise-only and absent from a Core tree, + 2 UIs). The release-customer.yml
-# workflow iterates over this same set when promoting Harbor → Docker Hub, so
-# keep them in sync.
-_ALL_IMAGES = $(_ALL_SVCS) $(_ALL_UIS)
+# The schema image (#2731): schema.sql, seed.sql and, from a licensed tree, the
+# signed Enterprise content bundle — what the chart's schema-migration and
+# seed-data Jobs apply. Built from scripts/database/Dockerfile for both lines
+# (release-core.yml builds the Core one from the public tree). Not a service:
+# no Go, no ports, no chart backend entry; the chart reaches it through
+# schemaMigration.sqlImage.
+_ALL_AUX = schema
+
+# Full commercial release-image set (21 total: 18 backends, one of them
+# Enterprise-only and absent from a Core tree, + 2 UIs + the schema image).
+# The release-customer.yml workflow iterates over this same set when promoting
+# Harbor → Docker Hub, so keep them in sync.
+_ALL_IMAGES = $(_ALL_SVCS) $(_ALL_UIS) $(_ALL_AUX)
 
 .PHONY: build-licensed push-licensed \
 	build-licensed-auth-service build-licensed-inventory-service build-licensed-compliance-engine \
@@ -376,7 +385,7 @@ build-licensed: ## Build licensed (dev-key, no obfuscation) images for all servi
 	@echo "Building licensed images with tag $(LICENSED_TAG) ..."
 	@# Derived from _ALL_SVCS (not restated) so push-licensed and this target
 	@# cannot disagree about which images exist.
-	@$(MAKE) -j$(shell nproc) $(addprefix build-licensed-,$(_ALL_SVCS))
+	@$(MAKE) -j$(DIST_JOBS) $(addprefix build-licensed-,$(_ALL_SVCS))
 	@echo "Licensed images built. Run: make push-licensed LICENSED_TAG=$(LICENSED_TAG) IMAGE_REGISTRY=$(IMAGE_REGISTRY)"
 
 build-licensed-auth-service:
@@ -460,10 +469,18 @@ push-licensed: ## Push licensed images to registry (requires LICENSED_TAG and IM
 # Frontends (2): web-ui + admin-ui from Dockerfile.prod. No license code to
 #                obfuscate; Vite already produces minified production assets.
 #
-# Total: 20 images (_ALL_IMAGES), matching the matrix in
+# Total: 21 images (_ALL_IMAGES), matching the matrix in
 # .github/workflows/release-customer.yml.
 # Use these when staging a release to Harbor for promotion to Docker Hub.
 # ---------------------------------------------------------------------------
+# Parallelism for the image-set builds (build-dist, build-licensed). NOT nproc:
+# each garble build is a full compile tree at 1-2 GB, and on a box that also
+# hosts CI runners `-j$(nproc)` (16 on a 16-core/31 GB host) drove the load
+# average past 370 and had the kernel OOM-kill three runner services and two
+# of the build's own buildx children. Raise per invocation when the host is
+# idle: make build-dist DIST_JOBS=8 ...
+DIST_JOBS ?= 4
+
 .PHONY: build-dist push-dist \
 	build-dist-auth-service build-dist-inventory-service build-dist-compliance-engine \
 	build-dist-cbom-service build-dist-sensor-manager build-dist-admin-service \
@@ -480,7 +497,7 @@ build-dist: ## Build the 19-image dist set (17 backends + web-ui + admin-ui). Re
 	@echo "Building dist images with tag $(DIST_TAG) ..."
 	@# Derived from _ALL_IMAGES (not restated) so push-dist, this target and the
 	@# release-customer.yml matrix share one list to keep in sync.
-	@$(MAKE) -j$(shell nproc) $(addprefix build-dist-,$(_ALL_IMAGES))
+	@$(MAKE) -j$(DIST_JOBS) $(addprefix build-dist-,$(_ALL_IMAGES))
 	@echo "Dist images built. Run: make push-dist DIST_TAG=$(DIST_TAG) IMAGE_REGISTRY=$(IMAGE_REGISTRY)"
 
 build-dist-auth-service:
@@ -566,10 +583,14 @@ build-dist-admin-ui: ## Admin console (VISTA Operations) — built from admin-ui
 		--build-arg VITE_BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
 		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/admin-ui:$(DIST_TAG) .
 
+build-dist-schema: ## The schema image (SQL for the chart's Jobs; verifies the content-bundle signature in-build). One Dockerfile for both lines.
+	docker build $(BASE_IMAGE_ARGS) -f scripts/database/Dockerfile \
+		-t $(LICENSED_REGISTRY)/$(LICENSED_REPO_PREFIX)/schema:$(DIST_TAG) .
+
 print-release-images: ## Print the commercial release-image set (_ALL_IMAGES), one per line
 	@printf '%s\n' $(_ALL_IMAGES)
 
-push-dist: ## Push the 20-image dist set to registry (requires DIST_TAG and IMAGE_REGISTRY)
+push-dist: ## Push the 21-image dist set to registry (requires DIST_TAG and IMAGE_REGISTRY)
 	@if [ -z "$(IMAGE_REGISTRY)" ]; then echo "ERROR: IMAGE_REGISTRY is required."; exit 1; fi
 	@echo "Pushing dist images with tag $(DIST_TAG) ..."
 	@for img in $(_ALL_IMAGES); do \
@@ -1086,10 +1107,7 @@ api-contract: ## Spec-first API guardrail (ADR-0001): verify generated TS client
 	@echo "✅ Contract tests pass — live handlers conform to the spec."
 
 
-chart-seed-stub: ## Stage a placeholder chart seed.sql (gitignored) so chart renders work from a bare checkout
-	@./scripts/stage-chart-seed-stub.sh
-
-chart-lint: chart-seed-stub ## helm lint the chart against values.schema.json (catches schema/template drift the release would otherwise hit)
+chart-lint: ## helm lint the chart against values.schema.json (catches schema/template drift the release would otherwise hit)
 	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-lint"; exit 1; }
 	@# Mirrors the helm lint invocation in .github/workflows/release-customer.yml.
 	@# The --set flags satisfy the schema's required fields so lint validates the
@@ -1100,6 +1118,13 @@ chart-lint: chart-seed-stub ## helm lint the chart against values.schema.json (c
 		--set platform.jwtSecret=l \
 		--set platform.internalAuthSecret=l \
 		--set platform.encryptionMasterKey=l
+
+chart-release-record-size-test: ## Helm release-record guard (#2731): package the chart as a release does, simulate the 1 MiB release Secret, fail above 900 KB — after proving the measure can fail
+	@command -v helm >/dev/null 2>&1 || { echo "❌ helm not found — install helm to run chart-release-record-size-test"; exit 1; }
+	node ./scripts/chart-release-record-size.mjs
+
+merge-safety: ## Run the stale-base guard for HEAD against origin/main (what the PR gate's merge-safety job runs)
+	./scripts/merge/stale-base-guard.sh origin/main HEAD
 
 # The IEEE OUI snapshot (standards/oui/ieee-*.tsv) is vendored, not fetched at
 # build time: `make generate` and `make audit` must stay offline. An operator
@@ -1165,7 +1190,7 @@ lint-workflows:   ## Lint GitHub Actions workflows (context availability, expres
 drift-check:   ## Check for configuration drift
 	@echo "Drift check complete!"
 
-standards-check: rating-contract-test rating-ladder-test generate verify-generated chart-lint changelog-audit-test vocabulary-test dcim-types-test sync-authority-test mcp-tool-docs-test oui-registry-test classification-rules-test lint-workflows  ## Generate, verify and run all standards checks
+standards-check: rating-contract-test rating-ladder-test generate verify-generated chart-lint chart-release-record-size-test changelog-audit-test vocabulary-test dcim-types-test sync-authority-test mcp-tool-docs-test oui-registry-test classification-rules-test lint-workflows  ## Generate, verify and run all standards checks
 
 registry-first: generate verify-generated  ## Complete registry-first workflow
 	@echo "✅ Registry-first workflow complete!"

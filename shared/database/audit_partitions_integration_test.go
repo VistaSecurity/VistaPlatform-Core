@@ -52,8 +52,7 @@ func TestIntegration_AuditPartitions_CoverTodayAndTheNearFuture(t *testing.T) {
 					"The partitions dumped into schema.sql have run out, and nothing recreated them. "+
 					"scripts/database/schema.sql must call `SELECT * FROM audit.ensure_future_partitions(3);` "+
 					"in POST-MIGRATIONS, above the ROLE GRANTS block so the new partitions are covered by "+
-					"the blanket grant — check that statement is still there (and mirrored into "+
-					"charts/vistaplatform/files/schema/schema.sql). Without it every fresh install and every "+
+					"the blanket grant — check that statement is still there. Without it every fresh install and every "+
 					"integration database loses the ability to write an audit record.",
 					at.Format(time.RFC3339), days, err)
 			}

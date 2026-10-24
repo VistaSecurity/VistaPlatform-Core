@@ -1098,6 +1098,27 @@
         },
         "image": {
           "type": "object"
+        },
+        "sqlImage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "registry": {
+              "type": "string"
+            },
+            "repoPrefix": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string"
+            },
+            "tag": {
+              "type": "string"
+            },
+            "digest": {
+              "type": "string"
+            }
+          }
         }
       }
     },

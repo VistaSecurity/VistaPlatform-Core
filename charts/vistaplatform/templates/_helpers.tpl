@@ -78,15 +78,55 @@ podAntiAffinity:
 {{- end -}}
 
 {{/*
-Short content hash of the shipped schema.sql. It is the key of the
-schema-migration completion marker (public.schema_migration_status, written by
+Short content hash of the schema the schema-migration Job applies. It is the
+key of the completion marker (public.schema_migration_status, written by
 jobs/schema-migration.yaml once the whole file has applied), and every reader of
 that marker — the seed-data Job and each backend's wait-for-schema init
 container — must derive it identically, or a reader waits for a row that is
 never written. So it is defined once, here.
+
+The SQL itself is NOT in the chart (#2731). Helm keeps every chart file and the
+rendered manifest in one release Secret, which Kubernetes caps at 1 MiB, and
+schema.sql + seed.sql (~1 MB each, present in both halves) put the 5.1.0
+commercial chart over it: `helm install` failed before creating anything, and
+Core sat 1% under. Gzipping the SQL into ConfigMaps had been tried before that
+(#2643) and only moved the failure — base64 of gzip does not compress again.
+The SQL now ships in the release image <registry>/<prefix>/schema:<appVersion>
+(scripts/database/Dockerfile, byte-identical to scripts/database/ at the tag),
+and both Jobs copy it out of that image in an init container
+(vistaplatform.sqlImage). What the chart carries is files/schema/schema.sha256:
+the full sha256 of scripts/database/schema.sql, stamped by
+scripts/stage-chart-sql.sh and audited against the source by
+scripts/audit-schema-mirror.mjs. The Job refuses an image whose schema hashes
+differently, so the marker can never claim a schema that was not applied.
+scripts/chart-release-record-size.mjs keeps the record under the limit.
 */}}
 {{- define "vistaplatform.schemaHash" -}}
-{{- .Files.Get "files/schema/schema.sql" | sha256sum | trunc 10 -}}
+{{- $stamp := .Files.Get "files/schema/schema.sha256" | trim -}}
+{{- if not (regexMatch "^[0-9a-f]{64}$" $stamp) -}}
+{{- fail "files/schema/schema.sha256 is missing or is not a sha256 hex digest: this chart's schema hash was not stamped, so the schema-migration marker and every wait-for-schema gate would key on nothing. Run scripts/stage-chart-sql.sh (it writes the sha256 of scripts/database/schema.sql there), or install the published OCI chart." -}}
+{{- end -}}
+{{- $stamp | trunc 10 -}}
+{{- end -}}
+
+{{/*
+The release image carrying the SQL: schema.sql, seed.sql and, in a licensed
+build, the signed Enterprise content bundle. Resolved like the product images
+(vistaplatform.image: image.registry / image.repoPrefix / image.tag or the
+appVersion, digest preferred over tag), with each part overridable under
+schemaMigration.sqlImage for a mirror or a hot-fix.
+*/}}
+{{- define "vistaplatform.sqlImage" -}}
+{{- $img := .Values.schemaMigration.sqlImage | default dict -}}
+{{- $registry := default .Values.image.registry $img.registry -}}
+{{- $prefix := default .Values.image.repoPrefix $img.repoPrefix -}}
+{{- $repo := default "schema" $img.repository -}}
+{{- $tag := default (default .Chart.AppVersion .Values.image.tag) $img.tag -}}
+{{- if $img.digest -}}
+{{- printf "%s/%s/%s@%s" $registry $prefix $repo $img.digest -}}
+{{- else -}}
+{{- printf "%s/%s/%s:%s" $registry $prefix $repo $tag -}}
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -95,77 +135,6 @@ THIS chart's schema.sql. Keyed on the content hash rather than "a marker
 exists", so on an upgrade it waits for the new schema instead of passing on the
 previous release's row.
 */}}
-{{/*
-The schema and seed SQL, one ConfigMap per ~600 KB chunk of whole lines.
-
-Kubernetes refuses any single object over 1 MiB, and seed.sql crossed that at
-5.0.0-rc.1 (the device-type library seed). Gzipping the SQL into binaryData
-was tried first and moved the failure to Helm's release Secret, which stores
-the chart files AND the rendered manifests gzipped: plain SQL compresses 6-8x
-there while a base64 gzip does not. So the SQL stays plain and is split by
-whole lines into <fullname>-<kind>-NN ConfigMaps, each carrying one
-<kind>-NN.sql key; the Job mounts them through one projected volume and
-concatenates the keys in order before psql (vistaplatform.sqlUnpackShell).
-A boundary never falls inside a line, so every key is valid UTF-8 and the
-concatenation restores the file. The schema hash is still computed from the
-whole file (vistaplatform.schemaHash).
-
-  vistaplatform.sqlConfigMaps      dict root kind component hook  -> the ConfigMap documents
-  vistaplatform.sqlProjectedSources dict root kind                -> projected-volume sources
-  vistaplatform.sqlUnpackShell     dict kind mount                -> shell setting SQL_FILE
-*/}}
-{{- define "vistaplatform.sqlChunkBytes" -}}600000{{- end -}}
-{{- define "vistaplatform.sqlChunkPlan" -}}
-{{- $sql := .root.Files.Get (printf "files/schema/%s.sql" .kind) -}}
-{{- $n := len (splitList "\n" $sql) -}}
-{{- $chunks := add (div (len $sql) (int (include "vistaplatform.sqlChunkBytes" .))) 1 -}}
-{{- $per := div (add $n (sub $chunks 1)) $chunks -}}
-{{- dict "lines" $n "chunks" (int $chunks) "per" (int $per) | toJson -}}
-{{- end -}}
-{{- define "vistaplatform.sqlConfigMaps" -}}
-{{- $plan := include "vistaplatform.sqlChunkPlan" . | fromJson -}}
-{{- $lines := splitList "\n" (.root.Files.Get (printf "files/schema/%s.sql" .kind)) -}}
-{{- range $i := until (int $plan.chunks) }}
-{{- $start := mul $i (int $plan.per) }}
-{{- if lt (int $start) (int $plan.lines) }}
-{{- $end := min (add $start (int $plan.per)) (int $plan.lines) }}
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ include "vistaplatform.fullname" $.root }}-{{ $.kind }}-{{ printf "%02d" $i }}
-  labels:
-    {{- include "vistaplatform.labels" $.root | nindent 4 }}
-    app.kubernetes.io/component: {{ $.component }}
-  {{- if $.hook }}
-  annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-4"
-    helm.sh/hook-delete-policy: before-hook-creation
-  {{- end }}
-data:
-  {{- /* |2: explicit indentation indicator, because a chunk may start on an
-       indented SQL line and YAML would otherwise take that as the block indent
-       and end the scalar at the next less-indented line. Clip chomping drops
-       blank lines that fall at a boundary, which SQL does not notice. */}}
-  {{ $.kind }}-{{ printf "%02d" $i }}.sql: |2
-{{ slice $lines (int $start) (int $end) | join "\n" | indent 4 }}
-{{ end }}
-{{- end }}
-{{- end -}}
-{{- define "vistaplatform.sqlProjectedSources" -}}
-{{- $plan := include "vistaplatform.sqlChunkPlan" . | fromJson -}}
-{{- range $i := until (int $plan.chunks) }}
-{{- if lt (mul $i (int $plan.per)) (int $plan.lines) }}
-- configMap:
-    name: {{ include "vistaplatform.fullname" $.root }}-{{ $.kind }}-{{ printf "%02d" $i }}
-{{- end }}
-{{- end }}
-{{- end -}}
-{{- define "vistaplatform.sqlUnpackShell" -}}
-cat {{ .mount }}/{{ .kind }}-*.sql > /tmp/{{ .kind }}.sql; SQL_FILE=/tmp/{{ .kind }}.sql
-{{- end -}}
-
 {{- define "vistaplatform.schemaMarkerQuery" -}}
 SELECT 1 FROM public.schema_migration_status WHERE schema_hash = '{{ include "vistaplatform.schemaHash" . }}'
 {{- end -}}

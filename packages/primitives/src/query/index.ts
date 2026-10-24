@@ -97,8 +97,11 @@ export type {
 export {
   COLLECTION_TARGET,
   NOT_ASSESSED,
+  NO_CRYPTO_OBSERVED,
   bandIndex,
   bandLabels,
+  bandLabelsFor,
+  isCoveragePseudoBand,
   fieldNames,
   findTarget,
   inAllowed,

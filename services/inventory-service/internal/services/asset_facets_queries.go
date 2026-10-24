@@ -13,6 +13,7 @@ import (
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/database"
 	"github.com/vistasecurity/vistaplatform/inventory-service/internal/models"
 	"github.com/vistasecurity/vistaplatform/shared/assetclass"
+	"github.com/vistasecurity/vistaplatform/shared/cryptosurface"
 	"github.com/vistasecurity/vistaplatform/shared/findings"
 	querysql "github.com/vistasecurity/vistaplatform/shared/query/sql"
 )
@@ -416,9 +417,16 @@ func classLabelForPath(path string) string {
 // badge and ≥70 in a facet. `not_assessed` is its own bucket and is not a band:
 // a score of 0 with an empty `risk_assessed_by` means nobody looked, which is a
 // different answer from "assessed, scored zero" (§5.2).
+//
+// The unscored set is split in two by shared/cryptosurface — the same SQL
+// `risk:not_assessed` / `risk:no_crypto_observed` compile to, so clicking a
+// bucket lists exactly the assets it counted.
 func (s *AssetService) riskFacets(tenantID uuid.UUID, where string, args []interface{}) ([]models.AssetFacetBucket, error) {
+	surface := cryptosurface.Inline("a")
 	var arms []string
-	arms = append(arms, `COUNT(*) FILTER (WHERE COALESCE(array_length(a.risk_assessed_by, 1), 0) = 0) AS not_assessed`)
+	arms = append(arms,
+		`COUNT(*) FILTER (WHERE COALESCE(array_length(a.risk_assessed_by, 1), 0) = 0 AND `+surface+`) AS not_assessed`,
+		`COUNT(*) FILTER (WHERE COALESCE(array_length(a.risk_assessed_by, 1), 0) = 0 AND NOT `+surface+`) AS no_crypto_observed`)
 	labels := make([]string, 0, len(models.RiskBands))
 	for _, band := range models.RiskBands {
 		cond := models.MustRiskBandSQL("a.risk_score", band.Label)
@@ -432,7 +440,8 @@ func (s *AssetService) riskFacets(tenantID uuid.UUID, where string, args []inter
 		FROM assets a
 		WHERE %s`, strings.Join(arms, ",\n\t\t       "), where)
 
-	counts := make([]int64, len(labels)+1)
+	const pseudo = 2 // not_assessed, no_crypto_observed
+	counts := make([]int64, len(labels)+pseudo)
 	dest := make([]interface{}, len(counts))
 	for i := range counts {
 		dest[i] = &counts[i]
@@ -447,10 +456,13 @@ func (s *AssetService) riskFacets(tenantID uuid.UUID, where string, args []inter
 		return nil, fmt.Errorf("failed to get risk facets: %w", err)
 	}
 
-	out := []models.AssetFacetBucket{{Key: "not_assessed", Label: "Not assessed", Count: int(counts[0])}}
+	out := []models.AssetFacetBucket{
+		{Key: "not_assessed", Label: "Not assessed", Count: int(counts[0])},
+		{Key: "no_crypto_observed", Label: "No crypto observed", Count: int(counts[1])},
+	}
 	for i, label := range labels {
 		out = append(out, models.AssetFacetBucket{
-			Key: strings.ToLower(label), Label: label, Count: int(counts[i+1]),
+			Key: strings.ToLower(label), Label: label, Count: int(counts[i+pseudo]),
 		})
 	}
 	return out, nil

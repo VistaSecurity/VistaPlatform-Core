@@ -6,6 +6,7 @@ import { Icon, LevelBar, LevelDot, MiniBar, PercentageGauge, RiskDonut, proporti
 import { PostureTrendChart } from '../../components/posture-trend-chart';
 import {
   DASHBOARD_CRITICAL_FINDINGS_ROUTE, DASHBOARD_HIGH_RISK_ASSETS_ROUTE, DASHBOARD_UNSCORED_ASSETS_ROUTE,
+  DASHBOARD_NO_CRYPTO_ASSETS_ROUTE, unscoredSplit,
   getDashboardPqcMetric, getDiscoveryFleetMetric,
 } from './dashboard-metrics';
 import { fetchDashboardSensors, fetchDashboardDeviceAgents, fetchDashboardTicketStats, fetchUntrustedCertificateCount } from './dashboard-queries';
@@ -97,7 +98,14 @@ export function DashboardPage() {
   // Dashboard read 0 while the Findings page listed them.
   const crit = findingsSeverity.data?.critical ?? 0;
   const crypto = s?.total_crypto ?? 0;
-  const unknown = s?.unknown_risk ?? 0;
+  // The unscored set, split by crypto surface (shared/cryptosurface). "Not
+  // assessed" is crypto on record that nobody has judged — a real gap.
+  // "No crypto observed" is an asset with nothing cryptographic on record (an
+  // ARP-only phone, a security group): nothing to judge. One grey slice used
+  // to carry both, and read 78 of 102 lab assets as work we had not done.
+  // Both stay in the ring and every percentage keeps total_assets as its
+  // denominator, which is what the posture trend's risk index uses too.
+  const { notAssessed, noCryptoObserved } = unscoredSplit(s);
   const pctHigh = proportionPercent(high, total);
   // The posture ring is a part-to-whole of the five mutually exclusive bands the
   // risk summary returns. "Healthy" is Low + assessed-clean ONLY: an asset nobody
@@ -112,7 +120,8 @@ export function DashboardPage() {
     { key: 'medium', label: 'Medium', count: medium, color: 'var(--warn)' },
     { key: 'low', label: 'Low', count: low, color: BLUE },
     { key: 'clean', label: 'Assessed, clean', count: clean, color: GREEN },
-    { key: 'unassessed', label: 'Not assessed', count: unknown, color: 'var(--neutral)', muted: true, onClick: () => { void nav(DASHBOARD_UNSCORED_ASSETS_ROUTE); } },
+    { key: 'unassessed', label: 'Not assessed', count: notAssessed, color: 'var(--neutral)', muted: true, onClick: () => { void nav(DASHBOARD_UNSCORED_ASSETS_ROUTE); } },
+    { key: 'no-crypto', label: 'No crypto observed', count: noCryptoObserved, color: 'var(--app-border2)', onClick: () => { void nav(DASHBOARD_NO_CRYPTO_ASSETS_ROUTE); } },
   ];
   // The dashboard's PQC number is ALWAYS config adoption (% of crypto configs on PQC
   // algorithms, /pqc/progress) so the % and the config counts beside it are one metric.
@@ -176,7 +185,7 @@ export function DashboardPage() {
     { id: 'high', count: high, label: 'High-risk assets', sub: `risk score ≥ ${LEVEL_MIN.High}`, icon: 'server', tone: 'var(--danger-soft)', route: DASHBOARD_HIGH_RISK_ASSETS_ROUTE, error: false },
     { id: 'exp', count: expSoon, label: 'Certs expiring', sub: 'within 30 days', icon: 'file-badge', tone: ORANGE, route: '/inventory?lens=certificate', error: expiring.isError },
     { id: 'untrusted-certs', count: untrustedCerts.data ?? 0, label: 'Untrusted certificates', sub: 'CA not trusted by your organisation', icon: 'shield-alert', tone: RED, route: UNTRUSTED_CERTIFICATES_HREF, error: untrustedCerts.isError },
-    { id: 'unk', count: unknown, label: 'Unscored assets', sub: 'no risk signal yet', icon: 'search', tone: 'var(--warn)', route: DASHBOARD_UNSCORED_ASSETS_ROUTE, error: false },
+    { id: 'unk', count: notAssessed, label: 'Not assessed', sub: 'crypto seen, not yet scored', icon: 'search', tone: 'var(--warn)', route: DASHBOARD_UNSCORED_ASSETS_ROUTE, error: false },
     { id: 'pqc', count: pqcNeedsMigration, label: 'Not PQC-ready', sub: 'configs on classical crypto', icon: 'key-round', tone: BLUE, route: '/inventory?lens=configuration', error: pqc.isError },
     { id: 'pqc-unclassified', count: pqcUnclassified, label: 'Not yet assessed', sub: 'no algorithm data', icon: 'help-circle', tone: 'var(--app-t3)', route: '/inventory?lens=configuration', error: pqc.isError },
     // The Queue, not Plans: this card counts overdue TICKETS, and Plans is a
@@ -216,7 +225,7 @@ export function DashboardPage() {
                 segments={postureSegments}
                 centerValue={pctHealthy === null ? '—' : `${pctHealthy}%`}
                 centerLabel={pctHealthy === null ? 'No monitored assets' : 'low risk or clean'}
-                ariaLabel={pctHealthy === null ? 'No monitored assets' : `${pctHealthy}% of monitored assets are low risk or assessed clean; ${high.toLocaleString()} high risk, ${unknown.toLocaleString()} not assessed`}
+                ariaLabel={pctHealthy === null ? 'No monitored assets' : `${pctHealthy}% of monitored assets are low risk or assessed clean; ${high.toLocaleString()} high risk, ${notAssessed.toLocaleString()} not assessed, ${noCryptoObserved.toLocaleString()} no crypto observed`}
               >
                 {(seg) => seg.key === 'high' && pctHigh !== null ? (
                   <span className="mono" data-testid="dashboard-high-risk-percent" style={{ fontSize: 10.5, color: 'var(--app-t3)', minWidth: 30, textAlign: 'right' }}>{pctHigh}%</span>
@@ -355,15 +364,17 @@ export function DashboardPage() {
           <Stage icon="database" accent={GREEN} title="Inventory" hero={crypto.toLocaleString()} heroUnit={`· ${total.toLocaleString()} assets`} caption="crypto configurations" onClick={() => nav('/inventory')}
             viz={
               <div style={{ width: '100%' }}>
-                <LevelBar counts={{ High: high, Medium: s?.medium_risk ?? 0, Low: s?.low_risk ?? 0, Informational: unknown }} h={9} />
+                {/* Informational is assessed-and-clean only. It used to carry
+                    unknown_risk — nobody having looked, drawn as a clean bill. */}
+                <LevelBar counts={{ High: high, Medium: s?.medium_risk ?? 0, Low: s?.low_risk ?? 0, Informational: clean }} h={9} />
                 <div style={{ display: 'flex', gap: 12, marginTop: 8 }}>
-                  {([['High', high], ['Medium', s?.medium_risk ?? 0], ['Informational', unknown]] as const).map(([l, n]) => (
+                  {([['High', high], ['Medium', s?.medium_risk ?? 0], ['Informational', clean]] as const).map(([l, n]) => (
                     <span key={l} style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10.5, color: 'var(--app-t3)' }}><LevelDot level={l} size={6} />{n}</span>
                   ))}
                 </div>
               </div>
             }
-            stats={[['Assets', total.toLocaleString(), null], ['Unscored', String(unknown), null]]} />
+            stats={[['Assets', total.toLocaleString(), null], ['Not assessed', String(notAssessed), null]]} />
           <Connector />
           <Stage icon="shield-check" accent="var(--accent)" title="Risk & Compliance" hero={crit.toLocaleString()} heroColor="var(--danger-soft)" caption="critical findings" onClick={() => nav(DASHBOARD_CRITICAL_FINDINGS_ROUTE)}
             viz={

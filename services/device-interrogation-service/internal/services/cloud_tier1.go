@@ -70,7 +70,10 @@ func init() {
 	for _, dt := range []string{
 		DeviceTypeAWSLambdaFunction, DeviceTypeAzureFunctionApp, DeviceTypeGCPCloudFunction,
 		DeviceTypeAWSEKSCluster, DeviceTypeAzureAKSCluster, DeviceTypeGCPGKECluster,
-		DeviceTypeAWSSecret, DeviceTypeAzureKeyVaultSecret, DeviceTypeGCPSecret,
+		// DeviceTypeAWSSecret is NOT here: it states its at-rest encryption
+		// (awsSecretResources) and so also goes through the discovery queue as
+		// an at-rest row, the way an S3 bucket does — see atRestDeviceTypes.
+		DeviceTypeAzureKeyVaultSecret, DeviceTypeGCPSecret,
 		DeviceTypeAWSHostedZone, DeviceTypeAzureDNSZone, DeviceTypeGCPManagedZone,
 		DeviceTypeAWSSecurityGroup, DeviceTypeAzureNetworkSecurityGrp, DeviceTypeGCPFirewall,
 	} {
@@ -169,9 +172,41 @@ func awsSecretResources(secs []awsclient.Secret) []cloudEnumResource {
 		}
 		out = append(out, tier1Resource("aws", DeviceTypeAWSSecret, sec.ARN, sec.Name, accountIDFromARN(sec.ARN), sec.Region, state,
 			map[string]any{"rotation_enabled": sec.RotationEnabled, "last_rotated_at": sec.LastRotated, "encryption_key_ref": sec.KMSKeyID},
-			sec.Tags, map[string]any{"resource_type": "secretsmanager"}))
+			sec.Tags, awsSecretAtRestMetadata(sec)))
 	}
 	return out
+}
+
+// awsSecretAtRestMetadata is a secret's at-rest posture, in the shape
+// inventory-service's atRestPostureFromFinding reads for an S3 bucket.
+//
+// Secrets Manager has no unencrypted secret: every value is envelope-encrypted
+// under a KMS key, the AWS-managed `aws/secretsmanager` key when the secret
+// names none. So "encrypted" and "determined" are not guesses — having listed
+// the secret IS the measurement, as DescribeDBInstances is for RDS. What
+// varies is whose key: ListSecrets omits KmsKeyId for the AWS-managed key
+// (and older secrets spell it as that alias), and any other key is the
+// customer's. Nothing here reads a value; ListSecrets never returns one.
+func awsSecretAtRestMetadata(sec awsclient.Secret) map[string]any {
+	encType := "customer-managed-kms"
+	if isAWSManagedSecretsKey(sec.KMSKeyID) {
+		encType = "aws-managed-kms"
+	}
+	return map[string]any{
+		"resource_type":         "secretsmanager",
+		"encrypted":             true,
+		"encryption_determined": true,
+		"encryption_type":       encType,
+		"algorithm":             "AES-256",
+		"kms_key_id":            sec.KMSKeyID,
+	}
+}
+
+// isAWSManagedSecretsKey reports whether a secret's KmsKeyId names the
+// AWS-managed key: absent, or the `aws/secretsmanager` alias by name or ARN.
+func isAWSManagedSecretsKey(kmsKeyID string) bool {
+	k := strings.TrimSpace(kmsKeyID)
+	return k == "" || k == "alias/aws/secretsmanager" || strings.HasSuffix(k, ":alias/aws/secretsmanager")
 }
 
 func awsZoneResources(zones []awsclient.HostedZone, account string) []cloudEnumResource {

@@ -102,6 +102,9 @@ type subjectNetwork struct {
 	VLANs       []identity.ObservedVLAN
 	// WirelessLANs are the SSIDs the subject's radios serve (row 4.4).
 	WirelessLANs []identity.ObservedWirelessLAN
+	// WirelessStations are a wireless client's radio and the SSID it joined,
+	// from a nameless station item (the controller's client list).
+	WirelessStations []identity.ObservedWirelessStation
 	// Neighbors are the subject's LLDP neighbours and wired uplink (row 3.3):
 	// cable ends, never stored as a net.neighbors fact.
 	Neighbors []identity.ObservedNeighbor
@@ -109,7 +112,7 @@ type subjectNetwork struct {
 
 func (n subjectNetwork) empty() bool {
 	return len(n.Interfaces) == 0 && len(n.Identifiers) == 0 && len(n.Prefixes) == 0 && len(n.VLANs) == 0 &&
-		len(n.WirelessLANs) == 0 && len(n.Neighbors) == 0
+		len(n.WirelessLANs) == 0 && len(n.WirelessStations) == 0 && len(n.Neighbors) == 0
 }
 
 // isSubjectNetworkFact reports whether f is a controller's account of a
@@ -150,6 +153,7 @@ func subjectNetworks(fs []di.FactObservation) map[string]subjectNetwork {
 			n.Interfaces = append(n.Interfaces, ifaces...)
 			n.Identifiers = append(n.Identifiers, ids...)
 			n.WirelessLANs = append(n.WirelessLANs, controllerWirelessLANs(f.Value)...)
+			n.WirelessStations = append(n.WirelessStations, controllerWirelessStations(f.Value)...)
 		case facts.KeyNetVlans:
 			prefixes, vlans := controllerNetworks(f.Value)
 			n.Prefixes = append(n.Prefixes, prefixes...)
@@ -274,6 +278,33 @@ func controllerWirelessLANs(value any) []identity.ObservedWirelessLAN {
 			VLAN:       it.Wireless.VLAN,
 			PSKPresent: it.Wireless.PSKPresent,
 		})
+	}
+	return out
+}
+
+// controllerWirelessStations lifts a wireless client's association off its
+// nameless net.interfaces item: the radio's MAC, the SSID it joined and the
+// 802.11 type it joined with. A named item is an interface of the device and
+// says what it serves (SSIDs), not what it joined.
+func controllerWirelessStations(value any) []identity.ObservedWirelessStation {
+	blob, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var items []controllerInterfaceItem
+	if err := json.Unmarshal(blob, &items); err != nil {
+		return nil
+	}
+	var out []identity.ObservedWirelessStation
+	for _, it := range items {
+		if strings.TrimSpace(it.Name) != "" || it.RFRole != "station" || len(it.SSIDs) == 0 {
+			continue
+		}
+		mac := normaliseHostMAC(it.MAC)
+		if mac == "" {
+			continue
+		}
+		out = append(out, identity.ObservedWirelessStation{MAC: mac, SSID: it.SSIDs[0], Type: strings.TrimSpace(it.Type)})
 	}
 	return out
 }
@@ -409,6 +440,7 @@ func (n subjectNetwork) applyTo(s *identity.Sighting, peer di.PeerRef) {
 	s.Interfaces = append(s.Interfaces, n.Interfaces...)
 	s.Prefixes = append(s.Prefixes, n.Prefixes...)
 	s.WirelessLANs = append(s.WirelessLANs, n.WirelessLANs...)
+	s.WirelessStations = append(s.WirelessStations, n.WirelessStations...)
 	s.VLANs = append(s.VLANs, n.VLANs...)
 	s.Neighbors = append(s.Neighbors, n.Neighbors...)
 	for _, id := range n.Identifiers {

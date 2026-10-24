@@ -344,8 +344,9 @@ var assetFields = []catalog.FieldInfo{
 		Name: "risk", Type: ast.TypeBand,
 		Accessor: ast.Accessor{
 			Kind: ast.AccessorColumn, Column: "risk_score", AssessedBy: "risk_assessed_by",
+			Surface: "crypto",
 		},
-		Description: "risk band; not_assessed means nobody scored it",
+		Description: "risk band; not_assessed means a crypto surface was seen and nobody scored it, no_crypto_observed means nobody scored it and no crypto surface is on record",
 	},
 	col("risk_score", ast.TypeNumber),
 	col("risk_assessed_by", ast.TypeKeywordArray),

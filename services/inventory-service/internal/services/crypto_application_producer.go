@@ -109,6 +109,11 @@ var atRestResourceTypes = map[string]string{
 	"rds_instance":      "database",
 	"sql_database":      "database",
 	"cloudsql_instance": "database",
+	// A Secrets Manager secret: its value is stored encrypted under a KMS key.
+	// `other` because the CHECK vocabulary has no word for a stored secret;
+	// adding one is a schema change for a label, and the Data Protection lens
+	// names the resource either way.
+	"secretsmanager": "other",
 }
 
 // atRestPostureFromFinding projects a discovery finding onto an at-rest posture,
@@ -127,9 +132,13 @@ func atRestPostureFromFinding(f IngestFinding) (atRestPosture, bool) {
 		return atRestPosture{}, false
 	}
 
+	// An enumerated resource (a Secrets Manager secret) carries its ARN as
+	// cloud_resource_id, the key its asset was recorded under, rather than as
+	// arn; both name the same provider resource.
+	identifier := firstNonEmpty(stringField(f.RawData, "arn"), stringField(f.RawData, "cloud_resource_id"))
 	p := atRestPosture{
 		ResourceType:       mapped,
-		ResourceIdentifier: strings.TrimSpace(stringField(f.RawData, "arn")),
+		ResourceIdentifier: strings.TrimSpace(identifier),
 		Encrypted:          boolField(f.RawData, "encrypted"),
 		EncryptionType:     stringField(f.RawData, "encryption_type"),
 		Algorithm:          stringField(f.RawData, "algorithm"),
@@ -191,6 +200,7 @@ var providerManagedEncryptionTypes = map[string]bool{
 	"microsoft-managed":   true, // Azure Storage
 	"google-managed":      true, // GCS / Cloud SQL
 	"tde-service-managed": true, // Azure SQL TDE, service-managed key
+	"aws-managed-kms":     true, // AWS Secrets Manager, the aws/secretsmanager key
 }
 
 // customerManagedEncryptionTypes are the encryption types where the tenant
@@ -201,6 +211,8 @@ var customerManagedEncryptionTypes = map[string]bool{
 	"cmk":          true, // Azure Storage customer-managed key
 	"cmek":         true, // GCS / Cloud SQL customer-managed key
 	"tde-cmk":      true, // Azure SQL TDE, Key Vault key
+	// AWS Secrets Manager under a key the tenant created
+	"customer-managed-kms": true,
 }
 
 // classifyKeyManager decides who holds the key for an encrypted resource.

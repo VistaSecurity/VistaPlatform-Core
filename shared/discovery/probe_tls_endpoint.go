@@ -114,6 +114,9 @@ func tlsVersionAccepted(ctx context.Context, dial func(context.Context) (net.Con
 		InsecureSkipVerify: true, //nolint:gosec // intentional — discovery probes any endpoint
 		MinVersion:         ver,
 		MaxVersion:         ver,
+		// The same offer as the identifying handshake: a version is
+		// accepted when the server will speak it with ANY suite we can.
+		CipherSuites: measuringCipherSuites,
 	})
 	defer func() { _ = tlsConn.Close() }()
 	// Without a deadline the handshake below can block indefinitely, so a

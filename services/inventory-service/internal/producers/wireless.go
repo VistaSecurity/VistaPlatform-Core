@@ -30,7 +30,8 @@ import (
 // The subject is the access point asset, because a wireless LAN is not an
 // asset and a finding must be about one. Several weak LANs on one AP are one
 // finding whose evidence names each; a weak LAN no interface serves has no
-// subject and is counted as Unserved.
+// subject and is counted as Unserved. A client's radio that joined the LAN
+// (rf_role `station`) does not serve it and is not a subject.
 //
 // It writes through its own crypto-producer Writer and sweeps only its own
 // kind, so it cannot resolve the crypto pass's rows. It claims no coverage
@@ -80,6 +81,7 @@ func (p *WirelessAuthProducer) Run(ctx context.Context, tenantID uuid.UUID) (Wir
 			  FROM public.wireless_lans l
 			  LEFT JOIN public.algorithms a ON a.id = l.algorithm_id
 			  LEFT JOIN public.interfaces i ON i.tenant_id = l.tenant_id AND l.id = ANY(i.wireless_lan_ids) AND i.status <> 'rejected'
+			        AND i.rf_role IS DISTINCT FROM 'station'
 			  LEFT JOIN public.assets s ON s.tenant_id = i.tenant_id AND s.id = i.asset_id AND s.deleted_at IS NULL
 			 WHERE l.tenant_id = $1 AND l.status <> 'rejected'
 			 ORDER BY l.ssid, l.id, i.asset_id`, tenantID)

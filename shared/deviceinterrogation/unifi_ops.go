@@ -41,9 +41,9 @@ import (
 // facts and edges but never copied into asset metadata.
 //
 // They are nested vendor objects — an array of ports, a table of neighbours —
-// and copying one into metadata is the mistake `unifiDeviceInventoryFields`
-// exists to prevent, just one level down. Each is projected field by field by
-// the functions below; the per-entry allowlists are beside them.
+// and copying one into metadata would carry every vendor field of every entry,
+// the controller's x_-prefixed secrets included. Each is projected field by
+// field by the functions below; the per-entry allowlists are beside them.
 var unifiDeviceStructuredFields = []string{
 	"uplink",         // → a wired uplink's neighbour (cable end); a meshed one's member_of edge
 	"port_table",     // → interfaces (DCIM row 1.5b), their LAGs and VLANs
@@ -1078,6 +1078,26 @@ func unifiRadioType(radio string) string {
 	return ""
 }
 
+// unifiClientRadioType is a wireless client's interface type: the 802.11
+// generation it associated with (`radio_proto`), else its band's type.
+func unifiClientRadioType(proto, radio string) string {
+	switch strings.ToLower(strings.TrimSpace(proto)) {
+	case "a":
+		return "ieee802.11a"
+	case "b", "g":
+		return "ieee802.11g"
+	case "n", "ng", "na":
+		return "ieee802.11n"
+	case "ac":
+		return "ieee802.11ac"
+	case "ax":
+		return "ieee802.11ax"
+	case "be":
+		return "ieee802.11be"
+	}
+	return unifiRadioType(radio)
+}
+
 // unifiGatewayNetworkInterface is the gateway interface one network_table
 // entry describes: `br0` for the untagged LAN or `br<vid>`, with the
 // gateway's own address on it (UniFi's ip_subnet is that address with the
@@ -1348,20 +1368,22 @@ func unifiTableEntries(device map[string]interface{}, table string) []map[string
 
 // unifiClientInventoryFields is the allowlist of `stat/sta` fields we keep.
 // Fingerprints, notes (emails), raw user objects and every `x_*` secret stay
-// off this list — the same discipline as unifiDeviceInventoryFields.
+// off this list.
 var unifiClientInventoryFields = []string{
-	"mac",       // hardware identity; skipped when LAA or virtual-router
-	"ip",        // lease address; recorded, does not vote on a DHCP segment
-	"hostname",  // DHCP hostname
-	"name",      // controller alias → DisplayName, even with spaces
-	"oui",       // manufacturer prefix; class evidence, not identity
-	"is_wired",  // wired vs wireless
-	"ap_mac",    // wireless attachment
-	"sw_mac",    // wired attachment
-	"essid",     // SSID
-	"network",   // UniFi network name
-	"vlan",      // 802.1Q tag
-	"last_seen", // unix seconds
+	"mac",         // hardware identity; skipped when LAA or virtual-router
+	"ip",          // lease address; recorded, does not vote on a DHCP segment
+	"hostname",    // DHCP hostname
+	"name",        // controller alias → DisplayName, even with spaces
+	"oui",         // manufacturer prefix; class evidence, not identity
+	"is_wired",    // wired vs wireless
+	"ap_mac",      // wireless attachment
+	"sw_mac",      // wired attachment
+	"essid",       // SSID
+	"radio",       // band of a wireless client's association (ng, na, 6e)
+	"radio_proto", // 802.11 generation it associated with (b, g, a, ng, na, ac, ax, be)
+	"network",     // UniFi network name
+	"vlan",        // 802.1Q tag
+	"last_seen",   // unix seconds
 }
 
 // unifiEmitClientObservations turns the controller's station list into peer
@@ -1495,6 +1517,12 @@ func unifiSkipHardwareMAC(mac string) bool {
 // on a synthetic `observed-<n>` interface that a later named report (the
 // client's own agent) renames by MAC. The item is still the client's ingest
 // vehicle; it is not stored as a fact.
+//
+// A wireless client's item also says it is a `station` on the SSID it joined,
+// with the 802.11 type it joined with: the engine makes the interface holding
+// the MAC a member of that wireless LAN (DCIM row 4.4). Only with a MAC — a
+// station is found by it — and only when the controller says the client is
+// not wired.
 func unifiClientInterface(client map[string]interface{}) map[string]interface{} {
 	entry := map[string]interface{}{}
 	mac := firstUnifiString(client, "mac")
@@ -1514,6 +1542,16 @@ func unifiClientInterface(client map[string]interface{}) map[string]interface{} 
 	}
 	if vlan := firstUnifiNumber(client, "vlan"); vlan > 0 {
 		entry["vlan"] = vlan
+	}
+	if _, hasMAC := entry["mac"]; hasMAC {
+		wired, known := client["is_wired"].(bool)
+		if essid := firstUnifiString(client, "essid"); known && !wired && essid != "" {
+			entry["rf_role"] = "station"
+			entry["ssids"] = []string{essid}
+			if t := unifiClientRadioType(firstUnifiString(client, "radio_proto"), firstUnifiString(client, "radio")); t != "" {
+				entry["type"] = t
+			}
+		}
 	}
 	if _, hasMAC := entry["mac"]; !hasMAC {
 		if _, hasAddr := entry["addresses"]; !hasAddr {

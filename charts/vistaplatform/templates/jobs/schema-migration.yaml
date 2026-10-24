@@ -43,6 +43,43 @@ external-database branches below, which previously carried it verbatim twice.
       {{- end }}
       securityContext:
         {{- include "vistaplatform.podSecurityContext" . | nindent 8 }}
+      initContainers:
+        # The SQL ships in the schema release image, not in the chart (
+        # see vistaplatform.schemaHash). Copy schema.sql into an emptyDir the
+        # psql container reads, and refuse an image whose schema does not hash
+        # to the value this chart was stamped with: the marker written below
+        # is what every backend waits for, and it must never claim a schema
+        # that was not the one applied. This fails in seconds, as Init:Error,
+        # before anything touches Postgres.
+        - name: fetch-sql
+          image: {{ include "vistaplatform.sqlImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- include "vistaplatform.containerSecurityContext" . | nindent 12 }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              SRC=/sql/schema.sql
+              if [ ! -s "$SRC" ]; then
+                echo "FATAL: $SRC is missing or empty in the schema image."
+                echo "  schemaMigration.sqlImage must point at the release's schema image (built from scripts/database/Dockerfile)."
+                exit 1
+              fi
+              actual=$(sha256sum "$SRC" | cut -c1-10)
+              if [ "$actual" != "{{ $schemaHash }}" ]; then
+                echo "FATAL: the schema image carries schema $actual, but this chart was stamped for schema {{ $schemaHash }}."
+                echo "  The schema image must come from the SAME release as the chart (appVersion {{ .Chart.AppVersion }}):"
+                echo "  a chart cannot apply another release's schema, because its backends wait for marker {{ $schemaHash }}."
+                echo "  Check schemaMigration.sqlImage (tag/digest) and image.tag."
+                exit 1
+              fi
+              cp "$SRC" /work/schema.sql
+              echo "schema {{ $schemaHash }} staged from the schema image."
+          volumeMounts:
+            - name: sql
+              mountPath: /work
       containers:
         - name: psql
           image: "{{ .Values.schemaMigration.image.repository }}:{{ .Values.schemaMigration.image.tag }}"
@@ -95,8 +132,7 @@ external-database branches below, which previously carried it verbatim twice.
                 sleep 2
               done
               echo "Applying schema (hash: {{ $schemaHash }})..."
-              {{ include "vistaplatform.sqlUnpackShell" (dict "kind" "schema" "mount" "/schema") }}
-              psql -v ON_ERROR_STOP=1 -f "$SQL_FILE"
+              psql -v ON_ERROR_STOP=1 -f /sql/schema.sql
               echo "Recording schema-migration completion marker (app {{ .Chart.AppVersion }}, chart {{ .Chart.Version }})..."
               psql -v ON_ERROR_STOP=1 -c "{{ $markerSQL }}"
               {{- else }}
@@ -104,15 +140,14 @@ external-database branches below, which previously carried it verbatim twice.
                 sleep 2
               done
               echo "Applying schema (hash: {{ $schemaHash }})..."
-              {{ include "vistaplatform.sqlUnpackShell" (dict "kind" "schema" "mount" "/schema") }}
-              psql -v ON_ERROR_STOP=1 -d "$DATABASE_URL" -f "$SQL_FILE"
+              psql -v ON_ERROR_STOP=1 -d "$DATABASE_URL" -f /sql/schema.sql
               echo "Recording schema-migration completion marker (app {{ .Chart.AppVersion }}, chart {{ .Chart.Version }})..."
               psql -v ON_ERROR_STOP=1 -d "$DATABASE_URL" -c "{{ $markerSQL }}"
               {{- end }}
               echo "Schema applied successfully."
           volumeMounts:
-            - name: schema
-              mountPath: /schema
+            - name: sql
+              mountPath: /sql
               readOnly: true
             - name: tmp
               mountPath: /tmp
@@ -122,10 +157,8 @@ external-database branches below, which previously carried it verbatim twice.
               readOnly: true
             {{- end }}
       volumes:
-        - name: schema
-          projected:
-            sources:
-              {{- include "vistaplatform.sqlProjectedSources" (dict "root" . "kind" "schema") | trim | nindent 14 }}
+        - name: sql
+          emptyDir: {}
         {{- if and .Values.datastores.postgres.enabled .Values.datastores.postgres.tls.enabled }}
         - name: db-ca
           secret:
@@ -141,13 +174,15 @@ external-database branches below, which previously carried it verbatim twice.
 Applies scripts/database/schema.sql against Postgres on every install and
 upgrade. The schema is idempotent (CREATE TABLE IF NOT EXISTS / DO blocks for
 types) so re-running is safe whether the database is fresh or already populated.
+The file comes from the release's schema image, copied in by the fetch-sql init
+container (#2731) — the chart carries only its hash (vistaplatform.schemaHash).
 
 v0.2.0 redesign — was previously a post-install Helm hook, which deadlocked
 fresh installs under `helm install --wait`: helm waits for all Deployments to
 be Ready BEFORE running post-install hooks, but backends can't be Ready without
 the schema, so the install fails before the hook ever runs.
 
-The new design makes the Job (and its ConfigMap) regular release resources.
+The new design makes the Job a regular release resource.
 Backend deployments have an init container (wait-for-schema) that polls for
 this Job's completion marker for the CURRENT schema hash — they self-gate on
 schema readiness, so install and upgrade converge naturally: Job and
@@ -187,8 +222,6 @@ CronJob: each release keeps at most one finished Job of this kind, and the next
 upgrade that changes the pod template renames it, so Helm (or Argo/Flux with
 prune on) deletes the superseded one.
 */}}
-{{- include "vistaplatform.sqlConfigMaps" (dict "root" . "kind" "schema" "component" "schema-migration" "hook" false) }}
----
 {{- $schemaHash := include "vistaplatform.schemaHash" . }}
 {{- $podTemplate := include "vistaplatform.schemaMigration.podTemplate" . }}
 {{- $jobHash := $podTemplate | sha256sum | trunc 10 }}

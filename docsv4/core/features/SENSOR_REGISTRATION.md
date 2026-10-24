@@ -159,9 +159,24 @@ sha256sum -c SHA256SUMS
 The most common install failure is mixing a binary and an installer script from
 two different releases. Use the pair from one release.
 
-## What a sensor's detail panel shows
+## What a sensor's or agent's detail panel shows
 
-Click any sensor row to open its panel. It has four tabs.
+Click any sensor or discovery agent row to open its panel. Both use the same
+tabs in the same order — **Overview · Discoveries · Health · Jobs · Logs ·
+Settings** — and leave out the ones a device cannot support rather than showing
+them empty:
+
+| Tab | Sensor | Discovery agent |
+|---|---|---|
+| Overview | ✓ | ✓ |
+| Discoveries | ✓ | — its work arrives as jobs |
+| Health | ✓ | ✓ |
+| Jobs | ✓ | ✓ |
+| Logs | ✓ | ✓ |
+| Settings | ✓ | ✓ |
+
+A platform sensor shows only Overview and Discoveries: it runs in the cluster
+and reports no health, jobs or settings.
 
 ### Overview
 
@@ -190,9 +205,17 @@ confidence and timestamp.
 
 ### Health
 
-Current metrics — uptime, memory, packets captured, discoveries in the last
-interval, and discoveries in total — with a history table underneath over 1 hour,
-24 hours or 7 days.
+Both kinds open with the same **Connection** block: online or offline, last
+heartbeat, the version it runs, and whether it has taken the settings you gave
+it (*Applied*, *Pending*, *Awaiting restart*, *Failed*, *Not reporting*).
+
+A **sensor** then shows current metrics — uptime, memory, packets captured,
+discoveries in the last interval, and discoveries in total — with a history
+table underneath over 1 hour, 24 hours or 7 days.
+
+A **discovery agent** reports no process metrics, so its Health tab shows what
+the platform sees it do: jobs run in all, when it last ran one, how many of its
+recent jobs completed or failed, and when it last inventoried its own host.
 
 Two metrics that exist in the data are deliberately **not** shown here: a CPU
 figure that is an estimate rather than a measurement, and an error count that is
@@ -228,10 +251,49 @@ Each observation becomes a pending asset in **Discovery → Approvals**. What on
 looks like there — and why it can be so sparse — is covered in
 [Discovery](./discovery.md#passive-host-observation).
 
-### Control
+### Jobs
 
-Configuration and commands, for users with the **Update sensors** permission
-(`sensors.update`).
+The last 10 things the device was asked to do, newest first, one line each with
+its status (*Queued*, *Delivered*, *Running*, *Completed*, *Failed*). Click a
+line to see its detail; click it again to close it.
+
+- **On a sensor** a job is a command or a discovery job handed to it. The detail
+  shows when it was sent, delivered, acknowledged and finished, the payload sent
+  and the sensor's reply. With **Update sensors** you can also **Send a
+  command**: clear cache, detect interfaces, update interfaces or update
+  configuration. Command types the sensor does not genuinely act on are not
+  offered; restart and log export have their own controls.
+- **On a discovery agent** a job is an interrogation assigned to it. The detail
+  shows the target asset, timing, duration, assets found, any error, and the
+  job's results. Jobs reach an agent from **Managed Devices** and the asset scan
+  actions; every job in the organization is listed in **Discovery Jobs**.
+
+### Logs
+
+**Fetch logs** asks the device for its most recent 100, 200 or 500 log lines.
+It replies at its next check-in and the lines appear here as text. Asking needs
+**Update sensors**; reading what came back needs only **View sensors**.
+
+Credentials that appear in a line — a password in a URL, an `Authorization`
+header, a `"password": …` pair — are masked before the line is shown. A
+discovery agent masks them before the lines leave its host, and the platform
+masks them again.
+
+A discovery agent's lines are kept for a day, and a request it has not collected
+expires after an hour. An agent from a release before this one cannot send its
+logs, and its Logs tab says so; upgrade it to use the tab.
+
+### Settings
+
+The managed settings described in
+[Agent and sensor settings](./agent-and-sensor-settings.md), their change
+history, and **Restart**. Restart warns, before you confirm, that a device
+launched by hand rather than run by a service manager will stop instead of
+restarting. A sensor's restart needs **Update sensors**; an agent's needs **Full
+sensor management** (`sensors.manage`).
+
+A sensor's Settings tab also holds its own record, for users with **Update
+sensors** (`sensors.update`):
 
 **Network interfaces.** Tick the interfaces the sensor should monitor and click
 **Save interfaces** to send the change — nothing is queued until you do. **Detect**
@@ -242,10 +304,6 @@ than silently accepted.
 **Configuration.** Air-gapped or connected, description, tags.
 
 **Reporting interval.** See [below](#changing-a-sensors-reporting-interval).
-
-**Commands.** Queue an action for the sensor to pick up on its next check-in:
-restart, clear cache, update interfaces, list interfaces, export logs, update
-config. Command types the sensor does not genuinely act on are not offered.
 
 ## Host inventory (agents)
 
@@ -443,7 +501,7 @@ sensor's **Overview** tab.
 To change it from the console:
 
 1. Go to **Discovery → Sensors & Agents** and click the sensor.
-2. Open the **Control** tab → **Reporting interval**.
+2. Open the **Settings** tab → **Reporting interval**.
 3. Pick a value — **30 seconds, 1 / 5 / 15 / 30 minutes, or 1 / 2 / 4 / 8 / 12 /
    24 hours** — and click **Apply**.
 
@@ -575,7 +633,7 @@ yourself. There is no download endpoint on the platform to look for.
 
 Check the **Health** tab's history over 24 hours. Packets captured flat at zero
 usually means the monitored interfaces are wrong for where the traffic is — use
-**Control → Detect** to see what the host actually has.
+**Settings → Detect** to see what the host actually has.
 
 ## Related
 

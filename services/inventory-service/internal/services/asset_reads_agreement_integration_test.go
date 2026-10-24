@@ -218,10 +218,14 @@ func TestIntegration_RiskSummary_SeparatesNotAssessedFromClean(t *testing.T) {
 	for _, b := range buckets {
 		facet[b.Key] = b.Count
 	}
-	if facet["not_assessed"] != summary.UnknownRisk {
-		t.Errorf("the risk facet says %d not-assessed and the summary says %d; the tile and the rail "+
-			"must not disagree about who has been looked at",
-			facet["not_assessed"], summary.UnknownRisk)
+	// The unscored set is split by crypto surface (shared/cryptosurface); this
+	// fixture's never-scored server has none, so it is no_crypto_observed.
+	if facet["not_assessed"]+facet["no_crypto_observed"] != summary.UnknownRisk ||
+		facet["not_assessed"] != summary.NotAssessed || facet["no_crypto_observed"] != summary.NoCryptoObserved {
+		t.Errorf("the risk facet says %d not-assessed + %d no-crypto-observed and the summary says %d (%d + %d); "+
+			"the tile and the rail must not disagree about who has been looked at",
+			facet["not_assessed"], facet["no_crypto_observed"], summary.UnknownRisk,
+			summary.NotAssessed, summary.NoCryptoObserved)
 	}
 	if facet["informational"] != summary.Informational {
 		t.Errorf("the risk facet says %d informational and the summary says %d",

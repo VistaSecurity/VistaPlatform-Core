@@ -60,6 +60,10 @@ func TestIntegration_Producers_PassHelpersTakeTheSchemaShareLock(t *testing.T) {
 			f := newCryptoFixture(t)
 			return func() { f.mustRun(t, ctx) }
 		}},
+		{"at-rest run", func(t *testing.T) func() {
+			f := newAtRestFixture(t)
+			return func() { f.run(t, ctx) }
+		}},
 		{"drift run", func(t *testing.T) func() {
 			f := newDriftFixture(t)
 			return func() { f.run(t, ctx) }

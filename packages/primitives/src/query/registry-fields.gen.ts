@@ -576,8 +576,8 @@ export const REGISTRY_FIELDS_BY_TARGET: Readonly<Record<string, readonly FieldIn
     {
       name: 'risk',
       type: 'band',
-      accessor: { kind: 'column', column: 'risk_score', assessedBy: 'risk_assessed_by' },
-      description: 'risk band; not_assessed means nobody scored it',
+      accessor: { kind: 'column', column: 'risk_score', assessedBy: 'risk_assessed_by', surface: 'crypto' },
+      description: 'risk band; not_assessed means a crypto surface was seen and nobody scored it, no_crypto_observed means nobody scored it and no crypto surface is on record',
     },
     {
       name: 'risk_assessed_by',

@@ -29,6 +29,7 @@ const (
 	KindWeakCertificate           = "weak_certificate"
 	KindPQCVulnerable             = "pqc_vulnerable"
 	KindWeakWirelessAuth          = "weak_wireless_auth"
+	KindUnencryptedAtRest         = "unencrypted_at_rest"
 	KindOSEndOfLife               = "os_end_of_life"
 	KindSoftwareEndOfLife         = "software_end_of_life"
 	KindHardwareEndOfSupport      = "hardware_end_of_support"
@@ -242,6 +243,20 @@ var All = []Kind{
 		TitleTemplate:   "{subject} {detail}",
 		Guidance:        "Move the wireless LAN named in the finding to WPA2 or WPA3 with the AES (CCMP) cipher only. Open networks, WEP and TKIP give a listener in range little or no protection. If a legacy client forces TKIP or WEP, put that client on its own SSID and VLAN with no route to anything that matters, then replace it. Re-read the controller afterwards to confirm the LAN reports the new authentication.",
 		Description:     "An access point serves a wireless LAN whose authentication is open or whose cipher is TKIP or WEP. The subject is the access point asset (the LAN itself is not an asset); the evidence names each SSID. The cipher is scored by its algorithms-catalogue row (wireless_lans. algorithm_id), so editing the row changes the score. A LAN whose cipher is `auto` or unrecorded is not assessed and raises nothing.",
+	},
+	{
+		Producer:        "crypto",
+		Key:             "unencrypted_at_rest",
+		SeverityModel:   "fixed",
+		DefaultSeverity: "from-catalogue",
+		Score:           0,
+		ScoreSource:     "catalogue",
+		Rungs:           nil,
+		SubjectTypes:    []string{"asset"},
+		FeedsRisk:       true,
+		TitleTemplate:   "{subject} {detail}",
+		Guidance:        "Turn on encryption at rest for the resource named in the finding — default encryption on the bucket, storage encryption on the database, or the provider's equivalent. For a database this usually means restoring an encrypted snapshot into a new instance, because storage encryption often cannot be switched on in place; plan the cutover. Prefer a key your organisation manages if you need to control who can decrypt the data. Re-run the cloud discovery afterwards to confirm the resource now reports encryption.",
+		Description:     "A cloud storage or database resource reports that its data is not encrypted at rest (crypto_applications.configuration_data: encryption_determined true, encrypted false). The subject is the resource's asset; several unencrypted records on one asset are one finding whose evidence names each. The score is the algorithms catalogue row AT-REST-PLAINTEXT (90, the at-rest ladder's unencrypted rung); edit the row to change it. An encrypted resource raises nothing, whoever holds the key — provider-managed versus customer-managed is shown on the Data Protection lens, not scored as risk (owner decision, 2026-10-23). A record whose encryption could not be determined raises nothing and is not counted as assessed. The pass claims crypto coverage only for an asset whose at-rest records are its whole crypto surface (no crypto configurations), so it never speaks for configurations the main crypto pass did not judge.",
 	},
 	{
 		Producer:        "eol",

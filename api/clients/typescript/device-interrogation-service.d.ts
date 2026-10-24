@@ -390,6 +390,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/{id}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The latest log lines this agent sent, and any request still waiting
+         * @description The console's Logs tab for a discovery agent. An operator asks with
+         *     `POST /agents/{id}/logs/request`; the request rides the agent's next
+         *     heartbeat answer and the agent uploads its recent lines, redacted on the
+         *     agent and again on the platform. Requests expire after an hour and
+         *     exports after a day: log lines are diagnostic material and are not kept.
+         *
+         *     `supported` is whether this agent's last heartbeat, within the past 15
+         *     minutes, said its build can send logs. It is false for an older build
+         *     and for an agent that has not checked in lately.
+         *
+         *     Gated at SensorsRead.
+         */
+        get: operations["getAgentLogs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{id}/logs/request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ask one agent to send its recent log lines at its next check-in
+         * @description Records a request the agent collects from its next heartbeat answer.
+         *     Asking again replaces a pending request. `lines` is clamped to
+         *     1–1000; omitted or zero asks for 200.
+         *
+         *     Gated at SensorsUpdate — the permission sensor-manager requires to queue
+         *     a sensor's `export_logs` command.
+         */
+        post: operations["requestAgentLogs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents/{id}/config/history": {
         parameters: {
             query?: never;
@@ -767,6 +822,8 @@ export interface paths {
          * @description Returns a paginated page of jobs. Filters (status[], job_type, asset_id,
          *     integration_id) are accepted as query params; page / page_size paginate.
          *     `device_id` is still accepted as a deprecated alias of `asset_id`.
+         *     `agent_id` narrows the page to the jobs assigned to one device agent
+         *     (the agent drawer's job history); a malformed id is a 400.
          */
         get: operations["listInterrogationJobs"];
         put?: never;
@@ -1119,6 +1176,29 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AgentLogRequest: {
+            /** @description Ties the agent's upload to this request; an upload for any other id is refused. */
+            id: string;
+            lines: number;
+            /** Format: date-time */
+            requested_at: string;
+        };
+        AgentLogExport: {
+            request_id: string;
+            /** @description Oldest first, redacted, each cut to 2000 bytes. */
+            lines: string[] | null;
+            line_count: number;
+            /** Format: date-time */
+            received_at: string;
+        };
+        AgentLogsView: {
+            supported: boolean;
+            request?: components["schemas"]["AgentLogRequest"];
+            export?: components["schemas"]["AgentLogExport"];
+        };
+        AgentLogRequestAccepted: {
+            request: components["schemas"]["AgentLogRequest"];
+        };
         RestartRequestAccepted: {
             /**
              * Format: date-time
@@ -2736,6 +2816,15 @@ export interface components {
                 "application/json": components["schemas"]["LegacyError"];
             };
         };
+        /** @description A dependency the operation needs is unavailable. */
+        LegacyServiceUnavailable: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["LegacyError"];
+            };
+        };
         /** @description The caller already has a live integration of this type with this name. Names are unique per tenant. */
         LegacyIntegrationNameTaken: {
             headers: {
@@ -3337,6 +3426,66 @@ export interface operations {
             400: components["responses"]["LegacyBadRequest"];
             404: components["responses"]["LegacyNotFound"];
             500: components["responses"]["LegacyServerError"];
+        };
+    };
+    getAgentLogs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The agent's UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The agent's log export state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentLogsView"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+            503: components["responses"]["LegacyServiceUnavailable"];
+        };
+    };
+    requestAgentLogs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The agent's UUID. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    lines?: number;
+                };
+            };
+        };
+        responses: {
+            /** @description The request was recorded. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AgentLogRequestAccepted"];
+                };
+            };
+            400: components["responses"]["LegacyBadRequest"];
+            404: components["responses"]["LegacyNotFound"];
+            500: components["responses"]["LegacyServerError"];
+            503: components["responses"]["LegacyServiceUnavailable"];
         };
     };
     getAgentConfigHistory: {
@@ -3982,6 +4131,8 @@ export interface operations {
             query?: {
                 page?: number;
                 page_size?: number;
+                /** @description Only jobs assigned to this device agent (device_jobs.agent_id). */
+                agent_id?: string;
             };
             header?: never;
             path?: never;

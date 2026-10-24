@@ -90,7 +90,7 @@ frontend-v2/src/sections/dashboard/dashboard-page.tsx#DashboardPage:
   concept: dashboard_counts
   reason: Displays per-grade counts and trends; unrelated count/length comparisons
     are not a ladder.
-  fingerprint: 10506caf0f86e47debf742ea2891860baebb138976bdf7a79887c777ed4efffe
+  fingerprint: 6b73198673fdbb83fb457c087e5aad672879be1906f9ba8fc3babac5a8ad5347
 frontend-v2/src/sections/findings/findings-page.tsx#FindingsPage:
   concept: findings_loaded_view_counts
   reason: UI comparisons and conditional labels describe row counts, filters and
@@ -111,7 +111,7 @@ frontend-v2/src/sections/posture/posture-overview.tsx#PostureOverview:
   concept: finding_counts
   reason: Copies server per-severity counts for exposure summaries; numeric counts
     are not ordinal ranks.
-  fingerprint: e24b95388c92b683951cd6e97f574c4ab727f2721f9437867a56d4a75e963539
+  fingerprint: ef9d7c1fefb699186722519fb0f8ced91c64176e87871559b3ad0133e68c627a
 shared/strength/strength.go#Definitions:
   concept: canonical_strength_owner
   reason: Authoritative catalogue strength vocabulary and ranks; generated

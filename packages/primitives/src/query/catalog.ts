@@ -315,6 +315,27 @@ export interface BandLadder {
 export const NOT_ASSESSED = 'not_assessed';
 
 /**
+ * The second coverage pseudo-band, accepted only by a band field whose accessor
+ * names a `surface`: an unscored row with no crypto surface on record. With
+ * `not_assessed` it partitions the unscored set.
+ */
+export const NO_CRYPTO_OBSERVED = 'no_crypto_observed';
+
+/** True for either value that tests coverage rather than the ladder. */
+export function isCoveragePseudoBand(v: string): boolean {
+  const l = v.toLowerCase();
+  return l === NOT_ASSESSED || l === NO_CRYPTO_OBSERVED;
+}
+
+/** `bandLabels` with exactly the pseudo-bands a field's accessor accepts. */
+export function bandLabelsFor(l: BandLadder, a: { assessedBy?: string; surface?: string }, withCoverage = true): string[] {
+  const covered = (a.assessedBy ?? '') !== '';
+  const out = bandLabels(l, covered && withCoverage);
+  if (covered && withCoverage && (a.surface ?? '') !== '') out.push(NO_CRYPTO_OBSERVED);
+  return out;
+}
+
+/**
  * Returns the ladder's labels, highest-first, plus not_assessed when the field
  * supports it. Used for error messages and autocomplete.
  */

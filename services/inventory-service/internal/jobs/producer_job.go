@@ -77,6 +77,10 @@ type FindingProducerJob struct {
 	drift   *producers.DriftProducer
 	// wireless is row 4.4's weak_wireless_auth pass, on the crypto producer's key.
 	wireless *producers.WirelessAuthProducer
+	// atRest judges crypto_applications (unencrypted_at_rest), also on the
+	// crypto producer's key, and claims crypto coverage for the assets whose
+	// whole crypto surface is at rest — an S3 bucket, a Secrets Manager secret.
+	atRest *producers.AtRestProducer
 
 	// appDB is the RLS-subject handle the post-pass recompute runs on. The
 	// producers hold their own; this one is for the step that belongs to no
@@ -139,6 +143,11 @@ func NewFindingProducerJob(appDB, bypassDB *sql.DB) (*FindingProducerJob, error)
 		return nil, err
 	}
 
+	atRest, err := producers.NewAtRestProducer(appDB)
+	if err != nil {
+		return nil, err
+	}
+
 	interval := 24 * time.Hour
 	if s := os.Getenv("FINDING_PRODUCER_INTERVAL"); s != "" {
 		if parsed, err := time.ParseDuration(s); err == nil && parsed > 0 {
@@ -161,6 +170,7 @@ func NewFindingProducerJob(appDB, bypassDB *sql.DB) (*FindingProducerJob, error)
 		hygiene:         hygiene,
 		drift:           drift,
 		wireless:        wireless,
+		atRest:          atRest,
 		appDB:           appDB,
 		bypassDB:        bypassDB,
 		logger:          log.New(log.Writer(), "[FindingProducerJob] ", log.LstdFlags),
@@ -404,6 +414,17 @@ func (j *FindingProducerJob) runTenant(ctx context.Context, tenantID uuid.UUID) 
 		// judge by, and a weak LAN no access point serves, are not "clean".
 		j.logger.Printf("wireless tenant=%s raised=%d resolved=%d lans=%d unassessed=%d unserved=%d",
 			tenantID, run.Raised, run.Resolved, run.LANs, run.Unassessed, run.Unserved)
+	}
+
+	if run, err := j.atRest.Run(ctx, tenantID); err != nil {
+		ok = false
+		j.logger.Printf("ERROR: at-rest producer failed for tenant %s: %v", tenantID, err)
+	} else if run.Records > 0 {
+		// Undetermined and Unscorable are logged: a record whose encryption
+		// could not be measured, or could not be scored, is neither clean nor
+		// covered.
+		j.logger.Printf("at-rest tenant=%s records=%d raised=%d resolved=%d assessed=%d undetermined=%d unscorable=%d",
+			tenantID, run.Records, run.Raised, run.Resolved, run.Assessed, run.Undetermined, run.Unscorable)
 	}
 
 	if run, err := j.config.Run(ctx, tenantID); err != nil {

@@ -96,12 +96,20 @@ function Section({ title, children, action }: { title: string; children: React.R
 }
 
 /** Approve a pending (discovered) object: its lifecycle status becomes
- *  approved, and the server records who approved it and when. */
-export function ApproveButton({ route, id }: { route: 'prefixes' | 'ip-addresses'; id: string }) {
+ *  approved, and the server records who approved it and when. Gated on the
+ *  permission that manages the route's objects (IPAM's by default). */
+export function ApproveButton({ route, id, permission = TENANT_PERMISSIONS.ipam.manage, label }: {
+  route: 'prefixes' | 'ip-addresses' | 'wireless-lans' | 'wireless-links';
+  id: string;
+  permission?: string;
+  /** Names the object for assistive technology, where a row holds several. */
+  label?: string;
+}) {
   const { update } = useIpamWrite(route);
   return (
-    <PermissionGate permission={TENANT_PERMISSIONS.ipam.manage}>
+    <PermissionGate permission={permission}>
       <button type="button" className="ui-btn sm" data-testid={`approve-${route}`} disabled={update.isPending}
+        aria-label={label ? `Approve ${label}` : undefined}
         onClick={() => { update.mutate({ id, body: { status: 'active' } }); }}>
         <Icon name="check" size={12} />Approve
       </button>

@@ -16,6 +16,7 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Icon, RiskChip, PercentageGauge, LevelBar, Pill, heatColor, frameworkPercentageColor, proportionPercent, type RiskLevel } from '../../components/ui';
+import { unscoredSplit } from '../dashboard/dashboard-metrics';
 import { Loading, EmptyState } from '../findings/bits';
 import { useAssetFacts, useBatchEvaluate, useFrameworkContext, usePostureByControl, type AssetFacts } from '../findings/queries';
 import { usePostureTrend, useRiskSummary } from '../../lib/shared-queries';
@@ -76,8 +77,9 @@ export function PostureOverview() {
 
   const s = riskQ.data;
   const total = s?.total_assets ?? 0;
-  const unscoredAssets = s?.unknown_risk ?? 0;
-  const assessedAssets = Math.max(0, total - unscoredAssets);
+  // The same split as the dashboard (shared/cryptosurface).
+  const { notAssessed: unscoredAssets, noCryptoObserved } = unscoredSplit(s);
+  const assessedAssets = Math.max(0, total - unscoredAssets - noCryptoObserved);
   const pctHigh = proportionPercent(s?.high_risk ?? 0, total);
   const overall = ctxQ.data?.status?.overall_score;
   const fwItems = ctxQ.data?.status?.frameworks ?? [];
@@ -146,7 +148,8 @@ export function PostureOverview() {
           </div>
           {pctHigh !== null && (
             <div style={{ marginTop: 3, position: 'relative', fontSize: 10.5, color: 'var(--app-t3)' }}>
-              {assessedAssets.toLocaleString()} assessed · {unscoredAssets.toLocaleString()} unscored
+              {assessedAssets.toLocaleString()} assessed · {unscoredAssets.toLocaleString()} not assessed
+              {noCryptoObserved > 0 && <> · {noCryptoObserved.toLocaleString()} no crypto observed</>}
             </div>
           )}
         </div>

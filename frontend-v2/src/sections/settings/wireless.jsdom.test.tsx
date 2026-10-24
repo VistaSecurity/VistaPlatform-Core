@@ -13,7 +13,9 @@
 //   - drop the `wireless` case from SettingsPage -> the spec-pending page renders;
 //   - drop <WirelessLansPanel> from InterfacesTab -> "an access point shows its
 //     SSIDs" fails;
-//   - draw an unscored LAN as a banded chip (AuthRisk) -> "not assessed" fails.
+//   - draw an unscored LAN as a banded chip (AuthRisk) -> "not assessed" fails;
+//   - drop <ApproveButton> from WirelessSection -> "approves a pending LAN"
+//     fails; gate it on ipam.manage instead of wireless.manage -> it fails too.
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -171,6 +173,29 @@ describe('Settings → Wireless', () => {
     expect(q('[data-testid="add-wireless-lan-groups"]')).toBeNull();
     expect(body().querySelector('[aria-label="Delete Corp"]')).toBeNull();
     expect(body().querySelector('[aria-label="Edit Corp"]')).toBeNull();
+  });
+
+  it('approves a pending LAN, and only for wireless.manage', async () => {
+    answer(happy);
+    mocks.patch.mockResolvedValue({ data: { data: { ...OPEN, status: 'active' } } });
+    await mount(null, MANAGE, '/inventory/manage/wireless');
+    const section = q('[data-testid="wireless-section-wireless-lans"]');
+    const buttons = Array.from(section?.querySelectorAll('[data-testid="approve-wireless-lans"]') ?? []);
+    // Only Lobby is pending.
+    expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual(['Approve Lobby']);
+    await click(buttons[0]);
+    await flush();
+    const [path, init] = mocks.patch.mock.calls[0] as [string, { params: { path: { id: string } }; body: Record<string, unknown> }];
+    expect(path).toBe('/wireless/wireless-lans/{id}');
+    expect(init.params.path.id).toBe('l4');
+    expect(init.body).toEqual({ status: 'active' });
+
+    act(() => root.unmount());
+    root = createRoot(host);
+    answer(happy);
+    await mount(null, READ, '/inventory/manage/wireless');
+    expect(q('[data-testid="wireless-section-wireless-lans"]')?.textContent).toContain('Pending');
+    expect(q('[data-testid="approve-wireless-lans"]')).toBeNull();
   });
 
   it('adds a LAN with a key-present checkbox and no way to send a key', async () => {

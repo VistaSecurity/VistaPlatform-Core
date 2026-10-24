@@ -259,6 +259,26 @@ func TestIntegration_UniFi_PersistRecordsInterfacesNotFacts(t *testing.T) {
 		}
 	}
 
+	// The wireless client is a station on the SSID it joined, on the interface
+	// holding its MAC; the wired laptop is not.
+	station := func(mac string) string {
+		t.Helper()
+		var typ, role, ssids string
+		if err := db.QueryRow(`SELECT i.type, COALESCE(i.rf_role, ''),
+			COALESCE((SELECT string_agg(l.ssid, ',' ORDER BY l.ssid) FROM wireless_lans l WHERE l.id = ANY(i.wireless_lan_ids)), '')
+			FROM interfaces i WHERE i.tenant_id = $1 AND i.asset_id = $2 AND i.mac_address = $3::macaddr8`,
+			tenant, unifiAssetByMAC(t, db, tenant, mac), mac).Scan(&typ, &role, &ssids); err != nil {
+			t.Fatalf("interface of %s: %v", mac, err)
+		}
+		return typ + "/" + role + "/" + ssids
+	}
+	if got, want := station("a4:83:e7:00:00:04"), "ieee802.11ac/station/Guest"; got != want {
+		t.Errorf("guest-04's interface = %s, want %s", got, want)
+	}
+	if got, want := station(unifiParityLaptop), "other//"; got != want {
+		t.Errorf("the wired laptop's interface = %s, want %s", got, want)
+	}
+
 	var stored, kept int
 	if err := db.QueryRow(`SELECT count(*) FILTER (WHERE key IN ('net.interfaces', 'net.vlans')), count(*) FILTER (WHERE key = 'hw.model')
 		FROM asset_facts WHERE tenant_id = $1`, tenant).Scan(&stored, &kept); err != nil {

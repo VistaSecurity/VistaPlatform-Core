@@ -154,6 +154,8 @@ jobs:
           - { name: maintenance-service,          context: ., dockerfile: services/maintenance-service/Dockerfile.prod }
           - { name: web-ui,                       context: ., dockerfile: frontend-v2/Dockerfile.prod }
           - { name: admin-ui,                     context: ., dockerfile: admin-ui-v2/Dockerfile.prod }
+          # The SQL the chart's Jobs apply; the chart carries only its hash.
+          - { name: schema,                       context: ., dockerfile: scripts/database/Dockerfile }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -335,11 +337,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # seed.sql is not committed under charts/ (see CLAUDE.md). Stage both
-      # SQL files without whole-line comments so Helm's release Secret stays
-      # below Kubernetes' 1 MiB limit; the tracked schema mirror stays exact.
-      - name: Stage schema and seed into the chart
-        run: scripts/stage-chart-sql.sh --strip-comments
+      # The chart carries no SQL: schema.sql and seed.sql ship in the `schema`
+      # image built above. This stamps the sha256 of schema.sql into the chart,
+      # which the schema-migration marker and every wait-for-schema gate key on.
+      - name: Stamp the schema hash into the chart
+        run: scripts/stage-chart-sql.sh
 
       - name: Stamp the version from the tag
         env:
@@ -355,6 +357,10 @@ jobs:
         run: |
           helm package charts/vistaplatform -d /tmp/chart
           TGZ=$(ls /tmp/chart/*.tgz)
+          # Helm keeps the whole chart plus the rendered manifest in one 1 MiB
+          # Secret; a chart over it cannot be installed at all. Measure the
+          # packaged artifact before publishing it.
+          node scripts/chart-release-record-size.mjs --tgz "$TGZ"
           OUT=$(helm push "$TGZ" "oci://ghcr.io/${{ steps.owner.outputs.lc }}" 2>&1)
           echo "$OUT"
           echo "digest=$(echo "$OUT" | grep -oE 'sha256:[a-f0-9]{64}' | head -1)" >> "$GITHUB_OUTPUT"

@@ -143,6 +143,9 @@ func observationFinding(o shareddisc.Observation, base func(string, int, float64
 	if v, ok := o.Metadata["tls_handshake_alert"]; ok {
 		data["tls_handshake_alert"] = v
 	}
+	if v, ok := o.Metadata["tls_handshake_error"]; ok {
+		data["tls_handshake_error"] = v
+	}
 	if o.Notes != "" {
 		data["identification_note"] = o.Notes
 	}

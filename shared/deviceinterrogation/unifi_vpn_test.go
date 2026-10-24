@@ -12,6 +12,15 @@ import (
 // the /proxy/network prefix) and the proxied Network API reads.
 func newMockUnifiOSController(t *testing.T) *httptest.Server {
 	t.Helper()
+	return newMockUnifiOSControllerWithDevices(t, []map[string]interface{}{
+		{"name": "office-switch", "ip": "10.0.0.2", "mac": "aa:bb", "model": "USW24"},
+	})
+}
+
+// newMockUnifiOSControllerWithDevices is newMockUnifiOSController serving
+// devices as the site's `stat/device` list.
+func newMockUnifiOSControllerWithDevices(t *testing.T, devices []map[string]interface{}) *httptest.Server {
+	t.Helper()
 	ok := func(w http.ResponseWriter, data []map[string]interface{}) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -29,7 +38,7 @@ func newMockUnifiOSController(t *testing.T) *httptest.Server {
 		ok(w, []map[string]interface{}{{"model": "UDM-Pro", "version": "8.0.7"}})
 	})
 	mux.HandleFunc("/proxy/network/api/s/default/stat/device", func(w http.ResponseWriter, r *http.Request) {
-		ok(w, []map[string]interface{}{{"name": "office-switch", "ip": "10.0.0.2", "mac": "aa:bb", "model": "USW24"}})
+		ok(w, devices)
 	})
 	mux.HandleFunc("/proxy/network/api/s/default/rest/networkconf", func(w http.ResponseWriter, r *http.Request) {
 		ok(w, []map[string]interface{}{
@@ -284,8 +293,8 @@ func TestUnifiVPNAssets_PPTPCarriesProtocolVersion(t *testing.T) {
 
 // TestUnifiInterrogate_EmitsVPNAssets drives the full interrogate() flow
 // against a mock UniFi-OS (UDM-style) controller and asserts the VPN
-// networkconf entry surfaces as a vpn_gateway asset alongside the managed
-// device + management-interface assets.
+// networkconf entry surfaces as a vpn_gateway asset alongside the
+// management-interface asset.
 func TestUnifiInterrogate_EmitsVPNAssets(t *testing.T) {
 	srv := newMockUnifiOSController(t)
 	defer srv.Close()

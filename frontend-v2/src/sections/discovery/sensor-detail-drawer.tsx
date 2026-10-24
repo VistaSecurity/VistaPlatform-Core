@@ -1,6 +1,8 @@
-// Sensor detail drawer — opened by clicking a sensor row in sensors-page. A
-// right-side slide-out with a header (name + status) and a local tab bar:
-//   Overview · Discoveries · Health · Control (config + commands)
+// Sensor detail drawer — opened by clicking a sensor row in sensors-page.
+// Rendered on the shared runtime frame (runtime-drawer.tsx), so its header, tab
+// order, Health opening block, job history and restart control are the same as
+// the discovery agent's:
+//   Overview · Discoveries · Health · Jobs · Logs · Settings
 // All data comes from the typed sensor-manager client. queries.ts is shared /
 // off-limits, so every query/mutation hook this panel needs lives locally here.
 //
@@ -16,13 +18,17 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { sensorManagerComponents } from '@vistasecurity/api-contract';
 import { PermissionGate, TENANT_PERMISSIONS, usePermissions } from '@vistasecurity/primitives/rbac';
 import { clients } from '../../lib/clients';
-import { Icon, DrawerShell, DrawerCloseBtn, MetaRow, SectionLabel, Pill, Modal, ModalField } from '../../components/ui';
+import { Icon, MetaRow, SectionLabel, Pill, Modal, ModalField } from '../../components/ui';
 import { DTable, CellMono, CellTxt, Note, sensorOnline, relTime } from './kit';
 import { summariseHostObservations } from './host-observations';
 import { SettingsPanel } from './settings-panel';
 import { useSensorConfig, useSensorConfigHistory, useSaveSensorConfig } from './sensor-config-queries';
 import { ConfigHistorySection } from './config-history';
 import type { SettingValue } from './agent-config';
+import {
+  RuntimeDrawer, ConnectionHealth, JobHistoryList, MetricCard, PayloadBlock, DetailRow, RestartControl,
+  ManagedHereNote, Muted, fmtTs, LogExportPanel, type LogExportState, type RecentJob, type RuntimeTabKey,
+} from './runtime-drawer';
 // useDiscoveryCounts is the one hook this drawer borrows from the shared
 // queries.ts (everything else lives locally per the note above) — it's a
 // cheap bulk id→count fetch already shared by sensors-page.tsx and
@@ -69,10 +75,6 @@ function fmtBytes(bytes?: number | null): string {
 
 function fmtNum(n?: number | null): string {
   return n == null ? '—' : n.toLocaleString();
-}
-
-function fmtTs(iso?: string | null): string {
-  return iso ? iso.slice(0, 19).replace('T', ' ') : '—';
 }
 
 // Compact label for a reporting interval (seconds) → "30s" / "5m" / "1h".
@@ -195,7 +197,9 @@ function useSensorCommands(sensorId: string, enabled: boolean) {
 }
 
 // ---------------------------------------------------------------------------
-type TabKey = 'overview' | 'discoveries' | 'health' | 'control';
+const SENSOR_TABS: readonly RuntimeTabKey[] = ['overview', 'discoveries', 'health', 'jobs', 'logs', 'settings'];
+// Platform sensors send no health/commands/config/cert telemetry.
+const PLATFORM_SENSOR_TABS: readonly RuntimeTabKey[] = ['overview', 'discoveries'];
 
 export function SensorDetailDrawer({ sensor: row, onClose }: { sensor: Sensor; onClose: () => void }) {
   // Refetch the full sensor for fresh/complete fields (available_interfaces,
@@ -203,65 +207,35 @@ export function SensorDetailDrawer({ sensor: row, onClose }: { sensor: Sensor; o
   const detailQ = useSensorDetail(row.id);
   const sensor = detailQ.data ?? row;
   const isPlatform = isPlatformSensorOf(sensor);
+  const tabs = isPlatform ? PLATFORM_SENSOR_TABS : SENSOR_TABS;
 
-  const TABS: { key: TabKey; label: string; icon: string }[] = useMemo(() => {
-    const all: { key: TabKey; label: string; icon: string }[] = [
-      { key: 'overview', label: 'Overview', icon: 'info' },
-      { key: 'discoveries', label: 'Discoveries', icon: 'radar' },
-      { key: 'health', label: 'Health', icon: 'activity' },
-      { key: 'control', label: 'Control', icon: 'sliders-horizontal' },
-    ];
-    // Platform sensors send no health/commands/config/cert telemetry.
-    return isPlatform ? all.filter((t) => t.key === 'overview' || t.key === 'discoveries') : all;
-  }, [isPlatform]);
-
-  const [tab, setTab] = useState<TabKey>('overview');
+  const [tab, setTab] = useState<RuntimeTabKey>('overview');
   const on = sensorOnline(sensor.status, sensor.last_heartbeat);
 
   return (
-    <DrawerShell onClose={onClose} width={560}>
-      {/* Header */}
-      <div style={{ padding: '18px 22px 0', borderBottom: '1px solid var(--app-border)' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
-          <span style={{ flex: 'none', width: 34, height: 34, borderRadius: 9, display: 'flex', alignItems: 'center', justifyContent: 'center', background: `color-mix(in srgb, ${on ? 'var(--ok)' : 'var(--danger)'} 12%, transparent)`, color: on ? 'var(--ok)' : 'var(--danger)' }}>
-            <Icon name="radar" size={16} />
-          </span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="eyebrow-app">{isPlatform ? 'Platform sensor' : (sensor.sensor_type || sensor.profile || 'Sensor')}</div>
-            <h2 style={{ margin: '4px 0 6px', fontSize: 16.5, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', lineHeight: 1.25, wordBreak: 'break-word' }}>{sensor.name}</h2>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap' }}>
-              <Pill color={on ? 'var(--ok)' : sensor.status === 'pending' ? 'var(--warn)' : 'var(--danger)'} style={{ fontSize: 10.5 }}>{(sensor.status || 'unknown').replace('_', ' ')}</Pill>
-              {sensor.air_gapped && <Pill color="var(--app-t3)" style={{ fontSize: 10.5 }}>air-gapped</Pill>}
-              {sensor.ip_address && <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{sensor.ip_address}</span>}
-            </div>
-          </div>
-          <DrawerCloseBtn onClose={onClose} />
-        </div>
-        {/* Tab bar */}
-        <div style={{ display: 'flex', gap: 4, marginTop: 16 }}>
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', border: 'none', background: 'transparent', cursor: 'pointer',
-                fontSize: 12.5, fontWeight: 600, color: tab === t.key ? 'var(--app-t1)' : 'var(--app-t3)',
-                borderBottom: tab === t.key ? '2px solid var(--accent)' : '2px solid transparent', marginBottom: -1,
-              }}
-            >
-              <Icon name={t.icon} size={13} />{t.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div style={{ flex: 1, padding: '4px 22px 30px' }}>
-        {tab === 'overview' && <OverviewTab sensor={sensor} isPlatform={isPlatform} />}
-        {tab === 'discoveries' && <DiscoveriesTab sensorId={sensor.id} />}
-        {tab === 'health' && !isPlatform && <HealthTab sensorId={sensor.id} />}
-        {tab === 'control' && !isPlatform && <ControlTab sensor={sensor} />}
-      </div>
-    </DrawerShell>
+    <RuntimeDrawer
+      icon="radar"
+      eyebrow={isPlatform ? 'Platform sensor' : (sensor.sensor_type || sensor.profile || 'Sensor')}
+      name={sensor.name}
+      online={on}
+      status={sensor.status}
+      badges={<>
+        {sensor.version && <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>v{sensor.version}</span>}
+        {sensor.air_gapped && <Pill color="var(--app-t3)" style={{ fontSize: 10.5 }}>air-gapped</Pill>}
+        {sensor.ip_address && <span className="mono" style={{ fontSize: 11, color: 'var(--app-t3)' }}>{sensor.ip_address}</span>}
+      </>}
+      tabs={tabs}
+      tab={tab}
+      onTab={setTab}
+      onClose={onClose}
+    >
+      {tab === 'overview' && <OverviewTab sensor={sensor} isPlatform={isPlatform} />}
+      {tab === 'discoveries' && <DiscoveriesTab sensorId={sensor.id} />}
+      {tab === 'health' && !isPlatform && <HealthTab sensor={sensor} />}
+      {tab === 'jobs' && !isPlatform && <JobsTab sensorId={sensor.id} />}
+      {tab === 'logs' && !isPlatform && <LogsTab sensorId={sensor.id} />}
+      {tab === 'settings' && !isPlatform && <SettingsTab sensor={sensor} />}
+    </RuntimeDrawer>
   );
 }
 
@@ -405,7 +379,7 @@ function RevokeCertModal({ open, sensorId, onClose }: { open: boolean; sensorId:
       }), 'Failed to revoke certificate');
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['discovery', 'sensor-certificate', sensorId] });
+      void qc.invalidateQueries({ queryKey: ['discovery', 'sensor-certificate', sensorId] });
       setReason('');
       onClose();
     },
@@ -428,7 +402,7 @@ function RevokeCertModal({ open, sensorId, onClose }: { open: boolean; sensorId:
         </button>
       }
       secondary={<button className="ui-btn" onClick={onClose} disabled={revoke.isPending}>Cancel</button>}
-      footerNote={revoke.isError ? <span style={{ color: 'var(--danger-text)' }}>{(revoke.error as Error).message}</span> : undefined}
+      footerNote={revoke.isError ? <span style={{ color: 'var(--danger-text)' }}>{revoke.error.message}</span> : undefined}
     >
       <ModalField label="Reason" hint="e.g. compromised, rotated, manual.">
         <textarea
@@ -512,19 +486,10 @@ const HISTORY_COLS = [
   { label: 'Uptime', w: '1fr', align: 'right' as const },
 ];
 
-function MetricCard({ icon, label, value }: { icon: string; label: string; value: string }) {
-  return (
-    <div className="panel" style={{ borderRadius: 12, padding: '12px 14px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--app-t3)' }}>
-        <Icon name={icon} size={13} /><span className="eyebrow-app">{label}</span>
-      </div>
-      <div style={{ fontSize: 18, fontWeight: 700, fontFamily: 'var(--font-head)', color: 'var(--app-t1)', marginTop: 6 }}>{value}</div>
-    </div>
-  );
-}
-
-function HealthTab({ sensorId }: { sensorId: string }) {
+function HealthTab({ sensor }: { sensor: Sensor }) {
+  const sensorId = sensor.id;
   const healthQ = useSensorHealth(sensorId, true);
+  const configQ = useSensorConfig(sensorId);
   // Cumulative discoveries for this sensor — the fleet row on Sensors & Agents
   // shows this same number as "Assets found". h.discoveries_made below is only
   // the latest heartbeat's PER-INTERVAL count, so labeling it as if cumulative
@@ -550,7 +515,15 @@ function HealthTab({ sensorId }: { sensorId: string }) {
   const rangeLabel = HISTORY_RANGES.find((r) => r.key === range)?.label ?? '24h';
 
   return (
-    <div style={{ marginTop: 12 }}>
+    <div>
+      <ConnectionHealth
+        noun="sensor"
+        online={sensorOnline(sensor.status, sensor.last_heartbeat)}
+        lastHeartbeat={sensor.last_heartbeat}
+        version={sensor.version}
+        configStatus={configQ.data?.status}
+        configLoading={configQ.isLoading}
+      />
       <SectionLabel icon="activity">Current</SectionLabel>
       {healthQ.isLoading ? (
         <div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '6px 0' }}>Loading health…</div>
@@ -636,21 +609,45 @@ function HealthTab({ sensorId }: { sensorId: string }) {
   );
 }
 
-// ==== Tab 4 — Control (Configuration + Commands) ===========================
-// Only these command types are real, sensor-handled actions. set_log_level and
-// trigger_scan are no-ops / misleading, so they are intentionally excluded.
-const COMMAND_TYPES = ['restart', 'clear_cache', 'update_interfaces', 'list_interfaces', 'export_logs', 'update_config'];
-
-function ControlTab({ sensor }: { sensor: Sensor }) {
+// ==== Tab — Settings =========================================================
+function SettingsTab({ sensor }: { sensor: Sensor }) {
   return (
     <div style={{ marginTop: 4 }}>
       {/* Managed settings first: they are what an operator came here to change,
           and they are the half that survives a restart of the sensor. The NIC
-          picker and the one-shot commands below remain what they were. */}
+          picker, the sensor's own record and the restart control follow. */}
       <SensorSettingsSection sensor={sensor} />
       <ConfigSection sensor={sensor} />
-      <CommandsSection sensorId={sensor.id} />
+      <SensorRestartSection sensorId={sensor.id} />
     </div>
+  );
+}
+
+// Restart is a command to a sensor. sensors.update, not .manage: sensor-manager
+// gates POST /sensors/:id/commands on SensorsUpdate, and a control the server
+// would accept from a role must not be hidden from it.
+function SensorRestartSection({ sensorId }: { sensorId: string }) {
+  const qc = useQueryClient();
+  const restart = useMutation({
+    mutationFn: async () => {
+      unwrap(await clients.sensors.POST('/sensors/{sensor_id}/commands', {
+        params: { path: { sensor_id: sensorId } },
+        body: { command_type: 'restart', payload: {} },
+      }), 'Could not request a restart');
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] }),
+  });
+  return (
+    <PermissionGate permission={TENANT_PERMISSIONS.sensors.update}>
+      <RestartControl
+        noun="sensor"
+        caveat="The sensor exits at its next check-in and its process supervisor (systemd, Docker or Kubernetes) starts it again. A sensor launched by hand will stop instead of restarting."
+        pending={restart.isPending}
+        onConfirm={() => restart.mutate()}
+        successNote={restart.isSuccess ? 'Requested. The restart shows in the Jobs tab once the sensor picks it up.' : undefined}
+        error={restart.isError ? restart.error.message : null}
+      />
+    </PermissionGate>
   );
 }
 
@@ -666,16 +663,8 @@ function SensorSettingsSection({ sensor }: { sensor: Sensor }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const history = useSensorConfigHistory(sensor.id, historyOpen);
 
-  if (q.isLoading) {
-    return <div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '10px 0' }}>Loading settings…</div>;
-  }
-  if (q.isError || !q.data) {
-    return (
-      <div style={{ fontSize: 12, color: 'var(--danger-text)', padding: '10px 0' }}>
-        Couldn't load this sensor's settings.
-      </div>
-    );
-  }
+  if (q.isLoading) return <Muted>Loading settings…</Muted>;
+  if (q.isError || !q.data) return <Muted danger>Couldn't load this sensor's settings.</Muted>;
 
   return (
     <>
@@ -688,10 +677,7 @@ function SensorSettingsSection({ sensor }: { sensor: Sensor }) {
         saving={save.isPending}
         save={(values: Record<string, SettingValue>, confirmed: boolean) => save.mutateAsync({ values, confirmed })}
       />
-      <div style={{ fontSize: 11, color: 'var(--app-t3)', margin: '12px 0 18px', lineHeight: 1.6 }}>
-        These are managed here, not on the sensor's host — a local edit to its config file is
-        overwritten at the next heartbeat.
-      </div>
+      <ManagedHereNote noun="sensor" canEdit={canEdit} />
       <ConfigHistorySection
         changes={history.data}
         isLoading={history.isLoading}
@@ -729,8 +715,8 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
   const allIfaces = useMemo(() => Array.from(new Set([...available, ...monitored, ...extraIfaces])), [available, monitored, extraIfaces]);
 
   const invalidateSensor = () => {
-    qc.invalidateQueries({ queryKey: ['discovery', 'sensor-detail', sensorId] });
-    qc.invalidateQueries({ queryKey: ['discovery', 'sensors'] });
+    void qc.invalidateQueries({ queryKey: ['discovery', 'sensor-detail', sensorId] });
+    void qc.invalidateQueries({ queryKey: ['discovery', 'sensors'] });
   };
 
   const toggleLocal = (iface: string) =>
@@ -760,7 +746,7 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
     },
     onSuccess: () => {
       invalidateSensor();
-      qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] });
+      void qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] });
     },
   });
 
@@ -771,7 +757,7 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
         body: { command_type: 'list_interfaces', payload: {} },
       }), 'Failed to queue detect command');
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] }),
   });
 
   const saveConfig = useMutation({
@@ -797,7 +783,7 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
     },
     onSuccess: () => {
       invalidateSensor();
-      qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] });
+      void qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] });
     },
   });
   const intervalDirty = reportingInterval !== (sensor.reporting_interval ?? null);
@@ -828,17 +814,17 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
       <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
         <input value={addName} onChange={(e) => setAddName(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addByName(); } }} placeholder="add by name (e.g. eth0)" className="mono" style={{ flex: 1, minWidth: 0, height: 32, padding: '0 10px', borderRadius: 8, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 12.5, outline: 'none' }} />
         <button className="ui-btn sm" disabled={!addName.trim()} onClick={addByName}><Icon name="plus" size={13} />Add</button>
-        <button className="ui-btn sm ghost" disabled={detect.isPending} onClick={() => detect.mutate()} title="Queue a list_interfaces command (result appears in Commands below)"><Icon name="history" size={13} />Detect</button>
+        <button className="ui-btn sm ghost" disabled={detect.isPending} onClick={() => detect.mutate()} title="Queue a list_interfaces command (the result appears in the Jobs tab)"><Icon name="history" size={13} />Detect</button>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
         <button className="ui-btn accent sm" disabled={!nicsDirty || saveNics.isPending} onClick={() => saveNics.mutate()} style={{ opacity: !nicsDirty || saveNics.isPending ? 0.6 : 1 }}>
           <Icon name="check" size={13} />{saveNics.isPending ? 'Saving…' : 'Save interfaces'}
         </button>
         {nicsDirty && <span style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>Queues an update command — the sensor applies it on its next check-in.</span>}
-        {saveNics.isError && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{(saveNics.error as Error).message}</span>}
+        {saveNics.isError && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{saveNics.error.message}</span>}
         {saveNics.isSuccess && !nicsDirty && <span style={{ fontSize: 11, color: 'var(--ok)' }}>Queued.</span>}
       </div>
-      {detect.isSuccess && <div style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 6 }}>Detect queued — result will appear in the command history below.</div>}
+      {detect.isSuccess && <div style={{ fontSize: 10.5, color: 'var(--app-t3)', marginTop: 6 }}>Detect queued — the result appears in the Jobs tab.</div>}
 
       <SectionLabel icon="settings">Settings</SectionLabel>
       <label style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '8px 0', borderBottom: '1px solid var(--app-border)', cursor: 'pointer' }}>
@@ -858,7 +844,7 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
         <button className="ui-btn accent sm" disabled={!configDirty || saveConfig.isPending} onClick={() => saveConfig.mutate()} style={{ opacity: !configDirty || saveConfig.isPending ? 0.6 : 1 }}>
           <Icon name="check" size={13} />{saveConfig.isPending ? 'Saving…' : 'Save'}
         </button>
-        {saveConfig.isError && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{(saveConfig.error as Error).message}</span>}
+        {saveConfig.isError && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{saveConfig.error.message}</span>}
         {saveConfig.isSuccess && !configDirty && <span style={{ fontSize: 11, color: 'var(--ok)' }}>Saved.</span>}
       </div>
 
@@ -879,46 +865,91 @@ function ConfigSection({ sensor }: { sensor: Sensor }) {
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
         {intervalDirty && reportingInterval != null && <span style={{ fontSize: 10.5, color: 'var(--app-t3)' }}>Queues a command — the sensor applies it on its next check-in.</span>}
-        {saveInterval.isError && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{(saveInterval.error as Error).message}</span>}
+        {saveInterval.isError && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{saveInterval.error.message}</span>}
         {saveInterval.isSuccess && !intervalDirty && <span style={{ fontSize: 11, color: 'var(--ok)' }}>Queued — applies on next check-in.</span>}
       </div>
     </PermissionGate>
   );
 }
 
-// ---- Commands -------------------------------------------------------------
-function cmdStatusColor(status?: string | null): string {
-  const s = (status || '').toLowerCase();
-  if (s === 'completed') return 'var(--ok)';
-  if (s === 'failed') return 'var(--danger)';
-  if (s === 'pending') return 'var(--warn)';
-  return 'var(--info)'; // delivered / acknowledged
+// ==== Tab — Jobs ============================================================
+// Everything the platform has asked this sensor to do — operator commands and
+// the discovery jobs handed to it — newest first, last 10, one line each.
+//
+// Only these command types are real, sensor-handled actions an operator would
+// send by hand. set_log_level and trigger_scan are no-ops / misleading, so they
+// are excluded; restart and export_logs have their own controls (Settings and
+// Logs), so they are not repeated here.
+const COMMAND_TYPES = ['clear_cache', 'list_interfaces', 'update_interfaces', 'update_config'];
+
+const COMMAND_LABELS: Record<string, string> = {
+  restart: 'Restart',
+  clear_cache: 'Clear cache',
+  update_interfaces: 'Update interfaces',
+  list_interfaces: 'Detect interfaces',
+  export_logs: 'Export logs',
+  update_config: 'Update configuration',
+  set_log_level: 'Set log level',
+  trigger_scan: 'Trigger scan',
+  discovery_job: 'Discovery job',
+  cancel_discovery_job: 'Cancel discovery job',
+  resolve_identity_dns: 'Identity DNS lookup',
+};
+
+export function commandLabel(type?: string | null): string {
+  if (!type) return 'Command';
+  return COMMAND_LABELS[type] ?? type.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
 }
 
-function CommandLifecycle({ cmd }: { cmd: SensorCommand }) {
-  const steps: { label: string; ts: string | null }[] = [
-    { label: 'Sent', ts: cmd.created_at },
-    { label: 'Delivered', ts: cmd.delivered_at },
-    { label: 'Acknowledged', ts: cmd.acknowledged_at },
-    { label: (cmd.status || '').toLowerCase() === 'failed' ? 'Failed' : 'Completed', ts: cmd.completed_at },
-  ];
+function sensorCommandRow(cmd: SensorCommand): RecentJob {
+  return {
+    id: cmd.id,
+    title: commandLabel(cmd.command_type),
+    status: cmd.status,
+    createdAt: cmd.created_at,
+    error: cmd.error_message,
+  };
+}
+
+function SensorCommandDetail({ cmd }: { cmd: SensorCommand }) {
+  // Exported log lines are shown in the Logs tab, not as a JSON array here.
+  const response = cmd.command_type === 'export_logs' && cmd.response_data
+    ? { line_count: (cmd.response_data as { line_count?: number }).line_count, lines: 'shown in the Logs tab' }
+    : cmd.response_data;
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-      {steps.map((s, i) => (
-        <span key={s.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          {i > 0 && <span style={{ color: 'var(--app-t3)', fontSize: 11 }}>→</span>}
-          <span style={{ fontSize: 10.5, color: s.ts ? 'var(--app-t1)' : 'var(--app-t3)' }} title={s.ts ? fmtTs(s.ts) : 'pending'}>{s.label}</span>
-        </span>
-      ))}
-    </div>
+    <>
+      <DetailRow k="Command" v={cmd.command_type} mono />
+      <DetailRow k="Sent" v={fmtTs(cmd.created_at)} mono />
+      <DetailRow k="Delivered" v={cmd.delivered_at ? fmtTs(cmd.delivered_at) : null} mono />
+      <DetailRow k="Acknowledged" v={cmd.acknowledged_at ? fmtTs(cmd.acknowledged_at) : null} mono />
+      <DetailRow k={(cmd.status || '').toLowerCase() === 'failed' ? 'Failed' : 'Completed'} v={cmd.completed_at ? fmtTs(cmd.completed_at) : null} mono />
+      <PayloadBlock label="Payload" value={cmd.payload} />
+      <PayloadBlock label="Response" value={response} />
+    </>
   );
 }
 
-function CommandsSection({ sensorId }: { sensorId: string }) {
-  const qc = useQueryClient();
+function JobsTab({ sensorId }: { sensorId: string }) {
   const q = useSensorCommands(sensorId, true);
   const commands = q.data ?? [];
+  const byId = new Map(commands.map((c) => [c.id, c]));
+  return (
+    <>
+      <SendCommandSection sensorId={sensorId} />
+      <JobHistoryList
+        jobs={commands.map(sensorCommandRow)}
+        isLoading={q.isLoading}
+        isError={q.isError}
+        emptyText="No jobs have been sent to this sensor."
+        renderDetail={(id) => <SensorCommandDetail cmd={byId.get(id)!} />}
+      />
+    </>
+  );
+}
 
+function SendCommandSection({ sensorId }: { sensorId: string }) {
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
   const [commandType, setCommandType] = useState(COMMAND_TYPES[0]);
   const [payloadText, setPayloadText] = useState('{}');
   const [payloadErr, setPayloadErr] = useState<string | null>(null);
@@ -938,7 +969,7 @@ function CommandsSection({ sensorId }: { sensorId: string }) {
     },
     onSuccess: () => {
       setPayloadText('{}');
-      qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] });
+      void qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] });
     },
   });
 
@@ -948,54 +979,100 @@ function CommandsSection({ sensorId }: { sensorId: string }) {
     try { JSON.parse(text); setPayloadErr(null); } catch { setPayloadErr('Invalid JSON'); }
   };
 
+  // sensors.update: POST /sensors/:id/commands is gated on SensorsUpdate. No
+  // fallback text: a viewer still has the history below, and a line saying what
+  // they cannot do is noise above it.
   return (
-    <>
-      <SectionLabel icon="terminal">Send command</SectionLabel>
-      {/* sensors.update: POST /sensors/:id/commands is gated on SensorsUpdate. */}
-      <PermissionGate permission={TENANT_PERMISSIONS.sensors.update} fallback={<div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '6px 0' }}>You don't have permission to send commands.</div>}>
-        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-          <select value={commandType} onChange={(e) => setCommandType(e.target.value)} style={{ flex: 'none', height: 32, padding: '0 8px', borderRadius: 8, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 12.5, cursor: 'pointer' }}>
-            {COMMAND_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <div style={{ fontSize: 11, color: 'var(--app-t3)', marginBottom: 5 }}>Payload (JSON)</div>
-          <textarea value={payloadText} onChange={(e) => validatePayload(e.target.value)} rows={3} className="mono" style={{ width: '100%', padding: '8px 11px', borderRadius: 9, border: `1px solid ${payloadErr ? 'var(--danger)' : 'var(--app-border2)'}`, background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 12, outline: 'none', resize: 'vertical', lineHeight: 1.5 }} />
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
-          <button className="ui-btn accent sm" disabled={!!payloadErr || send.isPending} onClick={() => send.mutate()} style={{ opacity: !!payloadErr || send.isPending ? 0.6 : 1 }}>
-            <Icon name="terminal" size={13} />{send.isPending ? 'Queuing…' : 'Send command'}
+    <PermissionGate permission={TENANT_PERMISSIONS.sensors.update}>
+      <div style={{ marginTop: 14 }}>
+        {!open ? (
+          <button className="ui-btn sm ghost" onClick={() => setOpen(true)}>
+            <Icon name="terminal" size={13} />Send a command
           </button>
-          {payloadErr && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{payloadErr}</span>}
-          {send.isError && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{(send.error as Error).message}</span>}
-          {send.isSuccess && <span style={{ fontSize: 11, color: 'var(--ok)' }}>Queued.</span>}
-        </div>
-      </PermissionGate>
-
-      <SectionLabel icon="activity">Command history ({q.isLoading ? '…' : commands.length})</SectionLabel>
-      {q.isError ? (
-        <div style={{ fontSize: 12, color: 'var(--danger-text)', padding: '6px 0' }}>Couldn't load command history.</div>
-      ) : q.isLoading ? (
-        <div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '6px 0' }}>Loading commands…</div>
-      ) : commands.length === 0 ? (
-        <div style={{ fontSize: 12, color: 'var(--app-t3)', padding: '6px 0' }}>No commands have been sent to this sensor.</div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}>
-          {commands.map((cmd) => (
-            <div key={cmd.id} className="panel" style={{ borderRadius: 10, padding: '11px 13px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                <span className="mono" style={{ fontSize: 12.5, color: 'var(--app-t1)', fontWeight: 600 }}>{cmd.command_type}</span>
-                <Pill color={cmdStatusColor(cmd.status)} style={{ fontSize: 10 }}>{(cmd.status || 'unknown').replace('_', ' ')}</Pill>
-              </div>
-              <CommandLifecycle cmd={cmd} />
-              {cmd.error_message && <div style={{ fontSize: 11, color: 'var(--danger-text)', marginTop: 6 }}>{cmd.error_message}</div>}
-              {cmd.response_data && (
-                <pre className="mono" style={{ margin: '8px 0 0', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t2)', fontSize: 11, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: 160, overflowY: 'auto' }}>{JSON.stringify(cmd.response_data, null, 2)}</pre>
-              )}
+        ) : (
+          <div className="panel" style={{ borderRadius: 10, padding: '12px 13px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <select aria-label="Command" value={commandType} onChange={(e) => setCommandType(e.target.value)} style={{ flex: 1, minWidth: 0, height: 32, padding: '0 8px', borderRadius: 8, border: '1px solid var(--app-border2)', background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 12.5, cursor: 'pointer' }}>
+                {COMMAND_TYPES.map((t) => <option key={t} value={t}>{commandLabel(t)}</option>)}
+              </select>
+              <button className="ui-btn sm ghost" onClick={() => setOpen(false)} title="Close"><Icon name="x" size={13} /></button>
             </div>
-          ))}
-        </div>
-      )}
-    </>
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 11, color: 'var(--app-t3)', marginBottom: 5 }}>Payload (JSON, optional)</div>
+              <textarea value={payloadText} onChange={(e) => validatePayload(e.target.value)} rows={2} className="mono" style={{ width: '100%', padding: '8px 11px', borderRadius: 9, border: `1px solid ${payloadErr ? 'var(--danger)' : 'var(--app-border2)'}`, background: 'var(--app-panel2)', color: 'var(--app-t1)', fontSize: 12, outline: 'none', resize: 'vertical', lineHeight: 1.5 }} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+              <button className="ui-btn accent sm" disabled={!!payloadErr || send.isPending} onClick={() => send.mutate()} style={{ opacity: !!payloadErr || send.isPending ? 0.6 : 1 }}>
+                <Icon name="send" size={13} />{send.isPending ? 'Queuing…' : 'Send'}
+              </button>
+              {payloadErr && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{payloadErr}</span>}
+              {send.isError && <span style={{ fontSize: 11, color: 'var(--danger-text)' }}>{send.error.message}</span>}
+              {send.isSuccess && <span style={{ fontSize: 11, color: 'var(--ok)' }}>Queued — it runs at the sensor's next check-in.</span>}
+            </div>
+          </div>
+        )}
+      </div>
+    </PermissionGate>
+  );
+}
+
+// ==== Tab — Logs ============================================================
+// The sensor keeps its recent log lines in memory and returns them in reply to
+// an export_logs command. This tab sends that command and shows the newest
+// reply as text — the lines used to arrive as a JSON array inside the command
+// history.
+
+export function latestLogExport(commands: SensorCommand[]): SensorCommand | undefined {
+  // The list is newest first; the first export_logs is the latest request.
+  return commands.find((c) => c.command_type === 'export_logs');
+}
+
+export function logLinesOf(cmd: SensorCommand | undefined): string[] | null {
+  const lines = (cmd?.response_data as { lines?: unknown } | null | undefined)?.lines;
+  return Array.isArray(lines) ? lines.map((l) => String(l)) : null;
+}
+
+function LogsTab({ sensorId }: { sensorId: string }) {
+  const qc = useQueryClient();
+  const q = useSensorCommands(sensorId, true);
+  const canRequest = usePermissions().hasPermission(TENANT_PERMISSIONS.sensors.update);
+  const [lineCount, setLineCount] = useState(200);
+  const latest = latestLogExport(q.data ?? []);
+  const lines = logLinesOf(latest);
+  const settled = ['completed', 'failed', 'error', 'success', 'expired'].includes((latest?.status || '').toLowerCase());
+
+  const request = useMutation({
+    mutationFn: async () => {
+      unwrap(await clients.sensors.POST('/sensors/{sensor_id}/commands', {
+        params: { path: { sensor_id: sensorId } },
+        body: { command_type: 'export_logs', payload: { lines: lineCount } },
+      }), 'Could not request the logs');
+    },
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['discovery', 'sensor-commands', sensorId] }),
+  });
+
+  const state: LogExportState = q.isError
+    ? { kind: 'error', message: "Couldn't load the logs." }
+    : q.isLoading
+      ? { kind: 'loading' }
+      : !latest
+        ? { kind: 'none' }
+        : !settled
+          ? { kind: 'waiting', requestedAt: latest.created_at }
+          : latest.error_message || !lines
+            ? { kind: 'failed', message: latest.error_message || 'The sensor replied without log lines.' }
+            : { kind: 'ready', lines, receivedAt: latest.completed_at ?? latest.acknowledged_at };
+
+  return (
+    <LogExportPanel
+      noun="sensor"
+      state={state}
+      canRequest={canRequest}
+      lineCount={lineCount}
+      onLineCount={setLineCount}
+      onFetch={() => request.mutate()}
+      fetching={request.isPending}
+      fetchError={request.isError ? request.error.message : null}
+    />
   );
 }

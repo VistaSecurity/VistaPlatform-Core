@@ -225,9 +225,10 @@ lab-fixtures.yaml
 # produced the qa-platform one.
 *.tsbuildinfo
 
-# Real seed.sql is staged at package time (scripts/stage-chart-sql.sh); the render
-# tests stage a placeholder (scripts/stage-chart-seed-stub.sh). Never commit it.
-charts/vistaplatform/files/schema/seed.sql
+# The chart carries only the schema hash (files/schema/schema.sha256); the SQL
+# ships in the schema release image (#2731). A copied-in schema.sql/seed.sql
+# would go back into Helm's 1 MiB release record. Never commit one.
+charts/vistaplatform/files/schema/*.sql
 
 # DCIM scale-fixture budget report (make test-dcim-scale)
 /build/dcim-scale/

@@ -174,7 +174,7 @@ that command from the `helm install` output.
 - `templates/networkpolicy/allow-rules.yaml` — emits egress rules from the same `backends.<name>.needs` map. If you change a service's datastore deps, edit values, not the policy template.
 - `templates/secrets-generated.yaml` — `lookup` + `randAlphaNum` with `helm.sh/resource-policy: keep`. Deliberately not a Helm hook (hooks aren't visible to `lookup` on subsequent upgrades).
 - `templates/ingress/{middlewares,ingressroutes}.yaml` — generated from `standards/service-registry.yaml` by `make generate-k8s-ingress` (also wired into `make generate`). **Re-run before tagging a release** if the registry has changed.
-- `files/schema/schema.sql` — copied from `scripts/database/schema.sql` at chart-package time. The release workflow handles this; if you `helm package` manually, copy it first.
+- `files/schema/schema.sha256` — the sha256 of `scripts/database/schema.sql`, stamped by `scripts/stage-chart-sql.sh` (tracked; `make audit` fails when stale). The SQL itself is not in the chart: it ships in the release's `schema` image, which the `schema-migration` and `seed-data` Jobs copy from in an init container (`schemaMigration.sqlImage`). Helm keeps every chart file plus the rendered manifest in one 1 MiB release Secret, and the SQL in there made 5.1.0 uninstallable; `scripts/chart-release-record-size.mjs` guards the record.
 
 To validate locally:
 

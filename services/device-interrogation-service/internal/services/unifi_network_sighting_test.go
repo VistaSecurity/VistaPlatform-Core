@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -272,6 +273,50 @@ func TestUniFiAdapter_ClientAddressIsTheClients(t *testing.T) {
 				t.Errorf("the client's %s reached %s's sighting", id.Value, infra)
 			}
 		}
+	}
+}
+
+// TestUniFiAdapter_WirelessClientIsAStation: a client the controller says is
+// on Wi-Fi carries its radio's association -- MAC, SSID, the 802.11 type it
+// joined with -- for the engine to file on the interface holding that MAC. A
+// wired client carries none, and neither does a client with a randomised
+// (locally administered) MAC, which is no identifier to find a radio by.
+func TestUniFiAdapter_WirelessClientIsAStation(t *testing.T) {
+	guest := sightingFor(t, "a4:83:e7:00:00:04")
+	want := []identity.ObservedWirelessStation{{MAC: "a4:83:e7:00:00:04", SSID: "Guest", Type: "ieee802.11ac"}}
+	if !reflect.DeepEqual(guest.WirelessStations, want) {
+		t.Errorf("guest-04 stations = %+v, want %+v", guest.WirelessStations, want)
+	}
+	if len(guest.Interfaces) != 0 {
+		t.Errorf("a station named an interface for the client: %+v", guest.Interfaces)
+	}
+	if laptop := sightingFor(t, unifiParityLaptop); len(laptop.WirelessStations) != 0 {
+		t.Errorf("a wired client carried stations: %+v", laptop.WirelessStations)
+	}
+	result, err := unifiSiteResult(unifiParityRecording(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, n := range subjectNetworks(result.Facts) {
+		for _, st := range n.WirelessStations {
+			if st.MAC == "da:a1:19:00:00:02" {
+				t.Errorf("subject %s: the randomised-MAC phone became a station %+v", key, st)
+			}
+		}
+	}
+}
+
+func TestControllerWirelessStations_OnlyNamelessStationItems(t *testing.T) {
+	got := controllerWirelessStations([]any{
+		map[string]any{"mac": "a4:83:e7:00:00:04", "rf_role": "station", "ssids": []any{"Home"}, "type": "ieee802.11ax"},
+		map[string]any{"name": "ra0", "mac": "f4:92:bf:30:00:01", "rf_role": "ap", "ssids": []any{"Home"}}, // a radio serving, not joining
+		map[string]any{"name": "wlan0", "mac": "a4:83:e7:00:00:05", "rf_role": "station", "ssids": []any{"Home"}},
+		map[string]any{"mac": "a4:83:e7:00:00:06", "ssids": []any{"Home"}}, // no role: not said to be a station
+		map[string]any{"rf_role": "station", "ssids": []any{"Home"}},       // no MAC to find it by
+	})
+	want := []identity.ObservedWirelessStation{{MAC: "a4:83:e7:00:00:04", SSID: "Home", Type: "ieee802.11ax"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("stations = %+v, want %+v", got, want)
 	}
 }
 

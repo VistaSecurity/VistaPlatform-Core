@@ -199,8 +199,8 @@ const ASSET_FIELDS: FieldInfo[] = [
   {
     name: 'risk',
     type: 'band',
-    accessor: { kind: 'column', column: 'risk_score', assessedBy: 'risk_assessed_by' },
-    description: 'risk band; not_assessed means nobody scored it',
+    accessor: { kind: 'column', column: 'risk_score', assessedBy: 'risk_assessed_by', surface: 'crypto' },
+    description: 'risk band; not_assessed means a crypto surface was seen and nobody scored it, no_crypto_observed means nobody scored it and no crypto surface is on record',
   },
   col('risk_score', 'number'),
   col('risk_assessed_by', 'keyword[]'),
@@ -309,7 +309,7 @@ const FINDING_FIELDS: FieldInfo[] = [
   ),
   enumAs(
     'kind', 'kind',
-    'control_noncompliant', 'weak_configuration', 'weak_certificate', 'pqc_vulnerable', 'weak_wireless_auth',
+    'control_noncompliant', 'weak_configuration', 'weak_certificate', 'pqc_vulnerable', 'weak_wireless_auth', 'unencrypted_at_rest',
     'os_end_of_life', 'software_end_of_life', 'hardware_end_of_support', 'known_vulnerability',
     'plaintext_management', 'default_credentials_exposed', 'insecure_service_exposed',
     'no_owner', 'no_class', 'no_location', 'duplicate_suspected', 'stale', 'orphan_relationship',

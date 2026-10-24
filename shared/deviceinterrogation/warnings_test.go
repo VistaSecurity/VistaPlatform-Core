@@ -172,14 +172,16 @@ func TestUnifiInterrogator_RefusedEndpointIsAWarningNotASilence(t *testing.T) {
 	w := findWarning(t, result, "/proxy/network/api/s/default/stat/sta")
 	assertWarning(t, w, "unifi", WarningPermissionDenied, "clients")
 
+	// A managed device reaches inventory as the subject of the controller's
+	// facts about it (it is not a crypto asset: nothing measured a listener).
 	found := false
-	for _, a := range result.Assets {
-		if a.Metadata["name"] == "office-switch" {
-			found = true
+	for _, f := range result.Facts {
+		for _, id := range f.Subject.Identifiers {
+			found = found || (id.Kind == IdentifierIPAddress && id.Value == "10.0.0.2")
 		}
 	}
 	if !found {
-		t.Errorf("the managed devices were lost with the client list: %+v", result.Assets)
+		t.Errorf("the managed devices were lost with the client list: %+v", result.Facts)
 	}
 }
 

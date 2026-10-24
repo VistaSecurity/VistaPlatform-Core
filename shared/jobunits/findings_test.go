@@ -145,3 +145,23 @@ func TestUnitFindings_RefusedTLSHandshakeIsATLSFinding(t *testing.T) {
 		}
 	}
 }
+
+// A port whose TLS attempt failed without an alert keeps the bounded reason
+// beside the note, so the finding says why it could not be measured.
+func TestUnitFindings_FailedTLSAttemptCarriesTheErrorClass(t *testing.T) {
+	out := shareddisc.UnitOutput{
+		Host: shareddisc.HostScan{PortsRequested: 1, OpenCount: 1, Open: []int{8883}},
+		TCP: []shareddisc.Observation{{
+			Port: 8883, Transport: "tcp", State: "open",
+			Metadata: map[string]any{"banner_len": 0, "tls_handshake_error": "eof"},
+			Notes:    "tls-attempt-failed",
+		}},
+	}
+	got := Findings("10.0.0.5", "", out)
+	if len(got) != 1 {
+		t.Fatalf("findings = %d, want 1", len(got))
+	}
+	if d := got[0].Data; d["identification_note"] != "tls-attempt-failed" || d["tls_handshake_error"] != "eof" {
+		t.Errorf("data = %+v, want the note and tls_handshake_error=eof", d)
+	}
+}
